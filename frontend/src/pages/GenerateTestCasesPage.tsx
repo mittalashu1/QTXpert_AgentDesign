@@ -107,7 +107,19 @@ export default function GenerateTestCasesPage() {
           {generateMutation.isPending && <LinearProgress sx={{ mt: 2 }} />}
           {generateMutation.isError && (
             <Alert severity="error" sx={{ mt: 2 }}>
-              Generation failed. Check your LLM provider configuration in Settings.
+              {(generateMutation.error as any)?.response?.data?.detail ||
+                (generateMutation.error as Error)?.message ||
+                "Generation failed. Check your LLM provider configuration in Settings."}
+            </Alert>
+          )}
+          {result && result.status === "failed" && (
+            <Alert severity="error" sx={{ mt: 2 }}>
+              {result.error_message || "Generation failed with no further detail."}
+            </Alert>
+          )}
+          {result && result.status === "completed" && result.error_message && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              {result.error_message}
             </Alert>
           )}
         </CardContent>
