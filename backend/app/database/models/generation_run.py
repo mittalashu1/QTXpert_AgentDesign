@@ -36,7 +36,8 @@ class GenerationRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         PGUUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     status: Mapped[RunStatus] = mapped_column(
-        Enum(RunStatus, name="run_status"), default=RunStatus.PENDING, nullable=False
+        Enum(RunStatus, name="run_status", values_callable=lambda enum_cls: [e.value for e in enum_cls]), 
+        default=RunStatus.PENDING, nullable=False
     )
     llm_provider: Mapped[str] = mapped_column(String(50), nullable=False)
     llm_model: Mapped[str] = mapped_column(String(100), nullable=False)
