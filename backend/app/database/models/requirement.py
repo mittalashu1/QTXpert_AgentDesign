@@ -37,10 +37,11 @@ class Requirement(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     external_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     source: Mapped[RequirementSource] = mapped_column(
-        Enum(RequirementSource, name="requirement_source"), nullable=False
+        Enum(RequirementSource, name="requirement_source", values_callable=lambda enum_cls: [e.value for e in enum_cls]), 
+        nullable=False
     )
     status: Mapped[RequirementStatus] = mapped_column(
-        Enum(RequirementStatus, name="requirement_status"),
+        Enum(RequirementStatus, name="requirement_status", values_callable=lambda enum_cls: [e.value for e in enum_cls]),
         default=RequirementStatus.RECEIVED,
         nullable=False,
     )
