@@ -36,8 +36,22 @@ class AzureOpenAIProvider(LLMProvider):
             response = await self._client.chat.completions.create(
                 model=self._deployment,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
-                temperature=temperature if temperature is not None else self._settings.LLM_TEMPERATURE,
-                max_tokens=max_tokens or self._settings.LLM_MAX_TOKENS,
+                # GPT-5-series reasoning-tuned models only accept the default
+                # temperature (1) and reject any other explicit value, unlike
+                # GPT-4o-era models. Only send temperature for models that
+                # support tuning it.
+                **(
+                    {}
+                    if self._deployment.startswith(("gpt-5", "o1", "o3", "o4"))
+                    else {
+                        "temperature": (
+                            temperature if temperature is not None else self._settings.LLM_TEMPERATURE
+                        )
+                    }
+                ),
+                # GPT-5-series models require max_completion_tokens instead
+                # of the legacy max_tokens parameter.
+                max_completion_tokens=max_tokens or self._settings.LLM_MAX_TOKENS,
                 response_format={"type": "json_object"} if response_format_json else None,
                 timeout=self._settings.LLM_REQUEST_TIMEOUT_SECONDS,
             )
@@ -64,8 +78,16 @@ class AzureOpenAIProvider(LLMProvider):
             stream = await self._client.chat.completions.create(
                 model=self._deployment,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
-                temperature=temperature if temperature is not None else self._settings.LLM_TEMPERATURE,
-                max_tokens=max_tokens or self._settings.LLM_MAX_TOKENS,
+                **(
+                    {}
+                    if self._deployment.startswith(("gpt-5", "o1", "o3", "o4"))
+                    else {
+                        "temperature": (
+                            temperature if temperature is not None else self._settings.LLM_TEMPERATURE
+                        )
+                    }
+                ),
+                max_completion_tokens=max_tokens or self._settings.LLM_MAX_TOKENS,
                 stream=True,
                 timeout=self._settings.LLM_REQUEST_TIMEOUT_SECONDS,
             )
