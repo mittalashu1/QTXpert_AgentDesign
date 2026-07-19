@@ -1,0 +1,51 @@
+services:
+  - type: web
+    name: qtxpert-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: qtxpert-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: qtxpert-redis
+          type: redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: APP_ENV
+        value: production
+      - key: LLM_PROVIDER
+        value: azure_openai
+      - key: CORS_ORIGINS
+        value: https://qtxpert-frontend.onrender.com
+      # Set the remaining provider/integration keys (AZURE_OPENAI_API_KEY,
+      # AZURE_ENDPOINT, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY,
+      # AWS_*, PINECONE_*, JIRA_*, CONFLUENCE_*) as secrets in the Render
+      # dashboard - they are intentionally not templated here.
+
+  - type: web
+    name: qtxpert-frontend
+    runtime: docker
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    plan: starter
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://qtxpert-backend.onrender.com/api/v1
+
+  - type: redis
+    name: qtxpert-redis
+    plan: starter
+    ipAllowList: []
+
+databases:
+  - name: qtxpert-postgres
+    plan: starter
+    databaseName: qtxpert
+    user: qtxpert
