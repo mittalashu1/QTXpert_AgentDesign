@@ -57,11 +57,24 @@ async def list_configurations(
     ]
 
 
-@router.post("", response_model=ApiConfigurationOut, status_code=status.HTTP_201_CREATED)
-async def create_configuration(
-    payload: ApiConfigurationIn,
-    db: Annotated[AsyncSession, Depends(get_db_session)],
-    user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+@router.post("/test-provider", response_model=ProviderTestResult)
+async def test_provider(
+    payload: ProviderTestRequest,
+    user: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.QA_LEAD))],
+):
+    try:
+        provider = get_llm_provider(payload.provider)
+        # Call complete() directly (not health_check()) so any Azure/OpenAI
+        # error message actually propagates back to the UI instead of being
+        # swallowed into a bare True/False.
+        from app.llm.base import LLMMessage
+        await provider.complete(
+            [LLMMessage(role="user", content="ping")],
+            max_tokens=5,
+        )
+        return ProviderTestResult(provider=payload.provider, healthy=True)
+    except LLMProviderError as exc:
+        return ProviderTestResult(provider=payload.provider, healthy=False, detail=str(exc))
 ):
     config = ApiConfiguration(**payload.model_dump())
     db.add(config)
