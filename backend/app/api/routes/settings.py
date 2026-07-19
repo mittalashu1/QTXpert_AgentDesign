@@ -1,6 +1,6 @@
 from typing import Annotated, List
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +9,7 @@ from app.api.deps.auth_deps import require_roles
 from app.database.models.config_and_audit import ApiConfiguration
 from app.database.models.user import User, UserRole
 from app.database.session import get_db_session
-from app.llm.base import LLMProviderError
+from app.llm.base import LLMMessage, LLMProviderError
 from app.llm.factory import get_llm_provider
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -57,24 +57,11 @@ async def list_configurations(
     ]
 
 
-@router.post("/test-provider", response_model=ProviderTestResult)
-async def test_provider(
-    payload: ProviderTestRequest,
-    user: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.QA_LEAD))],
-):
-    try:
-        provider = get_llm_provider(payload.provider)
-        # Call complete() directly (not health_check()) so any Azure/OpenAI
-        # error message actually propagates back to the UI instead of being
-        # swallowed into a bare True/False.
-        from app.llm.base import LLMMessage
-        await provider.complete(
-            [LLMMessage(role="user", content="ping")],
-            max_tokens=5,
-        )
-        return ProviderTestResult(provider=payload.provider, healthy=True)
-    except LLMProviderError as exc:
-        return ProviderTestResult(provider=payload.provider, healthy=False, detail=str(exc))
+@router.post("", response_model=ApiConfigurationOut, status_code=status.HTTP_201_CREATED)
+async def create_configuration(
+    payload: ApiConfigurationIn,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
 ):
     config = ApiConfiguration(**payload.model_dump())
     db.add(config)
@@ -96,7 +83,13 @@ async def test_provider(
 ):
     try:
         provider = get_llm_provider(payload.provider)
-        healthy = await provider.health_check()
-        return ProviderTestResult(provider=payload.provider, healthy=healthy)
+        # Call complete() directly (not health_check()) so any Azure/OpenAI
+        # error message actually propagates back to the UI instead of being
+        # swallowed into a bare True/False by health_check()'s broad except.
+        await provider.complete(
+            [LLMMessage(role="user", content="ping")],
+            max_tokens=5,
+        )
+        return ProviderTestResult(provider=payload.provider, healthy=True)
     except LLMProviderError as exc:
         return ProviderTestResult(provider=payload.provider, healthy=False, detail=str(exc))
