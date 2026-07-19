@@ -92,7 +92,8 @@ class TestCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_automation_candidate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     automation_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     risk_level: Mapped[RiskLevel] = mapped_column(
-        Enum(RiskLevel, name="risk_level"), default=RiskLevel.MEDIUM, nullable=False
+        Enum(RiskLevel, name="risk_level", values_callable=lambda enum_cls: [e.value for e in enum_cls]), 
+        default=RiskLevel.MEDIUM, nullable=False
     )
 
     generation_run: Mapped["GenerationRun"] = relationship(back_populates="test_cases")
