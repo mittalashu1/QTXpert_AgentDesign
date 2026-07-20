@@ -76,7 +76,8 @@ class TestCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     requirement_traceability: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
     test_type: Mapped[TestCaseType] = mapped_column(
-        Enum(TestCaseType, name="test_case_type"), nullable=False
+        Enum(TestCaseType, name="test_case_type", values_callable=lambda enum_cls: [e.value for e in enum_cls]), 
+        nullable=False
     )
     scenario: Mapped[str] = mapped_column(String(500), nullable=False)
     objective: Mapped[str] = mapped_column(Text, nullable=False)
