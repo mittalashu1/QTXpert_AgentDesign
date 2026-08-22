@@ -1,5 +1,5 @@
 """Azure OpenAI implementation of the LLM provider interface (default provider)."""
-from typing import AsyncIterator, List, Optional
+import logging\nfrom typing import AsyncIterator, List, Optional
 
 from openai import AsyncAzureOpenAI
 
