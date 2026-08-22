@@ -28,6 +28,13 @@ class ProjectRepository:
         result = await self._db.execute(select(Project).where(Project.id == project_id))
         return result.scalar_one_or_none()
 
+    async def get_for_owner(self, project_id: UUID, owner_id: UUID) -> Optional[Project]:
+        """Return a project only when it belongs to the requesting user."""
+        result = await self._db.execute(
+            select(Project).where(Project.id == project_id, Project.owner_id == owner_id)
+        )
+        return result.scalar_one_or_none()
+
 
 class RequirementRepository:
     def __init__(self, db: AsyncSession):
@@ -61,8 +68,13 @@ class RequirementRepository:
         )
         return list(result.scalars().all())
 
-    async def get_many(self, requirement_ids: List[UUID]) -> List[Requirement]:
+    async def get_many_for_project(
+        self, requirement_ids: List[UUID], project_id: UUID
+    ) -> List[Requirement]:
         result = await self._db.execute(
-            select(Requirement).where(Requirement.id.in_(requirement_ids))
+            select(Requirement).where(
+                Requirement.id.in_(requirement_ids), Requirement.project_id == project_id
+            )
         )
         return list(result.scalars().all())
+
