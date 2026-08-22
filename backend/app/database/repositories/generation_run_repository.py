@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database.models.generation_run import GenerationRun
+from app.database.models.project import Project
 
 
 class GenerationRunRepository:
@@ -29,3 +30,13 @@ class GenerationRunRepository:
             .order_by(GenerationRun.created_at.desc())
         )
         return list(result.scalars().all())
+
+    async def get_for_owner(self, run_id: UUID, owner_id: UUID) -> Optional[GenerationRun]:
+        result = await self._db.execute(
+            select(GenerationRun)
+            .join(Project, GenerationRun.project_id == Project.id)
+            .options(selectinload(GenerationRun.test_cases))
+            .where(GenerationRun.id == run_id, Project.owner_id == owner_id)
+        )
+        return result.scalar_one_or_none()
+
