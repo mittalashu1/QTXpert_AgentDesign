@@ -9,20 +9,35 @@ import asyncio
 import logging
 from typing import Any, Dict
 
-from app.agents.test_design_agent.json_utils import parse_llm_json
+from app.agents.test_design_agent.json_utils import LLMJsonParseError, parse_llm_json
 from app.agents.test_design_agent.state import TestDesignState
-from app.llm.base import LLMMessage, LLMProvider
+from app.llm.base import LLMMessage, LLMProvider, LLMProviderError
 from app.prompts import test_design_prompts as prompts
 
 logger = logging.getLogger(__name__)
 
 
 async def _call_json(provider: LLMProvider, system: str, user: str) -> Dict[str, Any]:
-    response = await provider.complete(
-        [LLMMessage(role="system", content=system), LLMMessage(role="user", content=user)],
-        response_format_json=True,
+    """Request machine-readable output, retrying transient empty/model-formatted replies."""
+    retry_system = system + (
+        " Your response must be a non-empty JSON object only. Do not use markdown,"
+        " explanations, or an empty response."
     )
-    return parse_llm_json(response.content)
+    last_error: LLMJsonParseError | None = None
+    for attempt in range(2):
+        response = await provider.complete(
+            [LLMMessage(role="system", content=retry_system if attempt else system), LLMMessage(role="user", content=user)],
+            response_format_json=True,
+        )
+        try:
+            return parse_llm_json(response.content)
+        except LLMJsonParseError as exc:
+            last_error = exc
+            logger.warning("LLM returned unusable JSON on attempt %s: %s", attempt + 1, exc)
+    raise LLMProviderError(
+        "The AI returned an empty or invalid structured response after a retry. "
+        "Please try the generation again."
+    ) from last_error
 
 
 def make_normalize_node(provider: LLMProvider):
