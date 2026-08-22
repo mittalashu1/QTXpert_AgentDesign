@@ -27,7 +27,9 @@ async def _call_json(provider: LLMProvider, system: str, user: str) -> Dict[str,
     for attempt in range(2):
         response = await provider.complete(
             [LLMMessage(role="system", content=retry_system if attempt else system), LLMMessage(role="user", content=user)],
-            response_format_json=True,
+            # Some reasoning-model deployments return whitespace in legacy
+            # JSON mode. The retry relies on the explicit prompt instead.
+            response_format_json=attempt == 0,
         )
         try:
             return parse_llm_json(response.content)
@@ -92,7 +94,7 @@ def make_test_scenarios_node(provider: LLMProvider):
     return test_scenarios_node
 
 
-def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None):
+def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None, max_scenarios: int = 40):
     async def detailed_test_cases_node(state: TestDesignState) -> TestDesignState:
         all_cases = []
         # A single requirement often produces many scenarios. Generate a few
@@ -109,7 +111,13 @@ def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None
                 return scenario, [], exc
             return scenario, result.get("test_cases", []), None
 
-        tasks = [asyncio.create_task(generate_for_scenario(s)) for s in state["test_scenarios"]]
+        scenarios = state["test_scenarios"][:max_scenarios]
+        skipped_scenarios = len(state["test_scenarios"]) - len(scenarios)
+        if skipped_scenarios:
+            state.setdefault("errors", []).append(
+                f"Skipped {skipped_scenarios} scenarios because the generation limit is {max_scenarios}."
+            )
+        tasks = [asyncio.create_task(generate_for_scenario(s)) for s in scenarios]
         for task in asyncio.as_completed(tasks):
             scenario, cases, error = await task
             if error:
