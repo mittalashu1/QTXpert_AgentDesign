@@ -68,9 +68,11 @@ async def history(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ):
     await _require_owned_project(db, project_id, user.id)
     repo = GenerationRunRepository(db)
+    await repo.fail_stale_for_project(project_id, settings.GENERATION_STALE_AFTER_SECONDS)
     return await repo.list_for_project(project_id)
 
 
@@ -79,10 +81,14 @@ async def get_run(
     run_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ):
     repo = GenerationRunRepository(db)
     run = await repo.get_for_owner(run_id, user.id)
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
+    await repo.fail_stale_for_project(run.project_id, settings.GENERATION_STALE_AFTER_SECONDS)
+    # Reload after a recovery check so the response returns the final status.
+    run = await repo.get_for_owner(run_id, user.id)
     return run
 
