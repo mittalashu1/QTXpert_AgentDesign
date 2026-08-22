@@ -76,7 +76,7 @@ def make_test_scenarios_node(provider: LLMProvider):
     return test_scenarios_node
 
 
-def make_detailed_test_cases_node(provider: LLMProvider):
+def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None):
     async def detailed_test_cases_node(state: TestDesignState) -> TestDesignState:
         all_cases = []
         for scenario in state["test_scenarios"]:
@@ -92,6 +92,8 @@ def make_detailed_test_cases_node(provider: LLMProvider):
             for case in result.get("test_cases", []):
                 case["scenario_id"] = scenario.get("scenario_id")
                 all_cases.append(case)
+            if on_test_case_batch:
+                await on_test_case_batch(result.get("test_cases", []))
         state["test_cases"] = all_cases
         state["automation_candidate_count"] = sum(
             1 for c in all_cases if c.get("is_automation_candidate")
@@ -123,3 +125,4 @@ def _distribution(items: list, key: str) -> Dict[str, int]:
         value = item.get(key, "unknown")
         dist[value] = dist.get(value, 0) + 1
     return dist
+
