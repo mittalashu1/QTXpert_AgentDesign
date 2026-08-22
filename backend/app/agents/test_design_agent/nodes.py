@@ -5,6 +5,7 @@ Each node: (1) builds a prompt, (2) calls the configured LLM provider,
 (3) parses the JSON response, (4) merges results into state. Nodes never
 import a concrete LLM SDK - only `app.llm.base.LLMProvider`.
 """
+import asyncio
 import logging
 from typing import Any, Dict
 
@@ -79,21 +80,34 @@ def make_test_scenarios_node(provider: LLMProvider):
 def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None):
     async def detailed_test_cases_node(state: TestDesignState) -> TestDesignState:
         all_cases = []
-        for scenario in state["test_scenarios"]:
+        # A single requirement often produces many scenarios. Generate a few
+        # at once so the first completed group can be shown to the user rather
+        # than making them wait for every scenario to run serially.
+        semaphore = asyncio.Semaphore(3)
+
+        async def generate_for_scenario(scenario):
             system, user = prompts.detailed_test_cases_prompt(scenario, state["structure"])
             try:
-                result = await _call_json(provider, system, user)
+                async with semaphore:
+                    result = await _call_json(provider, system, user)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Test case generation failed for scenario %s: %s", scenario, exc)
+                return scenario, [], exc
+            return scenario, result.get("test_cases", []), None
+
+        tasks = [asyncio.create_task(generate_for_scenario(s)) for s in state["test_scenarios"]]
+        for task in asyncio.as_completed(tasks):
+            scenario, cases, error = await task
+            if error:
+                logger.warning("Test case generation failed for scenario %s: %s", scenario, error)
                 state.setdefault("errors", []).append(
-                    f"Scenario '{scenario.get('title', scenario.get('scenario_id'))}' failed: {exc}"
+                    f"Scenario '{scenario.get('title', scenario.get('scenario_id'))}' failed: {error}"
                 )
                 continue
-            for case in result.get("test_cases", []):
+            for case in cases:
                 case["scenario_id"] = scenario.get("scenario_id")
                 all_cases.append(case)
             if on_test_case_batch:
-                await on_test_case_batch(result.get("test_cases", []))
+                await on_test_case_batch(cases)
         state["test_cases"] = all_cases
         state["automation_candidate_count"] = sum(
             1 for c in all_cases if c.get("is_automation_candidate")
