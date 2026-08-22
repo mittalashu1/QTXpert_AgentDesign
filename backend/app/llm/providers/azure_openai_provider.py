@@ -55,7 +55,7 @@ class AzureOpenAIProvider(LLMProvider):
                 # of the legacy max_tokens parameter.
                 max_completion_tokens=max_tokens or self._settings.LLM_MAX_TOKENS,
                 **(
-                    {"reasoning_effort": self._settings.LLM_REASONING_EFFORT}
+                    {"reasoning_effort": getattr(self._settings, "LLM_REASONING_EFFORT", "low")}
                     if self._deployment.startswith(("gpt-5", "o1", "o3", "o4"))
                     else {}
                 ),
