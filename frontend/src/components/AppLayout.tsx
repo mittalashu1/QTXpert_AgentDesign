@@ -25,6 +25,7 @@ import MenuBookOutlinedIcon from "@mui/icons-material/MenuBookOutlined";
 import HelpOutlineOutlinedIcon from "@mui/icons-material/HelpOutlineOutlined";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
+import PeopleOutlineIcon from "@mui/icons-material/PeopleOutline";
 import { useAuth } from "@/contexts/AuthContext";
 import { useThemeMode } from "@/contexts/ThemeModeContext";
 
@@ -111,7 +112,7 @@ export default function AppLayout() {
       >
         <Toolbar />
         <List sx={{ px: 1, py: 2 }}>
-          {NAV_ITEMS.map((item) => (
+          {[...NAV_ITEMS, ...(user?.role === "admin" ? [{ label: "Administration · Users", path: "/administration/users", icon: <PeopleOutlineIcon /> }] : [])].map((item) => (
             <ListItemButton
               key={item.path}
               selected={location.pathname === item.path}

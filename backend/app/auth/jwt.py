@@ -17,6 +17,7 @@ def create_token(
     settings: Settings,
     subject: str,
     token_type: Literal["access", "refresh"],
+    token_version: int = 0,
 ) -> str:
     now = datetime.now(timezone.utc)
     expires_delta = (
@@ -30,6 +31,7 @@ def create_token(
         "iat": now,
         "exp": now + expires_delta,
         "jti": str(uuid.uuid4()),
+        "ver": token_version,
     }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 

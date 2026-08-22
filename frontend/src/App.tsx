@@ -11,6 +11,7 @@ import ApiConfigurationPage from "@/pages/ApiConfigurationPage";
 import ProfilePage from "@/pages/ProfilePage";
 import PromptLibraryPage from "@/pages/PromptLibraryPage";
 import HelpPage from "@/pages/HelpPage";
+import UsersPage from "@/pages/UsersPage";
 import { CircularProgress, Box } from "@mui/material";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
@@ -24,6 +25,11 @@ function ProtectedRoute({ children }: { children: JSX.Element }) {
   }
   if (!user) return <Navigate to="/login" replace />;
   return children;
+}
+
+function AdminRoute({ children }: { children: JSX.Element }) {
+  const { user } = useAuth();
+  return user?.role === "admin" ? children : <Navigate to="/" replace />;
 }
 
 export default function App() {
@@ -47,6 +53,7 @@ export default function App() {
         <Route path="profile" element={<ProfilePage />} />
         <Route path="prompt-library" element={<PromptLibraryPage />} />
         <Route path="help" element={<HelpPage />} />
+        <Route path="administration/users" element={<AdminRoute><UsersPage /></AdminRoute>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

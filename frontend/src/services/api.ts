@@ -4,6 +4,7 @@ import {
   Project,
   Requirement,
   User,
+  UserRole,
 } from "@/types/domain";
 
 export const authApi = {
@@ -12,10 +13,20 @@ export const authApi = {
       email,
       password,
     }),
-  register: (email: string, full_name: string, password: string) =>
-    apiClient.post<User>("/auth/register", { email, full_name, password }),
   me: () => apiClient.get<User>("/auth/me"),
   logout: () => apiClient.post("/auth/logout"),
+  changePassword: (current_password: string, new_password: string) =>
+    apiClient.put("/auth/me/password", { current_password, new_password }),
+};
+
+export const usersApi = {
+  list: () => apiClient.get<User[]>("/auth/users"),
+  create: (payload: { email: string; full_name: string; password: string; role: UserRole }) =>
+    apiClient.post<User>("/auth/users", payload),
+  update: (id: string, payload: Partial<Pick<User, "full_name" | "role" | "is_active">>) =>
+    apiClient.patch<User>(`/auth/users/${id}`, payload),
+  resetPassword: (id: string, new_password: string) =>
+    apiClient.put(`/auth/users/${id}/password`, { new_password }),
 };
 
 export const projectsApi = {
