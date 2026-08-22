@@ -1,10 +1,12 @@
 """Azure OpenAI implementation of the LLM provider interface (default provider)."""
+import logging
 from typing import AsyncIterator, List, Optional
 
 from openai import AsyncAzureOpenAI
 
 from app.config import Settings
 from app.llm.base import LLMMessage, LLMProvider, LLMProviderError, LLMResponse
+logger = logging.getLogger(__name__)
 
 
 class AzureOpenAIProvider(LLMProvider):
@@ -52,10 +54,23 @@ class AzureOpenAIProvider(LLMProvider):
                 # GPT-5-series models require max_completion_tokens instead
                 # of the legacy max_tokens parameter.
                 max_completion_tokens=max_tokens or self._settings.LLM_MAX_TOKENS,
+                **(
+                    {"reasoning_effort": self._settings.LLM_REASONING_EFFORT}
+                    if self._deployment.startswith(("gpt-5", "o1", "o3", "o4"))
+                    else {}
+                ),
                 response_format={"type": "json_object"} if response_format_json else None,
                 timeout=self._settings.LLM_REQUEST_TIMEOUT_SECONDS,
             )
             choice = response.choices[0]
+            if not choice.message.content:
+                logger.warning(
+                    "Azure completion contained no visible content: deployment=%s finish_reason=%s refusal=%s usage=%s",
+                    self._deployment,
+                    choice.finish_reason,
+                    getattr(choice.message, "refusal", None),
+                    response.usage.model_dump() if response.usage else None,
+                )
             return LLMResponse(
                 content=choice.message.content or "",
                 model=self._deployment,
