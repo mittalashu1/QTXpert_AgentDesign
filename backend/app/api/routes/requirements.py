@@ -122,6 +122,7 @@ async def submit_direct_prompt(
     payload: DirectPromptRequest,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ):
     """Method 5 (direct user prompt with a large text editor)."""
     await _require_owned_project(db, payload.project_id, user.id)
