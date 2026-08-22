@@ -5,6 +5,7 @@ import time
 from typing import List, Optional
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.test_design_agent.graph import build_test_design_graph
@@ -36,7 +37,7 @@ class TestGenerationService:
         self._db = db
         self._settings = settings
 
-    async def run(
+    async def create_run(
         self,
         project_id: UUID,
         requested_by_id: UUID,
@@ -63,57 +64,70 @@ class TestGenerationService:
         )
         self._db.add(run)
         await self._db.commit()
-        await self._db.refresh(run)
+        # The immediate API response includes test_cases. Explicitly load the
+        # empty relationship now so response serialization never triggers an
+        # async lazy-load after the request session has finished.
+        await self._db.refresh(run, attribute_names=["test_cases"])
 
+        return run
+
+    async def execute(
+        self,
+        run_id: UUID,
+        project_id: UUID,
+        requirement_ids: Optional[List[UUID]],
+        requested_by_id: UUID,
+        llm_provider_override: Optional[str] = None,
+    ) -> GenerationRun:
+        run = (await self._db.execute(select(GenerationRun).where(GenerationRun.id == run_id))).scalar_one()
+        requirement_repo = RequirementRepository(self._db)
+        requirements = (
+            await requirement_repo.get_many(requirement_ids)
+            if requirement_ids
+            else await requirement_repo.list_for_project(project_id)
+        )
+        provider = get_llm_provider(llm_provider_override)
         start = time.perf_counter()
         case_build_warnings: List[str] = []
         try:
-            graph = build_test_design_graph(provider)
-            result_state = await graph.ainvoke(
-                {
-                    "raw_documents": [r.raw_content for r in requirements],
-                    "project_id": str(project_id),
-                    "generation_run_id": str(run.id),
-                }
-            )
+            persisted_count = 0
+
+            async def persist_batch(cases: list) -> None:
+                nonlocal persisted_count
+                run.status = RunStatus.GENERATING_TEST_CASES
+                await self._persist_test_cases(
+                    run, cases, case_build_warnings, start_index=persisted_count + 1
+                )
+                persisted_count += len(cases)
+                await self._db.commit()
+
+            graph = build_test_design_graph(provider, on_test_case_batch=persist_batch)
+            input_state = {
+                "raw_documents": [r.raw_content for r in requirements],
+                "project_id": str(project_id), "generation_run_id": str(run.id),
+            }
+            result_state = None
+            async for update in graph.astream(input_state, stream_mode="updates"):
+                node_name, node_state = next(iter(update.items()))
+                if node_name in {"extract_structure", "summary", "breakdown_step"}:
+                    run.status = RunStatus.ANALYZING
+                elif node_name == "scenarios_step":
+                    run.status = RunStatus.GENERATING_SCENARIOS
+                elif node_name == "detailed_test_cases":
+                    run.status = RunStatus.GENERATING_TEST_CASES
+                elif node_name == "risk_analysis_step":
+                    run.status = RunStatus.RISK_ANALYSIS
+                    result_state = node_state
+                await self._db.commit()
+
+            if result_state is None:
+                raise RuntimeError("Generation graph finished without risk analysis output")
 
             run.requirement_summary = result_state.get("requirement_summary")
             run.business_rules = result_state.get("structure", {}).get("business_rules")
             run.functional_breakdown = result_state.get("functional_breakdown")
             run.test_scenarios = result_state.get("test_scenarios")
             run.risk_analysis = result_state.get("risk_analysis")
-
-            raw_cases = result_state.get("test_cases", [])
-            persisted_count = 0
-            for index, case in enumerate(raw_cases, start=1):
-                try:
-                    test_case = TestCase(
-                        generation_run_id=run.id,
-                        test_case_key=f"TC-{run.id.hex[:8].upper()}-{index:04d}",
-                        requirement_traceability=case.get("requirement_traceability"),
-                        test_type=_coerce_enum(
-                            TestCaseType, case.get("test_type"), TestCaseType.FUNCTIONAL
-                        ),
-                        scenario=str(case.get("scenario") or f"Untitled scenario {index}"),
-                        objective=str(case.get("objective") or ""),
-                        priority=_coerce_enum(Priority, case.get("priority"), Priority.MEDIUM),
-                        severity=_coerce_enum(Severity, case.get("severity"), Severity.MINOR),
-                        preconditions=case.get("preconditions"),
-                        test_data=case.get("test_data") if isinstance(case.get("test_data"), dict) else None,
-                        steps=case.get("steps") if isinstance(case.get("steps"), list) else [],
-                        expected_result=str(case.get("expected_result") or ""),
-                        post_conditions=case.get("post_conditions"),
-                        is_automation_candidate=bool(case.get("is_automation_candidate", False)),
-                        automation_type=case.get("automation_type"),
-                        risk_level=_coerce_enum(RiskLevel, case.get("risk_level"), RiskLevel.MEDIUM),
-                    )
-                    self._db.add(test_case)
-                    persisted_count += 1
-                except Exception as case_exc:  # noqa: BLE001
-                    case_build_warnings.append(
-                        f"Skipped test case #{index} ({case.get('scenario', 'unknown')}): {case_exc}"
-                    )
-                    continue
 
             run.processing_time_seconds = time.perf_counter() - start
 
@@ -149,3 +163,31 @@ class TestGenerationService:
             run.processing_time_seconds = time.perf_counter() - start
             await self._db.commit()
             raise
+
+    async def _persist_test_cases(
+        self, run: GenerationRun, raw_cases: list, warnings: List[str], start_index: int = 1
+    ) -> None:
+        """Save cases before the final risk step so the UI can render them early."""
+        for index, case in enumerate(raw_cases, start=start_index):
+            try:
+                self._db.add(TestCase(
+                    generation_run_id=run.id,
+                    test_case_key=f"TC-{run.id.hex[:8].upper()}-{index:04d}",
+                    requirement_traceability=case.get("requirement_traceability"),
+                    test_type=_coerce_enum(TestCaseType, case.get("test_type"), TestCaseType.FUNCTIONAL),
+                    scenario=str(case.get("scenario") or f"Untitled scenario {index}"),
+                    objective=str(case.get("objective") or ""),
+                    priority=_coerce_enum(Priority, case.get("priority"), Priority.MEDIUM),
+                    severity=_coerce_enum(Severity, case.get("severity"), Severity.MINOR),
+                    preconditions=case.get("preconditions"),
+                    test_data=case.get("test_data") if isinstance(case.get("test_data"), dict) else None,
+                    steps=case.get("steps") if isinstance(case.get("steps"), list) else [],
+                    expected_result=str(case.get("expected_result") or ""),
+                    post_conditions=case.get("post_conditions"),
+                    is_automation_candidate=bool(case.get("is_automation_candidate", False)),
+                    automation_type=case.get("automation_type"),
+                    risk_level=_coerce_enum(RiskLevel, case.get("risk_level"), RiskLevel.MEDIUM),
+                ))
+            except Exception as case_exc:  # noqa: BLE001
+                warnings.append(f"Skipped test case #{index}: {case_exc}")
+

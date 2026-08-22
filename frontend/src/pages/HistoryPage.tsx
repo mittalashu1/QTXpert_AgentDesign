@@ -27,6 +27,7 @@ export default function HistoryPage() {
     queryKey: ["history", selectedProjectId],
     queryFn: () => testCasesApi.history(selectedProjectId).then((res) => res.data),
     enabled: Boolean(selectedProjectId),
+    refetchInterval: (query) => query.state.data?.some((run) => !["completed", "failed"].includes(run.status)) ? 2500 : false,
   });
 
   return (
@@ -82,3 +83,4 @@ export default function HistoryPage() {
     </Stack>
   );
 }
+
