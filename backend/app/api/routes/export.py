@@ -21,7 +21,7 @@ async def export_test_cases(
     user: Annotated[User, Depends(get_current_user)],
 ):
     repo = GenerationRunRepository(db)
-    run = await repo.get(payload.generation_run_id)
+    run = await repo.get_for_owner(payload.generation_run_id, user.id)
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
 
@@ -36,3 +36,4 @@ async def export_test_cases(
         media_type=result.media_type,
         headers={"Content-Disposition": f'attachment; filename="{result.filename}"'},
     )
+
