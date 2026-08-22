@@ -3,7 +3,7 @@ import enum
 import uuid
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, Enum, ForeignKey, JSON, String, Text
+from sqlalchemy import Boolean, Enum, ForeignKey, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -62,6 +62,9 @@ class RiskLevel(str, enum.Enum):
 
 class TestCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "test_cases"
+    __table_args__ = (
+        UniqueConstraint("generation_run_id", "test_case_key", name="uq_test_cases_run_key"),
+    )
 
     generation_run_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True),
@@ -98,3 +101,4 @@ class TestCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
     generation_run: Mapped["GenerationRun"] = relationship(back_populates="test_cases")
+

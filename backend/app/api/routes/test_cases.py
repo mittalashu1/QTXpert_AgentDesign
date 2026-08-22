@@ -8,12 +8,18 @@ from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
 from app.database.models.user import User
 from app.database.repositories.generation_run_repository import GenerationRunRepository
+from app.database.repositories.requirement_repository import ProjectRepository
 from app.database.session import AsyncSessionLocal, get_db_session
 from app.llm.base import LLMProviderError
 from app.schemas.test_case import GenerateTestCasesRequest, GenerationRunOut
 from app.services.test_generation_service import TestGenerationService
 
 router = APIRouter(tags=["test-cases"])
+
+
+async def _require_owned_project(db: AsyncSession, project_id: UUID, user_id: UUID) -> None:
+    if await ProjectRepository(db).get_for_owner(project_id, user_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
 
 async def _continue_generation(
@@ -37,6 +43,7 @@ async def generate_testcases(
     settings: Annotated[Settings, Depends(get_settings)],
 ):
     """Starts the AI workflow and immediately returns a run the UI can track."""
+    await _require_owned_project(db, payload.project_id, user.id)
     service = TestGenerationService(db, settings)
     try:
         run = await service.create_run(
@@ -61,8 +68,11 @@ async def history(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ):
+    await _require_owned_project(db, project_id, user.id)
     repo = GenerationRunRepository(db)
+    await repo.fail_stale_for_project(project_id, settings.GENERATION_STALE_AFTER_SECONDS)
     return await repo.list_for_project(project_id)
 
 
@@ -71,10 +81,14 @@ async def get_run(
     run_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ):
     repo = GenerationRunRepository(db)
-    run = await repo.get(run_id)
+    run = await repo.get_for_owner(run_id, user.id)
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
+    await repo.fail_stale_for_project(run.project_id, settings.GENERATION_STALE_AFTER_SECONDS)
+    # Reload after a recovery check so the response returns the final status.
+    run = await repo.get_for_owner(run_id, user.id)
     return run
 

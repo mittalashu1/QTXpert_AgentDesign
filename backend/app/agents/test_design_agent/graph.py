@@ -22,7 +22,7 @@ from app.agents.test_design_agent.state import TestDesignState
 from app.llm.base import LLMProvider
 
 
-def build_test_design_graph(provider: LLMProvider, on_test_case_batch=None):
+def build_test_design_graph(provider: LLMProvider, on_test_case_batch=None, max_scenarios: int = 40):
     """Compiles the LangGraph workflow bound to the given LLM provider."""
     graph = StateGraph(TestDesignState)
 
@@ -37,7 +37,10 @@ def build_test_design_graph(provider: LLMProvider, on_test_case_batch=None):
     graph.add_node("summary", make_summary_node(provider))
     graph.add_node("breakdown_step", make_functional_breakdown_node(provider))
     graph.add_node("scenarios_step", make_test_scenarios_node(provider))
-    graph.add_node("detailed_test_cases", make_detailed_test_cases_node(provider, on_test_case_batch))
+    graph.add_node(
+        "detailed_test_cases",
+        make_detailed_test_cases_node(provider, on_test_case_batch, max_scenarios),
+    )
     graph.add_node("risk_analysis_step", make_risk_analysis_node(provider))
 
     graph.set_entry_point("normalize")
