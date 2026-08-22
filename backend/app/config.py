@@ -83,7 +83,6 @@ class Settings(BaseSettings):
     # GPT-5 reasoning can consume part of this budget before visible output.
     LLM_MAX_TOKENS: int = 8192
     LLM_REQUEST_TIMEOUT_SECONDS: int = 120
-    LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low
 
     OPENAI_API_KEY: Optional[str] = None
 
