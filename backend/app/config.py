@@ -63,9 +63,6 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
-    # One-time bootstrap secret. Set only long enough to create the first admin,
-    # then remove it from the deployment environment.
-    ADMIN_BOOTSTRAP_TOKEN: Optional[str] = None
 
     # Microsoft Entra ID (Azure AD) - OAuth2 / OIDC, optional
     ENTRA_TENANT_ID: Optional[str] = None
@@ -82,6 +79,7 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 4096
     LLM_REQUEST_TIMEOUT_SECONDS: int = 120
+    LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
 
     OPENAI_API_KEY: Optional[str] = None
 
@@ -149,3 +147,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached settings singleton (dependency-injected across the app)."""
     return Settings()
+

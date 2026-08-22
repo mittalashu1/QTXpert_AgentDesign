@@ -27,7 +27,9 @@ async def _call_json(provider: LLMProvider, system: str, user: str) -> Dict[str,
     for attempt in range(2):
         response = await provider.complete(
             [LLMMessage(role="system", content=retry_system if attempt else system), LLMMessage(role="user", content=user)],
-            response_format_json=True,
+            # Some reasoning-model deployments return whitespace in legacy
+            # JSON mode. The retry relies on the explicit prompt instead.
+            response_format_json=attempt == 0,
         )
         try:
             return parse_llm_json(response.content)
