@@ -80,8 +80,8 @@ class Settings(BaseSettings):
     ] = "azure_openai"
     LLM_MODEL: str = "gpt-4o"
     LLM_TEMPERATURE: float = 0.2
-    LLM_MAX_TOKENS: int = 4096
-    LLM_REQUEST_TIMEOUT_SECONDS: int = 120
+    # GPT-5 reasoning can consume part of this budget before visible output.\n    LLM_MAX_TOKENS: int = 8192
+    LLM_REQUEST_TIMEOUT_SECONDS: int = 120\n    LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
 
     OPENAI_API_KEY: Optional[str] = None
 
