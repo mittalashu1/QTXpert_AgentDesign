@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
+    # One-time bootstrap secret. Set only long enough to create the first admin,
+    # then remove it from the deployment environment.
+    ADMIN_BOOTSTRAP_TOKEN: Optional[str] = None
 
     # Microsoft Entra ID (Azure AD) - OAuth2 / OIDC, optional
     ENTRA_TENANT_ID: Optional[str] = None

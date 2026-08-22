@@ -35,6 +35,9 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_sso_user: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     entra_object_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Incremented when credentials or account privileges change.  JWTs carry this
+    # value so a password reset or deactivation invalidates already-issued tokens.
+    token_version: Mapped[int] = mapped_column(default=0, nullable=False)
 
     projects: Mapped[List["Project"]] = relationship(
         back_populates="owner", cascade="all, delete-orphan"
