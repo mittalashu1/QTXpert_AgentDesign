@@ -356,6 +356,16 @@ class TestGenerationService:
                 steps = case.get("steps")
                 if not objective or not expected_result or not isinstance(steps, list) or not steps:
                     raise ValueError("missing objective, expected result, or test steps")
+                normalized_steps = []
+                for step in steps:
+                    if isinstance(step, str) and step.strip():
+                        normalized_steps.append(step.strip())
+                    elif isinstance(step, dict):
+                        action = step.get("action") or step.get("description") or step.get("step")
+                        if action is not None and str(action).strip():
+                            normalized_steps.append(str(action).strip())
+                if not normalized_steps:
+                    raise ValueError("test steps contained no usable actions")
                 self._db.add(TestCase(
                     generation_run_id=run.id,
                     test_case_key=f"TC-{run.id.hex[:8].upper()}-{index:04d}",
@@ -367,7 +377,7 @@ class TestGenerationService:
                     severity=_coerce_enum(Severity, case.get("severity"), Severity.MINOR),
                     preconditions=case.get("preconditions"),
                     test_data=case.get("test_data") if isinstance(case.get("test_data"), dict) else None,
-                    steps=steps,
+                    steps=normalized_steps,
                     expected_result=expected_result,
                     post_conditions=case.get("post_conditions"),
                     is_automation_candidate=bool(case.get("is_automation_candidate", False)),
