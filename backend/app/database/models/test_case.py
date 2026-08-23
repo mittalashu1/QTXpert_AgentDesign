@@ -84,8 +84,14 @@ class TestCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     scenario: Mapped[str] = mapped_column(String(500), nullable=False)
     objective: Mapped[str] = mapped_column(Text, nullable=False)
-    priority: Mapped[Priority] = mapped_column(Enum(Priority, name="priority"), nullable=False)
-    severity: Mapped[Severity] = mapped_column(Enum(Severity, name="severity"), nullable=False)
+    priority: Mapped[Priority] = mapped_column(
+        Enum(Priority, name="priority", values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        nullable=False,
+    )
+    severity: Mapped[Severity] = mapped_column(
+        Enum(Severity, name="severity", values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        nullable=False,
+    )
 
     preconditions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     test_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
