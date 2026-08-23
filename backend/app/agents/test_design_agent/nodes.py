@@ -138,7 +138,7 @@ def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None
             system, user = prompts.detailed_test_cases_prompt(scenario, state["structure"])
             try:
                 async with semaphore:
-                    result = await _call_json(provider, system, user, timeout_seconds=45, max_retries=0)
+                    result = await _call_json(provider, system, user, timeout_seconds=20, max_retries=0)
             except Exception as exc:  # noqa: BLE001
                 title = str(scenario.get("title") or scenario.get("scenario_id") or "Generated scenario")
                 fallback = {
@@ -167,7 +167,9 @@ def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None
                 state.setdefault("errors", []).append(
                     f"Scenario '{scenario.get('title', scenario.get('scenario_id'))}' failed: {error}"
                 )
-                continue
+                # Keep the generated suite useful even when a detail call times
+                # out: generate_for_scenario returns an input-specific fallback.
+                # Do not discard it just because the provider call failed.
             for case in cases:
                 case["scenario_id"] = scenario.get("scenario_id")
                 all_cases.append(case)
