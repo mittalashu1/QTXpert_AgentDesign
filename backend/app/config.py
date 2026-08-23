@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.2
     # GPT-5 reasoning can consume part of this budget before visible output.
     LLM_MAX_TOKENS: int = 8192
-    LLM_REQUEST_TIMEOUT_SECONDS: int = 120
+    # Bound each AI request so an upstream stall becomes a retryable failure.\n    LLM_REQUEST_TIMEOUT_SECONDS: int = 75
 
     OPENAI_API_KEY: Optional[str] = None
 
@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     MAX_REQUIREMENT_TEXT_CHARS: int = 200_000
     MAX_REQUIREMENTS_PER_GENERATION: int = 20
     MAX_SCENARIOS_PER_GENERATION: int = 40
-    GENERATION_STALE_AFTER_SECONDS: int = 900
+    GENERATION_STALE_AFTER_SECONDS: int = 300
     ALLOWED_UPLOAD_EXTENSIONS: str = "pdf,docx,txt,md,json,csv"
     UPLOAD_STORAGE_PATH: str = "./storage/uploads"
 

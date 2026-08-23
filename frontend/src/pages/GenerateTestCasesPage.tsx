@@ -32,7 +32,7 @@ export default function GenerateTestCasesPage() {
       <Button variant="contained" size="large" startIcon={<AutoAwesomeOutlinedIcon />} sx={{ mt: 2 }} disabled={!selectedProjectId || generateMutation.isPending || isActive} onClick={() => generateMutation.mutate()}>{generateMutation.isPending ? "Starting…" : isActive ? "Generation in progress" : "Generate test cases"}</Button>
       {(generateMutation.isPending || isActive) && <Box sx={{ mt: 2 }}><LinearProgress variant="determinate" value={run ? PROGRESS[run.status] : 5} /><Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>{generateMutation.isPending ? "Starting generation…" : `Working: ${run!.status.replaceAll("_", " ")} (${PROGRESS[run!.status]}%)`}</Typography></Box>}
       {generateMutation.isError && <Alert severity="error" sx={{ mt: 2 }}>{(generateMutation.error as any)?.response?.data?.detail || (generateMutation.error as Error)?.message || "Generation failed. Check the AI provider configuration."}</Alert>}
-      {run?.status === "failed" && <Alert severity="error" sx={{ mt: 2 }}>{run.error_message || "Generation failed with no further detail."}</Alert>}
+      {run?.status === "failed" && <Stack spacing={1} sx={{ mt: 2 }}><Alert severity="error">{run.error_message || "Generation failed with no further detail."}</Alert><Box><Button variant="outlined" onClick={() => setResult(null)}>Dismiss and start a new run</Button></Box></Stack>}
       {run?.status === "completed" && run.error_message && <Alert severity="warning" sx={{ mt: 2 }}>{run.error_message}</Alert>}
     </CardContent></Card>
     {run && <Card sx={{ borderRadius: 3 }}><CardContent>

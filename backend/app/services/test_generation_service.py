@@ -137,14 +137,18 @@ class TestGenerationService:
             result_state = None
             async for update in graph.astream(input_state, stream_mode="updates"):
                 node_name, node_state = next(iter(update.items()))
-                if node_name in {"extract_structure", "summary", "breakdown_step"}:
+                # LangGraph yields an update after a node completes. Set the
+                # status for the node that starts next so the UI is not one
+                # generation phase behind the actual work.
+                if node_name in {"normalize", "extract_structure", "summary"}:
                     run.status = RunStatus.ANALYZING
-                elif node_name == "scenarios_step":
+                elif node_name == "breakdown_step":
                     run.status = RunStatus.GENERATING_SCENARIOS
-                elif node_name == "detailed_test_cases":
+                elif node_name == "scenarios_step":
                     run.status = RunStatus.GENERATING_TEST_CASES
-                elif node_name == "risk_analysis_step":
+                elif node_name == "detailed_test_cases":
                     run.status = RunStatus.RISK_ANALYSIS
+                elif node_name == "risk_analysis_step":
                     result_state = node_state
                 await self._db.commit()
 

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.agents.test_design_agent.nodes import _call_json
@@ -24,3 +26,19 @@ async def test_call_json_retries_an_empty_completion():
     assert await _call_json(provider, "Return JSON", "input") == {"ok": True}
     assert provider.calls == 2
 
+
+
+class HangingProvider(LLMProvider):
+    provider_name = "test"
+
+    async def complete(self, messages, **kwargs):
+        await asyncio.sleep(1)
+
+    async def stream(self, messages, **kwargs):
+        yield ""
+
+
+@pytest.mark.asyncio
+async def test_call_json_fails_after_retrying_a_timeout():
+    with pytest.raises(Exception, match="did not respond in time"):
+        await _call_json(HangingProvider(), "Return JSON", "input", timeout_seconds=0.001)
