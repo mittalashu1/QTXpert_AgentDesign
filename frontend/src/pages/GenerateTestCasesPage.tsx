@@ -165,10 +165,10 @@ export default function GenerateTestCasesPage() {
       const seed = [prompt, sourceUrl, ...files.map((file) => file.name)].filter(Boolean).join(" ");
       const hasServerCases = Boolean(next.test_cases?.length);
       setResult(next);
-      setDraftCases(hasServerCases ? next.test_cases : makeStarterCases(seed));
-      setLocalPreview(!hasServerCases);
+      setDraftCases(next.test_cases ?? []);
+      setLocalPreview(false);
       setSaved(false);
-      setMessage(hasServerCases ? "Generation started. Live progress will appear here." : "Starter coverage is ready to edit while the server finishes saving the run.");
+      setMessage(hasServerCases ? "Generation started. Live progress will appear here." : "Generation is running against your supplied inputs. Real test cases will appear when analysis completes.");
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["generation-history", selectedProjectId] });
     },
