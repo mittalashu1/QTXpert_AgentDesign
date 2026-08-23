@@ -140,7 +140,17 @@ def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None
                 async with semaphore:
                     result = await _call_json(provider, system, user)
             except Exception as exc:  # noqa: BLE001
-                return scenario, [], exc
+                title = str(scenario.get("title") or scenario.get("scenario_id") or "Generated scenario")
+                fallback = {
+                    "scenario": title,
+                    "objective": f"Validate the expected behavior for: {title}",
+                    "preconditions": "Application is available and required test data is prepared.",
+                    "steps": [{"step": 1, "action": f"Execute the workflow described by: {title}"}],
+                    "expected_result": f"The workflow for '{title}' completes according to the requirement.",
+                    "test_type": "functional", "priority": "medium", "severity": "minor",
+                    "risk_level": "medium", "is_automation_candidate": False,
+                }
+                return scenario, [fallback], exc
             return scenario, result.get("test_cases", []), None
 
         scenarios = state["test_scenarios"][:max_scenarios]
