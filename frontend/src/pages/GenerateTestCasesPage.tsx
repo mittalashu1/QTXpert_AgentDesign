@@ -20,6 +20,7 @@ import { EXPORT_FORMATS, GenerationRun, TestCase } from "@/types/domain";
 const ACTIVE_STATUSES = ["pending", "normalizing", "analyzing", "generating_scenarios", "generating_test_cases", "risk_analysis"];
 const PROGRESS: Record<string, number> = { pending: 5, normalizing: 15, analyzing: 35, generating_scenarios: 55, generating_test_cases: 75, risk_analysis: 90, completed: 100, failed: 100 };
 const FILE_EXTENSIONS = ".pdf,.docx,.txt,.md,.json,.csv";
+const LOCAL_CHAT_STORAGE_KEY = "qtxpert-saved-chats";
 type SourceKind = "file" | "link";
 type InputSource = { id: string; label: string; description: string; kind: SourceKind; accept?: string; placeholder?: string };
 
@@ -46,6 +47,17 @@ function EditableCase({ testCase, onChange }: { testCase: TestCase; onChange: (n
       <TextField label="Expected result" value={testCase.expected_result} onChange={(e) => onChange({ ...testCase, expected_result: e.target.value })} fullWidth multiline minRows={2} />
     </Stack>
   </CardContent></Card>;
+}
+
+
+function readSavedChats(): GenerationRun[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(LOCAL_CHAT_STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function runTitle(run: GenerationRun) {
@@ -92,6 +104,11 @@ export default function GenerateTestCasesPage() {
     queryFn: () => testCasesApi.history(selectedProjectId!).then((res) => res.data),
     enabled: Boolean(selectedProjectId),
   });
+  const [localRuns, setLocalRuns] = useState<GenerationRun[]>(() => readSavedChats());
+  const allRuns = useMemo(
+    () => [...localRuns, ...historyRuns.filter((serverRun) => !localRuns.some((localRun) => localRun.id === serverRun.id))],
+    [historyRuns, localRuns],
+  );
   const [selectedSource, setSelectedSource] = useState("document");
   const [sourceUrl, setSourceUrl] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -108,7 +125,7 @@ export default function GenerateTestCasesPage() {
   const { data: liveRun } = useQuery({
     queryKey: ["generation-run", result?.id],
     queryFn: () => testCasesApi.getRun(result!.id).then((res) => res.data),
-    enabled: Boolean(result?.id),
+    enabled: Boolean(result?.id && !result.id.startsWith("local-")),
     refetchInterval: (query) => ACTIVE_STATUSES.includes(((query.state.data as GenerationRun | undefined)?.status ?? result?.status) ?? "") ? 2500 : false,
   });
   const run = liveRun ?? result;
@@ -180,12 +197,39 @@ export default function GenerateTestCasesPage() {
       input?.click();
     }
   };
-  const startNewChat = () => { setResult(null); setDraftCases([]); setFiles([]); setSelectedSource("document"); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setError(null); setMessage("Started a new test-design chat. Add a source or describe the flow to begin."); };
-  const openRun = (historyRun: GenerationRun) => { setResult(historyRun); setDraftCases(historyRun.test_cases ?? []); setLocalPreview(false); setSaved(false); setError(null); setMessage("Reopened this test run. Edit any field to improvise the suite."); };
-  const saveSuite = () => { if (!run) return; localStorage.setItem("qtxpert-saved-suite", JSON.stringify({ runId: run.id, cases: draftCases, savedAt: new Date().toISOString() })); setSaved(true); setMessage(localPreview ? "Suite saved in this browser while the server run completes." : "Suite saved to your QTXpert workspace and history."); };
+  const saveChatSnapshot = (sourceRun: GenerationRun, cases: TestCase[]) => {
+    const isLocal = sourceRun.id.startsWith("local-");
+    const snapshot: GenerationRun = {
+      ...sourceRun,
+      id: isLocal ? sourceRun.id : `local-${Date.now()}`,
+      status: cases.length ? "completed" : sourceRun.status,
+      requirement_summary: sourceRun.requirement_summary || "Saved test chat",
+      created_at: isLocal ? sourceRun.created_at : new Date().toISOString(),
+      test_cases: cases,
+    };
+    const next = [snapshot, ...localRuns.filter((item) => item.id !== snapshot.id)];
+    setLocalRuns(next);
+    localStorage.setItem(LOCAL_CHAT_STORAGE_KEY, JSON.stringify(next));
+    return snapshot;
+  };
+  const startNewChat = () => {
+    const savedChat = run ? saveChatSnapshot(run, draftCases) : null;
+    setResult(null); setDraftCases([]); setFiles([]); setSelectedSource("document"); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setError(null);
+    setMessage(savedChat ? "Saved the current chat to Test runs. Add a source or describe a new flow to begin." : "Started a new test-design chat. Add a source or describe the flow to begin.");
+  };
+  const openRun = (historyRun: GenerationRun) => {
+    setResult(historyRun); setDraftCases(historyRun.test_cases ?? []); setLocalPreview(historyRun.id.startsWith("local-")); setSaved(historyRun.id.startsWith("local-")); setError(null);
+    setMessage(historyRun.id.startsWith("local-") ? "Reopened a saved chat. Edit any field to continue improving it." : "Reopened this test run. Edit any field to improvise the suite.");
+  };
+  const saveSuite = () => {
+    if (!run) return;
+    saveChatSnapshot(run, draftCases);
+    localStorage.setItem("qtxpert-saved-suite", JSON.stringify({ runId: run.id, cases: draftCases, savedAt: new Date().toISOString() }));
+    setSaved(true); setMessage("Suite saved to Test runs. You can reopen it after starting another chat.");
+  };
   const updateCase = (index: number, next: TestCase) => setDraftCases((current) => current.map((item, idx) => idx === index ? next : item));
 
-  const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={3} alignItems="flex-start"><RunRail runs={historyRuns} activeId={run?.id} onSelect={openRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
+  const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={3} alignItems="flex-start"><RunRail runs={allRuns} activeId={run?.id} onSelect={openRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
 
   if (run) return workspace(<Stack spacing={3}>
     <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h5" sx={{ fontWeight: 700 }}>Interactive test suite</Typography><Typography color="text.secondary">{run.status === "completed" ? `${draftCases.length} editable test cases` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap"><Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button><Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={run.status !== "completed" && !localPreview}>{saved ? "Saved" : "Save suite"}</Button><Button onClick={startNewChat}>＋ New chat</Button></Stack></Stack>
