@@ -2,6 +2,7 @@
 LangGraph agent, and persists the structured results (steps 1-11 of the
 spec's AI workflow)."""
 import asyncio
+import json
 import logging
 import time
 from typing import List, Optional
@@ -36,6 +37,30 @@ def _coerce_enum(enum_cls, raw_value, default):
         return enum_cls(token)
     except ValueError:
         return default
+
+
+def _stringify_optional(value, max_length: int | None = None) -> str | None:
+    """Normalize flexible model output for columns that store plain text."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, list):
+        parts = [_stringify_optional(item) for item in value]
+        text = "; ".join(part for part in parts if part)
+    elif isinstance(value, dict):
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    else:
+        text = str(value).strip()
+    if not text:
+        return None
+    return text[:max_length] if max_length else text
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
 class TestGenerationService:
@@ -128,12 +153,17 @@ class TestGenerationService:
                 nonlocal persisted_count, next_case_index
                 run.status = RunStatus.GENERATING_TEST_CASES
                 warnings_before = len(case_build_warnings)
+                logger.info(
+                    "generation_batch_persisting run_id=%s raw_size=%s start_index=%s",
+                    run.id, len(cases), next_case_index,
+                )
                 await self._persist_test_cases(
                     run, cases, case_build_warnings, start_index=next_case_index
                 )
                 next_case_index += len(cases)
                 skipped = len(case_build_warnings) - warnings_before
                 persisted_count += max(0, len(cases) - skipped)
+                await self._db.flush()
                 await self._db.commit()
                 logger.info(
                     "generation_batch_persisted run_id=%s batch_size=%s total=%s",
@@ -331,18 +361,24 @@ class TestGenerationService:
             return run
 
         except LLMProviderError as exc:
-            run.status = RunStatus.FAILED
-            run.error_message = f"LLM provider error: {exc}"
-            run.processing_time_seconds = time.perf_counter() - start
-            await self._db.commit()
-            logger.exception("generation_failed run_id=%s category=llm", run.id)
+            await self._db.rollback()
+            run = await self._db.get(GenerationRun, run_id)
+            if run is not None:
+                run.status = RunStatus.FAILED
+                run.error_message = f"LLM provider error: {exc}"
+                run.processing_time_seconds = time.perf_counter() - start
+                await self._db.commit()
+            logger.exception("generation_failed run_id=%s category=llm", run_id)
             raise
         except Exception as exc:  # noqa: BLE001
-            run.status = RunStatus.FAILED
-            run.error_message = f"Unexpected error: {type(exc).__name__}: {exc}"
-            run.processing_time_seconds = time.perf_counter() - start
-            await self._db.commit()
-            logger.exception("generation_failed run_id=%s category=unexpected", run.id)
+            await self._db.rollback()
+            run = await self._db.get(GenerationRun, run_id)
+            if run is not None:
+                run.status = RunStatus.FAILED
+                run.error_message = f"Unexpected error: {type(exc).__name__}: {exc}"
+                run.processing_time_seconds = time.perf_counter() - start
+                await self._db.commit()
+            logger.exception("generation_failed run_id=%s category=unexpected", run_id)
             raise
 
     async def _persist_test_cases(
@@ -353,8 +389,8 @@ class TestGenerationService:
             try:
                 if not isinstance(case, dict):
                     raise ValueError("AI output was not a test-case object")
-                objective = str(case.get("objective") or "").strip()
-                expected_result = str(case.get("expected_result") or "").strip()
+                objective = _stringify_optional(case.get("objective"))
+                expected_result = _stringify_optional(case.get("expected_result"))
                 steps = case.get("steps")
                 if not objective or not expected_result or not isinstance(steps, list) or not steps:
                     raise ValueError("missing objective, expected result, or test steps")
@@ -364,26 +400,30 @@ class TestGenerationService:
                         normalized_steps.append(step.strip())
                     elif isinstance(step, dict):
                         action = step.get("action") or step.get("description") or step.get("step")
-                        if action is not None and str(action).strip():
-                            normalized_steps.append(str(action).strip())
+                        action_text = _stringify_optional(action)
+                        if action_text:
+                            normalized_steps.append(action_text)
                 if not normalized_steps:
                     raise ValueError("test steps contained no usable actions")
                 self._db.add(TestCase(
                     generation_run_id=run.id,
                     test_case_key=f"TC-{run.id.hex[:8].upper()}-{index:04d}",
-                    requirement_traceability=case.get("requirement_traceability"),
+                    requirement_traceability=_stringify_optional(
+                        case.get("requirement_traceability"), 255
+                    ),
                     test_type=_coerce_enum(TestCaseType, case.get("test_type"), TestCaseType.FUNCTIONAL),
-                    scenario=str(case.get("scenario") or f"Untitled scenario {index}"),
+                    scenario=_stringify_optional(case.get("scenario"), 500)
+                    or f"Untitled scenario {index}",
                     objective=objective,
                     priority=_coerce_enum(Priority, case.get("priority"), Priority.MEDIUM),
                     severity=_coerce_enum(Severity, case.get("severity"), Severity.MINOR),
-                    preconditions=case.get("preconditions"),
+                    preconditions=_stringify_optional(case.get("preconditions")),
                     test_data=case.get("test_data") if isinstance(case.get("test_data"), dict) else None,
                     steps=normalized_steps,
                     expected_result=expected_result,
-                    post_conditions=case.get("post_conditions"),
-                    is_automation_candidate=bool(case.get("is_automation_candidate", False)),
-                    automation_type=case.get("automation_type"),
+                    post_conditions=_stringify_optional(case.get("post_conditions")),
+                    is_automation_candidate=_coerce_bool(case.get("is_automation_candidate")),
+                    automation_type=_stringify_optional(case.get("automation_type"), 100),
                     risk_level=_coerce_enum(RiskLevel, case.get("risk_level"), RiskLevel.MEDIUM),
                 ))
             except Exception as case_exc:  # noqa: BLE001
