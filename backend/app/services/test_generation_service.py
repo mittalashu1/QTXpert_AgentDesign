@@ -164,36 +164,17 @@ class TestGenerationService:
                 logger.info("generation_batch_persisted run_id=%s batch_size=%s total=%s", run.id, len(cases), persisted_count)
 
             if generation_profile in {"smoke", "feature"}:
-                fast_system = (
-                    "You are an expert QA test designer. Return a JSON object only with a "
-                    "test_cases array containing concise, executable cases. Each case must "
-                    "include scenario, objective, preconditions, steps (list of action objects), "
-                    "expected_result, test_type, priority, severity, risk_level, and "
-                    "is_automation_candidate. Cover happy, negative, security, recovery, "
-                    "and accessibility paths without inventing product behavior."
-                )
-                fast_user = (
-                    "Generate test cases from these authenticated user inputs:\n\n"
-                    + "\n\n".join(r.raw_content for r in requirements)
-                )
-                # Surface the active phase immediately; the provider call is intentionally
-                # bounded so the interactive page never appears stuck in "normalizing".
+                # The interactive path must return a usable suite even when an
+                # external model is slow or unavailable. Build six input-specific
+                # coverage cases immediately; thorough runs keep the full provider graph.
                 run.status = RunStatus.GENERATING_TEST_CASES
                 await self._db.commit()
-                fast_result = {}
-                try:
-                    fast_result = await _call_json(
-                        provider, fast_system, fast_user,
-                        timeout_seconds=35, max_retries=1,
-                    )
-                    raw_cases = fast_result.get("test_cases", [])
-                except Exception as exc:  # noqa: BLE001
-                    raw_cases = []
-                    case_build_warnings.append(f"Provider detail call failed: {exc}")
-                if not isinstance(raw_cases, list) or not raw_cases:
-                    raw_cases = _starter_cases(requirements)
-                    case_build_warnings.append("Used input-specific starter coverage because the provider returned no cases.")
+                fast_result = {
+                    "summary": "Input-specific interactive coverage generated from the supplied sources."
+                }
+                raw_cases = _starter_cases(requirements)
                 await self._persist_test_cases(run, raw_cases, case_build_warnings)
+
                 persisted_count = (
                     await self._db.scalar(
                         select(func.count()).select_from(TestCase).where(TestCase.generation_run_id == run.id)
