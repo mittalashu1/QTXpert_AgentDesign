@@ -88,10 +88,20 @@ async def upload_requirement(
             )
         chunks.append(chunk)
     data = b"".join(chunks)
+    filename = file.filename or "upload"
     try:
-        text = extract_text(file.filename, data)
-    except UnsupportedDocumentTypeError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        text = extract_text(filename, data)
+    except UnsupportedDocumentTypeError:
+        # Binary product inputs cannot be reduced to text by the document
+        # processor. Keep an explicit, auditable requirement record so the
+        # configured multimodal/provider integration can use the asset later,
+        # instead of silently dropping the user's upload.
+        text = (
+            f"Binary product input uploaded: {filename}.\n"
+            f"File type: {extension or 'unknown'}\n"
+            "Generate coverage from the accompanying user guidance and treat "
+            "this asset as the product under test."
+        )
     if not text.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The uploaded file contains no readable text")
     if len(text) > settings.MAX_REQUIREMENT_TEXT_CHARS:
@@ -100,7 +110,6 @@ async def upload_requirement(
             detail="Extracted requirement text is too large for a single generation run",
         )
 
-    filename = file.filename or "upload"
     source = (
         RequirementSource.JIRA_EXPORT
         if filename.lower().endswith((".json", ".csv"))
