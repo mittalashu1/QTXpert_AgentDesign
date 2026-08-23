@@ -16,8 +16,6 @@ import {
   Toolbar,
   Typography,
 } from "@mui/material";
-import DashboardOutlinedIcon from "@mui/icons-material/DashboardOutlined";
-import UploadFileOutlinedIcon from "@mui/icons-material/UploadFileOutlined";
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
 import HistoryOutlinedIcon from "@mui/icons-material/HistoryOutlined";
 import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
@@ -32,9 +30,7 @@ import { useThemeMode } from "@/contexts/ThemeModeContext";
 const DRAWER_WIDTH = 240;
 
 const NAV_ITEMS = [
-  { label: "Dashboard", path: "/", icon: <DashboardOutlinedIcon /> },
-  { label: "Requirement Upload", path: "/requirements/upload", icon: <UploadFileOutlinedIcon /> },
-  { label: "Generate Test Cases", path: "/generate", icon: <AutoAwesomeOutlinedIcon /> },
+  { label: "Test design", path: "/generate", icon: <AutoAwesomeOutlinedIcon /> },
   { label: "History", path: "/history", icon: <HistoryOutlinedIcon /> },
   { label: "Prompt Library", path: "/prompt-library", icon: <MenuBookOutlinedIcon /> },
   { label: "Settings", path: "/settings", icon: <SettingsOutlinedIcon /> },
