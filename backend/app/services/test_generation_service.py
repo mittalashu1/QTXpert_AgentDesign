@@ -1,6 +1,7 @@
 """Orchestrates a full test-design run: collects requirements, invokes the
 LangGraph agent, and persists the structured results (steps 1-11 of the
 spec's AI workflow)."""
+import logging
 import time
 from typing import List, Optional
 from uuid import UUID
@@ -16,6 +17,8 @@ from app.database.repositories.requirement_repository import RequirementReposito
 from app.database.repositories.requirement_repository import ProjectRepository
 from app.llm.base import LLMProviderError
 from app.llm.factory import get_llm_provider
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_enum_token(value: str) -> str:
@@ -111,6 +114,7 @@ class TestGenerationService:
         provider = get_llm_provider(llm_provider_override)
         start = time.perf_counter()
         case_build_warnings: List[str] = []
+        logger.info("generation_started run_id=%s project_id=%s profile=%s requirements=%s", run_id, project_id, generation_profile, len(requirements))
         try:
             persisted_count = (
                 await self._db.scalar(
@@ -127,6 +131,7 @@ class TestGenerationService:
                 )
                 persisted_count += len(cases)
                 await self._db.commit()
+                logger.info("generation_batch_persisted run_id=%s batch_size=%s total=%s", run.id, len(cases), persisted_count)
 
             graph = build_test_design_graph(
                 provider,
@@ -145,6 +150,7 @@ class TestGenerationService:
             result_state = None
             async for update in graph.astream(input_state, stream_mode="updates"):
                 node_name, node_state = next(iter(update.items()))
+                logger.info("generation_node_completed run_id=%s node=%s", run.id, node_name)
                 # LangGraph yields an update after a node completes. Set the
                 # status for the node that starts next so the UI is not one
                 # generation phase behind the actual work.
@@ -189,6 +195,7 @@ class TestGenerationService:
 
             await self._db.commit()
             await self._db.refresh(run)
+            logger.info("generation_finished run_id=%s status=%s persisted_cases=%s", run.id, run.status.value, persisted_count)
             return run
 
         except LLMProviderError as exc:
@@ -196,12 +203,14 @@ class TestGenerationService:
             run.error_message = f"LLM provider error: {exc}"
             run.processing_time_seconds = time.perf_counter() - start
             await self._db.commit()
+            logger.exception("generation_failed run_id=%s category=llm", run.id)
             raise
         except Exception as exc:  # noqa: BLE001
             run.status = RunStatus.FAILED
             run.error_message = f"Unexpected error: {type(exc).__name__}: {exc}"
             run.processing_time_seconds = time.perf_counter() - start
             await self._db.commit()
+            logger.exception("generation_failed run_id=%s category=unexpected", run.id)
             raise
 
     async def _persist_test_cases(
