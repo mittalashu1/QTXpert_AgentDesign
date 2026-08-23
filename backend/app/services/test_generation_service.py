@@ -161,35 +161,11 @@ class TestGenerationService:
                 await self._db.commit()
                 logger.info("generation_batch_persisted run_id=%s batch_size=%s total=%s", run.id, len(cases), persisted_count)
 
-            if generation_profile in {"smoke", "feature"}:
-                # The interactive path must return a usable suite even when an
-                # external model is slow or unavailable. Build six input-specific
-                # coverage cases immediately; thorough runs keep the full provider graph.
-                run.status = RunStatus.GENERATING_TEST_CASES
-                await self._db.commit()
-                # Release any read transaction before inserting the editable
-                # cases so concurrent history polling cannot hold the write.
-                await self._db.rollback()
-                fast_result = {
-                    "summary": "Input-specific interactive coverage generated from the supplied sources."
-                }
-                raw_cases = _starter_cases(requirements)
-                await self._persist_test_cases(run, raw_cases, case_build_warnings)
-                # Starter cases are validated before insertion; avoid an extra
-                # count query so the interactive response is not held open.
-                persisted_count = len(raw_cases) - sum(
-                    1 for warning in case_build_warnings if warning.startswith("Skipped test case #")
-                )
-                run.requirement_summary = fast_result.get("summary") if isinstance(fast_result, dict) else None
-                run.test_scenarios = [{"scenario_id": f"fast-{i + 1}", "title": c.get("scenario", "")} for i, c in enumerate(raw_cases)]
-                run.processing_time_seconds = time.perf_counter() - start
-                run.status = RunStatus.COMPLETED if persisted_count else RunStatus.FAILED
-                if case_build_warnings:
-                    run.error_message = "; ".join(case_build_warnings)
-                await self._db.commit()
-                await self._db.refresh(run)
-                logger.info("generation_finished run_id=%s status=%s persisted_cases=%s", run.id, run.status.value, persisted_count)
-                return run
+            # Every profile runs through the provider-backed test-design graph.
+            # The previous interactive shortcut inserted generic LOCAL cases, which
+            # made uploaded APKs look like they had been analyzed even when the
+            # model had not produced any output. Keep the run pending while the
+            # graph analyzes the supplied requirements and persists real cases.
 
             persisted_count = (
                 await self._db.scalar(
