@@ -17,7 +17,9 @@ from app.prompts import test_design_prompts as prompts
 logger = logging.getLogger(__name__)
 
 
-async def _call_json(\n    provider: LLMProvider, system: str, user: str, timeout_seconds: float = 75\n) -> Dict[str, Any]:
+async def _call_json(
+    provider: LLMProvider, system: str, user: str, timeout_seconds: float = 75
+) -> Dict[str, Any]:
     """Request machine-readable output, retrying transient empty/model-formatted replies."""
     retry_system = system + (
         " Your response must be a non-empty JSON object only. Do not use markdown,"
