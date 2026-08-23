@@ -1,6 +1,7 @@
 """Orchestrates a full test-design run: collects requirements, invokes the
 LangGraph agent, and persists the structured results (steps 1-11 of the
 spec's AI workflow)."""
+import asyncio
 import logging
 import time
 from typing import List, Optional
@@ -125,18 +126,136 @@ class TestGenerationService:
             async def persist_batch(cases: list) -> None:
                 nonlocal persisted_count
                 run.status = RunStatus.GENERATING_TEST_CASES
+                warnings_before = len(case_build_warnings)
                 await self._persist_test_cases(
                     run, cases, case_build_warnings, start_index=persisted_count + 1
                 )
-                persisted_count += len(cases)
+                skipped = len(case_build_warnings) - warnings_before
+                persisted_count += max(0, len(cases) - skipped)
                 await self._db.commit()
-                logger.info("generation_batch_persisted run_id=%s batch_size=%s total=%s", run.id, len(cases), persisted_count)
+                logger.info(
+                    "generation_batch_persisted run_id=%s batch_size=%s total=%s",
+                    run.id, len(cases) - skipped, persisted_count,
+                )
 
-            # Every profile runs through the provider-backed test-design graph.
-            # The previous interactive shortcut inserted generic LOCAL cases, which
-            # made uploaded APKs look like they had been analyzed even when the
-            # model had not produced any output. Keep the run pending while the
-            # graph analyzes the supplied requirements and persists real cases.
+            # Interactive profiles use a small number of concurrent, provider-backed
+            # batches. This keeps the first real cases under a minute and makes them
+            # visible while later coverage batches are still being generated.
+            batch_specs_by_profile = {
+                "smoke": [
+                    ("critical happy paths, startup, authentication, and release-blocking failures", 6),
+                ],
+                "feature": [
+                    ("primary user journeys and business-rule validation", 5),
+                    ("negative paths, permissions, security, accessibility, and recovery", 5),
+                ],
+                "regression": [
+                    ("primary workflows and state transitions", 6),
+                    ("negative, boundary, validation, permissions, and error-handling paths", 6),
+                    ("integration, compatibility, accessibility, performance, and recovery risks", 6),
+                ],
+                "deep_regression": [
+                    ("primary workflows and business rules", 6),
+                    ("negative, boundary, abuse, and authorization paths", 6),
+                    ("integration, data integrity, recovery, and performance risks", 6),
+                    ("accessibility, localization, compatibility, and long-session behavior", 6),
+                ],
+            }
+            batch_specs = batch_specs_by_profile.get(generation_profile)
+            if batch_specs:
+                source_text = "\n\n".join(
+                    f"Source: {requirement.title}\n{requirement.raw_content or ''}"
+                    for requirement in requirements
+                )[:24000]
+                system_prompt = (
+                    "You are a senior software test architect. Analyze only the supplied product "
+                    "context and return a non-empty JSON object with keys summary and test_cases. "
+                    "Each test case must contain scenario, objective, preconditions, steps, "
+                    "expected_result, test_type, priority, severity, risk_level, and "
+                    "is_automation_candidate. steps must be an array of concise action strings. "
+                    "Use observable, product-specific behavior. Never emit placeholders, generic "
+                    "templates, or repeat the user's instruction as the scenario."
+                )
+                semaphore = asyncio.Semaphore(3)
+
+                async def generate_interactive_batch(focus: str, case_count: int) -> dict:
+                    user_prompt = (
+                        f"Product context:\n{source_text}\n\n"
+                        f"Coverage focus: {focus}.\n"
+                        f"Generate up to {case_count} distinct, execution-ready test cases. "
+                        "Prefer fewer high-quality cases over vague coverage."
+                    )
+                    async with semaphore:
+                        batch_started = time.perf_counter()
+                        logger.info(
+                            "interactive_batch_started run_id=%s focus=%s requested_cases=%s",
+                            run.id, focus, case_count,
+                        )
+                        result = await _call_json(
+                            provider, system_prompt, user_prompt,
+                            timeout_seconds=45, max_retries=0, max_tokens=2200,
+                        )
+                        logger.info(
+                            "interactive_batch_completed run_id=%s focus=%s duration_seconds=%.2f",
+                            run.id, focus, time.perf_counter() - batch_started,
+                        )
+                        return result
+
+                run.status = RunStatus.ANALYZING
+                await self._db.commit()
+                tasks = [
+                    asyncio.create_task(generate_interactive_batch(focus, case_count))
+                    for focus, case_count in batch_specs
+                ]
+                summaries: list[str] = []
+                generated_cases: list[dict] = []
+                for task in asyncio.as_completed(tasks):
+                    try:
+                        batch_result = await task
+                    except Exception as batch_exc:  # noqa: BLE001
+                        warning = f"Coverage batch failed: {batch_exc}"
+                        case_build_warnings.append(warning)
+                        logger.warning(
+                            "interactive_batch_failed run_id=%s error=%s", run.id, batch_exc
+                        )
+                        continue
+                    batch_cases = batch_result.get("test_cases", [])
+                    if not isinstance(batch_cases, list):
+                        case_build_warnings.append("Coverage batch returned a non-list test_cases value.")
+                        continue
+                    summary = str(batch_result.get("summary") or "").strip()
+                    if summary:
+                        summaries.append(summary)
+                    if batch_cases:
+                        await persist_batch(batch_cases)
+                        generated_cases.extend(batch_cases)
+
+                run.requirement_summary = summaries[0] if summaries else None
+                run.test_scenarios = [
+                    {
+                        "scenario_id": f"interactive-{index + 1}",
+                        "title": str(case.get("scenario") or f"Test case {index + 1}"),
+                    }
+                    for index, case in enumerate(generated_cases)
+                ]
+                run.risk_analysis = {
+                    "generated_case_count": persisted_count,
+                    "profile": generation_profile,
+                    "streamed_batches": len(batch_specs),
+                }
+                run.processing_time_seconds = time.perf_counter() - start
+                run.status = RunStatus.COMPLETED if persisted_count else RunStatus.FAILED
+                if case_build_warnings:
+                    run.error_message = "; ".join(case_build_warnings)
+                if not persisted_count and not run.error_message:
+                    run.error_message = "The AI returned no usable test cases."
+                await self._db.commit()
+                await self._db.refresh(run, attribute_names=["test_cases"])
+                logger.info(
+                    "generation_finished run_id=%s status=%s persisted_cases=%s duration_seconds=%.2f",
+                    run.id, run.status.value, persisted_count, run.processing_time_seconds,
+                )
+                return run
 
             persisted_count = (
                 await self._db.scalar(
