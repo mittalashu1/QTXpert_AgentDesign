@@ -138,7 +138,7 @@ class TestGenerationService:
                 on_test_case_batch=persist_batch,
                 max_scenarios={
                     "smoke": min(8, self._settings.MAX_SCENARIOS_PER_GENERATION),
-                    "feature": min(20, self._settings.MAX_SCENARIOS_PER_GENERATION),
+                    # Feature runs are interactive; keep the first result bounded\n                    # so six requirements cannot exceed the stale-recovery window.\n                    "feature": min(8, self._settings.MAX_SCENARIOS_PER_GENERATION),
                     "regression": self._settings.MAX_SCENARIOS_PER_GENERATION,
                     "deep_regression": min(80, self._settings.MAX_SCENARIOS_PER_GENERATION * 2),
                 }.get(generation_profile, min(20, self._settings.MAX_SCENARIOS_PER_GENERATION)),
