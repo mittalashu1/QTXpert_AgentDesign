@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 async def _call_json(
     provider: LLMProvider, system: str, user: str, timeout_seconds: float | None = None,
-    max_retries: int | None = None,
+    max_retries: int | None = None, max_tokens: int | None = None,
 ) -> Dict[str, Any]:
     """Request machine-readable output, retrying transient empty/model-formatted replies."""
     retry_system = system + (
@@ -42,6 +42,7 @@ async def _call_json(
                     # Some reasoning-model deployments return whitespace in legacy
                     # JSON mode. The retry relies on the explicit prompt instead.
                     response_format_json=attempt == 0,
+                    max_tokens=max_tokens,
                 ),
                 timeout=timeout_seconds,
             )
