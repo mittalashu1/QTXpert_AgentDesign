@@ -1,56 +1,34 @@
 import { useState } from "react";
-import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Outlet, useNavigate } from "react-router-dom";
 import {
   AppBar,
   Avatar,
   Box,
-  Divider,
-  Drawer,
   IconButton,
-  List,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
   Menu,
   MenuItem,
   Toolbar,
   Typography,
 } from "@mui/material";
-import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
-import HistoryOutlinedIcon from "@mui/icons-material/HistoryOutlined";
-import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
-import MenuBookOutlinedIcon from "@mui/icons-material/MenuBookOutlined";
-import HelpOutlineOutlinedIcon from "@mui/icons-material/HelpOutlineOutlined";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
-import PeopleOutlineIcon from "@mui/icons-material/PeopleOutline";
 import { useAuth } from "@/contexts/AuthContext";
 import { useThemeMode } from "@/contexts/ThemeModeContext";
 
-const DRAWER_WIDTH = 240;
-
-const NAV_ITEMS = [
-  { label: "Test design", path: "/generate", icon: <AutoAwesomeOutlinedIcon /> },
-  { label: "History", path: "/history", icon: <HistoryOutlinedIcon /> },
-  { label: "Prompt Library", path: "/prompt-library", icon: <MenuBookOutlinedIcon /> },
-  { label: "Settings", path: "/settings", icon: <SettingsOutlinedIcon /> },
-  { label: "Help", path: "/help", icon: <HelpOutlineOutlinedIcon /> },
-];
-
 export default function AppLayout() {
-  const location = useLocation();
   const navigate = useNavigate();
   const { user, logout } = useAuth();
   const { mode, toggleMode } = useThemeMode();
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
 
+  const closeMenu = () => setAnchorEl(null);
+
   return (
-    <Box sx={{ display: "flex" }}>
+    <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
       <AppBar
         position="fixed"
         elevation={0}
         sx={{
-          zIndex: (theme) => theme.zIndex.drawer + 1,
           borderBottom: "1px solid",
           borderColor: "divider",
           bgcolor: "background.paper",
@@ -65,27 +43,27 @@ export default function AppLayout() {
             <IconButton onClick={toggleMode} aria-label="Toggle dark mode">
               {mode === "dark" ? <LightModeOutlinedIcon /> : <DarkModeOutlinedIcon />}
             </IconButton>
-            <IconButton onClick={(e) => setAnchorEl(e.currentTarget)}>
+            <IconButton
+              onClick={(event) => setAnchorEl(event.currentTarget)}
+              aria-label="Account menu"
+            >
               <Avatar sx={{ width: 32, height: 32, bgcolor: "primary.main", fontSize: 14 }}>
                 {user?.full_name?.charAt(0).toUpperCase() ?? "U"}
               </Avatar>
             </IconButton>
-            <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
-              <MenuItem
-                onClick={() => {
-                  setAnchorEl(null);
-                  navigate("/profile");
-                }}
-              >
+            <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={closeMenu}>
+              <MenuItem onClick={() => { closeMenu(); navigate("/generate"); }}>
+                Test design
+              </MenuItem>
+              {user?.role === "admin" && (
+                <MenuItem onClick={() => { closeMenu(); navigate("/administration/users"); }}>
+                  Administration · Users
+                </MenuItem>
+              )}
+              <MenuItem onClick={() => { closeMenu(); navigate("/profile"); }}>
                 Profile
               </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setAnchorEl(null);
-                  logout();
-                  navigate("/login");
-                }}
-              >
+              <MenuItem onClick={() => { closeMenu(); logout(); navigate("/login"); }}>
                 Sign out
               </MenuItem>
             </Menu>
@@ -93,37 +71,7 @@ export default function AppLayout() {
         </Toolbar>
       </AppBar>
 
-      <Drawer
-        variant="permanent"
-        sx={{
-          width: DRAWER_WIDTH,
-          flexShrink: 0,
-          [`& .MuiDrawer-paper`]: {
-            width: DRAWER_WIDTH,
-            boxSizing: "border-box",
-            borderRight: "1px solid",
-            borderColor: "divider",
-          },
-        }}
-      >
-        <Toolbar />
-        <List sx={{ px: 1, py: 2 }}>
-          {[...NAV_ITEMS, ...(user?.role === "admin" ? [{ label: "Administration · Users", path: "/administration/users", icon: <PeopleOutlineIcon /> }] : [])].map((item) => (
-            <ListItemButton
-              key={item.path}
-              selected={location.pathname === item.path}
-              onClick={() => navigate(item.path)}
-              sx={{ borderRadius: 2, mb: 0.5 }}
-            >
-              <ListItemIcon sx={{ minWidth: 36 }}>{item.icon}</ListItemIcon>
-              <ListItemText primary={item.label} />
-            </ListItemButton>
-          ))}
-        </List>
-        <Divider sx={{ mt: "auto" }} />
-      </Drawer>
-
-      <Box component="main" sx={{ flexGrow: 1, p: 3, bgcolor: "background.default", minHeight: "100vh" }}>
+      <Box component="main" sx={{ p: { xs: 2, md: 4 }, minHeight: "100vh" }}>
         <Toolbar />
         <Outlet />
       </Box>
