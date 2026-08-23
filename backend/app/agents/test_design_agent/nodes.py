@@ -129,6 +129,10 @@ def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None
         # at once so the first completed group can be shown to the user rather
         # than making them wait for every scenario to run serially.
         semaphore = asyncio.Semaphore(3)
+        # LangGraph runs scenario tasks concurrently, but the persistence
+        # callback uses one AsyncSession. Serialize callback execution so
+        # concurrent scenario completions cannot overlap DB transactions.
+        persist_lock = asyncio.Lock()
 
         async def generate_for_scenario(scenario):
             system, user = prompts.detailed_test_cases_prompt(scenario, state["structure"])
@@ -158,7 +162,8 @@ def make_detailed_test_cases_node(provider: LLMProvider, on_test_case_batch=None
                 case["scenario_id"] = scenario.get("scenario_id")
                 all_cases.append(case)
             if on_test_case_batch:
-                await on_test_case_batch(cases)
+                async with persist_lock:
+                    await on_test_case_batch(cases)
         state["test_cases"] = all_cases
         state["automation_candidate_count"] = sum(
             1 for c in all_cases if c.get("is_automation_candidate")
