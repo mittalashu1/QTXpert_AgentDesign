@@ -167,6 +167,9 @@ class TestGenerationService:
                 # coverage cases immediately; thorough runs keep the full provider graph.
                 run.status = RunStatus.GENERATING_TEST_CASES
                 await self._db.commit()
+                # Release any read transaction before inserting the editable
+                # cases so concurrent history polling cannot hold the write.
+                await self._db.rollback()
                 fast_result = {
                     "summary": "Input-specific interactive coverage generated from the supplied sources."
                 }
