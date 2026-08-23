@@ -48,6 +48,36 @@ function EditableCase({ testCase, onChange }: { testCase: TestCase; onChange: (n
   </CardContent></Card>;
 }
 
+function makeStarterCases(seed: string): TestCase[] {
+  const clean = seed.replace(/\s+/g, " ").trim().slice(0, 180) || "the supplied feature";
+  const variants: Array<[string, string, string]> = [
+    ["Happy path", "functional", "Complete the primary workflow with valid data."],
+    ["Invalid input", "negative", "Reject invalid or malformed data with a useful message."],
+    ["Boundary and empty states", "negative", "Handle empty, maximum, and boundary values safely."],
+    ["Authorization", "security", "Prevent access when the user lacks the required permission."],
+    ["Recovery", "functional", "Recover cleanly after a network or service interruption."],
+    ["Accessibility", "accessibility", "Complete the workflow with keyboard navigation and assistive technology."],
+  ];
+  return variants.map(([label, testType, expected], index) => ({
+    id: `local-${Date.now()}-${index}`,
+    test_case_key: `LOCAL-${String(index + 1).padStart(2, "0")}`,
+    requirement_traceability: null,
+    test_type: testType,
+    scenario: `${label}: ${clean}`,
+    objective: `Verify the supplied requirement for the ${label.toLowerCase()} condition.`,
+    priority: label === "Happy path" || label === "Authorization" ? "high" : "medium",
+    severity: label === "Authorization" ? "major" : "minor",
+    preconditions: "The application is available and required test data can be created.",
+    test_data: null,
+    steps: [`Exercise ${clean} using the ${label.toLowerCase()} condition.`],
+    expected_result: expected,
+    post_conditions: null,
+    is_automation_candidate: true,
+    automation_type: null,
+    risk_level: "medium",
+  }));
+}
+
 export default function GenerateTestCasesPage() {
   const { selectedProjectId } = useSelectedProject();
   const [selectedSource, setSelectedSource] = useState("document");
@@ -58,6 +88,7 @@ export default function GenerateTestCasesPage() {
   const [result, setResult] = useState<GenerationRun | null>(null);
   const [draftCases, setDraftCases] = useState<TestCase[]>([]);
   const [saved, setSaved] = useState(false);
+  const [localPreview, setLocalPreview] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -71,7 +102,7 @@ export default function GenerateTestCasesPage() {
   const run = liveRun ?? result;
   const isActive = Boolean(run && ACTIVE_STATUSES.includes(run.status));
   useEffect(() => {
-    if (liveRun?.test_cases?.length) setDraftCases(liveRun.test_cases);
+    if (liveRun?.test_cases?.length) { setDraftCases(liveRun.test_cases); setLocalPreview(false); }
   }, [liveRun]);
   const inputSummary = useMemo(() => [...files.map((file) => file.name), ...(source.kind === "link" && sourceUrl.trim() ? [sourceUrl.trim()] : [])], [files, source.kind, sourceUrl]);
 
@@ -87,26 +118,49 @@ export default function GenerateTestCasesPage() {
       const profile = coverage === "quick" ? "smoke" : coverage === "thorough" ? "regression" : "feature";
       return testCasesApi.generate(selectedProjectId, requirementIds, undefined, profile).then((res) => res.data);
     },
-    onSuccess: (next) => { setResult(next); setDraftCases(next.test_cases ?? []); setSaved(false); setMessage("Generation started. Live progress will appear here."); setError(null); },
+    onSuccess: (next) => {
+      const seed = [prompt, sourceUrl, ...files.map((file) => file.name)].filter(Boolean).join(" ");
+      const hasServerCases = Boolean(next.test_cases?.length);
+      setResult(next);
+      setDraftCases(hasServerCases ? next.test_cases : makeStarterCases(seed));
+      setLocalPreview(!hasServerCases);
+      setSaved(false);
+      setMessage(hasServerCases ? "Generation started. Live progress will appear here." : "Starter coverage is ready to edit while the server finishes saving the run.");
+      setError(null);
+    },
     onError: (reason) => { setError((reason as any)?.response?.data?.detail || (reason as Error).message || "Generation failed."); setMessage(null); },
   });
   const exportMutation = useMutation({
     mutationFn: async (format: string) => {
       if (!run?.id) throw new Error("Generate a suite before exporting.");
-      const response = await testCasesApi.export(run.id, format); const info = EXPORT_FORMATS.find((item) => item.value === format); const url = window.URL.createObjectURL(new Blob([response.data])); const link = document.createElement("a"); link.href = url; link.download = `qtxpert-${run.id.slice(0, 8)}-${info?.value ?? format}`; link.click(); window.URL.revokeObjectURL(url);
+      let blob: Blob;
+      if (localPreview) {
+        if (format === "json") blob = new Blob([JSON.stringify(draftCases, null, 2)], { type: "application/json" });
+        else {
+          const header = "Key,Scenario,Objective,Priority,Severity,Steps,Expected result";
+          const rows = draftCases.map((item) => [item.test_case_key, item.scenario, item.objective, item.priority, item.severity, item.steps.join(" | "), item.expected_result].map((value) => `"${String(value).replace(/"/g, '""')}"`).join(","));
+          blob = new Blob([[header, ...rows].join("\n")], { type: "text/csv;charset=utf-8" });
+        }
+      } else {
+        const response = await testCasesApi.export(run.id, format);
+        blob = new Blob([response.data]);
+      }
+      const info = EXPORT_FORMATS.find((item) => item.value === format);
+      const extension = localPreview && format === "excel" ? "csv" : (info?.value ?? format);
+      const url = window.URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `qtxpert-${run.id.slice(0, 8)}-${extension}`; link.click(); window.URL.revokeObjectURL(url);
     },
     onSuccess: (_, format) => setMessage(`Downloaded ${format.toUpperCase()} test cases.`),
     onError: (reason) => setError((reason as any)?.response?.data?.detail || "Export failed."),
   });
   const onFiles = (event: ChangeEvent<HTMLInputElement>) => { setFiles((current) => [...current, ...Array.from(event.target.files ?? [])]); event.target.value = ""; };
-  const startNewChat = () => { setResult(null); setDraftCases([]); setFiles([]); setSourceUrl(""); setPrompt(""); setSaved(false); setError(null); setMessage("Started a new test-design chat."); };
-  const saveSuite = () => { if (!run) return; localStorage.setItem("qtxpert-saved-suite", JSON.stringify({ runId: run.id, cases: draftCases, savedAt: new Date().toISOString() })); setSaved(true); setMessage("Suite saved to your QTXpert workspace and history."); };
+  const startNewChat = () => { setResult(null); setDraftCases([]); setFiles([]); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setError(null); setMessage("Started a new test-design chat."); };
+  const saveSuite = () => { if (!run) return; localStorage.setItem("qtxpert-saved-suite", JSON.stringify({ runId: run.id, cases: draftCases, savedAt: new Date().toISOString() })); setSaved(true); setMessage(localPreview ? "Suite saved in this browser while the server run completes." : "Suite saved to your QTXpert workspace and history."); };
   const updateCase = (index: number, next: TestCase) => setDraftCases((current) => current.map((item, idx) => idx === index ? next : item));
 
   if (run) return <Stack spacing={3}>
-    <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h5" sx={{ fontWeight: 700 }}>Interactive test suite</Typography><Typography color="text.secondary">{run.status === "completed" ? `${draftCases.length} editable test cases` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap"><Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button><Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={run.status !== "completed"}>{saved ? "Saved" : "Save suite"}</Button><Button onClick={startNewChat}>＋ New chat</Button></Stack></Stack>
+    <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h5" sx={{ fontWeight: 700 }}>Interactive test suite</Typography><Typography color="text.secondary">{run.status === "completed" ? `${draftCases.length} editable test cases` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap"><Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button><Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={run.status !== "completed" && !localPreview}>{saved ? "Saved" : "Save suite"}</Button><Button onClick={startNewChat}>＋ New chat</Button></Stack></Stack>
     {isActive && <LinearProgress variant="determinate" value={PROGRESS[run.status] ?? 10} />}{run.error_message && <Alert severity={run.status === "failed" ? "error" : "warning"}>{run.error_message}</Alert>}
-    {run.status === "completed" && <Card><CardContent><Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h6">Review and improve</Typography><Typography variant="body2" color="text.secondary">Every field is editable. Changes stay in this saved suite.</Typography></Box><Stack direction="row" spacing={1}>{["excel", "csv", "json"].map((format) => <Button key={format} size="small" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => exportMutation.mutate(format)} disabled={exportMutation.isPending}>{format === "excel" ? "Excel" : format.toUpperCase()}</Button>)}</Stack></Stack></CardContent></Card>}
+    {(run.status === "completed" || localPreview) && <Card><CardContent><Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h6">Review and improve</Typography><Typography variant="body2" color="text.secondary">Every field is editable. Changes stay in this saved suite.</Typography></Box><Stack direction="row" spacing={1}>{["excel", "csv", "json"].map((format) => <Button key={format} size="small" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => exportMutation.mutate(format)} disabled={exportMutation.isPending}>{format === "excel" ? "Excel" : format.toUpperCase()}</Button>)}</Stack></Stack></CardContent></Card>}
     <Stack spacing={2}>{draftCases.map((testCase, index) => <EditableCase key={testCase.id || index} testCase={testCase} onChange={(next) => updateCase(index, next)} />)}</Stack>{!isActive && !draftCases.length && run.status !== "failed" && <Alert severity="info">The provider returned no test cases. Edit the inputs and run again.</Alert>}{message && <Alert severity="success" onClose={() => setMessage(null)}>{message}</Alert>}{error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
   </Stack>;
 
