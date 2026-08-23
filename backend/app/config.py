@@ -82,7 +82,8 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.2
     # GPT-5 reasoning can consume part of this budget before visible output.
     LLM_MAX_TOKENS: int = 8192
-    # Bound each AI request so an upstream stall becomes a retryable failure.\n    LLM_REQUEST_TIMEOUT_SECONDS: int = 75
+    # Bound each AI request so an upstream stall becomes a retryable failure.
+    LLM_REQUEST_TIMEOUT_SECONDS: int = Field(default=75, ge=10, le=600)
 
     OPENAI_API_KEY: Optional[str] = None
 
