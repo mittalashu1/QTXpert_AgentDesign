@@ -79,12 +79,14 @@ function makeStarterCases(seed: string): TestCase[] {
 }
 
 
+function runTitle(run: GenerationRun) {
+  const candidate = run.test_scenarios?.[0]?.["title"];
+  return run.requirement_summary || (typeof candidate === "string" ? candidate : null) || "Untitled test";
+}
+
 function RunRail({ runs, activeId, onSelect, onNew }: { runs: GenerationRun[]; activeId?: string; onSelect: (run: GenerationRun) => void; onNew: () => void }) {
   const [search, setSearch] = useState("");
-  const visibleRuns = runs.filter((run) => {
-    const title = run.requirement_summary || run.test_scenarios?.[0]?.title || "Untitled test";
-    return title.toLowerCase().includes(search.toLowerCase());
-  });
+  const visibleRuns = runs.filter((run) => runTitle(run).toLowerCase().includes(search.toLowerCase()));
   return <Card variant="outlined" sx={{ width: { xs: "100%", lg: 300 }, flexShrink: 0, position: { lg: "sticky" }, top: 16, borderRadius: 3 }}>
     <CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.25 }}>
@@ -94,7 +96,7 @@ function RunRail({ runs, activeId, onSelect, onNew }: { runs: GenerationRun[]; a
       <TextField size="small" fullWidth value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search runs" sx={{ mb: 1.25 }} />
       <Stack spacing={1} sx={{ maxHeight: { lg: "calc(100vh - 250px)" }, overflowY: "auto", pr: 0.25 }}>
         {visibleRuns.map((run) => {
-          const title = run.requirement_summary || run.test_scenarios?.[0]?.title || "Untitled test";
+          const title = runTitle(run);
           const selected = activeId === run.id;
           return <Card key={run.id} variant="outlined" onClick={() => onSelect(run)} sx={{ cursor: "pointer", borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s", "&:hover": { borderColor: "primary.main" } }}>
             <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
