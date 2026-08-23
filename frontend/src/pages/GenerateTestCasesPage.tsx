@@ -81,7 +81,8 @@ function makeStarterCases(seed: string): TestCase[] {
 
 function runTitle(run: GenerationRun) {
   const candidate = run.test_scenarios?.[0]?.["title"];
-  return run.requirement_summary || (typeof candidate === "string" ? candidate : null) || "Untitled test";
+  const date = run.created_at ? new Date(run.created_at).toLocaleDateString() : "";
+  return run.requirement_summary || (typeof candidate === "string" ? candidate : null) || `${run.generation_profile.replaceAll("_", " ")} test${date ? ` • ${date}` : ""}`;
 }
 
 function RunRail({ runs, activeId, onSelect, onNew }: { runs: GenerationRun[]; activeId?: string; onSelect: (run: GenerationRun) => void; onNew: () => void }) {
