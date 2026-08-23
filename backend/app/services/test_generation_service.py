@@ -122,14 +122,16 @@ class TestGenerationService:
             # Keep the count bookkeeping local so stale provider sessions cannot
             # block a new one-page generation.
             persisted_count = 0
+            next_case_index = 1
 
             async def persist_batch(cases: list) -> None:
-                nonlocal persisted_count
+                nonlocal persisted_count, next_case_index
                 run.status = RunStatus.GENERATING_TEST_CASES
                 warnings_before = len(case_build_warnings)
                 await self._persist_test_cases(
-                    run, cases, case_build_warnings, start_index=persisted_count + 1
+                    run, cases, case_build_warnings, start_index=next_case_index
                 )
+                next_case_index += len(cases)
                 skipped = len(case_build_warnings) - warnings_before
                 persisted_count += max(0, len(cases) - skipped)
                 await self._db.commit()
