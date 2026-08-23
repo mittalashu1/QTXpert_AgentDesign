@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,6 +15,7 @@ class GenerateTestCasesRequest(BaseModel):
         description="If empty, all requirements in the project are used.",
     )
     llm_provider_override: Optional[str] = None
+    generation_profile: Literal["smoke", "feature", "regression", "deep_regression"] = "feature"
 
 
 class TestCaseOut(BaseModel):
