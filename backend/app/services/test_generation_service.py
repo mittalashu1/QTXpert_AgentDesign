@@ -176,6 +176,10 @@ class TestGenerationService:
                     "Generate test cases from these authenticated user inputs:\n\n"
                     + "\n\n".join(r.raw_content for r in requirements)
                 )
+                # Surface the active phase immediately; the provider call is intentionally
+                # bounded so the interactive page never appears stuck in "normalizing".
+                run.status = RunStatus.GENERATING_TEST_CASES
+                await self._db.commit()
                 fast_result = {}
                 try:
                     fast_result = await _call_json(
