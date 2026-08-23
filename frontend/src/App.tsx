@@ -3,7 +3,6 @@ import { useAuth } from "@/contexts/AuthContext";
 import AppLayout from "@/components/AppLayout";
 import LoginPage from "@/pages/LoginPage";
 import DashboardPage from "@/pages/DashboardPage";
-import RequirementUploadPage from "@/pages/RequirementUploadPage";
 import GenerateTestCasesPage from "@/pages/GenerateTestCasesPage";
 import HistoryPage from "@/pages/HistoryPage";
 import SettingsPage from "@/pages/SettingsPage";
@@ -45,7 +44,7 @@ export default function App() {
         }
       >
         <Route index element={<DashboardPage />} />
-        <Route path="requirements/upload" element={<RequirementUploadPage />} />
+       
         <Route path="generate" element={<GenerateTestCasesPage />} />
         <Route path="history" element={<HistoryPage />} />
         <Route path="settings" element={<SettingsPage />} />
