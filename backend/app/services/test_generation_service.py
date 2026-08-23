@@ -174,12 +174,10 @@ class TestGenerationService:
                 }
                 raw_cases = _starter_cases(requirements)
                 await self._persist_test_cases(run, raw_cases, case_build_warnings)
-
-                persisted_count = (
-                    await self._db.scalar(
-                        select(func.count()).select_from(TestCase).where(TestCase.generation_run_id == run.id)
-                    )
-                    or 0
+                # Starter cases are validated before insertion; avoid an extra
+                # count query so the interactive response is not held open.
+                persisted_count = len(raw_cases) - sum(
+                    1 for warning in case_build_warnings if warning.startswith("Skipped test case #")
                 )
                 run.requirement_summary = fast_result.get("summary") if isinstance(fast_result, dict) else None
                 run.test_scenarios = [{"scenario_id": f"fast-{i + 1}", "title": c.get("scenario", "")} for i, c in enumerate(raw_cases)]
