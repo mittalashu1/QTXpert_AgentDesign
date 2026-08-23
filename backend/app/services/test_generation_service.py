@@ -146,12 +146,10 @@ class TestGenerationService:
         case_build_warnings: List[str] = []
         logger.info("generation_started run_id=%s project_id=%s profile=%s requirements=%s", run_id, project_id, generation_profile, len(requirements))
         try:
-            persisted_count = (
-                await self._db.scalar(
-                    select(func.count()).select_from(TestCase).where(TestCase.generation_run_id == run.id)
-                )
-                or 0
-            )
+            # Interactive runs do not need the graph's pre-flight count query.
+            # Keep the count bookkeeping local so stale provider sessions cannot
+            # block a new one-page generation.
+            persisted_count = 0
 
             async def persist_batch(cases: list) -> None:
                 nonlocal persisted_count
@@ -190,6 +188,12 @@ class TestGenerationService:
                 logger.info("generation_finished run_id=%s status=%s persisted_cases=%s", run.id, run.status.value, persisted_count)
                 return run
 
+            persisted_count = (
+                await self._db.scalar(
+                    select(func.count()).select_from(TestCase).where(TestCase.generation_run_id == run.id)
+                )
+                or 0
+            )
             graph = build_test_design_graph(
                 provider,
                 on_test_case_batch=persist_batch,
