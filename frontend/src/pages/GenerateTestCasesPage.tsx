@@ -81,7 +81,8 @@ export default function GenerateTestCasesPage() {
       for (const file of files) requirementIds.push((await requirementsApi.upload(selectedProjectId, file)).data.id);
       const context = [prompt.trim() ? `User guidance:\n${prompt.trim()}` : "", sourceUrl.trim() ? `${source.label} source: ${sourceUrl.trim()}` : "", `Coverage preference: ${coverage}`, inputSummary.length ? `Inputs: ${inputSummary.join(", ")}` : ""].filter(Boolean).join("\n\n");
       if (context) requirementIds.push((await requirementsApi.submitDirectPrompt(selectedProjectId, `${source.label} test design`, context)).data.id);
-      const profile = coverage === "quick" ? "smoke" : coverage === "thorough" ? "regression" : "feature";\n      return testCasesApi.generate(selectedProjectId, requirementIds, undefined, profile).then((res) => res.data);
+      const profile = coverage === "quick" ? "smoke" : coverage === "thorough" ? "regression" : "feature";
+      return testCasesApi.generate(selectedProjectId, requirementIds, undefined, profile).then((res) => res.data);
     },
     onSuccess: (next) => { setResult(next); setDraftCases(next.test_cases ?? []); setSaved(false); setMessage("Generation started. Live progress will appear here."); setError(null); },
     onError: (reason) => { setError((reason as any)?.response?.data?.detail || (reason as Error).message || "Generation failed."); setMessage(null); },
