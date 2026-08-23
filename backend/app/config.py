@@ -135,7 +135,8 @@ class Settings(BaseSettings):
     MAX_REQUIREMENT_TEXT_CHARS: int = 200_000
     MAX_REQUIREMENTS_PER_GENERATION: int = 20
     MAX_SCENARIOS_PER_GENERATION: int = 40
-    # Allow long-running AI batches to finish while still recovering abandoned jobs.\n    GENERATION_STALE_AFTER_SECONDS: int = 900
+    # Allow long-running AI batches to finish while still recovering abandoned jobs.
+    GENERATION_STALE_AFTER_SECONDS: int = 900
     ALLOWED_UPLOAD_EXTENSIONS: str = "pdf,docx,txt,md,json,csv"
     UPLOAD_STORAGE_PATH: str = "./storage/uploads"
 
