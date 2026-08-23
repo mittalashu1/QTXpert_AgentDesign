@@ -70,7 +70,10 @@ export default function GenerateTestCasesPage() {
   });
   const run = liveRun ?? result;
   const isActive = Boolean(run && ACTIVE_STATUSES.includes(run.status));
-  useEffect(() => {\n    if (liveRun?.test_cases?.length) setDraftCases(liveRun.test_cases);\n  }, [liveRun]);\n  const inputSummary = useMemo(() => [...files.map((file) => file.name), ...(source.kind === "link" && sourceUrl.trim() ? [sourceUrl.trim()] : [])], [files, source.kind, sourceUrl]);
+  useEffect(() => {
+    if (liveRun?.test_cases?.length) setDraftCases(liveRun.test_cases);
+  }, [liveRun]);
+  const inputSummary = useMemo(() => [...files.map((file) => file.name), ...(source.kind === "link" && sourceUrl.trim() ? [sourceUrl.trim()] : [])], [files, source.kind, sourceUrl]);
 
   const generationMutation = useMutation({
     mutationFn: async () => {
