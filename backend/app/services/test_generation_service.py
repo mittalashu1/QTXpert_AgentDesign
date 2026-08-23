@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.test_design_agent.graph import build_test_design_graph
+from app.agents.test_design_agent.nodes import _call_json
 from app.config import Settings
 from app.database.models.generation_run import GenerationRun, RunStatus
 from app.database.models.test_case import Priority, RiskLevel, Severity, TestCase, TestCaseType
@@ -34,6 +35,35 @@ def _coerce_enum(enum_cls, raw_value, default):
         return enum_cls(token)
     except ValueError:
         return default
+
+
+def _starter_cases(requirements: list) -> list[dict]:
+    """Create input-specific starter coverage when a provider times out."""
+    seed = str(requirements[0].raw_content or requirements[0].title or "the supplied feature").strip()
+    seed = " ".join(seed.split())[:180]
+    variants = [
+        ("Happy path", "Complete the primary workflow with valid data."),
+        ("Invalid input", "Reject invalid or malformed data with a useful message."),
+        ("Boundary and empty states", "Handle empty, maximum, and boundary values safely."),
+        ("Authorization", "Prevent access when the user lacks the required permission."),
+        ("Recovery", "Recover cleanly after a network or service interruption."),
+        ("Accessibility", "Complete the workflow with keyboard navigation and assistive technology."),
+    ]
+    return [
+        {
+            "scenario": f"{label}: {seed}",
+            "objective": f"Verify that the supplied requirement behaves correctly for this coverage area.",
+            "preconditions": "The application is available and test data can be created.",
+            "steps": [{"step": 1, "action": f"Exercise {seed} using the {label.lower()} condition."}],
+            "expected_result": expected,
+            "test_type": "functional" if label == "Happy path" else "negative" if label in {"Invalid input", "Boundary and empty states"} else "security" if label == "Authorization" else "accessibility" if label == "Accessibility" else "functional",
+            "priority": "high" if label in {"Happy path", "Authorization"} else "medium",
+            "severity": "major" if label == "Authorization" else "minor",
+            "risk_level": "medium",
+            "is_automation_candidate": True,
+        }
+        for label, expected in variants
+    ]
 
 
 class TestGenerationService:
@@ -132,6 +162,50 @@ class TestGenerationService:
                 persisted_count += len(cases)
                 await self._db.commit()
                 logger.info("generation_batch_persisted run_id=%s batch_size=%s total=%s", run.id, len(cases), persisted_count)
+
+            if generation_profile in {"smoke", "feature"}:
+                fast_system = (
+                    "You are an expert QA test designer. Return a JSON object only with a "
+                    "test_cases array containing concise, executable cases. Each case must "
+                    "include scenario, objective, preconditions, steps (list of action objects), "
+                    "expected_result, test_type, priority, severity, risk_level, and "
+                    "is_automation_candidate. Cover happy, negative, security, recovery, "
+                    "and accessibility paths without inventing product behavior."
+                )
+                fast_user = (
+                    "Generate test cases from these authenticated user inputs:\n\n"
+                    + "\n\n".join(r.raw_content for r in requirements)
+                )
+                fast_result = {}
+                try:
+                    fast_result = await _call_json(
+                        provider, fast_system, fast_user,
+                        timeout_seconds=35, max_retries=1,
+                    )
+                    raw_cases = fast_result.get("test_cases", [])
+                except Exception as exc:  # noqa: BLE001
+                    raw_cases = []
+                    case_build_warnings.append(f"Provider detail call failed: {exc}")
+                if not isinstance(raw_cases, list) or not raw_cases:
+                    raw_cases = _starter_cases(requirements)
+                    case_build_warnings.append("Used input-specific starter coverage because the provider returned no cases.")
+                await self._persist_test_cases(run, raw_cases, case_build_warnings)
+                persisted_count = (
+                    await self._db.scalar(
+                        select(func.count()).select_from(TestCase).where(TestCase.generation_run_id == run.id)
+                    )
+                    or 0
+                )
+                run.requirement_summary = fast_result.get("summary") if isinstance(fast_result, dict) else None
+                run.test_scenarios = [{"scenario_id": f"fast-{i + 1}", "title": c.get("scenario", "")} for i, c in enumerate(raw_cases)]
+                run.processing_time_seconds = time.perf_counter() - start
+                run.status = RunStatus.COMPLETED if persisted_count else RunStatus.FAILED
+                if case_build_warnings:
+                    run.error_message = "; ".join(case_build_warnings)
+                await self._db.commit()
+                await self._db.refresh(run)
+                logger.info("generation_finished run_id=%s status=%s persisted_cases=%s", run.id, run.status.value, persisted_count)
+                return run
 
             graph = build_test_design_graph(
                 provider,
