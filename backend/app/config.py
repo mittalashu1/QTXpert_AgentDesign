@@ -63,9 +63,6 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
-    # One-time bootstrap secret. Set only long enough to create the first admin,
-    # then remove it from the deployment environment.
-    ADMIN_BOOTSTRAP_TOKEN: Optional[str] = None
 
     # Microsoft Entra ID (Azure AD) - OAuth2 / OIDC, optional
     ENTRA_TENANT_ID: Optional[str] = None
@@ -80,13 +77,9 @@ class Settings(BaseSettings):
     ] = "azure_openai"
     LLM_MODEL: str = "gpt-4o"
     LLM_TEMPERATURE: float = 0.2
-    # GPT-5 reasoning can consume part of this budget before visible output.
-    LLM_MAX_TOKENS: int = 8192
-    # Bound each AI request so an upstream stall becomes a retryable failure.
-    LLM_REQUEST_TIMEOUT_SECONDS: int = Field(default=75, ge=10, le=600)
-    # Keep reasoning bounded so structured output has room for visible JSON.
-    LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high"] = "low"
-    LLM_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
+    LLM_MAX_TOKENS: int = 4096
+    LLM_REQUEST_TIMEOUT_SECONDS: int = 120
+    LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
 
     OPENAI_API_KEY: Optional[str] = None
 
@@ -135,9 +128,8 @@ class Settings(BaseSettings):
     MAX_REQUIREMENT_TEXT_CHARS: int = 200_000
     MAX_REQUIREMENTS_PER_GENERATION: int = 20
     MAX_SCENARIOS_PER_GENERATION: int = 40
-    # Allow long-running AI batches to finish while still recovering abandoned jobs.
     GENERATION_STALE_AFTER_SECONDS: int = 900
-    ALLOWED_UPLOAD_EXTENSIONS: str = "pdf,docx,txt,md,json,csv"
+    ALLOWED_UPLOAD_EXTENSIONS: str = "pdf,docx,txt,md,json,csv,apk,ipa,zip,mp4,mov,webm"
     UPLOAD_STORAGE_PATH: str = "./storage/uploads"
 
     @property
@@ -159,3 +151,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached settings singleton (dependency-injected across the app)."""
     return Settings()
+
