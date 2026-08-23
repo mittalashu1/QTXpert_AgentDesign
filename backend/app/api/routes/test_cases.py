@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated, List
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from app.schemas.test_case import GenerateTestCasesRequest, GenerationRunOut
 from app.services.test_generation_service import TestGenerationService
 
 router = APIRouter(tags=["test-cases"])
+logger = logging.getLogger(__name__)
 
 
 async def _require_owned_project(db: AsyncSession, project_id: UUID, user_id: UUID) -> None:
@@ -33,6 +35,7 @@ async def _continue_generation(
             run_id, project_id, requirement_ids, requested_by_id, llm_provider_override,
             generation_profile,
         )
+        logger.info("background_generation_finished run_id=%s", run_id)
 
 
 @router.post("/generate-testcases", response_model=GenerationRunOut, status_code=status.HTTP_201_CREATED)
