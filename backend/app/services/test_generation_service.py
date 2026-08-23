@@ -71,6 +71,7 @@ class TestGenerationService:
             status=RunStatus.NORMALIZING,
             llm_provider=provider.provider_name,
             llm_model=self._settings.LLM_MODEL,
+            generation_profile=generation_profile,
         )
         self._db.add(run)
         await self._db.commit()
