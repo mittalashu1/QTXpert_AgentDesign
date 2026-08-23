@@ -1,4 +1,4 @@
-import { ChangeEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Alert, Box, Button, Card, CardContent, Chip, Divider, FormControl,
@@ -70,7 +70,7 @@ export default function GenerateTestCasesPage() {
   });
   const run = liveRun ?? result;
   const isActive = Boolean(run && ACTIVE_STATUSES.includes(run.status));
-  const inputSummary = useMemo(() => [...files.map((file) => file.name), ...(source.kind === "link" && sourceUrl.trim() ? [sourceUrl.trim()] : [])], [files, source.kind, sourceUrl]);
+  useEffect(() => {\n    if (liveRun?.test_cases?.length) setDraftCases(liveRun.test_cases);\n  }, [liveRun]);\n  const inputSummary = useMemo(() => [...files.map((file) => file.name), ...(source.kind === "link" && sourceUrl.trim() ? [sourceUrl.trim()] : [])], [files, source.kind, sourceUrl]);
 
   const generationMutation = useMutation({
     mutationFn: async () => {
