@@ -47,6 +47,7 @@ class GenerationRunOut(BaseModel):
     status: RunStatus
     llm_provider: str
     llm_model: str
+    generation_profile: str
     requirement_summary: Optional[str]
     business_rules: Optional[list]
     functional_breakdown: Optional[list]
