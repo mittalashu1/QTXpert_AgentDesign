@@ -23,10 +23,7 @@ services:
       - key: LLM_PROVIDER
         value: azure_openai
       - key: CORS_ORIGINS
-        value: https://qtxpert-frontend.onrender.com
-      # To create the initial administrator, set ADMIN_BOOTSTRAP_TOKEN as a
-      # dashboard secret temporarily (not here), call /auth/bootstrap-admin,
-      # then remove the secret. It must never be committed.
+        value: https://design.qtxpert.com,https://qtxpert-frontend.onrender.com
       # Set the remaining provider/integration keys (AZURE_OPENAI_API_KEY,
       # AZURE_ENDPOINT, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY,
       # AWS_*, PINECONE_*, JIRA_*, CONFLUENCE_*) as secrets in the Render
@@ -52,3 +49,4 @@ databases:
     plan: starter
     databaseName: qtxpert
     user: qtxpert
+
