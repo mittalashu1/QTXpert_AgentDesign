@@ -41,6 +41,7 @@ class GenerationRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     llm_provider: Mapped[str] = mapped_column(String(50), nullable=False)
     llm_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    generation_profile: Mapped[str] = mapped_column(String(30), default="feature", nullable=False)
 
     requirement_summary: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     business_rules: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
