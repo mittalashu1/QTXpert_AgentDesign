@@ -211,7 +211,7 @@ export default function GenerateTestCasesPage() {
       input?.click();
     }
   };
-  const startNewChat = () => { setResult(null); setDraftCases([]); setFiles([]); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setError(null); setMessage("Started a new test-design chat. Add a source or describe the flow to begin."); };
+  const startNewChat = () => { setResult(null); setDraftCases([]); setFiles([]); setSelectedSource("document"); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setError(null); setMessage("Started a new test-design chat. Add a source or describe the flow to begin."); };
   const openRun = (historyRun: GenerationRun) => { setResult(historyRun); setDraftCases(historyRun.test_cases ?? []); setLocalPreview(false); setSaved(false); setError(null); setMessage("Reopened this test run. Edit any field to improvise the suite."); };
   const saveSuite = () => { if (!run) return; localStorage.setItem("qtxpert-saved-suite", JSON.stringify({ runId: run.id, cases: draftCases, savedAt: new Date().toISOString() })); setSaved(true); setMessage(localPreview ? "Suite saved in this browser while the server run completes." : "Suite saved to your QTXpert workspace and history."); };
   const updateCase = (index: number, next: TestCase) => setDraftCases((current) => current.map((item, idx) => idx === index ? next : item));
