@@ -37,35 +37,6 @@ def _coerce_enum(enum_cls, raw_value, default):
         return default
 
 
-def _starter_cases(requirements: list) -> list[dict]:
-    """Create input-specific starter coverage when a provider times out."""
-    seed = str(requirements[0].raw_content or requirements[0].title or "the supplied feature").strip()
-    seed = " ".join(seed.split())[:180]
-    variants = [
-        ("Happy path", "Complete the primary workflow with valid data."),
-        ("Invalid input", "Reject invalid or malformed data with a useful message."),
-        ("Boundary and empty states", "Handle empty, maximum, and boundary values safely."),
-        ("Authorization", "Prevent access when the user lacks the required permission."),
-        ("Recovery", "Recover cleanly after a network or service interruption."),
-        ("Accessibility", "Complete the workflow with keyboard navigation and assistive technology."),
-    ]
-    return [
-        {
-            "scenario": f"{label}: {seed}",
-            "objective": f"Verify that the supplied requirement behaves correctly for this coverage area.",
-            "preconditions": "The application is available and test data can be created.",
-            "steps": [{"step": 1, "action": f"Exercise {seed} using the {label.lower()} condition."}],
-            "expected_result": expected,
-            "test_type": "functional" if label == "Happy path" else "negative" if label in {"Invalid input", "Boundary and empty states"} else "security" if label == "Authorization" else "accessibility" if label == "Accessibility" else "functional",
-            "priority": "high" if label in {"Happy path", "Authorization"} else "medium",
-            "severity": "major" if label == "Authorization" else "minor",
-            "risk_level": "medium",
-            "is_automation_candidate": True,
-        }
-        for label, expected in variants
-    ]
-
-
 class TestGenerationService:
     def __init__(self, db: AsyncSession, settings: Settings):
         self._db = db
