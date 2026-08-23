@@ -48,37 +48,6 @@ function EditableCase({ testCase, onChange }: { testCase: TestCase; onChange: (n
   </CardContent></Card>;
 }
 
-function makeStarterCases(seed: string): TestCase[] {
-  const clean = seed.replace(/\s+/g, " ").trim().slice(0, 180) || "the supplied feature";
-  const variants: Array<[string, string, string]> = [
-    ["Happy path", "functional", "Complete the primary workflow with valid data."],
-    ["Invalid input", "negative", "Reject invalid or malformed data with a useful message."],
-    ["Boundary and empty states", "negative", "Handle empty, maximum, and boundary values safely."],
-    ["Authorization", "security", "Prevent access when the user lacks the required permission."],
-    ["Recovery", "functional", "Recover cleanly after a network or service interruption."],
-    ["Accessibility", "accessibility", "Complete the workflow with keyboard navigation and assistive technology."],
-  ];
-  return variants.map(([label, testType, expected], index) => ({
-    id: `local-${Date.now()}-${index}`,
-    test_case_key: `LOCAL-${String(index + 1).padStart(2, "0")}`,
-    requirement_traceability: null,
-    test_type: testType,
-    scenario: `${label}: ${clean}`,
-    objective: `Verify the supplied requirement for the ${label.toLowerCase()} condition.`,
-    priority: label === "Happy path" || label === "Authorization" ? "high" : "medium",
-    severity: label === "Authorization" ? "major" : "minor",
-    preconditions: "The application is available and required test data can be created.",
-    test_data: null,
-    steps: [`Exercise ${clean} using the ${label.toLowerCase()} condition.`],
-    expected_result: expected,
-    post_conditions: null,
-    is_automation_candidate: true,
-    automation_type: null,
-    risk_level: "medium",
-  }));
-}
-
-
 function runTitle(run: GenerationRun) {
   const candidate = run.test_scenarios?.[0]?.["title"];
   const date = run.created_at ? new Date(run.created_at).toLocaleDateString() : "";
@@ -162,7 +131,6 @@ export default function GenerateTestCasesPage() {
       return testCasesApi.generate(selectedProjectId, requirementIds, undefined, profile).then((res) => res.data);
     },
     onSuccess: (next) => {
-      const seed = [prompt, sourceUrl, ...files.map((file) => file.name)].filter(Boolean).join(" ");
       const hasServerCases = Boolean(next.test_cases?.length);
       setResult(next);
       setDraftCases(next.test_cases ?? []);
