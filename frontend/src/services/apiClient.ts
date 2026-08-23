@@ -44,6 +44,7 @@ apiClient.interceptors.response.use(
         localStorage.removeItem("qtxpert-access-token");
         localStorage.removeItem("qtxpert-refresh-token");
         window.location.href = "/login";
+        return Promise.reject(error);
       }
     }
     return Promise.reject(error);

@@ -44,6 +44,7 @@ class TestGenerationService:
         requested_by_id: UUID,
         requirement_ids: Optional[List[UUID]] = None,
         llm_provider_override: Optional[str] = None,
+        generation_profile: str = "feature",
     ) -> GenerationRun:
         if await ProjectRepository(self._db).get_for_owner(project_id, requested_by_id) is None:
             raise ValueError("Project not found")
@@ -70,6 +71,7 @@ class TestGenerationService:
             status=RunStatus.NORMALIZING,
             llm_provider=provider.provider_name,
             llm_model=self._settings.LLM_MODEL,
+            generation_profile=generation_profile,
         )
         self._db.add(run)
         await self._db.commit()
@@ -87,6 +89,7 @@ class TestGenerationService:
         requirement_ids: Optional[List[UUID]],
         requested_by_id: UUID,
         llm_provider_override: Optional[str] = None,
+        generation_profile: str = "feature",
     ) -> GenerationRun:
         run = (
             await self._db.execute(
@@ -128,7 +131,12 @@ class TestGenerationService:
             graph = build_test_design_graph(
                 provider,
                 on_test_case_batch=persist_batch,
-                max_scenarios=self._settings.MAX_SCENARIOS_PER_GENERATION,
+                max_scenarios={
+                    "smoke": min(8, self._settings.MAX_SCENARIOS_PER_GENERATION),
+                    "feature": min(20, self._settings.MAX_SCENARIOS_PER_GENERATION),
+                    "regression": self._settings.MAX_SCENARIOS_PER_GENERATION,
+                    "deep_regression": min(80, self._settings.MAX_SCENARIOS_PER_GENERATION * 2),
+                }.get(generation_profile, min(20, self._settings.MAX_SCENARIOS_PER_GENERATION)),
             )
             input_state = {
                 "raw_documents": [r.raw_content for r in requirements],

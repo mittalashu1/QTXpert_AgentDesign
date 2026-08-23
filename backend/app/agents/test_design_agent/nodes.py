@@ -10,6 +10,7 @@ import logging
 from typing import Any, Dict
 
 from app.agents.test_design_agent.json_utils import LLMJsonParseError, parse_llm_json
+from app.config import get_settings
 from app.agents.test_design_agent.state import TestDesignState
 from app.llm.base import LLMMessage, LLMProvider, LLMProviderError
 from app.prompts import test_design_prompts as prompts
@@ -18,15 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 async def _call_json(
-    provider: LLMProvider, system: str, user: str, timeout_seconds: float = 75
+    provider: LLMProvider, system: str, user: str, timeout_seconds: float | None = None,
+    max_retries: int | None = None,
 ) -> Dict[str, Any]:
     """Request machine-readable output, retrying transient empty/model-formatted replies."""
     retry_system = system + (
         " Your response must be a non-empty JSON object only. Do not use markdown,"
         " explanations, or an empty response."
     )
+    settings = get_settings()
+    timeout_seconds = timeout_seconds if timeout_seconds is not None else settings.LLM_REQUEST_TIMEOUT_SECONDS
+    attempts = (max_retries if max_retries is not None else settings.LLM_MAX_RETRIES) + 1
     last_error: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(max(1, attempts)):
         try:
             response = await asyncio.wait_for(
                 provider.complete(
@@ -40,19 +45,27 @@ async def _call_json(
                 ),
                 timeout=timeout_seconds,
             )
-            return parse_llm_json(response.content)
+            parsed = parse_llm_json(response.content)
+            if not isinstance(parsed, dict):
+                raise LLMJsonParseError("LLM response must be a JSON object")
+            return parsed
         except asyncio.TimeoutError as exc:
             last_error = exc
             logger.warning("LLM request timed out on attempt %s after %ss", attempt + 1, timeout_seconds)
         except LLMJsonParseError as exc:
             last_error = exc
             logger.warning("LLM returned unusable JSON on attempt %s: %s", attempt + 1, exc)
+        except LLMProviderError as exc:
+            last_error = exc
+            logger.warning("LLM provider failed on attempt %s: %s", attempt + 1, exc)
+            if attempt + 1 < max(1, attempts):
+                await asyncio.sleep(min(2 ** attempt, 4))
     if isinstance(last_error, asyncio.TimeoutError):
         raise LLMProviderError(
             "The AI did not respond in time. Please start the generation again."
         ) from last_error
     raise LLMProviderError(
-        "The AI returned an empty or invalid structured response after a retry. "
+        "The AI returned an empty or invalid structured response after retries. "
         "Please try the generation again."
     ) from last_error
 

@@ -79,6 +79,7 @@ export interface GenerationRun {
   status: RunStatus;
   llm_provider: string;
   llm_model: string;
+  generation_profile: "smoke" | "feature" | "regression" | "deep_regression";
   requirement_summary: string | null;
   business_rules: string[] | null;
   functional_breakdown: Record<string, unknown>[] | null;

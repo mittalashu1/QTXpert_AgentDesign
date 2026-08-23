@@ -24,13 +24,14 @@ async def _require_owned_project(db: AsyncSession, project_id: UUID, user_id: UU
 
 async def _continue_generation(
     run_id: UUID, project_id: UUID, requirement_ids: list[UUID] | None,
-    requested_by_id: UUID, llm_provider_override: str | None,
+    requested_by_id: UUID, llm_provider_override: str | None, generation_profile: str,
 ) -> None:
     """Run independently of the HTTP response so the UI can poll progress."""
     async with AsyncSessionLocal() as session:
         service = TestGenerationService(session, get_settings())
         await service.execute(
-            run_id, project_id, requirement_ids, requested_by_id, llm_provider_override
+            run_id, project_id, requirement_ids, requested_by_id, llm_provider_override,
+            generation_profile,
         )
 
 
@@ -51,6 +52,7 @@ async def generate_testcases(
             requested_by_id=user.id,
             requirement_ids=payload.requirement_ids or None,
             llm_provider_override=payload.llm_provider_override,
+            generation_profile=payload.generation_profile,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -58,7 +60,7 @@ async def generate_testcases(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     background_tasks.add_task(
         _continue_generation, run.id, payload.project_id, payload.requirement_ids or None,
-        user.id, payload.llm_provider_override,
+        user.id, payload.llm_provider_override, payload.generation_profile,
     )
     return run
 

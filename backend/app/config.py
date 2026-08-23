@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 8192
     # Bound each AI request so an upstream stall becomes a retryable failure.
     LLM_REQUEST_TIMEOUT_SECONDS: int = Field(default=75, ge=10, le=600)
+    # Keep reasoning bounded so structured output has room for visible JSON.
+    LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high"] = "low"
+    LLM_MAX_RETRIES: int = Field(default=2, ge=0, le=5)
 
     OPENAI_API_KEY: Optional[str] = None
 
@@ -132,7 +135,7 @@ class Settings(BaseSettings):
     MAX_REQUIREMENT_TEXT_CHARS: int = 200_000
     MAX_REQUIREMENTS_PER_GENERATION: int = 20
     MAX_SCENARIOS_PER_GENERATION: int = 40
-    GENERATION_STALE_AFTER_SECONDS: int = 300
+    GENERATION_STALE_AFTER_SECONDS: int = 1800
     ALLOWED_UPLOAD_EXTENSIONS: str = "pdf,docx,txt,md,json,csv"
     UPLOAD_STORAGE_PATH: str = "./storage/uploads"
 

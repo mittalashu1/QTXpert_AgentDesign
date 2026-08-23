@@ -55,11 +55,12 @@ export const requirementsApi = {
 };
 
 export const testCasesApi = {
-  generate: (projectId: string, requirementIds: string[] = [], llmProviderOverride?: string) =>
+  generate: (projectId: string, requirementIds: string[] = [], llmProviderOverride?: string, generationProfile: "smoke" | "feature" | "regression" | "deep_regression" = "feature") =>
     apiClient.post<GenerationRun>("/generate-testcases", {
       project_id: projectId,
       requirement_ids: requirementIds,
       llm_provider_override: llmProviderOverride,
+      generation_profile: generationProfile,
     }),
   history: (projectId: string) =>
     apiClient.get<GenerationRun[]>("/history", { params: { project_id: projectId } }),
