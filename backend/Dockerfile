@@ -17,6 +17,9 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
+# Fail the image build before deployment if any application module has invalid Python syntax.
+RUN python -m compileall -q app alembic
+
 RUN useradd --create-home --shell /bin/bash appuser \
     && mkdir -p /app/storage/uploads \
     && chown -R appuser:appuser /app
