@@ -63,6 +63,25 @@ def _coerce_bool(value) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _derive_test_set_title(requirements: list, requested_title: str | None = None) -> str | None:
+    """Choose a stable, human-readable heading before generation starts."""
+    explicit = _stringify_optional(requested_title, 500)
+    if explicit:
+        return explicit
+
+    titles = []
+    for requirement in requirements:
+        title = _stringify_optional(getattr(requirement, "title", None), 180)
+        if title and title not in titles:
+            titles.append(title)
+    if not titles:
+        return "Test design"
+    if len(titles) == 1:
+        return titles[0]
+    remaining = len(titles) - 1
+    return f"{titles[0]} + {remaining} more" if remaining == 1 else f"{titles[0]} + {remaining} more sources"
+
+
 class TestGenerationService:
     def __init__(self, db: AsyncSession, settings: Settings):
         self._db = db
@@ -75,6 +94,7 @@ class TestGenerationService:
         requirement_ids: Optional[List[UUID]] = None,
         llm_provider_override: Optional[str] = None,
         generation_profile: str = "feature",
+        test_set_title: Optional[str] = None,
     ) -> GenerationRun:
         if await ProjectRepository(self._db).get_for_owner(project_id, requested_by_id) is None:
             raise ValueError("Project not found")
@@ -102,6 +122,7 @@ class TestGenerationService:
             llm_provider=provider.provider_name,
             llm_model=self._settings.LLM_MODEL,
             generation_profile=generation_profile,
+            title=_derive_test_set_title(requirements, test_set_title),
         )
         self._db.add(run)
         await self._db.commit()
@@ -428,4 +449,5 @@ class TestGenerationService:
                 ))
             except Exception as case_exc:  # noqa: BLE001
                 warnings.append(f"Skipped test case #{index}: {case_exc}")
+
 

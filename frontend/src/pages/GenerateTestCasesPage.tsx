@@ -1,15 +1,16 @@
 import { ChangeEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Alert, Box, Button, Card, CardContent, Chip, Divider, FormControl,
-  FormHelperText, InputLabel, LinearProgress, MenuItem, Select, Stack,
-  TextField, Typography,
+  Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Card,
+  CardContent, Chip, Divider, FormControl, FormHelperText, InputLabel,
+  LinearProgress, MenuItem, Select, Stack, TextField, Typography,
 } from "@mui/material";
 import AddOutlinedIcon from "@mui/icons-material/AddOutlined";
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import DeleteOutlineOutlinedIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import DownloadOutlinedIcon from "@mui/icons-material/DownloadOutlined";
+import ExpandMoreOutlinedIcon from "@mui/icons-material/ExpandMoreOutlined";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import RefreshOutlinedIcon from "@mui/icons-material/RefreshOutlined";
 import { requirementsApi, testCasesApi } from "@/services/api";
@@ -34,19 +35,32 @@ const SOURCES: InputSource[] = [
 ];
 
 function EditableCase({ testCase, onChange }: { testCase: TestCase; onChange: (next: TestCase) => void }) {
-  return <Card variant="outlined" sx={{ borderRadius: 2 }}><CardContent>
-    <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }}>
-      <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{testCase.test_case_key}</Typography>
-      <Stack direction="row" spacing={0.5}><Chip size="small" label={testCase.test_type.replace(/_/g, " ")} /><Chip size="small" color={testCase.priority === "high" || testCase.priority === "critical" ? "error" : "warning"} label={testCase.priority} /></Stack>
-    </Stack>
-    <Stack spacing={1.25}>
-      <TextField label="Scenario" value={testCase.scenario} onChange={(e) => onChange({ ...testCase, scenario: e.target.value })} fullWidth />
-      <TextField label="Objective" value={testCase.objective} onChange={(e) => onChange({ ...testCase, objective: e.target.value })} fullWidth multiline minRows={2} />
-      <TextField label="Preconditions" value={testCase.preconditions ?? ""} onChange={(e) => onChange({ ...testCase, preconditions: e.target.value })} fullWidth multiline minRows={2} />
-      <TextField label="Steps (one per line)" value={testCase.steps.join("\n")} onChange={(e) => onChange({ ...testCase, steps: e.target.value.split("\n").filter(Boolean) })} fullWidth multiline minRows={3} />
-      <TextField label="Expected result" value={testCase.expected_result} onChange={(e) => onChange({ ...testCase, expected_result: e.target.value })} fullWidth multiline minRows={2} />
-    </Stack>
-  </CardContent></Card>;
+  return <Accordion variant="outlined" disableGutters sx={{ borderRadius: 2, "&:before": { display: "none" } }}>
+    <AccordionSummary expandIcon={<ExpandMoreOutlinedIcon />} sx={{ px: 2, py: 0.5 }}>
+      <Stack spacing={0.6} sx={{ minWidth: 0, pr: 1 }}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={{ xs: 0.25, sm: 1 }} alignItems={{ xs: "flex-start", sm: "center" }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>{testCase.test_case_key}</Typography>
+          <Typography variant="body2" sx={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: { xs: "calc(100vw - 120px)", sm: 620 } }}>
+            {testCase.scenario || "Untitled scenario"}
+          </Typography>
+        </Stack>
+        <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+          <Chip size="small" label={testCase.test_type.replace(/_/g, " ")} />
+          <Chip size="small" color={testCase.priority === "high" || testCase.priority === "critical" ? "error" : "warning"} label={testCase.priority} />
+          <Typography variant="caption" color="text.secondary" sx={{ alignSelf: "center" }}>Expand to edit details</Typography>
+        </Stack>
+      </Stack>
+    </AccordionSummary>
+    <AccordionDetails sx={{ px: 2, pb: 2 }}>
+      <Stack spacing={1.25}>
+        <TextField label="Scenario" value={testCase.scenario} onChange={(e) => onChange({ ...testCase, scenario: e.target.value })} fullWidth />
+        <TextField label="Objective" value={testCase.objective} onChange={(e) => onChange({ ...testCase, objective: e.target.value })} fullWidth multiline minRows={2} />
+        <TextField label="Preconditions" value={testCase.preconditions ?? ""} onChange={(e) => onChange({ ...testCase, preconditions: e.target.value })} fullWidth multiline minRows={2} />
+        <TextField label="Steps (one per line)" value={testCase.steps.join("\n")} onChange={(e) => onChange({ ...testCase, steps: e.target.value.split("\n").filter(Boolean) })} fullWidth multiline minRows={3} />
+        <TextField label="Expected result" value={testCase.expected_result} onChange={(e) => onChange({ ...testCase, expected_result: e.target.value })} fullWidth multiline minRows={2} />
+      </Stack>
+    </AccordionDetails>
+  </Accordion>;
 }
 
 
@@ -60,10 +74,49 @@ function readSavedChats(): GenerationRun[] {
   }
 }
 
+function shortHeading(value: unknown, maxLength = 92) {
+  if (typeof value !== "string") return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  const firstSentence = normalized.split(/[.!?](?:\s|$)/)[0]?.trim() || normalized;
+  return firstSentence.length > maxLength ? `${firstSentence.slice(0, maxLength - 1).trimEnd()}…` : firstSentence;
+}
+
 function runTitle(run: GenerationRun) {
-  const candidate = run.test_scenarios?.[0]?.["title"];
+  const candidates: unknown[] = [
+    run.title,
+    run.requirement_summary,
+    run.test_scenarios?.[0]?.["title"],
+    run.test_scenarios?.[0]?.["scenario"],
+    run.functional_breakdown?.[0]?.["title"],
+    run.functional_breakdown?.[0]?.["name"],
+    run.test_cases?.[0]?.scenario,
+  ];
+  const heading = candidates.map((candidate) => shortHeading(candidate)).find(Boolean);
+  if (heading) return heading;
+  const profile = shortHeading(run.generation_profile?.replaceAll("_", " "), 40) || "feature";
   const date = run.created_at ? new Date(run.created_at).toLocaleDateString() : "";
-  return run.requirement_summary || (typeof candidate === "string" ? candidate : null) || `${run.generation_profile.replaceAll("_", " ")} test${date ? ` • ${date}` : ""}`;
+  return `Test set • ${profile}${date ? ` • ${date}` : ""}`;
+}
+
+function inputHeading(source: InputSource, files: File[], sourceUrl: string, prompt: string) {
+  const queryHeading = shortHeading(prompt, 110);
+  if (queryHeading) return queryHeading;
+  const fileNames = files
+    .map((file) => file.name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim())
+    .filter(Boolean);
+  if (fileNames.length === 1) return shortHeading(fileNames[0], 110) || fileNames[0];
+  if (fileNames.length > 1) return `${shortHeading(fileNames[0], 78) || fileNames[0]} + ${fileNames.length - 1} more`;
+  if (sourceUrl.trim()) {
+    try {
+      const parsed = new URL(sourceUrl.trim());
+      const path = parsed.pathname.split("/").filter(Boolean).pop();
+      return shortHeading(path ? `${parsed.hostname} • ${path}` : parsed.hostname, 110) || source.label;
+    } catch {
+      return shortHeading(sourceUrl, 110) || source.label;
+    }
+  }
+  return `${source.label} test design`;
 }
 
 function RunRail({ runs, activeId, onSelect, onNew }: { runs: GenerationRun[]; activeId?: string; onSelect: (run: GenerationRun) => void; onNew: () => void }) {
@@ -106,7 +159,16 @@ export default function GenerateTestCasesPage() {
   });
   const [localRuns, setLocalRuns] = useState<GenerationRun[]>(() => readSavedChats());
   const allRuns = useMemo(
-    () => [...localRuns, ...historyRuns.filter((serverRun) => !localRuns.some((localRun) => localRun.id === serverRun.id))],
+    () => {
+      const serverCaseIds = new Map(historyRuns.map((serverRun) => [serverRun.id, new Set((serverRun.test_cases ?? []).map((testCase) => testCase.id))]));
+      const visibleLocalRuns = localRuns.filter((localRun) => {
+        // Older builds created a local copy whenever a server run was saved.
+        // Hide those copies when their case IDs match the canonical server run.
+        const localCaseIds = new Set((localRun.test_cases ?? []).map((testCase) => testCase.id));
+        return !Array.from(serverCaseIds.values()).some((serverIds) => Array.from(localCaseIds).some((id) => serverIds.has(id)));
+      });
+      return [...visibleLocalRuns, ...historyRuns.filter((serverRun) => !localRuns.some((localRun) => localRun.id === serverRun.id))];
+    },
     [historyRuns, localRuns],
   );
   const [selectedSource, setSelectedSource] = useState("document");
@@ -145,11 +207,12 @@ export default function GenerateTestCasesPage() {
       const context = [prompt.trim() ? `User guidance:\n${prompt.trim()}` : "", sourceUrl.trim() ? `${source.label} source: ${sourceUrl.trim()}` : "", `Coverage preference: ${coverage}`, inputSummary.length ? `Inputs: ${inputSummary.join(", ")}` : ""].filter(Boolean).join("\n\n");
       if (context) requirementIds.push((await requirementsApi.submitDirectPrompt(selectedProjectId, `${source.label} test design`, context)).data.id);
       const profile = coverage === "quick" ? "smoke" : coverage === "thorough" ? "regression" : "feature";
-      return testCasesApi.generate(selectedProjectId, requirementIds, undefined, profile).then((res) => res.data);
+      const testSetTitle = inputHeading(source, files, sourceUrl, prompt);
+      return testCasesApi.generate(selectedProjectId, requirementIds, undefined, profile, testSetTitle).then((res) => res.data);
     },
     onSuccess: (next) => {
       const hasServerCases = Boolean(next.test_cases?.length);
-      setResult(next);
+      setResult({ ...next, title: next.title || inputHeading(source, files, sourceUrl, prompt) });
       setDraftCases(next.test_cases ?? []);
       setLocalPreview(false);
       setSaved(false);
@@ -199,12 +262,15 @@ export default function GenerateTestCasesPage() {
   };
   const saveChatSnapshot = (sourceRun: GenerationRun, cases: TestCase[]) => {
     const isLocal = sourceRun.id.startsWith("local-");
+    // Server runs are already canonical history records. Creating a local
+    // copy here is what caused an edit to appear as a second test set.
+    if (!isLocal) return null;
     const snapshot: GenerationRun = {
       ...sourceRun,
-      id: isLocal ? sourceRun.id : `local-${Date.now()}`,
+      id: sourceRun.id,
       status: cases.length ? "completed" : sourceRun.status,
       requirement_summary: sourceRun.requirement_summary || "Saved test chat",
-      created_at: isLocal ? sourceRun.created_at : new Date().toISOString(),
+      created_at: sourceRun.created_at,
       test_cases: cases,
     };
     const next = [snapshot, ...localRuns.filter((item) => item.id !== snapshot.id)];
@@ -213,26 +279,45 @@ export default function GenerateTestCasesPage() {
     return snapshot;
   };
   const startNewChat = () => {
-    const savedChat = run ? saveChatSnapshot(run, draftCases) : null;
+    const savedChat = run?.id.startsWith("local-") ? saveChatSnapshot(run, draftCases) : null;
     setResult(null); setDraftCases([]); setFiles([]); setSelectedSource("document"); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setError(null);
     setMessage(savedChat ? "Saved the current chat to Test runs. Add a source or describe a new flow to begin." : "Started a new test-design chat. Add a source or describe the flow to begin.");
   };
   const openRun = (historyRun: GenerationRun) => {
     setResult(historyRun); setDraftCases(historyRun.test_cases ?? []); setLocalPreview(historyRun.id.startsWith("local-")); setSaved(historyRun.id.startsWith("local-")); setError(null);
-    setMessage(historyRun.id.startsWith("local-") ? "Reopened a saved chat. Edit any field to continue improving it." : "Reopened this test run. Edit any field to improvise the suite.");
+    setMessage(historyRun.id.startsWith("local-") ? "Reopened a saved chat. Edit any field to continue improving it." : "Reopened this test run. Edit any field to improve the suite.");
   };
-  const saveSuite = () => {
-    if (!run) return;
-    saveChatSnapshot(run, draftCases);
-    localStorage.setItem("qtxpert-saved-suite", JSON.stringify({ runId: run.id, cases: draftCases, savedAt: new Date().toISOString() }));
-    setSaved(true); setMessage("Suite saved to Test runs. You can reopen it after starting another chat.");
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      if (!run) throw new Error("Open a generated test set before saving edits.");
+      if (localPreview) {
+        return saveChatSnapshot(run, draftCases) ?? { ...run, test_cases: draftCases };
+      }
+      return testCasesApi.updateRun(run.id, draftCases).then((response) => response.data);
+    },
+    onSuccess: (updatedRun) => {
+      setResult(updatedRun);
+      setDraftCases(updatedRun.test_cases ?? draftCases);
+      setSaved(true);
+      setMessage("Changes saved to this test set. No new generation run was created.");
+      if (!updatedRun.id.startsWith("local-")) {
+        queryClient.setQueryData(["generation-run", updatedRun.id], updatedRun);
+        queryClient.invalidateQueries({ queryKey: ["generation-history", selectedProjectId] });
+      }
+      setError(null);
+    },
+    onError: (reason) => setError((reason as any)?.response?.data?.detail || (reason as Error).message || "Could not save the test set."),
+  });
+  const saveSuite = () => { if (run) saveMutation.mutate(); };
+  const updateCase = (index: number, next: TestCase) => {
+    setSaved(false);
+    setDraftCases((current) => current.map((item, idx) => idx === index ? next : item));
   };
-  const updateCase = (index: number, next: TestCase) => setDraftCases((current) => current.map((item, idx) => idx === index ? next : item));
 
   const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={3} alignItems="flex-start"><RunRail runs={allRuns} activeId={run?.id} onSelect={openRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
 
   if (run) return workspace(<Stack spacing={3}>
-    <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h5" sx={{ fontWeight: 700 }}>Interactive test suite</Typography><Typography color="text.secondary">{run.status === "completed" ? `${draftCases.length} editable test cases` : draftCases.length ? `${draftCases.length} test cases ready • generating more` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap"><Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button><Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={run.status !== "completed" && !localPreview}>{saved ? "Saved" : "Save suite"}</Button><Button onClick={startNewChat}>＋ New chat</Button></Stack></Stack>
+    <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h5" sx={{ fontWeight: 700 }}>{runTitle(run)}</Typography><Typography color="text.secondary">{run.status === "completed" ? `${draftCases.length} editable test cases` : draftCases.length ? `${draftCases.length} test cases ready • generating more` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap"><Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button><Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={saveMutation.isPending || (run.status !== "completed" && !localPreview)}>{saveMutation.isPending ? "Saving…" : saved ? "Saved" : "Save suite"}</Button><Button onClick={startNewChat}>＋ New chat</Button></Stack></Stack>
     {isActive && <LinearProgress variant="determinate" value={PROGRESS[run.status] ?? 10} />}
     {isActive && <Alert severity="info">{draftCases.length ? `${draftCases.length} real test cases are ready to review below. Additional coverage is still generating.` : "Analyzing your inputs. The first completed test-case batch will appear here automatically."}</Alert>}
     {run.error_message && <Alert severity={run.status === "failed" ? "error" : "warning"}>{run.error_message}</Alert>}

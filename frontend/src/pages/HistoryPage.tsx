@@ -43,15 +43,19 @@ export default function HistoryPage() {
         <Typography color="text.secondary">No generation runs for this project yet.</Typography>
       ) : (
         <Stack spacing={2}>
-          {runs.map((run) => (
-            <Card key={run.id} sx={{ borderRadius: 3 }}>
+          {runs.map((run) => {
+            const scenarioTitle = run.test_scenarios?.[0]?.["title"];
+            const title = run.title || run.requirement_summary || (typeof scenarioTitle === "string" ? scenarioTitle : null) || run.test_cases?.[0]?.scenario || `Run ${run.id.slice(0, 8)}`;
+            return <Card key={run.id} sx={{ borderRadius: 3 }}>
               <CardContent>
                 <Box
                   sx={{ display: "flex", justifyContent: "space-between", cursor: "pointer" }}
                   onClick={() => setExpandedRunId(expandedRunId === run.id ? null : run.id)}
                 >
                   <Box>
-                    <Typography sx={{ fontWeight: 600 }}>Run {run.id.slice(0, 8)}</Typography>
+                    <Typography sx={{ fontWeight: 600 }}>
+                      {title}
+                    </Typography>
                     <Typography variant="caption" color="text.secondary">
                       {new Date(run.created_at).toLocaleString()} - {run.llm_provider}/{run.llm_model} -{" "}
                       {run.test_cases.length} test cases
@@ -76,8 +80,8 @@ export default function HistoryPage() {
                   </Stack>
                 </Collapse>
               </CardContent>
-            </Card>
-          ))}
+            </Card>;
+          })}
         </Stack>
       )}
     </Stack>

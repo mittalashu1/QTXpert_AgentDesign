@@ -7,12 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
+from app.database.models.generation_run import RunStatus
 from app.database.models.user import User
 from app.database.repositories.generation_run_repository import GenerationRunRepository
 from app.database.repositories.requirement_repository import ProjectRepository
 from app.database.session import AsyncSessionLocal, get_db_session
 from app.llm.base import LLMProviderError
-from app.schemas.test_case import GenerateTestCasesRequest, GenerationRunOut
+from app.schemas.test_case import (
+    GenerateTestCasesRequest,
+    GenerationRunOut,
+    UpdateGenerationRunRequest,
+)
 from app.services.test_generation_service import TestGenerationService
 
 router = APIRouter(tags=["test-cases"])
@@ -56,6 +61,7 @@ async def generate_testcases(
             requirement_ids=payload.requirement_ids or None,
             llm_provider_override=payload.llm_provider_override,
             generation_profile=payload.generation_profile,
+            test_set_title=payload.test_set_title,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -95,5 +101,64 @@ async def get_run(
     await repo.fail_stale_for_project(run.project_id, settings.GENERATION_STALE_AFTER_SECONDS)
     # Reload after a recovery check so the response returns the final status.
     run = await repo.get_for_owner(run_id, user.id)
+    return run
+
+
+@router.patch("/history/{run_id}", response_model=GenerationRunOut)
+async def update_run(
+    run_id: UUID,
+    payload: UpdateGenerationRunRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Persist inline Design Agent edits on the current run.
+
+    The editor sends the existing test-case IDs. Updating those rows in place
+    is intentional: editing a suite must never start another generation run or
+    duplicate the suite in the run rail.
+    """
+    repo = GenerationRunRepository(db)
+    run = await repo.get_for_owner(run_id, user.id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
+    if run.status not in {RunStatus.COMPLETED, RunStatus.FAILED}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Wait for generation to finish before saving test-case edits.",
+        )
+
+    existing = {test_case.id: test_case for test_case in run.test_cases}
+    submitted_ids = [item.id for item in payload.test_cases]
+    if len(submitted_ids) != len(set(submitted_ids)):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Duplicate test-case IDs are not allowed")
+    unknown_ids = [test_case_id for test_case_id in submitted_ids if test_case_id not in existing]
+    if unknown_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="One or more test cases do not belong to this run")
+    missing_ids = set(existing).difference(submitted_ids)
+    if missing_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Send every test case in the suite when saving edits.",
+        )
+
+    for item in payload.test_cases:
+        test_case = existing[item.id]
+        scenario = item.scenario.strip()
+        objective = item.objective.strip()
+        expected_result = item.expected_result.strip()
+        cleaned_steps = [step.strip() for step in item.steps if step.strip()]
+        if not scenario or not objective or not expected_result or not cleaned_steps:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Each test case needs a scenario, objective, expected result, and at least one step",
+            )
+        test_case.scenario = scenario
+        test_case.objective = objective
+        test_case.preconditions = (item.preconditions.strip() or None) if item.preconditions else None
+        test_case.steps = cleaned_steps
+        test_case.expected_result = expected_result
+
+    await db.commit()
+    await db.refresh(run, attribute_names=["test_cases"])
     return run
 

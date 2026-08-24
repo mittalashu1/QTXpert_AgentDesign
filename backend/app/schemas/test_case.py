@@ -16,6 +16,32 @@ class GenerateTestCasesRequest(BaseModel):
     )
     llm_provider_override: Optional[str] = None
     generation_profile: Literal["smoke", "feature", "regression", "deep_regression"] = "feature"
+    test_set_title: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Optional user-facing title derived from the source document or query.",
+    )
+
+
+class TestCaseUpdate(BaseModel):
+    """The fields exposed by the Design Agent's inline editor."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID
+    scenario: str = Field(min_length=1, max_length=500)
+    objective: str = Field(min_length=1)
+    preconditions: Optional[str] = None
+    steps: list[str] = Field(min_length=1)
+    expected_result: str = Field(min_length=1)
+
+
+class UpdateGenerationRunRequest(BaseModel):
+    """Replace the editable fields on an existing run without creating a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    test_cases: List[TestCaseUpdate] = Field(default_factory=list)
 
 
 class TestCaseOut(BaseModel):
@@ -48,6 +74,7 @@ class GenerationRunOut(BaseModel):
     llm_provider: str
     llm_model: str
     generation_profile: str
+    title: Optional[str] = None
     requirement_summary: Optional[str]
     business_rules: Optional[list]
     functional_breakdown: Optional[list]
@@ -64,3 +91,4 @@ class ExportRequest(BaseModel):
     format: str = Field(
         description="One of: json, csv, excel, markdown, testrail, zephyr, xray, azure_devops"
     )
+
