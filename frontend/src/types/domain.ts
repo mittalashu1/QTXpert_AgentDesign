@@ -91,6 +91,56 @@ export interface GenerationRun {
   test_cases: TestCase[];
 }
 
+export type ExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type ExecutionResultStatus = "pending" | "passed" | "failed" | "blocked" | "skipped";
+
+export interface Defect {
+  id: string;
+  defect_key: string;
+  title: string;
+  severity: string;
+  status: string;
+}
+
+export interface ExecutionResult {
+  id: string;
+  test_case_id: string;
+  test_case_key: string;
+  scenario: string;
+  status: ExecutionResultStatus;
+  duration_ms: number | null;
+  error_message: string | null;
+  evidence: Record<string, unknown> | null;
+  defects: Defect[];
+}
+
+export interface ExecutionRun {
+  id: string;
+  project_id: string;
+  name: string;
+  status: ExecutionStatus;
+  browser: string;
+  base_url: string;
+  total_tests: number;
+  passed_tests: number;
+  failed_tests: number;
+  blocked_tests: number;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  results: ExecutionResult[];
+}
+
+export interface DashboardSummary {
+  requirements: number;
+  test_cases: number;
+  execution_runs: number;
+  pass_rate: number;
+  open_defects: number;
+  automation_candidates: number;
+  recent_runs: ExecutionRun[];
+}
+
 export const EXPORT_FORMATS = [
   { value: "json", label: "JSON" },
   { value: "csv", label: "CSV" },
@@ -101,3 +151,4 @@ export const EXPORT_FORMATS = [
   { value: "xray", label: "Xray" },
   { value: "azure_devops", label: "Azure DevOps Test Plans" },
 ] as const;
+

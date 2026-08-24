@@ -10,6 +10,10 @@ import ProfilePage from "@/pages/ProfilePage";
 import PromptLibraryPage from "@/pages/PromptLibraryPage";
 import HelpPage from "@/pages/HelpPage";
 import UsersPage from "@/pages/UsersPage";
+import RequirementUploadPage from "@/pages/RequirementUploadPage";
+import DashboardPage from "@/pages/DashboardPage";
+import TestExecutionPage from "@/pages/TestExecutionPage";
+import TestReportsPage from "@/pages/TestReportsPage";
 import { CircularProgress, Box } from "@mui/material";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
@@ -42,8 +46,12 @@ export default function App() {
           </ProtectedRoute>
         }
       >
-        <Route index element={<Navigate to="/generate" replace />} />
-        <Route path="generate" element={<GenerateTestCasesPage />} />
+        <Route index element={<DashboardPage />} />
+        <Route path="documents" element={<RequirementUploadPage />} />
+        <Route path="design" element={<GenerateTestCasesPage />} />
+        <Route path="generate" element={<Navigate to="/design" replace />} />
+        <Route path="execution" element={<TestExecutionPage />} />
+        <Route path="reports" element={<TestReportsPage />} />
         <Route path="history" element={<HistoryPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="settings/api-configuration" element={<ApiConfigurationPage />} />
@@ -56,3 +64,4 @@ export default function App() {
     </Routes>
   );
 }
+

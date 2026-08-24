@@ -54,7 +54,7 @@ export default function LoginPage() {
             QTXpert<Box component="span" sx={{ color: "primary.main" }}>.ai</Box>
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-            AI Test Design Agent - sign in to continue
+            Quality Engineering Workspace
           </Typography>
 
           {error && (
@@ -86,8 +86,12 @@ export default function LoginPage() {
               </Button>
             </Stack>
           </form>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 3 }}>
+            Analyze requirements, design tests, execute automation, and review quality reports.
+          </Typography>
         </CardContent>
       </Card>
     </Box>
   );
 }
+
