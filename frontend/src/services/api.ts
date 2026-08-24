@@ -5,6 +5,7 @@ import {
   Requirement,
   User,
   UserRole,
+  TestCase,
   ExecutionRun,
   DashboardSummary,
 } from "@/types/domain";
@@ -77,16 +78,34 @@ export const requirementsApi = {
 };
 
 export const testCasesApi = {
-  generate: (projectId: string, requirementIds: string[] = [], llmProviderOverride?: string, generationProfile: "smoke" | "feature" | "regression" | "deep_regression" = "feature") =>
+  generate: (
+    projectId: string,
+    requirementIds: string[] = [],
+    llmProviderOverride?: string,
+    generationProfile: "smoke" | "feature" | "regression" | "deep_regression" = "feature",
+    testSetTitle?: string,
+  ) =>
     apiClient.post<GenerationRun>("/generate-testcases", {
       project_id: projectId,
       requirement_ids: requirementIds,
       llm_provider_override: llmProviderOverride,
       generation_profile: generationProfile,
+      test_set_title: testSetTitle,
     }),
   history: (projectId: string) =>
     apiClient.get<GenerationRun[]>("/history", { params: { project_id: projectId } }),
   getRun: (runId: string) => apiClient.get<GenerationRun>(`/history/${runId}`),
+  updateRun: (runId: string, testCases: TestCase[]) =>
+    apiClient.patch<GenerationRun>(`/history/${runId}`, {
+      test_cases: testCases.map((testCase) => ({
+        id: testCase.id,
+        scenario: testCase.scenario,
+        objective: testCase.objective,
+        preconditions: testCase.preconditions,
+        steps: testCase.steps,
+        expected_result: testCase.expected_result,
+      })),
+    }),
   export: (generationRunId: string, format: string) =>
     apiClient.post(
       "/export",
