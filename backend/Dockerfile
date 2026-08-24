@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.12-slim AS base
+# Playwright's pinned Ubuntu image includes Chromium and its supported system
+# dependencies. The previous python:3.12-slim image made Playwright fall back to
+# unavailable Ubuntu font packages during Render builds.
+FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,8 +18,9 @@ RUN apt-get update \
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
-RUN python -m playwright install --with-deps chromium \
-    && chmod -R a+rX /ms-playwright
+
+# Browsers and system dependencies are provided by the Playwright base image.
+RUN chmod -R a+rX /ms-playwright
 
 COPY . .
 
@@ -34,4 +38,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
-
