@@ -5,6 +5,8 @@ import {
   Requirement,
   User,
   UserRole,
+  ExecutionRun,
+  DashboardSummary,
 } from "@/types/domain";
 
 export const authApi = {
@@ -17,6 +19,26 @@ export const authApi = {
   logout: () => apiClient.post("/auth/logout"),
   changePassword: (current_password: string, new_password: string) =>
     apiClient.put("/auth/me/password", { current_password, new_password }),
+};
+
+export const dashboardApi = {
+  summary: (projectId: string) =>
+    apiClient.get<DashboardSummary>("/dashboard", { params: { project_id: projectId } }),
+};
+
+export const executionsApi = {
+  list: (projectId: string) =>
+    apiClient.get<ExecutionRun[]>("/executions", { params: { project_id: projectId } }),
+  create: (payload: {
+    project_id: string;
+    name: string;
+    base_url: string;
+    browser: "chromium" | "firefox" | "webkit";
+    test_case_ids: string[];
+  }) => apiClient.post<ExecutionRun>("/executions", payload),
+  get: (runId: string) => apiClient.get<ExecutionRun>(`/executions/${runId}`),
+  createDefect: (resultId: string, payload: { title: string; severity: string; description: string }) =>
+    apiClient.post(`/execution-results/${resultId}/defects`, payload),
 };
 
 export const usersApi = {
@@ -87,3 +109,4 @@ export const settingsApi = {
       { provider }
     ),
 };
+

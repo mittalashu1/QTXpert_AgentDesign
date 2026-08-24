@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.middleware import RateLimitMiddleware
-from app.api.routes import auth, export, health, requirements, settings, test_cases
+from app.api.routes import auth, executions, export, health, requirements, settings, test_cases
 from app.config import get_settings
 
 settings_obj = get_settings()
@@ -37,6 +37,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix=prefix)
     app.include_router(requirements.router, prefix=prefix)
     app.include_router(test_cases.router, prefix=prefix)
+    app.include_router(executions.router, prefix=prefix)
     app.include_router(export.router, prefix=prefix)
     app.include_router(settings.router, prefix=prefix)
     app.include_router(health.router, prefix=prefix)
@@ -61,3 +62,4 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
+

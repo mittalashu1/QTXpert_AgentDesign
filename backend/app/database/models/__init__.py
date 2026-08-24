@@ -15,6 +15,9 @@ from app.database.models.test_case import (  # noqa: F401
     RiskLevel,
 )
 from app.database.models.config_and_audit import ApiConfiguration, AuditLog  # noqa: F401
+from app.database.models.execution import (  # noqa: F401
+    Defect, DefectStatus, ExecutionResult, ExecutionRun, ExecutionStatus, ResultStatus,
+)
 
 __all__ = [
     "User",
@@ -32,4 +35,11 @@ __all__ = [
     "RiskLevel",
     "ApiConfiguration",
     "AuditLog",
+    "ExecutionRun",
+    "ExecutionResult",
+    "ExecutionStatus",
+    "ResultStatus",
+    "Defect",
+    "DefectStatus",
 ]
+
