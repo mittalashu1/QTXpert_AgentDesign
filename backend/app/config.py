@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gpt-4o"
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 4096
-    LLM_REQUEST_TIMEOUT_SECONDS: int = 120
+    LLM_REQUEST_TIMEOUT_SECONDS: int = Field(default=75, ge=1, le=600)
     LLM_MAX_RETRIES: int = 2
     LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
 
