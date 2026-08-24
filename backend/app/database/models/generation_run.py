@@ -42,6 +42,10 @@ class GenerationRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     llm_provider: Mapped[str] = mapped_column(String(50), nullable=False)
     llm_model: Mapped[str] = mapped_column(String(100), nullable=False)
     generation_profile: Mapped[str] = mapped_column(String(30), default="feature", nullable=False)
+    # A user-facing name for the test set. This is captured from the source
+    # document/query at creation time so the run rail never depends on a
+    # later LLM summary being available.
+    title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     requirement_summary: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     business_rules: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
@@ -56,3 +60,4 @@ class GenerationRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     test_cases: Mapped[List["TestCase"]] = relationship(
         back_populates="generation_run", cascade="all, delete-orphan"
     )
+
