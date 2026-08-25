@@ -83,10 +83,10 @@ class Settings(BaseSettings):
     LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
     # Router targets use provider:model. The first configured/available target
     # in a tier is tried first; failures move across the list and then upward.
-    LLM_ROUTER_LOW_COST: str = "gemini:gemini-2.5-flash-lite,azure_openai:gpt-5.6-luna"
-    LLM_ROUTER_STANDARD: str = "gemini:gemini-2.5-flash,azure_openai:gpt-5.6-luna"
-    LLM_ROUTER_COMPLEX: str = "azure_openai:gpt-5.6-terra,openai:gpt-5.6-terra"
-    LLM_ROUTER_FALLBACK: str = "azure_openai:gpt-5.6-terra"
+    LLM_ROUTER_LOW_COST: str = "gemini:gemini-2.5-flash-lite,azure_openai:configured"
+    LLM_ROUTER_STANDARD: str = "gemini:gemini-2.5-flash,azure_openai:configured"
+    LLM_ROUTER_COMPLEX: str = "azure_openai:configured"
+    LLM_ROUTER_FALLBACK: str = "azure_openai:configured"
     LLM_ROUTER_COMPLEX_INPUT_CHARS: int = 30000
     LLM_COST_RATES_JSON: str = "{}"
 

@@ -23,13 +23,13 @@ services:
       - key: LLM_PROVIDER
         value: router
       - key: LLM_ROUTER_LOW_COST
-        value: gemini:gemini-2.5-flash-lite,azure_openai:gpt-5.6-luna
+        value: gemini:gemini-2.5-flash-lite,azure_openai:configured
       - key: LLM_ROUTER_STANDARD
-        value: gemini:gemini-2.5-flash,azure_openai:gpt-5.6-luna
+        value: gemini:gemini-2.5-flash,azure_openai:configured
       - key: LLM_ROUTER_COMPLEX
-        value: azure_openai:gpt-5.6-terra
+        value: azure_openai:configured
       - key: LLM_ROUTER_FALLBACK
-        value: azure_openai:gpt-5.6-terra
+        value: azure_openai:configured
       - key: CORS_ORIGINS
         value: https://design.qtxpert.com,https://qtxpert-frontend.onrender.com
       # Set the remaining provider/integration keys (AZURE_OPENAI_API_KEY,

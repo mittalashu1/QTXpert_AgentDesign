@@ -67,7 +67,13 @@ def _get_model_provider(provider_key: str, model: str) -> LLMProvider:
     factory = _REGISTRY.get(provider_key)
     if factory is None or provider_key == "router":
         raise LLMProviderError(f"Unknown routed LLM provider '{provider_key}'")
-    settings = get_settings().model_copy(update={"LLM_MODEL": model})
+    settings = get_settings()
+    # "configured" preserves the provider's existing model/deployment. This
+    # is especially important for Azure, where deployment names are chosen by
+    # the account owner and cannot be inferred from a public model ID.
+    if model == "configured":
+        return factory(settings)
+    settings = settings.model_copy(update={"LLM_MODEL": model})
     if provider_key == "azure_openai":
         settings = settings.model_copy(update={"AZURE_OPENAI_DEPLOYMENT": model})
     return factory(settings)

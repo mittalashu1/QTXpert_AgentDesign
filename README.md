@@ -94,6 +94,8 @@ concrete provider) to retain the previous fixed-provider behavior.
 Routes are comma-separated `provider:model` values in
 `LLM_ROUTER_LOW_COST`, `LLM_ROUTER_STANDARD`, `LLM_ROUTER_COMPLEX`, and
 `LLM_ROUTER_FALLBACK`. For Azure, `model` must be the Azure deployment name.
+Use `azure_openai:configured` to retain the existing
+`AZURE_OPENAI_DEPLOYMENT` as a safe fallback.
 Only include providers whose credentials are configured. Each successful call
 logs provider, model, tier, input/output tokens, and—when rates are supplied in
 `LLM_COST_RATES_JSON`—an estimated USD cost. `UsageMeter` also accepts a hook
