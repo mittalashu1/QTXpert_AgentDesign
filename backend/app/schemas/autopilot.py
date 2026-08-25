@@ -56,13 +56,20 @@ class AutopilotJobSummary(BaseModel):
     created_at: str
 
 
+class AutopilotProviderStatus(BaseModel):
+    browserstack_configured: bool = False
+    custom_appium_available: bool = True
+    recommended_provider: Literal["browserstack", "appium"] = "appium"
+
+
 class AutopilotExecutionRequest(BaseModel):
-    appium_url: str = "http://127.0.0.1:4723"
-    device_name: str = "Android Emulator"
-    platform_version: Optional[str] = None
+    provider: Literal["browserstack", "appium"] = "browserstack"
+    appium_url: Optional[str] = None
+    device_name: str = "Google Pixel 8"
+    platform_version: Optional[str] = "14.0"
     appium_app: Optional[str] = Field(
         default=None,
-        description="Optional remote/cloud app reference. If omitted, the uploaded APK path is used.",
+        description="Optional app reference for a custom remote Appium provider. BrowserStack uploads the APK automatically.",
     )
     no_reset: bool = False
     auto_grant_permissions: bool = False
@@ -71,6 +78,7 @@ class AutopilotExecutionRequest(BaseModel):
 class AutopilotExecutionResult(BaseModel):
     job_id: str
     status: Literal["passed", "failed", "blocked"]
+    provider: Literal["browserstack", "appium"]
     started_at: str
     finished_at: str
     duration_seconds: float
