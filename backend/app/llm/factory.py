@@ -52,10 +52,22 @@ def get_llm_provider(provider_override: str | None = None) -> LLMProvider:
     """
     settings = get_settings()
     provider_key = provider_override or settings.LLM_PROVIDER
+    if provider_key == "router":
+        from app.llm.router import ModelRouter
+        return ModelRouter(settings, _get_model_provider)
     factory = _REGISTRY.get(provider_key)
     if factory is None:
         raise LLMProviderError(
             f"Unknown LLM provider '{provider_key}'. Registered providers: "
             f"{list(_REGISTRY.keys())}"
         )
+    return factory(settings)
+@lru_cache
+def _get_model_provider(provider_key: str, model: str) -> LLMProvider:
+    factory = _REGISTRY.get(provider_key)
+    if factory is None or provider_key == "router":
+        raise LLMProviderError(f"Unknown routed LLM provider '{provider_key}'")
+    settings = get_settings().model_copy(update={"LLM_MODEL": model})
+    if provider_key == "azure_openai":
+        settings = settings.model_copy(update={"AZURE_OPENAI_DEPLOYMENT": model})
     return factory(settings)

@@ -32,6 +32,10 @@ class AzureOpenAIProvider(LLMProvider):
         self._deployment = settings.AZURE_OPENAI_DEPLOYMENT or settings.LLM_MODEL
         self._settings = settings
 
+    @property
+    def model_name(self) -> str:
+        return self._deployment
+
     async def complete(
         self,
         messages: List[LLMMessage],

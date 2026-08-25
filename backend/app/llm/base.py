@@ -25,6 +25,7 @@ class LLMResponse:
     provider: str
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
+    estimated_cost_usd: Optional[float] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -36,6 +37,11 @@ class LLMProvider(ABC):
     """Common contract every LLM provider implementation must satisfy."""
 
     provider_name: str = "base"
+
+    @property
+    def model_name(self) -> str:
+        """Best-effort model/deployment name for persistence and diagnostics."""
+        return "unknown"
 
     @abstractmethod
     async def complete(

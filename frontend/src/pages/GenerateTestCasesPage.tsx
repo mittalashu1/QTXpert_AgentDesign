@@ -1,5 +1,6 @@
 import { ChangeEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AxiosError } from "axios";
 import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Card,
   CardContent, Chip, Divider, FormControl, FormHelperText, InputLabel,
@@ -24,6 +25,11 @@ const FILE_EXTENSIONS = ".pdf,.docx,.txt,.md,.json,.csv";
 const LOCAL_CHAT_STORAGE_KEY = "qtxpert-saved-chats";
 type SourceKind = "file" | "link";
 type InputSource = { id: string; label: string; description: string; kind: SourceKind; accept?: string; placeholder?: string };
+
+function apiErrorMessage(reason: unknown, fallback: string): string {
+  const detail = (reason as AxiosError<{ detail?: string }>)?.response?.data?.detail;
+  return detail || (reason instanceof Error ? reason.message : fallback);
+}
 
 const SOURCES: InputSource[] = [
   { id: "app", label: "App / APK", description: "Upload a product package", kind: "file", accept: ".apk,.ipa,.zip" },
@@ -220,7 +226,7 @@ export default function GenerateTestCasesPage() {
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["generation-history", selectedProjectId] });
     },
-    onError: (reason) => { setError((reason as any)?.response?.data?.detail || (reason as Error).message || "Generation failed."); setMessage(null); },
+    onError: (reason) => { setError(apiErrorMessage(reason, "Generation failed.")); setMessage(null); },
   });
   const exportMutation = useMutation({
     mutationFn: async (format: string) => {
@@ -242,7 +248,7 @@ export default function GenerateTestCasesPage() {
       const url = window.URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `qtxpert-${run.id.slice(0, 8)}-${extension}`; link.click(); window.URL.revokeObjectURL(url);
     },
     onSuccess: (_, format) => setMessage(`Downloaded ${format.toUpperCase()} test cases.`),
-    onError: (reason) => setError((reason as any)?.response?.data?.detail || "Export failed."),
+    onError: (reason) => setError(apiErrorMessage(reason, "Export failed.")),
   });
   const allowedExtensions = (source.accept ?? FILE_EXTENSIONS).split(",").map((extension) => extension.trim().toLowerCase());
   const addFiles = (incoming: File[]) => {
@@ -306,7 +312,7 @@ export default function GenerateTestCasesPage() {
       }
       setError(null);
     },
-    onError: (reason) => setError((reason as any)?.response?.data?.detail || (reason as Error).message || "Could not save the test set."),
+    onError: (reason) => setError(apiErrorMessage(reason, "Could not save the test set.")),
   });
   const saveSuite = () => { if (run) saveMutation.mutate(); };
   const updateCase = (index: number, next: TestCase) => {

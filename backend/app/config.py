@@ -73,14 +73,22 @@ class Settings(BaseSettings):
     # LLM Providers - abstraction is selected by LLM_PROVIDER at runtime
     # ------------------------------------------------------------------ #
     LLM_PROVIDER: Literal[
-        "azure_openai", "openai", "anthropic", "gemini", "bedrock"
-    ] = "azure_openai"
+        "router", "azure_openai", "openai", "anthropic", "gemini", "bedrock"
+    ] = "router"
     LLM_MODEL: str = "gpt-4o"
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 4096
     LLM_REQUEST_TIMEOUT_SECONDS: int = Field(default=75, ge=1, le=600)
     LLM_MAX_RETRIES: int = 2
     LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
+    # Router targets use provider:model. The first configured/available target
+    # in a tier is tried first; failures move across the list and then upward.
+    LLM_ROUTER_LOW_COST: str = "gemini:gemini-2.5-flash-lite,azure_openai:gpt-5.6-luna"
+    LLM_ROUTER_STANDARD: str = "gemini:gemini-2.5-flash,azure_openai:gpt-5.6-luna"
+    LLM_ROUTER_COMPLEX: str = "azure_openai:gpt-5.6-terra,openai:gpt-5.6-terra"
+    LLM_ROUTER_FALLBACK: str = "azure_openai:gpt-5.6-terra"
+    LLM_ROUTER_COMPLEX_INPUT_CHARS: int = 30000
+    LLM_COST_RATES_JSON: str = "{}"
 
     OPENAI_API_KEY: Optional[str] = None
 

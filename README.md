@@ -40,8 +40,8 @@ Prerequisites: Docker and Docker Compose.
 
 ```bash
 cp backend/.env.example backend/.env
-# edit backend/.env - at minimum set an LLM provider's API key and
-# LLM_PROVIDER to match it (default: azure_openai)
+# edit backend/.env - set keys for the providers present in your router routes
+# (default: cost-first router; single-provider mode remains supported)
 
 docker compose up --build
 ```
@@ -81,6 +81,23 @@ All configuration is environment-driven - see `backend/.env.example` for
 every key (LLM providers, Jira/Confluence OAuth, Pinecone, JWT, rate
 limiting, upload limits). The active LLM provider is selected purely via
 `LLM_PROVIDER`; no provider is hardcoded anywhere in the codebase.
+
+### Cost-first model routing
+
+`LLM_PROVIDER=router` selects low-cost models for normalization,
+classification, and short requests; standard models for test design work; and
+complex models for large inputs, regulatory/UAT analysis, automation scripts,
+and root-cause analysis. A provider error or empty response tries the next
+target and then escalates tiers. Set `LLM_PROVIDER=azure_openai` (or another
+concrete provider) to retain the previous fixed-provider behavior.
+
+Routes are comma-separated `provider:model` values in
+`LLM_ROUTER_LOW_COST`, `LLM_ROUTER_STANDARD`, `LLM_ROUTER_COMPLEX`, and
+`LLM_ROUTER_FALLBACK`. For Azure, `model` must be the Azure deployment name.
+Only include providers whose credentials are configured. Each successful call
+logs provider, model, tier, input/output tokens, and—when rates are supplied in
+`LLM_COST_RATES_JSON`—an estimated USD cost. `UsageMeter` also accepts a hook
+for forwarding these events to telemetry or persistent billing storage.
 
 ## Deployment (Render)
 

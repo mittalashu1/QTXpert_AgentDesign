@@ -17,6 +17,10 @@ class AnthropicProvider(LLMProvider):
             )
         self._client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
         self._model = settings.LLM_MODEL
+
+    @property
+    def model_name(self) -> str:
+        return self._model
         self._settings = settings
 
     @staticmethod

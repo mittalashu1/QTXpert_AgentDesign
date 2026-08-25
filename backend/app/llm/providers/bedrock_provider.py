@@ -23,6 +23,10 @@ class BedrockProvider(LLMProvider):
             region_name=settings.AWS_REGION,
         )
         self._model_id = settings.BEDROCK_MODEL_ID
+
+    @property
+    def model_name(self) -> str:
+        return self._model_id
         self._settings = settings
 
     @staticmethod

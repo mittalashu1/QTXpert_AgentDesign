@@ -120,7 +120,7 @@ class TestGenerationService:
             requested_by_id=requested_by_id,
             status=RunStatus.NORMALIZING,
             llm_provider=provider.provider_name,
-            llm_model=self._settings.LLM_MODEL,
+            llm_model=provider.model_name,
             generation_profile=generation_profile,
             title=_derive_test_set_title(requirements, test_set_title),
         )
@@ -449,5 +449,3 @@ class TestGenerationService:
                 ))
             except Exception as case_exc:  # noqa: BLE001
                 warnings.append(f"Skipped test case #{index}: {case_exc}")
-
-

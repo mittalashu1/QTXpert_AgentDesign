@@ -17,6 +17,10 @@ class OpenAIProvider(LLMProvider):
         self._model = settings.LLM_MODEL
         self._settings = settings
 
+    @property
+    def model_name(self) -> str:
+        return self._model
+
     async def complete(
         self,
         messages: List[LLMMessage],
@@ -26,11 +30,17 @@ class OpenAIProvider(LLMProvider):
         response_format_json: bool = False,
     ) -> LLMResponse:
         try:
+            options = {}
+            if self._model.startswith(("gpt-5", "o1", "o3", "o4")):
+                options["reasoning_effort"] = self._settings.LLM_REASONING_EFFORT
+                options["max_completion_tokens"] = max_tokens or self._settings.LLM_MAX_TOKENS
+            else:
+                options["temperature"] = temperature if temperature is not None else self._settings.LLM_TEMPERATURE
+                options["max_tokens"] = max_tokens or self._settings.LLM_MAX_TOKENS
             response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
-                temperature=temperature if temperature is not None else self._settings.LLM_TEMPERATURE,
-                max_tokens=max_tokens or self._settings.LLM_MAX_TOKENS,
+                **options,
                 response_format={"type": "json_object"} if response_format_json else None,
                 timeout=self._settings.LLM_REQUEST_TIMEOUT_SECONDS,
             )
@@ -54,11 +64,17 @@ class OpenAIProvider(LLMProvider):
         max_tokens: Optional[int] = None,
     ) -> AsyncIterator[str]:
         try:
+            options = {}
+            if self._model.startswith(("gpt-5", "o1", "o3", "o4")):
+                options["reasoning_effort"] = self._settings.LLM_REASONING_EFFORT
+                options["max_completion_tokens"] = max_tokens or self._settings.LLM_MAX_TOKENS
+            else:
+                options["temperature"] = temperature if temperature is not None else self._settings.LLM_TEMPERATURE
+                options["max_tokens"] = max_tokens or self._settings.LLM_MAX_TOKENS
             stream = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[{"role": m.role, "content": m.content} for m in messages],
-                temperature=temperature if temperature is not None else self._settings.LLM_TEMPERATURE,
-                max_tokens=max_tokens or self._settings.LLM_MAX_TOKENS,
+                **options,
                 stream=True,
                 timeout=self._settings.LLM_REQUEST_TIMEOUT_SECONDS,
             )

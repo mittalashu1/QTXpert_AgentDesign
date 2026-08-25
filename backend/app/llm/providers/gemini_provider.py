@@ -17,6 +17,10 @@ class GeminiProvider(LLMProvider):
         self._model_name = settings.LLM_MODEL
         self._settings = settings
 
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
     @staticmethod
     def _to_gemini_history(messages: List[LLMMessage]):
         system_parts = [m.content for m in messages if m.role == "system"]
