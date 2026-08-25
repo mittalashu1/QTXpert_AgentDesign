@@ -143,6 +143,17 @@ class Settings(BaseSettings):
     AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=250, ge=1, le=2048)
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
 
+    # BrowserStack App Automate (optional real-device execution)
+    BROWSERSTACK_USERNAME: Optional[str] = None
+    BROWSERSTACK_ACCESS_KEY: Optional[str] = None
+    BROWSERSTACK_HUB_URL: str = "https://hub-cloud.browserstack.com/wd/hub"
+    BROWSERSTACK_UPLOAD_URL: str = "https://api-cloud.browserstack.com/app-automate/upload"
+    BROWSERSTACK_PROJECT_NAME: str = "QTXpert Autopilot"
+
+    @property
+    def browserstack_configured(self) -> bool:
+        return bool(self.BROWSERSTACK_USERNAME and self.BROWSERSTACK_ACCESS_KEY)
+
     # ------------------------------------------------------------------ #
     # Rate limiting
     # ------------------------------------------------------------------ #
