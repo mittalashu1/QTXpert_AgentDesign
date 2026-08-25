@@ -28,7 +28,7 @@ COPY . .
 RUN python -m compileall -q app alembic
 
 RUN useradd --create-home --shell /bin/bash appuser \
-    && mkdir -p /app/storage/uploads \
+    && mkdir -p /app/storage/uploads /app/storage/autopilot \
     && chown -R appuser:appuser /app
 USER appuser
 
