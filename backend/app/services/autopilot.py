@@ -1,0 +1,580 @@
+"""Android-first autonomous mobile QA prototype service.
+
+The prototype separates deterministic binary/runtime analysis from LLM enrichment.
+If the configured LLM is unavailable, QTXpert still returns a useful test plan.
+Real-device smoke execution can use BrowserStack App Automate when credentials are
+configured, while a generic Appium endpoint remains available for local/private labs.
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import re
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List
+from uuid import uuid4
+
+import httpx
+
+from app.config import Settings
+from app.llm.base import LLMMessage
+from app.llm.factory import get_llm_provider
+from app.schemas.autopilot import (
+    AutopilotAnalysis,
+    AutopilotExecutionRequest,
+    AutopilotExecutionResult,
+    AutopilotTest,
+)
+
+
+_DANGEROUS_PERMISSION_HINTS = {
+    "android.permission.CAMERA": ("Camera", "Validate camera permission grant/deny and recovery flows."),
+    "android.permission.ACCESS_FINE_LOCATION": ("Location", "Validate precise-location permission, denial and degraded behavior."),
+    "android.permission.ACCESS_COARSE_LOCATION": ("Location", "Validate approximate-location behavior and fallback."),
+    "android.permission.RECORD_AUDIO": ("Microphone", "Validate microphone permission grant/deny behavior."),
+    "android.permission.READ_CONTACTS": ("Contacts", "Validate contacts permission and privacy-safe fallback."),
+    "android.permission.POST_NOTIFICATIONS": ("Notifications", "Validate notification permission and notification-dependent journeys."),
+    "android.permission.READ_MEDIA_IMAGES": ("Media", "Validate media selection permission and denied-state UX."),
+}
+
+
+class AutopilotPrototypeService:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self.root = Path(settings.AUTOPILOT_STORAGE_PATH).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _job_dir(self, job_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f-]{36}", job_id):
+            raise ValueError("Invalid Autopilot job id")
+        return self.root / job_id
+
+    def _metadata_path(self, job_id: str) -> Path:
+        return self._job_dir(job_id) / "analysis.json"
+
+    async def save_upload(self, filename: str, data: bytes, owner_id: str, context: str = "") -> tuple[str, Path]:
+        job_id = str(uuid4())
+        job_dir = self._job_dir(job_id)
+        job_dir.mkdir(parents=True, exist_ok=False)
+        safe_name = Path(filename).name or "application.apk"
+        apk_path = job_dir / safe_name
+        await asyncio.to_thread(apk_path.write_bytes, data)
+        seed = {
+            "job_id": job_id,
+            "owner_id": owner_id,
+            "filename": safe_name,
+            "context": context[:8000],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "apk_path": str(apk_path),
+        }
+        await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
+        return job_id, apk_path
+
+    async def load_job(self, job_id: str) -> Dict[str, Any]:
+        path = self._job_dir(job_id) / "job.json"
+        if not path.exists():
+            raise FileNotFoundError(job_id)
+        return json.loads(await asyncio.to_thread(path.read_text, "utf-8"))
+
+    async def load_analysis(self, job_id: str) -> AutopilotAnalysis:
+        path = self._metadata_path(job_id)
+        if not path.exists():
+            raise FileNotFoundError(job_id)
+        return AutopilotAnalysis.model_validate_json(await asyncio.to_thread(path.read_text, "utf-8"))
+
+    async def analyze(self, job_id: str) -> AutopilotAnalysis:
+        job = await self.load_job(job_id)
+        apk_path = Path(job["apk_path"])
+        metadata = await asyncio.to_thread(self._analyze_apk_sync, apk_path)
+        deterministic_tests = self._build_deterministic_tests(metadata)
+        enrichment = await self._enrich_with_ai(metadata, job.get("context", ""))
+
+        tests = deterministic_tests + enrichment.get("tests", [])
+        deduped: list[AutopilotTest] = []
+        seen: set[str] = set()
+        for test in tests:
+            key = re.sub(r"\W+", " ", test.title.lower()).strip()
+            if key and key not in seen:
+                deduped.append(test)
+                seen.add(key)
+
+        analysis = AutopilotAnalysis(
+            job_id=job_id,
+            filename=job["filename"],
+            status="analysis_partial" if metadata.get("warnings") else "analyzed",
+            app_name=metadata.get("app_name"),
+            package_name=metadata.get("package_name"),
+            version_name=metadata.get("version_name"),
+            version_code=metadata.get("version_code"),
+            min_sdk=metadata.get("min_sdk"),
+            target_sdk=metadata.get("target_sdk"),
+            main_activity=metadata.get("main_activity"),
+            activities=metadata.get("activities", []),
+            services=metadata.get("services", []),
+            receivers=metadata.get("receivers", []),
+            permissions=metadata.get("permissions", []),
+            file_count=metadata.get("file_count", 0),
+            size_bytes=metadata.get("size_bytes", 0),
+            sha256=metadata["sha256"],
+            debuggable=metadata.get("debuggable"),
+            inferred_domain=enrichment.get("inferred_domain") or self._infer_domain(metadata, job.get("context", "")),
+            app_summary=enrichment.get("app_summary") or self._fallback_summary(metadata),
+            critical_journeys=enrichment.get("critical_journeys") or self._fallback_journeys(metadata),
+            clarification_questions=enrichment.get("clarification_questions") or self._fallback_questions(metadata),
+            tests=deduped[:80],
+            release_risks=enrichment.get("release_risks") or self._fallback_risks(metadata),
+            warnings=metadata.get("warnings", []),
+            capabilities=self._capabilities(metadata),
+        )
+        await asyncio.to_thread(self._metadata_path(job_id).write_text, analysis.model_dump_json(indent=2), "utf-8")
+        return analysis
+
+    def _analyze_apk_sync(self, apk_path: Path) -> Dict[str, Any]:
+        digest = hashlib.sha256()
+        with apk_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+
+        result: Dict[str, Any] = {
+            "sha256": digest.hexdigest(),
+            "size_bytes": apk_path.stat().st_size,
+            "warnings": [],
+            "activities": [],
+            "services": [],
+            "receivers": [],
+            "permissions": [],
+            "file_count": 0,
+        }
+        try:
+            from androguard.core.apk import APK
+
+            apk = APK(str(apk_path))
+            result.update(
+                {
+                    "app_name": apk.get_app_name() or None,
+                    "package_name": apk.get_package() or None,
+                    "version_name": apk.get_androidversion_name() or None,
+                    "version_code": apk.get_androidversion_code() or None,
+                    "min_sdk": apk.get_min_sdk_version() or None,
+                    "target_sdk": apk.get_target_sdk_version() or None,
+                    "main_activity": apk.get_main_activity() or None,
+                    "activities": sorted(apk.get_activities() or []),
+                    "services": sorted(apk.get_services() or []),
+                    "receivers": sorted(apk.get_receivers() or []),
+                    "permissions": sorted(apk.get_permissions() or []),
+                    "file_count": len(apk.get_files() or []),
+                }
+            )
+            debuggable = apk.get_attribute_value("application", "debuggable")
+            result["debuggable"] = str(debuggable).lower() == "true" if debuggable is not None else None
+        except Exception as exc:
+            result["warnings"].append(f"Deep APK parsing was partial: {type(exc).__name__}: {exc}")
+            try:
+                import zipfile
+
+                with zipfile.ZipFile(apk_path) as archive:
+                    result["file_count"] = len(archive.infolist())
+            except Exception:
+                pass
+        return result
+
+    def _build_deterministic_tests(self, meta: Dict[str, Any]) -> List[AutopilotTest]:
+        tests: list[AutopilotTest] = [
+            AutopilotTest(
+                id="QT-AUTO-SMOKE-001",
+                suite="Smoke",
+                title="Install and cold-launch application",
+                priority="critical",
+                objective="Verify the uploaded build installs and reaches a stable foreground UI without an immediate crash.",
+                steps=["Install uploaded APK on clean Android device", "Cold-launch the application", "Wait for first stable foreground screen", "Capture screenshot, UI hierarchy and device state"],
+                expected=["Installation succeeds", "Application becomes foreground process", "No immediate fatal crash is detected", "A readable UI hierarchy or rendered screen is available"],
+            ),
+            AutopilotTest(
+                id="QT-AUTO-SMOKE-002",
+                suite="Smoke",
+                title="Background and foreground recovery",
+                priority="high",
+                objective="Verify the app survives a basic lifecycle interruption.",
+                steps=["Launch application", "Send application to background", "Wait briefly", "Restore application to foreground"],
+                expected=["Application remains responsive", "No unexpected logout or crash occurs unless explicitly designed"],
+            ),
+            AutopilotTest(
+                id="QT-AUTO-UX-001",
+                suite="Accessibility",
+                title="Initial-screen accessibility and semantic control scan",
+                priority="medium",
+                objective="Identify missing labels, inaccessible controls and obvious semantic UI defects on discovered entry screens.",
+                steps=["Capture UI hierarchy", "Enumerate interactive controls", "Check labels/content descriptions and enabled states"],
+                expected=["Critical interactive controls are discoverable and semantically labelled"],
+            ),
+            AutopilotTest(
+                id="QT-AUTO-SEC-001",
+                suite="Security",
+                title="Application package security posture baseline",
+                priority="high",
+                objective="Baseline manifest exposure, requested permissions and debug posture before deeper dynamic security testing.",
+                steps=["Inspect Android manifest", "Inventory permissions, exported components and debug posture", "Flag high-risk configuration for review"],
+                expected=["No unexplained high-risk package configuration remains unreviewed"],
+            ),
+        ]
+        if "android.permission.INTERNET" in meta.get("permissions", []):
+            tests.append(
+                AutopilotTest(
+                    id="QT-AUTO-NET-001",
+                    suite="Resilience",
+                    title="Network loss and recovery behavior",
+                    priority="high",
+                    objective="Verify graceful behavior when connectivity is interrupted and restored.",
+                    steps=["Launch app online", "Interrupt connectivity at a safe non-transactional state", "Observe error handling", "Restore connectivity"],
+                    expected=["User receives controlled feedback", "App does not crash", "App recovers without corrupting state"],
+                )
+            )
+        for permission, (label, objective) in _DANGEROUS_PERMISSION_HINTS.items():
+            if permission in meta.get("permissions", []):
+                slug = re.sub(r"\W+", "-", label.upper()).strip("-")
+                tests.append(
+                    AutopilotTest(
+                        id=f"QT-AUTO-PERM-{slug}",
+                        suite="Permissions",
+                        title=f"{label} permission grant and denial",
+                        priority="medium",
+                        objective=objective,
+                        steps=[f"Navigate to a non-destructive feature requiring {label.lower()} access", "Deny permission", "Verify controlled fallback", "Grant permission and retry"],
+                        expected=["Denial is handled without crash", "Permission rationale is understandable when required", "Feature recovers after permission is granted"],
+                    )
+                )
+        if meta.get("debuggable") is True:
+            tests.append(
+                AutopilotTest(
+                    id="QT-AUTO-SEC-DEBUG",
+                    suite="Security",
+                    title="Debuggable production-build finding",
+                    priority="high",
+                    objective="Confirm whether android:debuggable=true is intentional for this environment.",
+                    steps=["Inspect application debug flag", "Compare with declared test environment"],
+                    expected=["Production/release builds are not debuggable unless an approved exception exists"],
+                )
+            )
+        return tests
+
+    async def _enrich_with_ai(self, meta: Dict[str, Any], context: str) -> Dict[str, Any]:
+        try:
+            provider = get_llm_provider()
+            prompt = {
+                "artifact": {
+                    "app_name": meta.get("app_name"),
+                    "package": meta.get("package_name"),
+                    "main_activity": meta.get("main_activity"),
+                    "permissions": meta.get("permissions", [])[:80],
+                    "activities": meta.get("activities", [])[:80],
+                    "services": meta.get("services", [])[:40],
+                    "receivers": meta.get("receivers", [])[:40],
+                    "target_sdk": meta.get("target_sdk"),
+                    "debuggable": meta.get("debuggable"),
+                },
+                "user_context": context[:8000],
+            }
+            messages = [
+                LLMMessage(
+                    role="system",
+                    content=(
+                        "You are the QTXpert Autonomous Mobile QA Architect. Infer only what the evidence supports. "
+                        "Return strict JSON with keys: app_summary (string), inferred_domain (string), "
+                        "critical_journeys (array of short strings), clarification_questions (max 6 array), "
+                        "release_risks (array), tests (array). Each test must contain title, suite, priority, "
+                        "objective, steps, expected, destructive. Prefer high-value mobile tests that can be "
+                        "derived from the artifact. Never assume credentials or real transaction permission."
+                    ),
+                ),
+                LLMMessage(role="user", content=json.dumps(prompt, ensure_ascii=False)),
+            ]
+            response = await provider.complete(messages, temperature=0.1, max_tokens=2800, response_format_json=True)
+            data = json.loads(response.content)
+            parsed_tests: list[AutopilotTest] = []
+            for index, raw in enumerate(data.get("tests", [])[:30], start=1):
+                if not isinstance(raw, dict) or not raw.get("title"):
+                    continue
+                priority = str(raw.get("priority", "medium")).lower()
+                if priority not in {"critical", "high", "medium", "low"}:
+                    priority = "medium"
+                parsed_tests.append(
+                    AutopilotTest(
+                        id=f"QT-AI-{index:03d}",
+                        suite=str(raw.get("suite") or "AI Discovery")[:80],
+                        title=str(raw["title"])[:240],
+                        priority=priority,
+                        objective=str(raw.get("objective") or raw["title"])[:700],
+                        steps=[str(x)[:500] for x in raw.get("steps", [])[:12]],
+                        expected=[str(x)[:500] for x in raw.get("expected", [])[:8]],
+                        autonomous=not bool(raw.get("destructive", False)),
+                        destructive=bool(raw.get("destructive", False)),
+                        source="ai",
+                    )
+                )
+            return {
+                "app_summary": str(data.get("app_summary") or "")[:1200],
+                "inferred_domain": str(data.get("inferred_domain") or "")[:200],
+                "critical_journeys": self._string_list(data.get("critical_journeys"), 12),
+                "clarification_questions": self._string_list(data.get("clarification_questions"), 6),
+                "release_risks": self._string_list(data.get("release_risks"), 12),
+                "tests": parsed_tests,
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _string_list(value: Any, limit: int) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item)[:500] for item in value[:limit] if str(item).strip()]
+
+    def _infer_domain(self, meta: Dict[str, Any], context: str) -> str:
+        haystack = " ".join(
+            [str(meta.get("app_name") or ""), str(meta.get("package_name") or ""), context]
+        ).lower()
+        rules = [
+            (("bank", "finance", "wallet", "payment", "invest", "loan"), "Banking / Financial Services"),
+            (("shop", "retail", "cart", "store", "commerce"), "Retail / E-commerce"),
+            (("health", "clinic", "medical", "patient"), "Healthcare"),
+            (("travel", "flight", "hotel", "booking"), "Travel / Hospitality"),
+        ]
+        for terms, label in rules:
+            if any(term in haystack for term in terms):
+                return label
+        return "General mobile application"
+
+    @staticmethod
+    def _fallback_summary(meta: Dict[str, Any]) -> str:
+        name = meta.get("app_name") or meta.get("package_name") or "Android application"
+        return (
+            f"QTXpert identified {name} as an Android application with "
+            f"{len(meta.get('activities', []))} activities, {len(meta.get('services', []))} services and "
+            f"{len(meta.get('permissions', []))} declared permissions. The first Autopilot pass will remain "
+            "non-destructive until test credentials and permitted business actions are supplied."
+        )
+
+    @staticmethod
+    def _fallback_journeys(meta: Dict[str, Any]) -> List[str]:
+        journeys = ["Install and cold launch", "First-screen rendering", "Background/foreground recovery"]
+        if "android.permission.INTERNET" in meta.get("permissions", []):
+            journeys.append("Network-dependent user journey and recovery")
+        if meta.get("main_activity"):
+            journeys.append(f"Entry journey through {meta['main_activity'].split('.')[-1]}")
+        return journeys
+
+    @staticmethod
+    def _fallback_questions(meta: Dict[str, Any]) -> List[str]:
+        questions = [
+            "Which environment may QTXpert test (dev, QA, UAT, staging or production)?",
+            "Provide non-production test credentials/roles needed to access authenticated journeys.",
+            "Which actions are prohibited or require explicit approval (payments, deletion, notifications, real OTP, etc.)?",
+            "Which business journeys are release-critical?",
+        ]
+        if "android.permission.INTERNET" in meta.get("permissions", []):
+            questions.append("Which external APIs/integrated systems should be validated end to end?")
+        return questions[:6]
+
+    @staticmethod
+    def _fallback_risks(meta: Dict[str, Any]) -> List[str]:
+        risks = []
+        if meta.get("debuggable") is True:
+            risks.append("Application is marked debuggable; validate that this is not a production/release artifact.")
+        if len(meta.get("permissions", [])) > 15:
+            risks.append("Large permission footprint; review least-privilege and permission-denial behavior.")
+        if "android.permission.INTERNET" in meta.get("permissions", []):
+            risks.append("Backend/API dependencies require environment-aware validation; APK-only evidence cannot prove business correctness.")
+        return risks or ["Business-rule assertions require customer context or trusted backend/oracle data."]
+
+    @staticmethod
+    def _capabilities(meta: Dict[str, Any]) -> Dict[str, bool]:
+        permissions = set(meta.get("permissions", []))
+        return {
+            "static_apk_analysis": True,
+            "appium_smoke_execution": True,
+            "network_test_candidate": "android.permission.INTERNET" in permissions,
+            "camera_test_candidate": "android.permission.CAMERA" in permissions,
+            "location_test_candidate": bool({"android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"} & permissions),
+            "notification_test_candidate": "android.permission.POST_NOTIFICATIONS" in permissions,
+            "ai_test_design": True,
+        }
+
+    async def _browserstack_app_url(self, job_id: str, apk_path: Path, sha256: str) -> str:
+        if not self.settings.browserstack_configured:
+            raise RuntimeError(
+                "BrowserStack is not configured. Set BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY as backend secrets."
+            )
+
+        cache_path = self._job_dir(job_id) / "browserstack.json"
+        if cache_path.exists():
+            try:
+                cached = json.loads(await asyncio.to_thread(cache_path.read_text, "utf-8"))
+                if cached.get("sha256") == sha256 and cached.get("app_url"):
+                    return str(cached["app_url"])
+            except Exception:
+                pass
+
+        custom_id = f"qtxpert-{sha256[:24]}"
+        timeout = httpx.Timeout(240.0, connect=30.0)
+        async with httpx.AsyncClient(
+            auth=(self.settings.BROWSERSTACK_USERNAME or "", self.settings.BROWSERSTACK_ACCESS_KEY or ""),
+            timeout=timeout,
+        ) as client:
+            with apk_path.open("rb") as handle:
+                response = await client.post(
+                    self.settings.BROWSERSTACK_UPLOAD_URL,
+                    files={
+                        "file": (
+                            apk_path.name,
+                            handle,
+                            "application/vnd.android.package-archive",
+                        )
+                    },
+                    data={"custom_id": custom_id},
+                )
+            if response.status_code >= 400:
+                detail = response.text[:500]
+                raise RuntimeError(f"BrowserStack app upload failed ({response.status_code}): {detail}")
+            payload = response.json()
+
+        app_url = payload.get("app_url")
+        if not app_url:
+            raise RuntimeError("BrowserStack app upload did not return an app_url")
+        cache = {
+            "sha256": sha256,
+            "app_url": app_url,
+            "custom_id": payload.get("custom_id") or custom_id,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await asyncio.to_thread(cache_path.write_text, json.dumps(cache, indent=2), "utf-8")
+        return str(app_url)
+
+    async def execute_smoke(self, job_id: str, request: AutopilotExecutionRequest) -> AutopilotExecutionResult:
+        job = await self.load_job(job_id)
+        analysis = await self.load_analysis(job_id)
+        started = datetime.now(timezone.utc)
+        start_perf = time.perf_counter()
+        evidence_dir = self._job_dir(job_id) / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        screenshot_path = evidence_dir / "launch.png"
+        source_path = evidence_dir / "page-source.xml"
+
+        try:
+            apk_path = Path(job["apk_path"])
+            app_reference = request.appium_app or str(apk_path)
+            appium_url = request.appium_url or "http://127.0.0.1:4723"
+            browserstack_options: Dict[str, Any] | None = None
+
+            if request.provider == "browserstack":
+                app_reference = await self._browserstack_app_url(job_id, apk_path, analysis.sha256)
+                appium_url = self.settings.BROWSERSTACK_HUB_URL
+                browserstack_options = {
+                    "userName": self.settings.BROWSERSTACK_USERNAME,
+                    "accessKey": self.settings.BROWSERSTACK_ACCESS_KEY,
+                    "projectName": self.settings.BROWSERSTACK_PROJECT_NAME,
+                    "buildName": f"Autopilot {analysis.app_name or analysis.package_name or job['filename']}",
+                    "sessionName": f"Safe Smoke {job_id[:8]}",
+                    "debug": True,
+                    "networkLogs": True,
+                }
+
+            result = await asyncio.to_thread(
+                self._execute_appium_sync,
+                appium_url,
+                app_reference,
+                request,
+                screenshot_path,
+                source_path,
+                browserstack_options,
+            )
+            result["provider"] = request.provider
+            if request.provider == "browserstack":
+                result["cloud_app_reference"] = app_reference
+            execution_status = "passed"
+            error = None
+        except Exception as exc:
+            result = {"provider": request.provider}
+            execution_status = "blocked" if self._looks_like_connector_problem(exc) else "failed"
+            error = f"{type(exc).__name__}: {exc}"
+
+        finished = datetime.now(timezone.utc)
+        return AutopilotExecutionResult(
+            job_id=job_id,
+            status=execution_status,
+            provider=request.provider,
+            started_at=started.isoformat(),
+            finished_at=finished.isoformat(),
+            duration_seconds=round(time.perf_counter() - start_perf, 2),
+            device_name=request.device_name,
+            current_package=result.get("current_package"),
+            current_activity=result.get("current_activity"),
+            screenshot_path=str(screenshot_path) if screenshot_path.exists() else None,
+            page_source_path=str(source_path) if source_path.exists() else None,
+            error=error,
+            evidence=result,
+        )
+
+    @staticmethod
+    def _execute_appium_sync(
+        appium_url: str,
+        app_reference: str,
+        request: AutopilotExecutionRequest,
+        screenshot_path: Path,
+        source_path: Path,
+        browserstack_options: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        from appium import webdriver
+        from appium.options.android import UiAutomator2Options
+
+        capabilities: Dict[str, Any] = {
+            "platformName": "Android",
+            "appium:automationName": "UiAutomator2",
+            "appium:deviceName": request.device_name,
+            "appium:app": app_reference,
+            "appium:noReset": request.no_reset,
+            "appium:autoGrantPermissions": request.auto_grant_permissions,
+            "appium:newCommandTimeout": 120,
+        }
+        if request.platform_version:
+            capabilities["appium:platformVersion"] = request.platform_version
+        if browserstack_options:
+            capabilities["bstack:options"] = browserstack_options
+
+        options = UiAutomator2Options().load_capabilities(capabilities)
+        driver = webdriver.Remote(appium_url, options=options)
+        try:
+            time.sleep(3)
+            driver.get_screenshot_as_file(str(screenshot_path))
+            source_path.write_text(driver.page_source or "", encoding="utf-8")
+            current_package = getattr(driver, "current_package", None)
+            current_activity = getattr(driver, "current_activity", None)
+            return {
+                "session_id": driver.session_id,
+                "current_package": current_package,
+                "current_activity": current_activity,
+                "orientation": getattr(driver, "orientation", None),
+                "page_source_chars": source_path.stat().st_size if source_path.exists() else 0,
+            }
+        finally:
+            driver.quit()
+
+    @staticmethod
+    def _looks_like_connector_problem(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(
+            token in text
+            for token in (
+                "connection refused",
+                "max retries",
+                "could not connect",
+                "invalid argument: app",
+                "unknown server-side error",
+                "browserstack is not configured",
+                "browserstack app upload failed (401)",
+                "browserstack app upload failed (403)",
+                "unauthorized",
+                "authentication",
+            )
+        )

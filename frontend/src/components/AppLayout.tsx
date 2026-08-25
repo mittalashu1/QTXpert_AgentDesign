@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { AppBar, Avatar, Box, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Toolbar, Tooltip, Typography } from "@mui/material";
+import { AppBar, Avatar, Box, Chip, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Toolbar, Tooltip, Typography } from "@mui/material";
 import DashboardOutlinedIcon from "@mui/icons-material/DashboardOutlined";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ArchitectureOutlinedIcon from "@mui/icons-material/ArchitectureOutlined";
 import PlayCircleOutlineIcon from "@mui/icons-material/PlayCircleOutline";
 import AssessmentOutlinedIcon from "@mui/icons-material/AssessmentOutlined";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
 import LightModeOutlinedIcon from "@mui/icons-material/LightModeOutlined";
 import { useAuth } from "@/contexts/AuthContext";
@@ -15,6 +16,7 @@ import ProjectSelector from "@/components/ProjectSelector";
 const drawerWidth = 248;
 const navigation = [
   { to: "/", label: "Dashboard", icon: <DashboardOutlinedIcon />, end: true },
+  { to: "/autopilot", label: "Autopilot", icon: <AutoAwesomeIcon />, badge: "NEW" },
   { to: "/documents", label: "Document analysis", icon: <DescriptionOutlinedIcon /> },
   { to: "/design", label: "Test design", icon: <ArchitectureOutlinedIcon /> },
   { to: "/execution", label: "Test execution", icon: <PlayCircleOutlineIcon /> },
@@ -48,13 +50,12 @@ export default function AppLayout() {
         <Box sx={{ px: 1.5, py: 2 }}>
           <Typography variant="caption" color="text.secondary" sx={{ px: 1.5, fontWeight: 700, letterSpacing: ".12em" }}>QUALITY WORKSPACE</Typography>
           <List sx={{ mt: 1 }}>
-            {navigation.map((item) => <ListItemButton key={item.to} component={NavLink} to={item.to} end={item.end} sx={{ borderRadius: 2, mb: .5, "&.active": { bgcolor: "primary.main", color: "primary.contrastText", "& .MuiListItemIcon-root": { color: "inherit" } } }}><ListItemIcon sx={{ minWidth: 38, color: "text.secondary" }}>{item.icon}</ListItemIcon><ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} /></ListItemButton>)}
+            {navigation.map((item) => <ListItemButton key={item.to} component={NavLink} to={item.to} end={item.end} sx={{ borderRadius: 2, mb: .5, "&.active": { bgcolor: "primary.main", color: "primary.contrastText", "& .MuiListItemIcon-root": { color: "inherit" } } }}><ListItemIcon sx={{ minWidth: 38, color: "text.secondary" }}>{item.icon}</ListItemIcon><ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />{item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}</ListItemButton>)}
           </List>
         </Box>
-        <Box sx={{ mt: "auto", p: 2 }}><Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "action.hover" }}><Typography variant="caption" color="primary.main" sx={{ fontWeight: 700 }}>M4 FOUNDATION</Typography><Typography variant="body2" sx={{ mt: .5, fontWeight: 600 }}>Playwright-first execution</Typography><Typography variant="caption" color="text.secondary">Unsupported natural-language steps are blocked, never reported as false passes.</Typography></Box></Box>
+        <Box sx={{ mt: "auto", p: 2 }}><Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "action.hover" }}><Typography variant="caption" color="primary.main" sx={{ fontWeight: 700 }}>AUTONOMOUS QE</Typography><Typography variant="body2" sx={{ mt: .5, fontWeight: 600 }}>APK → intelligence → tests → execution</Typography><Typography variant="caption" color="text.secondary">Autopilot starts safe and expands coverage only within approved guardrails.</Typography></Box></Box>
       </Drawer>
       <Box component="main" sx={{ ml: `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
     </Box>
   );
 }
-
