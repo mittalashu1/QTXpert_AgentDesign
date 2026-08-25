@@ -1,4 +1,4 @@
-import { ChangeEvent, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -8,9 +8,12 @@ import {
   Chip,
   CircularProgress,
   Divider,
+  FormControl,
   Grid,
-  LinearProgress,
+  InputLabel,
+  MenuItem,
   Paper,
+  Select,
   Stack,
   Table,
   TableBody,
@@ -71,8 +74,15 @@ type Analysis = {
   capabilities: Record<string, boolean>;
 };
 
+type ProviderStatus = {
+  browserstack_configured: boolean;
+  custom_appium_available: boolean;
+  recommended_provider: "browserstack" | "appium";
+};
+
 type Execution = {
   status: "passed" | "failed" | "blocked";
+  provider: "browserstack" | "appium";
   duration_seconds: number;
   current_package?: string;
   current_activity?: string;
@@ -92,13 +102,25 @@ export default function AutopilotPage() {
   const [context, setContext] = useState("");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [execution, setExecution] = useState<Execution | null>(null);
+  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [provider, setProvider] = useState<"browserstack" | "appium">("browserstack");
   const [busy, setBusy] = useState(false);
   const [smokeBusy, setSmokeBusy] = useState(false);
   const [error, setError] = useState("");
   const [appiumUrl, setAppiumUrl] = useState("http://127.0.0.1:4723");
-  const [deviceName, setDeviceName] = useState("Android Emulator");
-  const [platformVersion, setPlatformVersion] = useState("");
+  const [deviceName, setDeviceName] = useState("Google Pixel 8");
+  const [platformVersion, setPlatformVersion] = useState("14.0");
   const [appiumApp, setAppiumApp] = useState("");
+
+  useEffect(() => {
+    apiClient.get<ProviderStatus>("/autopilot/providers")
+      .then((response) => {
+        setProviderStatus(response.data);
+        setProvider(response.data.recommended_provider);
+        if (response.data.recommended_provider === "appium") setDeviceName("Android Emulator");
+      })
+      .catch(() => setProviderStatus(null));
+  }, []);
 
   const stats = useMemo(() => {
     if (!analysis) return null;
@@ -145,13 +167,14 @@ export default function AutopilotPage() {
     setError("");
     try {
       const response = await apiClient.post<Execution>(`/autopilot/${analysis.job_id}/smoke`, {
-        appium_url: appiumUrl,
+        provider,
+        appium_url: provider === "appium" ? appiumUrl : null,
         device_name: deviceName,
         platform_version: platformVersion || null,
-        appium_app: appiumApp || null,
+        appium_app: provider === "appium" ? (appiumApp || null) : null,
         no_reset: false,
         auto_grant_permissions: false,
-      }, { timeout: 180000 });
+      }, { timeout: 300000 });
       setExecution(response.data);
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || "Smoke execution failed");
@@ -159,6 +182,8 @@ export default function AutopilotPage() {
       setSmokeBusy(false);
     }
   };
+
+  const browserStackUnavailable = provider === "browserstack" && providerStatus?.browserstack_configured === false;
 
   return (
     <Stack spacing={3}>
@@ -207,7 +232,7 @@ export default function AutopilotPage() {
             </Stack>
           </Grid>
         </Grid>
-        {busy && <LinearProgress sx={{ mt: 2, borderRadius: 2 }} />}
+        {busy && <LinearProgressCompat />}
       </Paper>
 
       {error && <Alert severity="error">{error}</Alert>}
@@ -298,15 +323,35 @@ export default function AutopilotPage() {
           <Card variant="outlined">
             <CardContent>
               <Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Safe smoke execution</Typography></Stack>
-              <Typography color="text.secondary" variant="body2" sx={{ mt: 1 }}>Connect an Appium-compatible Android device. QTXpert will install/launch the uploaded build, capture a screenshot and UI hierarchy, and report the foreground package/activity. No business transaction is performed.</Typography>
+              <Typography color="text.secondary" variant="body2" sx={{ mt: 1 }}>
+                QTXpert installs and launches the uploaded build, captures a screenshot and UI hierarchy, and records foreground package/activity. No business transaction is performed.
+              </Typography>
               <Grid container spacing={2} sx={{ mt: 0.5 }}>
-                <Grid item xs={12} md={5}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(e) => setAppiumUrl(e.target.value)} /></Grid>
+                <Grid item xs={12} md={3}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel id="autopilot-provider-label">Execution target</InputLabel>
+                    <Select labelId="autopilot-provider-label" label="Execution target" value={provider} onChange={(e) => setProvider(e.target.value as "browserstack" | "appium")}>
+                      <MenuItem value="browserstack">BrowserStack real device</MenuItem>
+                      <MenuItem value="appium">Custom / local Appium</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
                 <Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} /></Grid>
                 <Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(e) => setPlatformVersion(e.target.value)} /></Grid>
-                <Grid item xs={12} md={2}><Button fullWidth sx={{ height: 40 }} variant="contained" disabled={smokeBusy} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running" : "Run smoke"}</Button></Grid>
-                <Grid item xs={12}><TextField fullWidth size="small" label="Optional cloud app reference" placeholder="Leave blank for local Appium; enter provider app reference for a configured remote endpoint" value={appiumApp} onChange={(e) => setAppiumApp(e.target.value)} /></Grid>
+                <Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="contained" disabled={smokeBusy || browserStackUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running" : "Run safe smoke"}</Button></Grid>
+                {provider === "appium" && <>
+                  <Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(e) => setAppiumUrl(e.target.value)} /></Grid>
+                  <Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" placeholder="Leave blank when the Appium server can access the uploaded APK path" value={appiumApp} onChange={(e) => setAppiumApp(e.target.value)} /></Grid>
+                </>}
               </Grid>
-              {execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke status: <b>{execution.status.toUpperCase()}</b> · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.current_activity ? ` · ${execution.current_activity}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}
+              {provider === "browserstack" && (
+                <Alert sx={{ mt: 2 }} severity={providerStatus?.browserstack_configured ? "success" : "warning"}>
+                  {providerStatus?.browserstack_configured
+                    ? "BrowserStack is configured. QTXpert will upload this APK server-side and launch it on the selected real device; credentials remain server-side."
+                    : "BrowserStack credentials are not configured on the backend yet. Add BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY as Render secrets to enable real-device execution."}
+                </Alert>
+              )}
+              {execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke status: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.current_activity ? ` · ${execution.current_activity}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}
             </CardContent>
           </Card>
 
@@ -315,4 +360,8 @@ export default function AutopilotPage() {
       )}
     </Stack>
   );
+}
+
+function LinearProgressCompat() {
+  return <Box sx={{ mt: 2, height: 4, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}><Box sx={{ height: "100%", width: "45%", bgcolor: "primary.main", animation: "autopilotProgress 1.2s ease-in-out infinite alternate", "@keyframes autopilotProgress": { from: { ml: "0%" }, to: { ml: "55%" } } }} /></Box>;
 }
