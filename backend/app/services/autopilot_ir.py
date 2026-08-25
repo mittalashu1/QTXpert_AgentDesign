@@ -47,9 +47,6 @@ class AutopilotIRCompiler:
         else:
             readiness = "discovery_required"
 
-        steps = self._ir_steps(test)
-        assertions = list(test.expected)
-        script = self._appium_script(test, analysis, readiness)
         return QTXTestIR(
             test_id=test.id,
             title=test.title,
@@ -57,9 +54,9 @@ class AutopilotIRCompiler:
             priority=test.priority,
             readiness=readiness,
             source=test.source,
-            steps=steps,
-            assertions=assertions,
-            appium_python=script,
+            steps=self._ir_steps(test),
+            assertions=list(test.expected),
+            appium_python=self._appium_script(test, analysis, readiness),
         )
 
     def _ir_steps(self, test: AutopilotTest) -> list[QTXIRStep]:
@@ -81,11 +78,8 @@ class AutopilotIRCompiler:
                 QTXIRStep(action="inspect_ui", description="Read Android UI hierarchy and enumerate semantic controls."),
                 QTXIRStep(action="capture_evidence", description="Record UI hierarchy for accessibility and semantic analysis."),
             ]
-        if test.id == "QT-AUTO-SEC-001" or test.id == "QT-AUTO-SEC-DEBUG":
-            return [
-                QTXIRStep(action="static_assertion", description=step)
-                for step in test.steps
-            ]
+        if test.id in {"QT-AUTO-SEC-001", "QT-AUTO-SEC-DEBUG"}:
+            return [QTXIRStep(action="static_assertion", description=step) for step in test.steps]
         if test.id == "QT-AUTO-NET-001":
             return [
                 QTXIRStep(action="network_condition", description=step, target="connectivity")
@@ -93,16 +87,15 @@ class AutopilotIRCompiler:
             ]
         if test.id.startswith("QT-AUTO-PERM-"):
             return [
-                QTXIRStep(action="permission_flow", description=step, target=test.title.split(" permission", 1)[0].lower())
+                QTXIRStep(
+                    action="permission_flow",
+                    description=step,
+                    target=test.title.split(" permission", 1)[0].lower(),
+                )
                 for step in test.steps
             ]
-
         return [
-            QTXIRStep(
-                action="intent",
-                description=step,
-                safe_for_autopilot=not test.destructive,
-            )
+            QTXIRStep(action="intent", description=step, safe_for_autopilot=not test.destructive)
             for step in test.steps
         ]
 
@@ -183,17 +176,18 @@ class AutopilotIRCompiler:
             if readiness == "approval_required"
             else "Runtime screen/element discovery is required before deterministic Appium locators can be emitted."
         )
-        semantic_steps = "\n".join(f"    # {index}. {step}" for index, step in enumerate(test.steps, start=1))
-        return dedent(
-            f'''\
-            def {function_name}(driver, evidence_dir):
-                """QTX {test.id}: {test.title}."""
-                import pytest
-
-            {semantic_steps or '    # No procedural steps supplied.'}
-                pytest.skip({reason!r})
-            '''
-        ).strip()
+        lines = [
+            f"def {function_name}(driver, evidence_dir):",
+            f'    """QTX {test.id}: {test.title}."""',
+            "    import pytest",
+            "",
+        ]
+        if test.steps:
+            lines.extend(f"    # {index}. {step}" for index, step in enumerate(test.steps, start=1))
+        else:
+            lines.append("    # No procedural steps supplied.")
+        lines.append(f"    pytest.skip({reason!r})")
+        return "\n".join(lines)
 
     @staticmethod
     def _function_name(test_id: str) -> str:
