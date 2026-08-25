@@ -6,7 +6,12 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
 from app.database.models.user import User
-from app.schemas.autopilot import AutopilotAnalysis, AutopilotExecutionRequest, AutopilotExecutionResult
+from app.schemas.autopilot import (
+    AutopilotAnalysis,
+    AutopilotExecutionRequest,
+    AutopilotExecutionResult,
+    AutopilotProviderStatus,
+)
 from app.services.autopilot import AutopilotPrototypeService
 
 router = APIRouter(prefix="/autopilot", tags=["autopilot"])
@@ -24,6 +29,21 @@ async def _require_owned_job(service: AutopilotPrototypeService, job_id: str, us
     if job.get("owner_id") != str(user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot job not found")
     return job
+
+
+@router.get("/providers", response_model=AutopilotProviderStatus)
+async def get_autopilot_providers(
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Return execution-provider readiness without exposing credentials."""
+    _ = user
+    configured = settings.browserstack_configured
+    return AutopilotProviderStatus(
+        browserstack_configured=configured,
+        custom_appium_available=True,
+        recommended_provider="browserstack" if configured else "appium",
+    )
 
 
 @router.post("/analyze", response_model=AutopilotAnalysis, status_code=status.HTTP_201_CREATED)
@@ -83,7 +103,7 @@ async def execute_autopilot_smoke(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
 ):
-    """Run the safe launch smoke against a configured local/remote Appium endpoint."""
+    """Run the safe launch smoke against BrowserStack or a configured Appium endpoint."""
     service = _service(settings)
     await _require_owned_job(service, job_id, user)
     return await service.execute_smoke(job_id, payload)
