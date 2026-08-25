@@ -4,8 +4,8 @@ from app.config import Settings
 from app.services.autopilot import AutopilotPrototypeService
 
 
-def _service(tmp_path: Path) -> AutopilotPrototypeService:
-    settings = Settings(AUTOPILOT_STORAGE_PATH=str(tmp_path))
+def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
+    settings = Settings(AUTOPILOT_STORAGE_PATH=str(tmp_path), **overrides)
     return AutopilotPrototypeService(settings)
 
 
@@ -63,6 +63,25 @@ def test_autopilot_questions_remain_guardrail_focused(tmp_path):
 def test_appium_connection_errors_are_blocked_not_product_failures():
     exc = RuntimeError("HTTPConnectionPool: connection refused")
     assert AutopilotPrototypeService._looks_like_connector_problem(exc) is True
+
+
+def test_missing_browserstack_configuration_is_blocked_not_product_failure():
+    exc = RuntimeError(
+        "BrowserStack is not configured. Set BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY as backend secrets."
+    )
+    assert AutopilotPrototypeService._looks_like_connector_problem(exc) is True
+
+
+def test_browserstack_configuration_requires_both_secrets(tmp_path):
+    incomplete = _service(tmp_path, BROWSERSTACK_USERNAME="user")
+    configured = _service(
+        tmp_path,
+        BROWSERSTACK_USERNAME="user",
+        BROWSERSTACK_ACCESS_KEY="key",
+    )
+
+    assert incomplete.settings.browserstack_configured is False
+    assert configured.settings.browserstack_configured is True
 
 
 def test_capabilities_follow_manifest_permissions(tmp_path):
