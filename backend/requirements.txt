@@ -33,6 +33,10 @@ pypdf==5.1.0
 python-docx==1.1.2
 openpyxl==3.1.5
 
+# Mobile Autopilot prototype
+androguard==4.1.4
+Appium-Python-Client==6.0.0
+
 pytest==8.3.4
 pytest-asyncio==0.25.0
 pytest-cov==6.0.0
@@ -40,4 +44,3 @@ pytest-cov==6.0.0
 python-dotenv==1.0.1
 email-validator==2.2.0
 playwright==1.49.1
-
