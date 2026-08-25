@@ -14,6 +14,7 @@ import RequirementUploadPage from "@/pages/RequirementUploadPage";
 import DashboardPage from "@/pages/DashboardPage";
 import TestExecutionPage from "@/pages/TestExecutionPage";
 import TestReportsPage from "@/pages/TestReportsPage";
+import AutopilotPage from "@/pages/AutopilotPage";
 import { CircularProgress, Box } from "@mui/material";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
@@ -47,6 +48,7 @@ export default function App() {
         }
       >
         <Route index element={<DashboardPage />} />
+        <Route path="autopilot" element={<AutopilotPage />} />
         <Route path="documents" element={<RequirementUploadPage />} />
         <Route path="design" element={<GenerateTestCasesPage />} />
         <Route path="generate" element={<Navigate to="/design" replace />} />
@@ -64,4 +66,3 @@ export default function App() {
     </Routes>
   );
 }
-
