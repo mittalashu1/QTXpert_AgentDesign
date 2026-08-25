@@ -8,11 +8,13 @@ from app.config import Settings, get_settings
 from app.database.models.user import User
 from app.schemas.autopilot import (
     AutopilotAnalysis,
+    AutopilotAutomationBundle,
     AutopilotExecutionRequest,
     AutopilotExecutionResult,
     AutopilotProviderStatus,
 )
 from app.services.autopilot import AutopilotPrototypeService
+from app.services.autopilot_ir import AutopilotIRCompiler
 
 router = APIRouter(prefix="/autopilot", tags=["autopilot"])
 
@@ -94,6 +96,22 @@ async def get_autopilot_analysis(
         return await service.load_analysis(job_id)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
+
+
+@router.get("/{job_id}/automation", response_model=AutopilotAutomationBundle)
+async def get_autopilot_automation(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Compile generated test designs into QTX Test IR and Appium Python previews."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    try:
+        analysis = await service.load_analysis(job_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
+    return AutopilotIRCompiler().compile_bundle(analysis)
 
 
 @router.post("/{job_id}/smoke", response_model=AutopilotExecutionResult)

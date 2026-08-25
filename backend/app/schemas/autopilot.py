@@ -62,6 +62,48 @@ class AutopilotProviderStatus(BaseModel):
     recommended_provider: Literal["browserstack", "appium"] = "appium"
 
 
+class QTXIRStep(BaseModel):
+    action: Literal[
+        "launch_app",
+        "background_app",
+        "restore_app",
+        "capture_evidence",
+        "inspect_ui",
+        "static_assertion",
+        "permission_flow",
+        "network_condition",
+        "intent",
+    ]
+    description: str
+    target: Optional[str] = None
+    value: Optional[str] = None
+    safe_for_autopilot: bool = True
+
+
+class QTXTestIR(BaseModel):
+    schema_version: str = "qtx-ir/0.1"
+    test_id: str
+    title: str
+    suite: str
+    priority: Literal["critical", "high", "medium", "low"]
+    readiness: Literal["executable", "discovery_required", "approval_required"]
+    source: Literal["deterministic", "ai"]
+    steps: List[QTXIRStep] = Field(default_factory=list)
+    assertions: List[str] = Field(default_factory=list)
+    appium_python: str = ""
+
+
+class AutopilotAutomationBundle(BaseModel):
+    job_id: str
+    generated_at: str
+    framework: str = "QTX Test IR + Appium Python"
+    schema_version: str = "qtx-ir/0.1"
+    executable_count: int = 0
+    discovery_required_count: int = 0
+    approval_required_count: int = 0
+    tests: List[QTXTestIR] = Field(default_factory=list)
+
+
 class AutopilotExecutionRequest(BaseModel):
     provider: Literal["browserstack", "appium"] = "browserstack"
     appium_url: Optional[str] = None
