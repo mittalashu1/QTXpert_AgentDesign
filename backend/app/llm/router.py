@@ -67,7 +67,7 @@ class ModelRouter(LLMProvider):
                 response = await provider.complete(messages, temperature=temperature, max_tokens=max_tokens, response_format_json=response_format_json)
                 if not response.content.strip():
                     raise LLMProviderError("provider returned an empty response")
-                self._meter.record(response, attempted_tier)
+                await self._meter.record(response, attempted_tier)
                 return response
             except LLMProviderError as exc:
                 errors.append(f"{provider_name}:{model}: {exc}")

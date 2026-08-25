@@ -142,6 +142,28 @@ export interface DashboardSummary {
   recent_runs: ExecutionRun[];
 }
 
+export interface AICostBreakdown {
+  provider: string;
+  model: string;
+  tier: string;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost_usd: number;
+  unpriced_requests: number;
+}
+
+export interface AICostSummary {
+  period_days: number;
+  since: string;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost_usd: number;
+  unpriced_requests: number;
+  by_model: AICostBreakdown[];
+}
+
 export const EXPORT_FORMATS = [
   { value: "json", label: "JSON" },
   { value: "csv", label: "CSV" },

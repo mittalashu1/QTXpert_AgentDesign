@@ -98,8 +98,12 @@ Use `azure_openai:configured` to retain the existing
 `AZURE_OPENAI_DEPLOYMENT` as a safe fallback.
 Only include providers whose credentials are configured. Each successful call
 logs provider, model, tier, input/output tokens, and—when rates are supplied in
-`LLM_COST_RATES_JSON`—an estimated USD cost. `UsageMeter` also accepts a hook
-for forwarding these events to telemetry or persistent billing storage.
+`LLM_COST_RATES_JSON`—an estimated USD cost. Usage events are persisted in the
+`llm_usage_events` table and are visible to administrators in the Dashboard's
+AI spend card (last 30 days by default). The endpoint is
+`GET /api/v1/admin/ai-costs?days=30` and requires the admin role. Requests for
+models without a configured rate remain visible as unpriced usage so the rate
+configuration can be completed without losing the audit trail.
 
 ## Deployment (Render)
 

@@ -30,6 +30,8 @@ services:
         value: azure_openai:configured
       - key: LLM_ROUTER_FALLBACK
         value: azure_openai:configured
+      - key: LLM_COST_RATES_JSON
+        value: '{"gemini:gemini-2.5-flash-lite":{"input":0.10,"output":0.40},"gemini:gemini-2.5-flash":{"input":0.30,"output":2.50}}'
       - key: CORS_ORIGINS
         value: https://design.qtxpert.com,https://qtxpert-frontend.onrender.com
       # Set the remaining provider/integration keys (AZURE_OPENAI_API_KEY,

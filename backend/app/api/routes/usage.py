@@ -1,0 +1,90 @@
+"""Admin-only LLM usage and cost reporting."""
+from datetime import datetime, timedelta, timezone
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps.auth_deps import require_roles
+from app.database.models.llm_usage import LLMUsageEvent
+from app.database.models.user import User, UserRole
+from app.database.session import get_db_session
+from app.schemas.usage import AICostBreakdown, AICostSummary
+
+router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+def _as_float(value) -> float:
+    return float(value or 0)
+
+
+@router.get("/ai-costs", response_model=AICostSummary)
+async def get_ai_costs(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    _user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> AICostSummary:
+    """Return workspace-wide model usage for the selected trailing period."""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    total_cost = func.coalesce(func.sum(LLMUsageEvent.estimated_cost_usd), 0).label(
+        "estimated_cost_usd"
+    )
+    totals_result = await db.execute(
+        select(
+            func.count(LLMUsageEvent.id).label("request_count"),
+            func.coalesce(func.sum(LLMUsageEvent.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(LLMUsageEvent.output_tokens), 0).label("output_tokens"),
+            total_cost,
+            func.count(LLMUsageEvent.id)
+            .filter(LLMUsageEvent.estimated_cost_usd.is_(None))
+            .label("unpriced_requests"),
+        ).where(LLMUsageEvent.created_at >= since)
+    )
+    totals = totals_result.one()
+
+    model_cost = func.coalesce(func.sum(LLMUsageEvent.estimated_cost_usd), 0).label(
+        "estimated_cost_usd"
+    )
+    model_rows = (
+        await db.execute(
+            select(
+                LLMUsageEvent.provider,
+                LLMUsageEvent.model,
+                LLMUsageEvent.tier,
+                func.count(LLMUsageEvent.id).label("request_count"),
+                func.coalesce(func.sum(LLMUsageEvent.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(LLMUsageEvent.output_tokens), 0).label("output_tokens"),
+                model_cost,
+                func.count(LLMUsageEvent.id)
+                .filter(LLMUsageEvent.estimated_cost_usd.is_(None))
+                .label("unpriced_requests"),
+            )
+            .where(LLMUsageEvent.created_at >= since)
+            .group_by(LLMUsageEvent.provider, LLMUsageEvent.model, LLMUsageEvent.tier)
+            .order_by(model_cost.desc(), LLMUsageEvent.provider, LLMUsageEvent.model)
+        )
+    ).all()
+
+    return AICostSummary(
+        period_days=days,
+        since=since,
+        request_count=int(totals.request_count or 0),
+        input_tokens=int(totals.input_tokens or 0),
+        output_tokens=int(totals.output_tokens or 0),
+        estimated_cost_usd=_as_float(totals.estimated_cost_usd),
+        unpriced_requests=int(totals.unpriced_requests or 0),
+        by_model=[
+            AICostBreakdown(
+                provider=row.provider,
+                model=row.model,
+                tier=row.tier,
+                request_count=int(row.request_count or 0),
+                input_tokens=int(row.input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
+                estimated_cost_usd=_as_float(row.estimated_cost_usd),
+                unpriced_requests=int(row.unpriced_requests or 0),
+            )
+            for row in model_rows
+        ],
+    )

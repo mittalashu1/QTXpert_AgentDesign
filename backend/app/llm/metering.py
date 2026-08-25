@@ -2,10 +2,10 @@
 import json
 import logging
 from dataclasses import dataclass
-from typing import Callable
+from typing import AsyncIterator, Callable, List, Optional
 
 from app.config import Settings
-from app.llm.base import LLMResponse
+from app.llm.base import LLMMessage, LLMProvider, LLMResponse
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +24,21 @@ UsageHook = Callable[[UsageEvent], None]
 
 
 class UsageMeter:
-    def __init__(self, settings: Settings, hook: UsageHook | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        hook: UsageHook | None = None,
+        *,
+        persist: bool = False,
+    ):
         try:
             self._rates = json.loads(settings.LLM_COST_RATES_JSON or "{}")
         except json.JSONDecodeError as exc:
             raise ValueError("LLM_COST_RATES_JSON must be valid JSON") from exc
         self._hook = hook
+        self._persist = persist
 
-    def record(self, response: LLMResponse, tier: str) -> None:
+    async def record(self, response: LLMResponse, tier: str) -> None:
         rate = self._rates.get(f"{response.provider}:{response.model}", {})
         input_tokens, output_tokens = response.input_tokens or 0, response.output_tokens or 0
         cost = None
@@ -41,4 +48,78 @@ class UsageMeter:
         event = UsageEvent(response.provider, response.model, tier, input_tokens, output_tokens, cost)
         logger.info("llm_usage provider=%s model=%s tier=%s input_tokens=%s output_tokens=%s estimated_cost_usd=%s", event.provider, event.model, event.tier, event.input_tokens, event.output_tokens, event.estimated_cost_usd)
         if self._hook:
-            self._hook(event)
+            try:
+                self._hook(event)
+            except Exception:  # noqa: BLE001
+                logger.exception("LLM usage hook failed")
+        if self._persist:
+            try:
+                await self._persist_event(event)
+            except Exception:  # noqa: BLE001
+                # Metering must never turn a successful provider response into
+                # a failed user request when the database is unavailable.
+                logger.exception("Could not persist LLM usage event")
+
+    @staticmethod
+    async def _persist_event(event: UsageEvent) -> None:
+        # Imports stay local so lightweight provider/unit-test imports do not
+        # initialize the database until persistence is explicitly enabled.
+        from app.database.models.llm_usage import LLMUsageEvent
+        from app.database.session import session_scope
+
+        async with session_scope() as db:
+            db.add(
+                LLMUsageEvent(
+                    provider=event.provider,
+                    model=event.model,
+                    tier=event.tier,
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    estimated_cost_usd=event.estimated_cost_usd,
+                )
+            )
+
+
+class MeteredProvider(LLMProvider):
+    """Decorates a concrete provider so direct-provider mode is metered too."""
+
+    def __init__(self, provider: LLMProvider, meter: UsageMeter, tier: str = "direct"):
+        self._provider = provider
+        self._meter = meter
+        self._tier = tier
+        self.provider_name = provider.provider_name
+
+    @property
+    def model_name(self) -> str:
+        return self._provider.model_name
+
+    async def complete(
+        self,
+        messages: List[LLMMessage],
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        response_format_json: bool = False,
+    ) -> LLMResponse:
+        response = await self._provider.complete(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format_json=response_format_json,
+        )
+        await self._meter.record(response, self._tier)
+        return response
+
+    async def stream(
+        self,
+        messages: List[LLMMessage],
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> AsyncIterator[str]:
+        # Providers currently do not expose final usage metadata for streams;
+        # keep streaming behavior unchanged until the provider SDKs do.
+        async for chunk in self._provider.stream(
+            messages, temperature=temperature, max_tokens=max_tokens
+        ):
+            yield chunk

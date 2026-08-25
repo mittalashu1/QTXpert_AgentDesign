@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.middleware import RateLimitMiddleware
-from app.api.routes import auth, autopilot, executions, export, health, requirements, settings, test_cases
+from app.api.routes import auth, autopilot, executions, export, health, requirements, settings, test_cases, usage
 from app.config import get_settings
 
 settings_obj = get_settings()
@@ -41,6 +41,7 @@ def create_app() -> FastAPI:
     app.include_router(autopilot.router, prefix=prefix)
     app.include_router(export.router, prefix=prefix)
     app.include_router(settings.router, prefix=prefix)
+    app.include_router(usage.router, prefix=prefix)
     app.include_router(health.router, prefix=prefix)
 
     @app.exception_handler(HTTPException)

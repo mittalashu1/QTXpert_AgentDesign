@@ -8,6 +8,7 @@ import {
   TestCase,
   ExecutionRun,
   DashboardSummary,
+  AICostSummary,
 } from "@/types/domain";
 
 export const authApi = {
@@ -25,6 +26,8 @@ export const authApi = {
 export const dashboardApi = {
   summary: (projectId: string) =>
     apiClient.get<DashboardSummary>("/dashboard", { params: { project_id: projectId } }),
+  aiCosts: (days = 30) =>
+    apiClient.get<AICostSummary>("/admin/ai-costs", { params: { days } }),
 };
 
 export const executionsApi = {

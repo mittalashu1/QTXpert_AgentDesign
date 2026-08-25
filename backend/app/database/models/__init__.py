@@ -18,6 +18,7 @@ from app.database.models.config_and_audit import ApiConfiguration, AuditLog  # n
 from app.database.models.execution import (  # noqa: F401
     Defect, DefectStatus, ExecutionResult, ExecutionRun, ExecutionStatus, ResultStatus,
 )
+from app.database.models.llm_usage import LLMUsageEvent  # noqa: F401
 
 __all__ = [
     "User",
@@ -41,5 +42,6 @@ __all__ = [
     "ResultStatus",
     "Defect",
     "DefectStatus",
+    "LLMUsageEvent",
 ]
 
