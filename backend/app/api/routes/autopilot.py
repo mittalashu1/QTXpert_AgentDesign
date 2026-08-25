@@ -1,7 +1,7 @@
 """Authenticated API endpoints for the Android-first Autopilot prototype."""
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 
 from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
@@ -11,6 +11,7 @@ from app.schemas.autopilot import (
     AutopilotAutomationBundle,
     AutopilotExecutionRequest,
     AutopilotExecutionResult,
+    AutopilotJobStatus,
     AutopilotProviderStatus,
 )
 from app.services.autopilot import AutopilotPrototypeService
@@ -48,8 +49,9 @@ async def get_autopilot_providers(
     )
 
 
-@router.post("/analyze", response_model=AutopilotAnalysis, status_code=status.HTTP_201_CREATED)
+@router.post("/analyze", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
 async def analyze_mobile_app(
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
     file: UploadFile = File(...),
@@ -81,7 +83,20 @@ async def analyze_mobile_app(
 
     service = _service(settings)
     job_id, _ = await service.save_upload(filename, data, str(user.id), context=context)
-    return await service.analyze(job_id)
+    background_tasks.add_task(service.analyze_safely, job_id)
+    return await service.get_job_status(job_id)
+
+
+@router.get("/jobs/{job_id}", response_model=AutopilotJobStatus)
+async def get_autopilot_job_status(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Return progress without holding a request open while an APK is analyzed."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    return await service.get_job_status(job_id)
 
 
 @router.get("/{job_id}", response_model=AutopilotAnalysis)

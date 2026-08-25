@@ -80,6 +80,16 @@ type ProviderStatus = {
   recommended_provider: "browserstack" | "appium";
 };
 
+type AnalysisJob = {
+  job_id: string;
+  filename: string;
+  status: "uploaded" | "analyzing" | "analyzed" | "failed";
+  stage: string;
+  progress: number;
+  error?: string;
+  analysis?: Analysis;
+};
+
 type Execution = {
   status: "passed" | "failed" | "blocked";
   provider: "browserstack" | "appium";
@@ -105,6 +115,8 @@ export default function AutopilotPage() {
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [provider, setProvider] = useState<"browserstack" | "appium">("browserstack");
   const [busy, setBusy] = useState(false);
+  const [analysisProgress, setAnalysisProgress] = useState(0);
+  const [analysisStage, setAnalysisStage] = useState("");
   const [smokeBusy, setSmokeBusy] = useState(false);
   const [error, setError] = useState("");
   const [appiumUrl, setAppiumUrl] = useState("http://127.0.0.1:4723");
@@ -149,11 +161,26 @@ export default function AutopilotPage() {
       const form = new FormData();
       form.append("file", file);
       form.append("context", context);
-      const response = await apiClient.post<Analysis>("/autopilot/analyze", form, {
+      const response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, {
         headers: { "Content-Type": "multipart/form-data" },
-        timeout: 180000,
+        timeout: 300000,
       });
-      setAnalysis(response.data);
+      const jobId = response.data.job_id;
+      setAnalysisProgress(response.data.progress);
+      setAnalysisStage(response.data.stage);
+      const deadline = Date.now() + 20 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        const poll = await apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 });
+        setAnalysisProgress(poll.data.progress);
+        setAnalysisStage(poll.data.stage);
+        if (poll.data.status === "failed") throw new Error(poll.data.error || "Autopilot analysis failed");
+        if (poll.data.status === "analyzed" && poll.data.analysis) {
+          setAnalysis(poll.data.analysis);
+          return;
+        }
+      }
+      throw new Error("Analysis is still running after 20 minutes. The job is saved; retry status shortly.");
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || "Autopilot analysis failed");
     } finally {
@@ -232,7 +259,7 @@ export default function AutopilotPage() {
             </Stack>
           </Grid>
         </Grid>
-        {busy && <LinearProgressCompat />}
+        {busy && <><LinearProgressCompat progress={analysisProgress} /><Typography variant="caption" color="text.secondary">{analysisStage.replaceAll("_", " ")} · {analysisProgress}%</Typography></>}
       </Paper>
 
       {error && <Alert severity="error">{error}</Alert>}
@@ -362,6 +389,6 @@ export default function AutopilotPage() {
   );
 }
 
-function LinearProgressCompat() {
-  return <Box sx={{ mt: 2, height: 4, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}><Box sx={{ height: "100%", width: "45%", bgcolor: "primary.main", animation: "autopilotProgress 1.2s ease-in-out infinite alternate", "@keyframes autopilotProgress": { from: { ml: "0%" }, to: { ml: "55%" } } }} /></Box>;
+function LinearProgressCompat({ progress }: { progress: number }) {
+  return <Box sx={{ mt: 2, height: 4, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}><Box sx={{ height: "100%", width: `${Math.max(3, progress)}%`, bgcolor: "primary.main", transition: "width .4s ease" }} /></Box>;
 }

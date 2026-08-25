@@ -56,6 +56,18 @@ class AutopilotJobSummary(BaseModel):
     created_at: str
 
 
+class AutopilotJobStatus(BaseModel):
+    job_id: str
+    filename: str
+    status: Literal["uploaded", "analyzing", "analyzed", "failed"]
+    stage: str = "queued"
+    progress: int = Field(default=0, ge=0, le=100)
+    created_at: str
+    updated_at: str
+    error: Optional[str] = None
+    analysis: Optional[AutopilotAnalysis] = None
+
+
 class AutopilotProviderStatus(BaseModel):
     browserstack_configured: bool = False
     custom_appium_available: bool = True

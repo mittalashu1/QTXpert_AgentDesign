@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from app.config import Settings
 from app.services.autopilot import AutopilotPrototypeService
 
@@ -100,3 +102,39 @@ def test_capabilities_follow_manifest_permissions(tmp_path):
     assert capabilities["network_test_candidate"] is True
     assert capabilities["location_test_candidate"] is True
     assert capabilities["camera_test_candidate"] is False
+
+
+@pytest.mark.asyncio
+async def test_background_analysis_records_failure_instead_of_hanging(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    job_id, _ = await service.save_upload("broken.apk", b"x" * 2048, "owner")
+
+    async def fail(_job_id):
+        raise RuntimeError("parser stopped")
+
+    monkeypatch.setattr(service, "analyze", fail)
+    await service.analyze_safely(job_id)
+    result = await service.get_job_status(job_id)
+
+    assert result.status == "failed"
+    assert result.progress == 100
+    assert "parser stopped" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_completed_background_analysis_returns_saved_result(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    job_id, _ = await service.save_upload("app.apk", b"x" * 2048, "owner")
+
+    async def complete(_job_id):
+        from app.schemas.autopilot import AutopilotAnalysis
+        result = AutopilotAnalysis(job_id=job_id, filename="app.apk", sha256="a" * 64)
+        service._metadata_path(job_id).write_text(result.model_dump_json(), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(service, "analyze", complete)
+    await service.analyze_safely(job_id)
+    result = await service.get_job_status(job_id)
+
+    assert result.status == "analyzed"
+    assert result.analysis is not None

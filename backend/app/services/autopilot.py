@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -26,8 +27,11 @@ from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotExecutionRequest,
     AutopilotExecutionResult,
+    AutopilotJobStatus,
     AutopilotTest,
 )
+
+logger = logging.getLogger(__name__)
 
 
 _DANGEROUS_PERMISSION_HINTS = {
@@ -69,9 +73,61 @@ class AutopilotPrototypeService:
             "context": context[:8000],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "apk_path": str(apk_path),
+            "status": "uploaded",
+            "stage": "queued",
+            "progress": 5,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
         return job_id, apk_path
+
+    async def update_job(self, job_id: str, **changes: Any) -> Dict[str, Any]:
+        path = self._job_dir(job_id) / "job.json"
+        job = await self.load_job(job_id)
+        job.update(changes)
+        job["updated_at"] = datetime.now(timezone.utc).isoformat()
+        temporary = path.with_suffix(".tmp")
+        await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
+        await asyncio.to_thread(temporary.replace, path)
+        return job
+
+    async def get_job_status(self, job_id: str) -> AutopilotJobStatus:
+        job = await self.load_job(job_id)
+        analysis = None
+        if job.get("status") == "analyzed":
+            try:
+                analysis = await self.load_analysis(job_id)
+            except FileNotFoundError:
+                await self.update_job(job_id, status="failed", stage="failed", error="Analysis result is missing")
+                job = await self.load_job(job_id)
+        return AutopilotJobStatus(
+            job_id=job_id,
+            filename=job["filename"],
+            status=job.get("status", "uploaded"),
+            stage=job.get("stage", "queued"),
+            progress=int(job.get("progress", 0)),
+            created_at=job["created_at"],
+            updated_at=job.get("updated_at", job["created_at"]),
+            error=job.get("error"),
+            analysis=analysis,
+        )
+
+    async def analyze_safely(self, job_id: str) -> None:
+        started = time.perf_counter()
+        try:
+            await self.update_job(job_id, status="analyzing", stage="reading_apk", progress=15, error=None)
+            await asyncio.wait_for(self.analyze(job_id), timeout=900)
+            await self.update_job(job_id, status="analyzed", stage="complete", progress=100)
+            logger.info("Autopilot analysis completed job_id=%s duration_seconds=%.2f", job_id, time.perf_counter() - started)
+        except Exception as exc:
+            logger.exception("Autopilot analysis failed job_id=%s", job_id)
+            await self.update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                progress=100,
+                error=f"{type(exc).__name__}: {exc}"[:1000],
+            )
 
     async def load_job(self, job_id: str) -> Dict[str, Any]:
         path = self._job_dir(job_id) / "job.json"
@@ -89,8 +145,10 @@ class AutopilotPrototypeService:
         job = await self.load_job(job_id)
         apk_path = Path(job["apk_path"])
         metadata = await asyncio.to_thread(self._analyze_apk_sync, apk_path)
+        await self.update_job(job_id, status="analyzing", stage="designing_tests", progress=65)
         deterministic_tests = self._build_deterministic_tests(metadata)
         enrichment = await self._enrich_with_ai(metadata, job.get("context", ""))
+        await self.update_job(job_id, status="analyzing", stage="finalizing", progress=90)
 
         tests = deterministic_tests + enrichment.get("tests", [])
         deduped: list[AutopilotTest] = []
@@ -480,14 +538,17 @@ class AutopilotPrototypeService:
                     "networkLogs": True,
                 }
 
-            result = await asyncio.to_thread(
-                self._execute_appium_sync,
-                appium_url,
-                app_reference,
-                request,
-                screenshot_path,
-                source_path,
-                browserstack_options,
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._execute_appium_sync,
+                    appium_url,
+                    app_reference,
+                    request,
+                    screenshot_path,
+                    source_path,
+                    browserstack_options,
+                ),
+                timeout=240,
             )
             result["provider"] = request.provider
             if request.provider == "browserstack":
