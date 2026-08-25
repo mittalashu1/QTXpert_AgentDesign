@@ -138,6 +138,12 @@ class Settings(BaseSettings):
         return [e.strip().lower() for e in self.ALLOWED_UPLOAD_EXTENSIONS.split(",")]
 
     # ------------------------------------------------------------------ #
+    # Mobile Autopilot prototype
+    # ------------------------------------------------------------------ #
+    AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=250, ge=1, le=2048)
+    AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
+
+    # ------------------------------------------------------------------ #
     # Rate limiting
     # ------------------------------------------------------------------ #
     RATE_LIMIT_PER_MINUTE: int = 60
@@ -152,4 +158,3 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Cached settings singleton (dependency-injected across the app)."""
     return Settings()
-
