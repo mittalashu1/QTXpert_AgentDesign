@@ -1,8 +1,9 @@
 """Android-first autonomous mobile QA prototype service.
 
-The prototype intentionally separates deterministic binary/runtime analysis from
-LLM enrichment. If the configured LLM is unavailable, QTXpert still returns a
-useful test plan and can execute a non-destructive Appium smoke session.
+The prototype separates deterministic binary/runtime analysis from LLM enrichment.
+If the configured LLM is unavailable, QTXpert still returns a useful test plan.
+Real-device smoke execution can use BrowserStack App Automate when credentials are
+configured, while a generic Appium endpoint remains available for local/private labs.
 """
 from __future__ import annotations
 
@@ -13,8 +14,10 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List
 from uuid import uuid4
+
+import httpx
 
 from app.config import Settings
 from app.llm.base import LLMMessage
@@ -169,7 +172,6 @@ class AutopilotPrototypeService:
             result["debuggable"] = str(debuggable).lower() == "true" if debuggable is not None else None
         except Exception as exc:
             result["warnings"].append(f"Deep APK parsing was partial: {type(exc).__name__}: {exc}")
-            # Even when parsing fails, preserve a useful artifact-level result.
             try:
                 import zipfile
 
@@ -399,8 +401,59 @@ class AutopilotPrototypeService:
             "ai_test_design": True,
         }
 
+    async def _browserstack_app_url(self, job_id: str, apk_path: Path, sha256: str) -> str:
+        if not self.settings.browserstack_configured:
+            raise RuntimeError(
+                "BrowserStack is not configured. Set BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY as backend secrets."
+            )
+
+        cache_path = self._job_dir(job_id) / "browserstack.json"
+        if cache_path.exists():
+            try:
+                cached = json.loads(await asyncio.to_thread(cache_path.read_text, "utf-8"))
+                if cached.get("sha256") == sha256 and cached.get("app_url"):
+                    return str(cached["app_url"])
+            except Exception:
+                pass
+
+        custom_id = f"qtxpert-{sha256[:24]}"
+        timeout = httpx.Timeout(240.0, connect=30.0)
+        async with httpx.AsyncClient(
+            auth=(self.settings.BROWSERSTACK_USERNAME or "", self.settings.BROWSERSTACK_ACCESS_KEY or ""),
+            timeout=timeout,
+        ) as client:
+            with apk_path.open("rb") as handle:
+                response = await client.post(
+                    self.settings.BROWSERSTACK_UPLOAD_URL,
+                    files={
+                        "file": (
+                            apk_path.name,
+                            handle,
+                            "application/vnd.android.package-archive",
+                        )
+                    },
+                    data={"custom_id": custom_id},
+                )
+            if response.status_code >= 400:
+                detail = response.text[:500]
+                raise RuntimeError(f"BrowserStack app upload failed ({response.status_code}): {detail}")
+            payload = response.json()
+
+        app_url = payload.get("app_url")
+        if not app_url:
+            raise RuntimeError("BrowserStack app upload did not return an app_url")
+        cache = {
+            "sha256": sha256,
+            "app_url": app_url,
+            "custom_id": payload.get("custom_id") or custom_id,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await asyncio.to_thread(cache_path.write_text, json.dumps(cache, indent=2), "utf-8")
+        return str(app_url)
+
     async def execute_smoke(self, job_id: str, request: AutopilotExecutionRequest) -> AutopilotExecutionResult:
         job = await self.load_job(job_id)
+        analysis = await self.load_analysis(job_id)
         started = datetime.now(timezone.utc)
         start_perf = time.perf_counter()
         evidence_dir = self._job_dir(job_id) / "evidence"
@@ -409,24 +462,48 @@ class AutopilotPrototypeService:
         source_path = evidence_dir / "page-source.xml"
 
         try:
+            apk_path = Path(job["apk_path"])
+            app_reference = request.appium_app or str(apk_path)
+            appium_url = request.appium_url or "http://127.0.0.1:4723"
+            browserstack_options: Dict[str, Any] | None = None
+
+            if request.provider == "browserstack":
+                app_reference = await self._browserstack_app_url(job_id, apk_path, analysis.sha256)
+                appium_url = self.settings.BROWSERSTACK_HUB_URL
+                browserstack_options = {
+                    "userName": self.settings.BROWSERSTACK_USERNAME,
+                    "accessKey": self.settings.BROWSERSTACK_ACCESS_KEY,
+                    "projectName": self.settings.BROWSERSTACK_PROJECT_NAME,
+                    "buildName": f"Autopilot {analysis.app_name or analysis.package_name or job['filename']}",
+                    "sessionName": f"Safe Smoke {job_id[:8]}",
+                    "debug": True,
+                    "networkLogs": True,
+                }
+
             result = await asyncio.to_thread(
                 self._execute_appium_sync,
-                Path(job["apk_path"]),
+                appium_url,
+                app_reference,
                 request,
                 screenshot_path,
                 source_path,
+                browserstack_options,
             )
-            status = "passed"
+            result["provider"] = request.provider
+            if request.provider == "browserstack":
+                result["cloud_app_reference"] = app_reference
+            execution_status = "passed"
             error = None
         except Exception as exc:
-            result = {}
-            status = "blocked" if self._looks_like_connector_problem(exc) else "failed"
+            result = {"provider": request.provider}
+            execution_status = "blocked" if self._looks_like_connector_problem(exc) else "failed"
             error = f"{type(exc).__name__}: {exc}"
 
         finished = datetime.now(timezone.utc)
         return AutopilotExecutionResult(
             job_id=job_id,
-            status=status,
+            status=execution_status,
+            provider=request.provider,
             started_at=started.isoformat(),
             finished_at=finished.isoformat(),
             duration_seconds=round(time.perf_counter() - start_perf, 2),
@@ -441,10 +518,12 @@ class AutopilotPrototypeService:
 
     @staticmethod
     def _execute_appium_sync(
-        apk_path: Path,
+        appium_url: str,
+        app_reference: str,
         request: AutopilotExecutionRequest,
         screenshot_path: Path,
         source_path: Path,
+        browserstack_options: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         from appium import webdriver
         from appium.options.android import UiAutomator2Options
@@ -453,16 +532,18 @@ class AutopilotPrototypeService:
             "platformName": "Android",
             "appium:automationName": "UiAutomator2",
             "appium:deviceName": request.device_name,
-            "appium:app": request.appium_app or str(apk_path),
+            "appium:app": app_reference,
             "appium:noReset": request.no_reset,
             "appium:autoGrantPermissions": request.auto_grant_permissions,
             "appium:newCommandTimeout": 120,
         }
         if request.platform_version:
             capabilities["appium:platformVersion"] = request.platform_version
+        if browserstack_options:
+            capabilities["bstack:options"] = browserstack_options
 
         options = UiAutomator2Options().load_capabilities(capabilities)
-        driver = webdriver.Remote(request.appium_url, options=options)
+        driver = webdriver.Remote(appium_url, options=options)
         try:
             time.sleep(3)
             driver.get_screenshot_as_file(str(screenshot_path))
@@ -482,4 +563,18 @@ class AutopilotPrototypeService:
     @staticmethod
     def _looks_like_connector_problem(exc: Exception) -> bool:
         text = str(exc).lower()
-        return any(token in text for token in ("connection refused", "max retries", "could not connect", "invalid argument: app", "unknown server-side error"))
+        return any(
+            token in text
+            for token in (
+                "connection refused",
+                "max retries",
+                "could not connect",
+                "invalid argument: app",
+                "unknown server-side error",
+                "browserstack is not configured",
+                "browserstack app upload failed (401)",
+                "browserstack app upload failed (403)",
+                "unauthorized",
+                "authentication",
+            )
+        )
