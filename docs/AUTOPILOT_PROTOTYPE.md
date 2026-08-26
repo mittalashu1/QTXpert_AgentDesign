@@ -76,6 +76,57 @@ When these backend secrets exist:
 
 QTXpert uploads the APK server-side to BrowserStack, caches the returned `bs://` application reference per APK SHA, and starts the Appium session using server-side credentials. No BrowserStack credentials are sent to the browser.
 
+## Setup and first safe smoke run
+
+### BrowserStack real device (hosted Render deployment)
+
+1. Create or open a BrowserStack App Automate account and copy the account username and access key.
+2. In the Render Dashboard, open the **backend** service's Environment page and add these as secret values (never commit them):
+
+   - `BROWSERSTACK_USERNAME`
+   - `BROWSERSTACK_ACCESS_KEY`
+
+3. Let the backend redeploy. The Autopilot provider status will then report BrowserStack as configured and the BrowserStack option will be enabled.
+4. Select **BrowserStack**, choose a supported Android device/OS (the default prototype target is Google Pixel 8 / Android 14.0), and click **Run safe smoke**. The backend uploads the stored APK, starts one real-device Appium session, captures launch evidence, and closes the session.
+
+The smoke is intentionally non-destructive: it installs/cold-launches the build and records a screenshot, UI hierarchy, package, activity and orientation. It does not perform payments, deletion, OTP, notifications or other business mutations. The server-side upload and device session use the configurable limits below, which are deliberately longer for large APKs:
+
+| Setting | Default |
+| --- | ---: |
+| `AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS` | `300` |
+| `AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS` | `120` |
+| `AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS` | `120` |
+| `AUTOPILOT_SMOKE_TIMEOUT_SECONDS` | `600` |
+| `AUTOPILOT_BROWSERSTACK_UPLOAD_TIMEOUT_SECONDS` | `600` |
+
+### Custom/local Appium
+
+On the Android/Appium host, open a new PowerShell window and run:
+
+```powershell
+$sdk="$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_HOME=$sdk
+$env:ANDROID_SDK_ROOT=$sdk
+$env:JAVA_HOME="C:\Program Files\Android\Android Studio\jbr"
+$env:Path="$env:JAVA_HOME\bin;$sdk\platform-tools;$sdk\emulator;$env:Path"
+
+appium driver list --installed
+appium --address 127.0.0.1 --port 4723
+```
+
+In another PowerShell window, start an available emulator and verify it:
+
+```powershell
+& "$env:LOCALAPPDATA\Android\Sdk\emulator\emulator.exe" -avd Pixel_10_Pro_XL -no-snapshot -no-boot-anim -gpu swiftshader_indirect -no-audio
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" devices -l
+```
+
+The local adapter needs an online device (`adb devices` shows `device`), a boot-completed Android system, and an Appium `/status` response with `ready: true`. In the Autopilot form use the emulator id reported by adb (for this verified setup: `emulator-5554`), Android `17`, and `http://127.0.0.1:4723` **only when the QTXpert API is running on the same machine**.
+
+The hosted Render API cannot reach your laptop's `127.0.0.1` and cannot read a local Windows APK path. For a hosted custom-Appium run, expose Appium through an authenticated TLS tunnel or private reachable endpoint and provide an app reference that the Appium host can read. Keep Appium bound to localhost; do not expose an unauthenticated `0.0.0.0:4723` endpoint.
+
+The verified local run completed successfully with the InvestNation UAT APK and produced launch screenshot/UI-source evidence under `outputs/local-smoke/`.
+
 ### 7. Autopilot workspace
 
 The React workspace is available under `/autopilot` and shows:

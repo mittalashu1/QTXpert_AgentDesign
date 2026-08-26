@@ -527,7 +527,7 @@ export default function AutopilotPage() {
                 {provider === "appium" && <>
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(e) => setAppiumUrl(e.target.value)} /></Grid>
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" placeholder="Leave blank when the Appium server can access the uploaded APK path" value={appiumApp} onChange={(e) => setAppiumApp(e.target.value)} /></Grid>
-                  <Grid item xs={12}><Alert severity="info">The hosted QTXpert backend must be able to reach this Appium URL. <b>127.0.0.1</b> works only when the API and Appium run on the same machine; for the Render deployment use a secure tunnel or a reachable private Appium endpoint.</Alert></Grid>
+                  <Grid item xs={12}><Alert severity="info">The hosted QTXpert backend must be able to reach this Appium URL. <b>127.0.0.1</b> works only when the API and Appium run on the same machine; for the Render deployment use a secure tunnel or a reachable private Appium endpoint. Also provide a remote app reference when Appium cannot access the APK path on Render.</Alert></Grid>
                 </>}
               </Grid>
               {provider === "browserstack" && (
