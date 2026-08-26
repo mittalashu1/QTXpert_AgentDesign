@@ -17,6 +17,7 @@ from app.schemas.test_case import (
     GenerateTestCasesRequest,
     GenerationRunOut,
     GenerationRunSummaryOut,
+    GenerationRunTitleUpdate,
     UpdateGenerationRunRequest,
 )
 from app.services.test_generation_service import TestGenerationService
@@ -116,8 +117,28 @@ async def get_run(
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
     await repo.fail_stale_for_project(run.project_id, settings.GENERATION_STALE_AFTER_SECONDS)
-    # Reload after a recovery check so the response returns the final status.
     run = await repo.get_for_owner(run_id, user.id)
+    return run
+
+
+@router.patch("/history/{run_id}/title", response_model=GenerationRunOut)
+async def update_run_title(
+    run_id: UUID,
+    payload: GenerationRunTitleUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Rename a Test Design run without regenerating or changing its test cases."""
+    repo = GenerationRunRepository(db)
+    run = await repo.get_for_owner(run_id, user.id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Test run name cannot be empty")
+    run.title = title
+    await db.commit()
+    await db.refresh(run, attribute_names=["test_cases"])
     return run
 
 

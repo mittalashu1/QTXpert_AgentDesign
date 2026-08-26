@@ -244,6 +244,17 @@ export interface AICostBreakdown {
   unpriced_requests: number;
 }
 
+export interface AzureActualCost {
+  configured: boolean;
+  connected: boolean;
+  actual_cost: number | null;
+  currency: string | null;
+  last_synced_at: string | null;
+  scope: string | null;
+  resource_name: string | null;
+  error: string | null;
+}
+
 export interface AICostSummary {
   period_days: number;
   since: string;
@@ -253,6 +264,8 @@ export interface AICostSummary {
   estimated_cost_usd: number;
   unpriced_requests: number;
   by_model: AICostBreakdown[];
+  azure: AzureActualCost;
+  variance_usd: number | null;
 }
 
 export const EXPORT_FORMATS = [

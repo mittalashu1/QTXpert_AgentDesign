@@ -3,14 +3,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
 import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Card,
-  CardContent, Chip, Divider, FormControl, FormHelperText, InputLabel,
-  LinearProgress, MenuItem, Select, Stack, TextField, Typography,
+  CardContent, Chip, Divider, FormControl, FormHelperText, IconButton, InputLabel,
+  LinearProgress, MenuItem, Select, Stack, TextField, Tooltip, Typography,
 } from "@mui/material";
 import AddOutlinedIcon from "@mui/icons-material/AddOutlined";
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
+import CheckOutlinedIcon from "@mui/icons-material/CheckOutlined";
+import CloseOutlinedIcon from "@mui/icons-material/CloseOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import DeleteOutlineOutlinedIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import DownloadOutlinedIcon from "@mui/icons-material/DownloadOutlined";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import ExpandMoreOutlinedIcon from "@mui/icons-material/ExpandMoreOutlined";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import RefreshOutlinedIcon from "@mui/icons-material/RefreshOutlined";
@@ -135,29 +138,73 @@ function inputHeading(source: InputSource, files: File[], sourceUrl: string, pro
   return `${source.label} test design`;
 }
 
-function RunRail({ runs, activeId, openingId, onSelect, onNew }: { runs: RunRailEntry[]; activeId?: string; openingId?: string | null; onSelect: (run: RunRailEntry) => void | Promise<void>; onNew: () => void }) {
+function RunRail({ runs, activeId, openingId, renamingId, onSelect, onRename, onNew }: {
+  runs: RunRailEntry[];
+  activeId?: string;
+  openingId?: string | null;
+  renamingId?: string | null;
+  onSelect: (run: RunRailEntry) => void | Promise<void>;
+  onRename: (run: RunRailEntry, title: string) => Promise<void>;
+  onNew: () => void;
+}) {
   const [search, setSearch] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
   const visibleRuns = runs.filter((run) => runTitle(run).toLowerCase().includes(search.toLowerCase()));
   const displayedRuns = visibleRuns.slice(0, RUN_RAIL_RENDER_LIMIT);
+
+  const beginRename = (run: RunRailEntry) => {
+    setEditingId(run.id);
+    setEditingTitle(runTitle(run));
+  };
+  const finishRename = async (run: RunRailEntry) => {
+    const title = editingTitle.trim();
+    if (!title) return;
+    await onRename(run, title);
+    setEditingId(null);
+    setEditingTitle("");
+  };
+
   return <Card variant="outlined" sx={{ width: { xs: "100%", lg: 300 }, flexShrink: 0, position: { lg: "sticky" }, top: 16, borderRadius: 3 }}>
-    <CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.25 }}>
-        <Box><Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Test runs</Typography><Typography variant="caption" color="text.secondary">Revisit and improve your suites</Typography></Box>
-        <Button size="small" startIcon={<AddOutlinedIcon />} onClick={onNew} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>New test</Button>
+    <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+        <Box><Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Test runs</Typography><Typography sx={{ fontSize: ".7rem" }} color="text.secondary">Revisit and improve saved suites</Typography></Box>
+        <Button size="small" startIcon={<AddOutlinedIcon />} onClick={onNew} sx={{ textTransform: "none", whiteSpace: "nowrap", minWidth: 0 }}>New</Button>
       </Stack>
-      <TextField size="small" fullWidth value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search runs" sx={{ mb: 1.25 }} />
-      <Stack spacing={1} sx={{ maxHeight: { lg: "calc(100vh - 250px)" }, overflowY: "auto", pr: 0.25, minHeight: 0, "& > .MuiCard-root": { flexShrink: 0 } }}>
+      <TextField size="small" fullWidth value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search runs" sx={{ mb: 1 }} />
+      <Stack spacing={0.6} sx={{ maxHeight: { lg: "calc(100vh - 235px)" }, overflowY: "auto", pr: 0.25, minHeight: 0, "& > .MuiCard-root": { flexShrink: 0 } }}>
         {displayedRuns.map((run) => {
           const title = runTitle(run);
           const selected = activeId === run.id;
           const status = run.status || "completed";
           const opening = openingId === run.id;
-          return <Card key={run.id} variant="outlined" onClick={() => { if (!opening) void onSelect(run); }} sx={{ cursor: opening ? "progress" : "pointer", flexShrink: 0, minHeight: 82, opacity: opening ? 0.7 : 1, borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s, opacity .15s", "&:hover": { borderColor: "primary.main" } }}>
-            <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
-              <Typography variant="body2" sx={{ fontWeight: 700, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{title}</Typography>
-              <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 0.75 }}>
-                <Chip size="small" label={opening ? "loading…" : status.replaceAll("_", " ")} color={status === "completed" ? "success" : status === "failed" ? "error" : "default"} />
-                <Typography variant="caption" color="text.secondary">{runCaseCount(run)} cases</Typography>
+          const editing = editingId === run.id;
+          const renaming = renamingId === run.id;
+          return <Card key={run.id} variant="outlined" onClick={() => { if (!opening && !editing) void onSelect(run); }} sx={{ cursor: opening ? "progress" : editing ? "default" : "pointer", flexShrink: 0, minHeight: 50, opacity: opening || renaming ? 0.7 : 1, borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s, opacity .15s", "&:hover": { borderColor: "primary.main" } }}>
+            <CardContent sx={{ px: 1, py: 0.7, "&:last-child": { pb: 0.7 } }}>
+              {editing ? <Stack direction="row" spacing={0.25} alignItems="center">
+                <TextField
+                  variant="standard"
+                  value={editingTitle}
+                  onChange={(event) => setEditingTitle(event.target.value)}
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") { event.preventDefault(); void finishRename(run); }
+                    if (event.key === "Escape") { setEditingId(null); setEditingTitle(""); }
+                  }}
+                  autoFocus
+                  fullWidth
+                  inputProps={{ maxLength: 500, style: { fontSize: "0.76rem", fontWeight: 650 } }}
+                />
+                <IconButton size="small" disabled={renaming || !editingTitle.trim()} onClick={(event) => { event.stopPropagation(); void finishRename(run); }} aria-label="Save test run name"><CheckOutlinedIcon sx={{ fontSize: 16 }} /></IconButton>
+                <IconButton size="small" disabled={renaming} onClick={(event) => { event.stopPropagation(); setEditingId(null); setEditingTitle(""); }} aria-label="Cancel rename"><CloseOutlinedIcon sx={{ fontSize: 16 }} /></IconButton>
+              </Stack> : <Stack direction="row" spacing={0.25} alignItems="center" sx={{ minWidth: 0 }}>
+                <Tooltip title={title} placement="top" enterDelay={500}><Typography noWrap sx={{ flex: 1, minWidth: 0, fontSize: ".76rem", lineHeight: 1.25, fontWeight: 700 }}>{title}</Typography></Tooltip>
+                <Tooltip title="Rename test run"><IconButton size="small" onClick={(event) => { event.stopPropagation(); beginRename(run); }} aria-label="Rename test run" sx={{ p: 0.35 }}><EditOutlinedIcon sx={{ fontSize: 14 }} /></IconButton></Tooltip>
+              </Stack>}
+              <Stack direction="row" spacing={0.65} alignItems="center" sx={{ mt: 0.35 }}>
+                <Chip size="small" label={opening ? "loading…" : renaming ? "saving…" : status.replaceAll("_", " ")} color={status === "completed" ? "success" : status === "failed" ? "error" : "default"} sx={{ height: 19, "& .MuiChip-label": { px: 0.7, fontSize: ".61rem", lineHeight: 1 } }} />
+                <Typography color="text.secondary" sx={{ fontSize: ".67rem", whiteSpace: "nowrap" }}>{runCaseCount(run)} cases</Typography>
               </Stack>
             </CardContent>
           </Card>;
@@ -198,6 +245,7 @@ export default function GenerateTestCasesPage() {
   const [saved, setSaved] = useState(false);
   const [localPreview, setLocalPreview] = useState(false);
   const [openingRunId, setOpeningRunId] = useState<string | null>(null);
+  const [renamingRunId, setRenamingRunId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -296,7 +344,7 @@ export default function GenerateTestCasesPage() {
   };
   const startNewChat = () => {
     const savedChat = run?.id.startsWith("local-") ? saveChatSnapshot(run, draftCases) : null;
-    setResult(null); setDraftCases([]); setFiles([]); setSelectedSource("document"); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setOpeningRunId(null); setError(null);
+    setResult(null); setDraftCases([]); setFiles([]); setSelectedSource("document"); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setOpeningRunId(null); setRenamingRunId(null); setError(null);
     setMessage(savedChat ? "Saved the current chat to Test runs. Add a source or describe a new flow to begin." : "Started a new test-design chat. Add a source or describe the flow to begin.");
   };
   const openRun = async (historyRun: RunRailEntry) => {
@@ -322,6 +370,29 @@ export default function GenerateTestCasesPage() {
       setError(apiErrorMessage(reason, "Could not load this test run."));
     } finally {
       setOpeningRunId(null);
+    }
+  };
+  const renameRun = async (historyRun: RunRailEntry, title: string) => {
+    setRenamingRunId(historyRun.id);
+    setError(null);
+    try {
+      if (historyRun.id.startsWith("local-")) {
+        const next = localRuns.map((item) => item.id === historyRun.id ? { ...item, title } : item);
+        setLocalRuns(next);
+        localStorage.setItem(LOCAL_CHAT_STORAGE_KEY, JSON.stringify(next));
+        if (result?.id === historyRun.id) setResult({ ...result, title });
+      } else {
+        const updated = (await testCasesApi.updateRunTitle(historyRun.id, title)).data;
+        queryClient.setQueryData(["generation-run", historyRun.id], updated);
+        if (result?.id === historyRun.id) setResult(updated);
+        await queryClient.invalidateQueries({ queryKey: ["generation-history-summaries", selectedProjectId] });
+      }
+      setMessage("Test run name updated.");
+    } catch (reason) {
+      setError(apiErrorMessage(reason, "Could not rename this test run."));
+      throw reason;
+    } finally {
+      setRenamingRunId(null);
     }
   };
   const saveMutation = useMutation({
@@ -351,7 +422,7 @@ export default function GenerateTestCasesPage() {
     setDraftCases((current) => current.map((item, idx) => idx === index ? next : item));
   };
 
-  const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={3} alignItems="flex-start"><RunRail runs={allRuns} activeId={run?.id} openingId={openingRunId} onSelect={openRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
+  const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={3} alignItems="flex-start"><RunRail runs={allRuns} activeId={run?.id} openingId={openingRunId} renamingId={renamingRunId} onSelect={openRun} onRename={renameRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
 
   if (run) return workspace(<Stack spacing={3}>
     <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h5" sx={{ fontWeight: 700 }}>{runTitle(run)}</Typography><Typography color="text.secondary">{run.status === "completed" ? `${draftCases.length} editable test cases` : draftCases.length ? `${draftCases.length} test cases ready • generating more` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap"><Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button><Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={saveMutation.isPending || (run.status !== "completed" && !localPreview)}>{saveMutation.isPending ? "Saving…" : saved ? "Saved" : "Save suite"}</Button><Button onClick={startNewChat}>＋ New chat</Button></Stack></Stack>

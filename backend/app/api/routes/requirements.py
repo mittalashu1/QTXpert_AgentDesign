@@ -5,10 +5,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps.auth_deps import get_current_user
+from app.api.deps.auth_deps import get_current_user, require_roles
 from app.config import Settings, get_settings
 from app.database.models.requirement import RequirementSource
-from app.database.models.user import User
+from app.database.models.user import User, UserRole
 from app.database.repositories.requirement_repository import (
     ProjectRepository,
     RequirementRepository,
@@ -18,6 +18,7 @@ from app.schemas.requirement import (
     DirectPromptRequest,
     ProjectCreate,
     ProjectOut,
+    ProjectUpdate,
     RequirementOut,
 )
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
@@ -29,7 +30,6 @@ router = APIRouter(tags=["requirements"])
 async def _require_owned_project(db: AsyncSession, project_id: UUID, user_id: UUID) -> None:
     project = await ProjectRepository(db).get_for_owner(project_id, user_id)
     if project is None:
-        # Do not reveal whether another user's project exists.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
 
@@ -50,6 +50,24 @@ async def list_projects(
 ):
     repo = ProjectRepository(db)
     return await repo.list_for_owner(user.id)
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectOut)
+async def update_project(
+    project_id: UUID,
+    payload: ProjectUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+):
+    """Rename/update a project. Project metadata changes are admin-only."""
+    repo = ProjectRepository(db)
+    project = await repo.get_for_owner(project_id, user.id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Project name cannot be empty")
+    return await repo.update(project, name=name, description=payload.description)
 
 
 @router.get("/requirements", response_model=List[RequirementOut])
@@ -107,8 +125,6 @@ async def upload_requirement(
             detail="Extracted requirement text is too large for a single generation run",
         )
 
-    # Keep the original bytes in one shared repository. The requirement row
-    # points to this durable asset instead of a disposable filename.
     asset = await UploadRepositoryService.create_from_bytes(
         db,
         data,

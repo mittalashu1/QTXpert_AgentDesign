@@ -67,6 +67,8 @@ export const projectsApi = {
   list: () => apiClient.get<Project[]>("/projects"),
   create: (name: string, description?: string) =>
     apiClient.post<Project>("/projects", { name, description }),
+  update: (id: string, name: string, description?: string | null) =>
+    apiClient.patch<Project>(`/projects/${id}`, { name, description: description ?? null }),
 };
 
 export const uploadsApi = {
@@ -160,6 +162,8 @@ export const testCasesApi = {
       params: { project_id: projectId, limit, offset },
     }),
   getRun: (runId: string) => apiClient.get<GenerationRun>(`/history/${runId}`),
+  updateRunTitle: (runId: string, title: string) =>
+    apiClient.patch<GenerationRun>(`/history/${runId}/title`, { title }),
   updateRun: (runId: string, testCases: TestCase[]) =>
     apiClient.patch<GenerationRun>(`/history/${runId}`, {
       test_cases: testCases.map((testCase) => ({
