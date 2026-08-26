@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Alert,
@@ -35,6 +35,7 @@ import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { apiClient } from "@/services/apiClient";
 import { uploadsApi } from "@/services/api";
 import { UploadedAsset } from "@/types/domain";
+import { useSelectedProject } from "@/hooks/useSelectedProject";
 
 type TestCase = {
   id: string;
@@ -117,8 +118,17 @@ function formatBytes(value: number) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function readableError(error: unknown, fallback: string) {
+  const candidate = error as { response?: { data?: { detail?: unknown } }; message?: unknown };
+  if (typeof candidate?.response?.data?.detail === "string") return candidate.response.data.detail;
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof candidate?.message === "string") return candidate.message;
+  return fallback;
+}
+
 export default function AutopilotPage() {
   const navigate = useNavigate();
+  const { selectedProjectId } = useSelectedProject();
   const [file, setFile] = useState<File | null>(null);
   const [storedApks, setStoredApks] = useState<UploadedAsset[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState("");
@@ -139,17 +149,21 @@ export default function AutopilotPage() {
   const [platformVersion, setPlatformVersion] = useState("14.0");
   const [appiumApp, setAppiumApp] = useState("");
 
-  const refreshStoredApks = async () => {
+  const refreshStoredApks = useCallback(async (projectId: string) => {
+    if (!projectId) {
+      setStoredApks([]);
+      return;
+    }
     setRepositoryLoading(true);
     try {
-      const response = await uploadsApi.list({ category: "apk" });
+      const response = await uploadsApi.list({ category: "apk", project_id: projectId });
       setStoredApks(response.data);
     } catch {
       setStoredApks([]);
     } finally {
       setRepositoryLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     apiClient.get<ProviderStatus>("/autopilot/providers")
@@ -162,8 +176,8 @@ export default function AutopilotPage() {
   }, []);
 
   useEffect(() => {
-    void refreshStoredApks();
-  }, []);
+    void refreshStoredApks(selectedProjectId);
+  }, [refreshStoredApks, selectedProjectId]);
 
   useEffect(() => {
     let active = true;
@@ -178,6 +192,7 @@ export default function AutopilotPage() {
       }
     };
     const restore = async () => {
+      if (!selectedProjectId) return;
       try {
         const response = await apiClient.get<AnalysisJob | null>("/autopilot/jobs/latest", { timeout: 15000 });
         if (!active || !response.data) return;
@@ -202,7 +217,7 @@ export default function AutopilotPage() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [selectedProjectId]);
 
   const stats = useMemo(() => {
     if (!analysis) return null;
@@ -248,6 +263,10 @@ export default function AutopilotPage() {
 
   const analyze = async () => {
     if (!file && !selectedUploadId) return;
+    if (!selectedProjectId) {
+      setError("Select a project before starting Autopilot.");
+      return;
+    }
     setBusy(true);
     setError("");
     setExecution(null);
@@ -266,7 +285,7 @@ export default function AutopilotPage() {
           headers: { "Content-Type": "multipart/form-data" },
           timeout: 300000,
         });
-        await refreshStoredApks();
+        await refreshStoredApks(selectedProjectId);
       }
 
       const jobId = response.data.job_id;
@@ -274,8 +293,8 @@ export default function AutopilotPage() {
       setAnalysisStage(response.data.stage);
       setArtifactAvailable(response.data.artifact_available !== false);
       await pollAnalysis(jobId);
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || "Autopilot analysis failed");
+    } catch (err: unknown) {
+      setError(readableError(err, "Autopilot analysis failed"));
     } finally {
       setBusy(false);
     }
@@ -296,8 +315,8 @@ export default function AutopilotPage() {
         auto_grant_permissions: false,
       }, { timeout: 300000 });
       setExecution(response.data);
-    } catch (err: any) {
-      setError(err?.response?.data?.detail || err?.message || "Smoke execution failed");
+    } catch (err: unknown) {
+      setError(readableError(err, "Smoke execution failed"));
     } finally {
       setSmokeBusy(false);
     }
@@ -391,7 +410,7 @@ export default function AutopilotPage() {
               helperText="Do not paste production passwords or secrets. Autopilot will ask only for context it cannot infer."
             />
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
-              <Button disabled={(!file && !selectedUploadId) || busy} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>
+              <Button disabled={(!file && !selectedUploadId) || busy || !selectedProjectId} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>
                 {busy ? "Learning application…" : selectedStoredApk ? "Analyze Stored APK" : "Start Autopilot Analysis"}
               </Button>
               <Typography variant="caption" color="text.secondary">Android APK · prototype limit 250 MB · new uploads are saved automatically</Typography>
