@@ -9,6 +9,7 @@ import {
   ExecutionRun,
   DashboardSummary,
   AICostSummary,
+  UploadedAsset,
 } from "@/types/domain";
 
 export const authApi = {
@@ -59,6 +60,24 @@ export const projectsApi = {
   list: () => apiClient.get<Project[]>("/projects"),
   create: (name: string, description?: string) =>
     apiClient.post<Project>("/projects", { name, description }),
+};
+
+export const uploadsApi = {
+  list: (params?: { category?: string; extension?: string; project_id?: string }) =>
+    apiClient.get<UploadedAsset[]>("/uploads", { params }),
+  upload: (file: File, options?: { projectId?: string; sourceModule?: string; category?: string }) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (options?.projectId) form.append("project_id", options.projectId);
+    if (options?.sourceModule) form.append("source_module", options.sourceModule);
+    if (options?.category) form.append("category", options.category);
+    return apiClient.post<UploadedAsset>("/uploads", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 300000,
+    });
+  },
+  download: (id: string) => apiClient.get(`/uploads/${id}/content`, { responseType: "blob" }),
+  remove: (id: string) => apiClient.delete(`/uploads/${id}`),
 };
 
 export const requirementsApi = {
@@ -131,4 +150,3 @@ export const settingsApi = {
       { provider }
     ),
 };
-
