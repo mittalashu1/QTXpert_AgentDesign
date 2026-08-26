@@ -5,14 +5,16 @@ from pathlib import Path
 from typing import Annotated, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
 from app.database.models.autopilot_job import AutopilotJob
+from app.database.models.uploaded_asset import UploadedAsset
 from app.database.models.user import User
+from app.database.repositories.requirement_repository import ProjectRepository
 from app.database.session import get_db_session
 from app.schemas.autopilot import (
     AutopilotAnalysis,
@@ -36,6 +38,22 @@ router = APIRouter(prefix="/autopilot", tags=["autopilot"])
 
 def _service(settings: Settings) -> AutopilotPrototypeService:
     return AutopilotPrototypeService(settings)
+
+
+async def _active_project(
+    db: AsyncSession,
+    user: User,
+    header_project_id: Optional[str],
+) -> Optional[UUID]:
+    if not header_project_id:
+        return None
+    try:
+        project_id = UUID(header_project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid project context") from exc
+    if await ProjectRepository(db).get_for_owner(project_id, user.id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return project_id
 
 
 async def _require_owned_job(service: AutopilotPrototypeService, job_id: str, user: User):
@@ -63,9 +81,7 @@ async def _link_repository_asset(
     job_id: str,
     asset_id: UUID,
 ) -> None:
-    # Keep the local job manifest informative for local development.
     await service.update_job(job_id, repository_asset_id=str(asset_id))
-    # Deployed Autopilot job metadata is durable in PostgreSQL.
     record = await db.scalar(select(AutopilotJob).where(AutopilotJob.job_id == job_id))
     if record is not None:
         record.repository_asset_id = asset_id
@@ -117,8 +133,6 @@ async def _mark_repository_available(
 
 
 class _AsyncPathReader:
-    """Small adapter allowing the existing bounded upload writer to reuse a stored APK."""
-
     def __init__(self, path: Path):
         self._handle = path.open("rb")
 
@@ -134,7 +148,6 @@ async def get_autopilot_providers(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
 ):
-    """Return execution-provider readiness without exposing credentials."""
     _ = user
     configured = settings.browserstack_configured
     return AutopilotProviderStatus(
@@ -152,8 +165,10 @@ async def analyze_mobile_app(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     file: UploadFile = File(...),
     context: str = Form(default=""),
+    x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
-    """Upload an APK, save it to the shared repository, then analyze it."""
+    """Upload an APK into the active project's repository, then analyze it."""
+    project_id = await _active_project(db, user, x_qtxpert_project_id)
     filename = Path(file.filename or "application.apk").name
     if not filename.lower().endswith(".apk"):
         raise HTTPException(
@@ -176,13 +191,13 @@ async def analyze_mobile_app(
     except AutopilotUploadInvalid as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    # Persist the original APK independently of Render's replaceable filesystem.
     asset = await UploadRepositoryService.create_from_path(
         db,
         apk_path,
         user.id,
         filename=filename,
         content_type=file.content_type or "application/vnd.android.package-archive",
+        project_id=project_id,
         source_module="autopilot",
         category="apk",
         max_bytes=max_bytes,
@@ -201,11 +216,13 @@ async def analyze_existing_mobile_app(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
-    """Start a new Android analysis from an APK already in Test Data → Uploads."""
+    """Start a new Android analysis from an APK in the active project."""
+    project_id = await _active_project(db, user, x_qtxpert_project_id)
     asset = await UploadRepositoryService.get_owned(db, payload.upload_id, user.id)
-    if asset is None or asset.extension != "apk":
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK not found")
+    if asset is None or asset.extension != "apk" or (project_id is not None and asset.project_id != project_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK not found in this project")
 
     service = _service(settings)
     temp_dir = service.root / "_repository_reuse" / str(asset.id)
@@ -236,18 +253,21 @@ async def get_latest_autopilot_job(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
-    """Restore the latest result, including repository-backed APK availability."""
+    """Restore the latest Autopilot result for the active project."""
     service = _service(settings)
-    record = await db.scalar(
-        select(AutopilotJob)
-        .where(AutopilotJob.owner_id == user.id)
-        .order_by(AutopilotJob.created_at.desc())
-        .limit(1)
-    )
+    project_id = await _active_project(db, user, x_qtxpert_project_id)
+    query = select(AutopilotJob).where(AutopilotJob.owner_id == user.id)
+    if project_id is not None:
+        query = query.join(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
+            UploadedAsset.project_id == project_id
+        )
+    record = await db.scalar(query.order_by(AutopilotJob.created_at.desc()).limit(1))
     if record is None:
-        result = await service.get_latest_job_status(str(user.id))
-        return result
+        # The filesystem fallback is owner-wide and therefore only safe when no
+        # project context exists (legacy/local clients).
+        return await service.get_latest_job_status(str(user.id)) if project_id is None else None
 
     job = await _require_owned_job(service, record.job_id, user)
     local_path = job.get("apk_path")
@@ -271,7 +291,6 @@ async def get_autopilot_job_status(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ):
-    """Return progress and recover an interrupted repository-backed analysis."""
     service = _service(settings)
     job = await _require_owned_job(service, job_id, user)
     local_path = job.get("apk_path")
@@ -309,7 +328,6 @@ async def get_autopilot_automation(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
 ):
-    """Compile generated test designs into QTX Test IR and Appium Python previews."""
     service = _service(settings)
     await _require_owned_job(service, job_id, user)
     try:

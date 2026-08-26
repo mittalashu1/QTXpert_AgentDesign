@@ -16,6 +16,8 @@ import {
   DocumentProfile,
 } from "@/types/domain";
 
+const activeProjectId = () => localStorage.getItem("qtxpert-selected-project") || undefined;
+
 export const authApi = {
   login: (email: string, password: string) =>
     apiClient.post<{ access_token: string; refresh_token: string }>("/auth/login", {
@@ -67,12 +69,17 @@ export const projectsApi = {
 };
 
 export const uploadsApi = {
-  list: (params?: { category?: string; extension?: string; project_id?: string }) =>
-    apiClient.get<UploadedAsset[]>("/uploads", { params }),
+  list: (params?: { category?: string; extension?: string; project_id?: string }) => {
+    const projectId = params?.project_id || activeProjectId();
+    return apiClient.get<UploadedAsset[]>("/uploads", {
+      params: { ...params, ...(projectId ? { project_id: projectId } : {}) },
+    });
+  },
   upload: (file: File, options?: { projectId?: string; sourceModule?: string; category?: string }) => {
     const form = new FormData();
+    const projectId = options?.projectId || activeProjectId();
     form.append("file", file);
-    if (options?.projectId) form.append("project_id", options.projectId);
+    if (projectId) form.append("project_id", projectId);
     if (options?.sourceModule) form.append("source_module", options.sourceModule);
     if (options?.category) form.append("category", options.category);
     return apiClient.post<UploadedAsset>("/uploads", form, {
