@@ -44,6 +44,14 @@ class UpdateGenerationRunRequest(BaseModel):
     test_cases: List[TestCaseUpdate] = Field(default_factory=list)
 
 
+class GenerationRunTitleUpdate(BaseModel):
+    """Rename a saved Test Design run without changing or regenerating its suite."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=500)
+
+
 class TestCaseOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
