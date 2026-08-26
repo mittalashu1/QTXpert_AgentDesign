@@ -1,10 +1,4 @@
-"""Durable metadata and analysis results for mobile Autopilot jobs.
-
-The uploaded APK itself remains on the job workspace because it can be hundreds
-of megabytes. The job record and generated analysis are kept in the database so
-results survive a Render restart or deployment, where the container filesystem
-is replaced.
-"""
+"""Durable metadata and analysis results for mobile Autopilot jobs."""
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,7 +16,11 @@ def _utcnow() -> datetime:
 
 
 class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """One uploaded mobile build and its durable Autopilot state."""
+    """One mobile build and its durable Autopilot state.
+
+    The original APK belongs to the shared Upload Repository. ``apk_path`` is
+    only a disposable local materialization used by Androguard/Appium workers.
+    """
 
     __tablename__ = "autopilot_jobs"
     __table_args__ = (
@@ -32,6 +30,12 @@ class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     job_id: Mapped[str] = mapped_column(String(36), unique=True, index=True, nullable=False)
     owner_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    repository_asset_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("uploaded_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
