@@ -32,6 +32,19 @@ export default function ProjectSelector({ topLevel = false }: { topLevel?: boole
     selectProject(project.id);
   };
 
+  const dialog = (
+    <CreateProjectDialog
+      open={dialogOpen}
+      name={name}
+      description={description}
+      busy={createProject.isPending}
+      onNameChange={setName}
+      onDescriptionChange={setDescription}
+      onClose={() => setDialogOpen(false)}
+      onCreate={handleCreate}
+    />
+  );
+
   if (projects.length === 0) {
     return (
       <Stack direction="row" spacing={2} alignItems="center">
@@ -39,15 +52,7 @@ export default function ProjectSelector({ topLevel = false }: { topLevel?: boole
         <Button startIcon={<AddIcon />} variant="outlined" onClick={() => setDialogOpen(true)}>
           Create project
         </Button>
-        <CreateProjectDialog
-          open={dialogOpen}
-          name={name}
-          description={description}
-          onNameChange={setName}
-          onDescriptionChange={setDescription}
-          onClose={() => setDialogOpen(false)}
-          onCreate={handleCreate}
-        />
+        {dialog}
       </Stack>
     );
   }
@@ -71,15 +76,7 @@ export default function ProjectSelector({ topLevel = false }: { topLevel?: boole
       <Button size="small" startIcon={<AddIcon />} onClick={() => setDialogOpen(true)}>
         New project
       </Button>
-      <CreateProjectDialog
-        open={dialogOpen}
-        name={name}
-        description={description}
-        onNameChange={setName}
-        onDescriptionChange={setDescription}
-        onClose={() => setDialogOpen(false)}
-        onCreate={handleCreate}
-      />
+      {dialog}
     </Stack>
   );
 }
@@ -88,6 +85,7 @@ function CreateProjectDialog({
   open,
   name,
   description,
+  busy,
   onNameChange,
   onDescriptionChange,
   onClose,
@@ -96,6 +94,7 @@ function CreateProjectDialog({
   open: boolean;
   name: string;
   description: string;
+  busy: boolean;
   onNameChange: (value: string) => void;
   onDescriptionChange: (value: string) => void;
   onClose: () => void;
@@ -112,15 +111,10 @@ function CreateProjectDialog({
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={onCreate} disabled={!name.trim() || createProjectBusyPlaceholder(false)}>
-          Create
+        <Button variant="contained" onClick={onCreate} disabled={!name.trim() || busy}>
+          {busy ? "Creating…" : "Create"}
         </Button>
       </DialogActions>
     </Dialog>
   );
-}
-
-// Kept as a pure helper so the dialog remains presentation-only.
-function createProjectBusyPlaceholder(value: boolean) {
-  return value;
 }
