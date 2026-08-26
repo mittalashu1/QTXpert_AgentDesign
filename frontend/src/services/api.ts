@@ -1,6 +1,7 @@
 import { apiClient } from "@/services/apiClient";
 import {
   GenerationRun,
+  GenerationRunSummary,
   Project,
   Requirement,
   User,
@@ -154,6 +155,10 @@ export const testCasesApi = {
     }),
   history: (projectId: string) =>
     apiClient.get<GenerationRun[]>("/history", { params: { project_id: projectId } }),
+  historySummaries: (projectId: string, limit = 200, offset = 0) =>
+    apiClient.get<GenerationRunSummary[]>("/history-summaries", {
+      params: { project_id: projectId, limit, offset },
+    }),
   getRun: (runId: string) => apiClient.get<GenerationRun>(`/history/${runId}`),
   updateRun: (runId: string, testCases: TestCase[]) =>
     apiClient.patch<GenerationRun>(`/history/${runId}`, {
