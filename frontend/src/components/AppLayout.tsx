@@ -21,7 +21,7 @@ const drawerWidth = 248;
 const navigation = [
   { to: "/", label: "Dashboard", icon: <DashboardOutlinedIcon />, end: true },
   { to: "/autopilot", label: "Autopilot", icon: <AutoAwesomeIcon />, badge: "NEW" },
-  { to: "/documents", label: "Document analysis", icon: <DescriptionOutlinedIcon /> },
+  { to: "/documents", label: "Document Intelligence", icon: <DescriptionOutlinedIcon />, badge: "AI" },
   { to: "/design", label: "Test design", icon: <ArchitectureOutlinedIcon /> },
   { to: "/execution", label: "Test execution", icon: <PlayCircleOutlineIcon /> },
   { to: "/reports", label: "Test reports", icon: <AssessmentOutlinedIcon /> },
@@ -78,21 +78,14 @@ export default function AppLayout() {
               </ListItemButton>
             ))}
 
-            <ListItemButton
-              onClick={() => setTestDataOpen((open) => !open)}
-              sx={{ borderRadius: 2, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined }}
-            >
+            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} sx={{ borderRadius: 2, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined }}>
               <ListItemIcon sx={{ minWidth: 38, color: "text.secondary" }}><StorageOutlinedIcon /></ListItemIcon>
               <ListItemText primary="Test Data" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
               {testDataOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
             </ListItemButton>
             <Collapse in={testDataOpen} timeout="auto" unmountOnExit>
               <List disablePadding>
-                <ListItemButton
-                  component={NavLink}
-                  to="/test-data/uploads"
-                  sx={{ ...navSx, pl: 4.6 }}
-                >
+                <ListItemButton component={NavLink} to="/test-data/uploads" sx={{ ...navSx, pl: 4.6 }}>
                   <ListItemIcon sx={{ minWidth: 34, color: "text.secondary" }}><CloudUploadOutlinedIcon fontSize="small" /></ListItemIcon>
                   <ListItemText primary="Uploads" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
                 </ListItemButton>
@@ -100,7 +93,7 @@ export default function AppLayout() {
             </Collapse>
           </List>
         </Box>
-        <Box sx={{ mt: "auto", p: 2 }}><Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "action.hover" }}><Typography variant="caption" color="primary.main" sx={{ fontWeight: 700 }}>AUTONOMOUS QE</Typography><Typography variant="body2" sx={{ mt: .5, fontWeight: 600 }}>APK → intelligence → tests → execution</Typography><Typography variant="caption" color="text.secondary">Autopilot starts safe and expands coverage only within approved guardrails.</Typography></Box></Box>
+        <Box sx={{ mt: "auto", p: 2 }}><Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "action.hover" }}><Typography variant="caption" color="primary.main" sx={{ fontWeight: 700 }}>AUTONOMOUS QE</Typography><Typography variant="body2" sx={{ mt: .5, fontWeight: 600 }}>Documents → intelligence → tests → execution</Typography><Typography variant="caption" color="text.secondary">QTXpert validates the requirement baseline before downstream test design and autonomous execution.</Typography></Box></Box>
       </Drawer>
       <Box component="main" sx={{ ml: `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
     </Box>
