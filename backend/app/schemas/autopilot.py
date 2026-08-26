@@ -64,6 +64,7 @@ class AutopilotJobStatus(BaseModel):
     progress: int = Field(default=0, ge=0, le=100)
     created_at: str
     updated_at: str
+    artifact_available: bool = True
     error: Optional[str] = None
     analysis: Optional[AutopilotAnalysis] = None
 

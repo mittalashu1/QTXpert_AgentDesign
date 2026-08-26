@@ -14,14 +14,18 @@ import logging
 import re
 import shutil
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from uuid import uuid4
 
 import httpx
+from sqlalchemy import select
 
 from app.config import Settings
+from app.database.models.autopilot_job import AutopilotJob
+from app.database.session import AsyncSessionLocal
 from app.llm.base import LLMMessage
 from app.llm.factory import get_llm_provider
 from app.schemas.autopilot import (
@@ -33,6 +37,7 @@ from app.schemas.autopilot import (
 )
 
 logger = logging.getLogger(__name__)
+_MISSING = object()
 
 
 class AutopilotUploadTooLarge(ValueError):
@@ -59,6 +64,100 @@ class AutopilotPrototypeService:
         self.settings = settings
         self.root = Path(settings.AUTOPILOT_STORAGE_PATH).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._persistence_disabled_until = 0.0
+
+    @property
+    def _durable_results_enabled(self) -> bool:
+        """Use the database for deployed jobs while keeping unit tests local."""
+        return bool(
+            getattr(self.settings, "AUTOPILOT_DB_PERSISTENCE_ENABLED", True)
+            and self.settings.APP_ENV != "local"
+        )
+
+    async def _persist_job(self, job: Dict[str, Any], analysis: Any = _MISSING) -> None:
+        """Best-effort durable write; filesystem operation must never fail on DB hiccups."""
+        if not self._durable_results_enabled or time.monotonic() < self._persistence_disabled_until:
+            return
+        try:
+            owner_id = uuid.UUID(str(job["owner_id"]))
+            created_at = datetime.fromisoformat(str(job["created_at"]).replace("Z", "+00:00"))
+            async with AsyncSessionLocal() as session:
+                record = await session.scalar(
+                    select(AutopilotJob).where(AutopilotJob.job_id == str(job["job_id"]))
+                )
+                if record is None:
+                    record = AutopilotJob(
+                        job_id=str(job["job_id"]),
+                        owner_id=owner_id,
+                        filename=str(job.get("filename", "application.apk")),
+                        created_at=created_at,
+                    )
+                    session.add(record)
+                record.filename = str(job.get("filename", record.filename))
+                record.owner_id = owner_id
+                record.context = str(job.get("context", ""))[:8000]
+                record.apk_path = job.get("apk_path")
+                record.status = str(job.get("status", "uploaded"))
+                record.stage = str(job.get("stage", "queued"))
+                record.progress = int(job.get("progress", 0))
+                record.error = job.get("error")
+                if analysis is not _MISSING:
+                    record.analysis = analysis
+                await session.commit()
+        except Exception as exc:  # pragma: no cover - exercised by unavailable production DBs
+            # Do not turn a healthy APK analysis into a failed job just because
+            # the optional result store is temporarily unavailable. Avoid
+            # repeatedly waiting on a broken connection for the next minute.
+            self._persistence_disabled_until = time.monotonic() + 60
+            logger.warning("Autopilot durable result write skipped: %s", exc)
+
+    async def _load_job_from_db(self, job_id: str) -> Dict[str, Any] | None:
+        if not self._durable_results_enabled or time.monotonic() < self._persistence_disabled_until:
+            return None
+        try:
+            async with AsyncSessionLocal() as session:
+                record = await session.scalar(
+                    select(AutopilotJob).where(AutopilotJob.job_id == job_id)
+                )
+                if record is None:
+                    return None
+                result: Dict[str, Any] = {
+                    "job_id": record.job_id,
+                    "owner_id": str(record.owner_id),
+                    "filename": record.filename,
+                    "context": record.context or "",
+                    "apk_path": record.apk_path,
+                    "status": record.status,
+                    "stage": record.stage,
+                    "progress": record.progress,
+                    "error": record.error,
+                    "created_at": record.created_at.isoformat(),
+                    "updated_at": record.updated_at.isoformat(),
+                }
+                if record.analysis is not None:
+                    result["analysis"] = record.analysis
+                return result
+        except Exception as exc:  # pragma: no cover - exercised by unavailable production DBs
+            self._persistence_disabled_until = time.monotonic() + 60
+            logger.warning("Autopilot durable result read skipped: %s", exc)
+            return None
+
+    async def _latest_job_id_from_db(self, owner_id: str) -> str | None:
+        if not self._durable_results_enabled or time.monotonic() < self._persistence_disabled_until:
+            return None
+        try:
+            async with AsyncSessionLocal() as session:
+                record = await session.scalar(
+                    select(AutopilotJob)
+                    .where(AutopilotJob.owner_id == uuid.UUID(str(owner_id)))
+                    .order_by(AutopilotJob.created_at.desc())
+                    .limit(1)
+                )
+                return record.job_id if record else None
+        except Exception as exc:  # pragma: no cover - exercised by unavailable production DBs
+            self._persistence_disabled_until = time.monotonic() + 60
+            logger.warning("Autopilot durable latest-job read skipped: %s", exc)
+            return None
 
     def _job_dir(self, job_id: str) -> Path:
         if not re.fullmatch(r"[0-9a-f-]{36}", job_id):
@@ -88,6 +187,7 @@ class AutopilotPrototypeService:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
+        await self._persist_job(seed)
         return job_id, apk_path
 
     async def save_upload_stream(
@@ -136,6 +236,7 @@ class AutopilotPrototypeService:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
+            await self._persist_job(seed)
             return job_id, apk_path
         except Exception:
             if handle is not None:
@@ -152,9 +253,11 @@ class AutopilotPrototypeService:
         job = await self.load_job(job_id)
         job.update(changes)
         job["updated_at"] = datetime.now(timezone.utc).isoformat()
-        temporary = path.with_suffix(".tmp")
-        await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
-        await asyncio.to_thread(temporary.replace, path)
+        if path.parent.exists():
+            temporary = path.with_suffix(".tmp")
+            await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
+            await asyncio.to_thread(temporary.replace, path)
+        await self._persist_job(job)
         return job
 
     async def get_job_status(self, job_id: str) -> AutopilotJobStatus:
@@ -166,6 +269,20 @@ class AutopilotPrototypeService:
             except FileNotFoundError:
                 await self.update_job(job_id, status="failed", stage="failed", error="Analysis result is missing")
                 job = await self.load_job(job_id)
+        elif job.get("status") in {"uploaded", "analyzing"}:
+            # A Render deploy replaces the container filesystem. Do not leave a
+            # durable in-flight job polling forever when its APK is gone.
+            apk_path = job.get("apk_path")
+            if not apk_path or not Path(apk_path).is_file():
+                await self.update_job(
+                    job_id,
+                    status="failed",
+                    stage="failed",
+                    progress=100,
+                    error="The uploaded APK is no longer available after a service restart. Please upload it again.",
+                )
+                job = await self.load_job(job_id)
+        artifact_path = job.get("apk_path")
         return AutopilotJobStatus(
             job_id=job_id,
             filename=job["filename"],
@@ -174,13 +291,19 @@ class AutopilotPrototypeService:
             progress=int(job.get("progress", 0)),
             created_at=job["created_at"],
             updated_at=job.get("updated_at", job["created_at"]),
+            artifact_available=bool(artifact_path and Path(artifact_path).is_file()),
             error=job.get("error"),
             analysis=analysis,
         )
 
     async def get_latest_job_status(self, owner_id: str) -> AutopilotJobStatus | None:
         """Return the newest job owned by a user, if one has been uploaded."""
-        job_id = await asyncio.to_thread(self._latest_job_id_sync, owner_id)
+        # Prefer the database in deployed environments. This is what makes a
+        # completed result survive a Render deploy; the local scan remains a
+        # fast path for development and for the APK artifact itself.
+        job_id = await self._latest_job_id_from_db(owner_id)
+        if not job_id:
+            job_id = await asyncio.to_thread(self._latest_job_id_sync, owner_id)
         if not job_id:
             return None
         return await self.get_job_status(job_id)
@@ -224,15 +347,21 @@ class AutopilotPrototypeService:
 
     async def load_job(self, job_id: str) -> Dict[str, Any]:
         path = self._job_dir(job_id) / "job.json"
-        if not path.exists():
+        if path.exists():
+            return json.loads(await asyncio.to_thread(path.read_text, "utf-8"))
+        durable = await self._load_job_from_db(job_id)
+        if durable is None:
             raise FileNotFoundError(job_id)
-        return json.loads(await asyncio.to_thread(path.read_text, "utf-8"))
+        return durable
 
     async def load_analysis(self, job_id: str) -> AutopilotAnalysis:
         path = self._metadata_path(job_id)
-        if not path.exists():
+        if path.exists():
+            return AutopilotAnalysis.model_validate_json(await asyncio.to_thread(path.read_text, "utf-8"))
+        durable = await self._load_job_from_db(job_id)
+        if not durable or durable.get("analysis") is None:
             raise FileNotFoundError(job_id)
-        return AutopilotAnalysis.model_validate_json(await asyncio.to_thread(path.read_text, "utf-8"))
+        return AutopilotAnalysis.model_validate(durable["analysis"])
 
     async def analyze(self, job_id: str) -> AutopilotAnalysis:
         job = await self.load_job(job_id)
@@ -281,6 +410,7 @@ class AutopilotPrototypeService:
             capabilities=self._capabilities(metadata),
         )
         await asyncio.to_thread(self._metadata_path(job_id).write_text, analysis.model_dump_json(indent=2), "utf-8")
+        await self._persist_job(job, analysis=analysis.model_dump(mode="json"))
         return analysis
 
     def _analyze_apk_sync(self, apk_path: Path) -> Dict[str, Any]:
@@ -613,7 +743,12 @@ class AutopilotPrototypeService:
         source_path = evidence_dir / "page-source.xml"
 
         try:
-            apk_path = Path(job["apk_path"])
+            apk_path = Path(job.get("apk_path") or "")
+            if not apk_path.is_file() and not request.appium_app:
+                raise RuntimeError(
+                    "The uploaded APK artifact is unavailable after a service restart. "
+                    "Upload the APK again before running smoke execution."
+                )
             app_reference = request.appium_app or str(apk_path)
             appium_url = request.appium_url or "http://127.0.0.1:4723"
             browserstack_options: Dict[str, Any] | None = None
@@ -728,6 +863,8 @@ class AutopilotPrototypeService:
                 "browserstack is not configured",
                 "browserstack app upload failed (401)",
                 "browserstack app upload failed (403)",
+                "uploaded apk artifact is unavailable",
+                "uploaded apk artifact",
                 "unauthorized",
                 "authentication",
             )

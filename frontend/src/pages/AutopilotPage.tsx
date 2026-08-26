@@ -86,6 +86,7 @@ type AnalysisJob = {
   status: "uploaded" | "analyzing" | "analyzed" | "failed";
   stage: string;
   progress: number;
+  artifact_available?: boolean;
   error?: string;
   analysis?: Analysis | null;
 };
@@ -117,6 +118,7 @@ export default function AutopilotPage() {
   const [busy, setBusy] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisStage, setAnalysisStage] = useState("");
+  const [artifactAvailable, setArtifactAvailable] = useState(true);
   const [smokeBusy, setSmokeBusy] = useState(false);
   const [error, setError] = useState("");
   const [appiumUrl, setAppiumUrl] = useState("http://127.0.0.1:4723");
@@ -141,8 +143,11 @@ export default function AutopilotPage() {
         if (!active || !response.data) return;
         setAnalysisProgress(response.data.progress);
         setAnalysisStage(response.data.stage);
+        setArtifactAvailable(response.data.artifact_available !== false);
         if (response.data.status === "analyzed" && response.data.analysis) {
           setAnalysis(response.data.analysis);
+        } else if (response.data.status === "failed" && response.data.error) {
+          setError(response.data.error);
         }
       })
       .catch(() => {
@@ -187,12 +192,14 @@ export default function AutopilotPage() {
       const jobId = response.data.job_id;
       setAnalysisProgress(response.data.progress);
       setAnalysisStage(response.data.stage);
+      setArtifactAvailable(response.data.artifact_available !== false);
       const deadline = Date.now() + 20 * 60 * 1000;
       while (Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 2000));
         const poll = await apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 });
         setAnalysisProgress(poll.data.progress);
         setAnalysisStage(poll.data.stage);
+        setArtifactAvailable(poll.data.artifact_available !== false);
         if (poll.data.status === "failed") throw new Error(poll.data.error || "Autopilot analysis failed");
         if (poll.data.status === "analyzed" && poll.data.analysis) {
           setAnalysis(poll.data.analysis);
@@ -384,7 +391,7 @@ export default function AutopilotPage() {
                 </Grid>
                 <Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} /></Grid>
                 <Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(e) => setPlatformVersion(e.target.value)} /></Grid>
-                <Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="contained" disabled={smokeBusy || browserStackUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running" : "Run safe smoke"}</Button></Grid>
+                <Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="contained" disabled={smokeBusy || browserStackUnavailable || !artifactAvailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running" : "Run safe smoke"}</Button></Grid>
                 {provider === "appium" && <>
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(e) => setAppiumUrl(e.target.value)} /></Grid>
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" placeholder="Leave blank when the Appium server can access the uploaded APK path" value={appiumApp} onChange={(e) => setAppiumApp(e.target.value)} /></Grid>
@@ -397,6 +404,7 @@ export default function AutopilotPage() {
                     : "BrowserStack credentials are not configured on the backend yet. Add BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY as Render secrets to enable real-device execution."}
                 </Alert>
               )}
+              {!artifactAvailable && <Alert sx={{ mt: 2 }} severity="warning">The analysis result was restored from durable storage, but the APK bytes are no longer on this service instance. Re-upload the APK to run smoke execution.</Alert>}
               {execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke status: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.current_activity ? ` · ${execution.current_activity}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}
             </CardContent>
           </Card>

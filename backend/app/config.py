@@ -150,6 +150,10 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=250, ge=1, le=2048)
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
+    # Result metadata is persisted in Postgres in deployed environments. The
+    # APK bytes stay on the job workspace because storing a 250 MB binary in a
+    # relational row is neither efficient nor required to render the result.
+    AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
 
     # BrowserStack App Automate (optional real-device execution)
     BROWSERSTACK_USERNAME: Optional[str] = None
