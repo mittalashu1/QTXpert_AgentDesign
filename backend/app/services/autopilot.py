@@ -103,6 +103,10 @@ class AutopilotPrototypeService:
                     session.add(record)
                 record.filename = str(job.get("filename", record.filename))
                 record.owner_id = owner_id
+                repository_asset_id = job.get("repository_asset_id")
+                record.repository_asset_id = (
+                    uuid.UUID(str(repository_asset_id)) if repository_asset_id else None
+                )
                 record.context = str(job.get("context", ""))[:8000]
                 record.apk_path = job.get("apk_path")
                 record.status = str(job.get("status", "uploaded"))
@@ -132,6 +136,9 @@ class AutopilotPrototypeService:
                 result: Dict[str, Any] = {
                     "job_id": record.job_id,
                     "owner_id": str(record.owner_id),
+                    "repository_asset_id": str(record.repository_asset_id)
+                    if record.repository_asset_id
+                    else None,
                     "filename": record.filename,
                     "context": record.context or "",
                     "apk_path": record.apk_path,
