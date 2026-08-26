@@ -87,6 +87,16 @@ async def analyze_mobile_app(
     return await service.get_job_status(job_id)
 
 
+@router.get("/jobs/latest", response_model=AutopilotJobStatus | None)
+async def get_latest_autopilot_job(
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Restore the latest user-owned Autopilot result after a page refresh."""
+    service = _service(settings)
+    return await service.get_latest_job_status(str(user.id))
+
+
 @router.get("/jobs/{job_id}", response_model=AutopilotJobStatus)
 async def get_autopilot_job_status(
     job_id: str,

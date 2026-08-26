@@ -178,6 +178,33 @@ class AutopilotPrototypeService:
             analysis=analysis,
         )
 
+    async def get_latest_job_status(self, owner_id: str) -> AutopilotJobStatus | None:
+        """Return the newest job owned by a user, if one has been uploaded."""
+        job_id = await asyncio.to_thread(self._latest_job_id_sync, owner_id)
+        if not job_id:
+            return None
+        return await self.get_job_status(job_id)
+
+    def _latest_job_id_sync(self, owner_id: str) -> str | None:
+        latest: tuple[str, str] | None = None
+        try:
+            entries = list(self.root.iterdir())
+        except OSError:
+            return None
+        for job_dir in entries:
+            if not job_dir.is_dir():
+                continue
+            try:
+                job = json.loads((job_dir / "job.json").read_text("utf-8"))
+            except (OSError, ValueError):
+                continue
+            if str(job.get("owner_id")) != owner_id or not job.get("job_id"):
+                continue
+            created_at = str(job.get("created_at", ""))
+            if latest is None or created_at > latest[0]:
+                latest = (created_at, str(job["job_id"]))
+        return latest[1] if latest else None
+
     async def analyze_safely(self, job_id: str) -> None:
         started = time.perf_counter()
         try:

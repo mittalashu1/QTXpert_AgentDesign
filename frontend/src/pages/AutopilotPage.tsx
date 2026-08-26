@@ -87,7 +87,7 @@ type AnalysisJob = {
   stage: string;
   progress: number;
   error?: string;
-  analysis?: Analysis;
+  analysis?: Analysis | null;
 };
 
 type Execution = {
@@ -132,6 +132,25 @@ export default function AutopilotPage() {
         if (response.data.recommended_provider === "appium") setDeviceName("Android Emulator");
       })
       .catch(() => setProviderStatus(null));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    apiClient.get<AnalysisJob | null>("/autopilot/jobs/latest", { timeout: 15000 })
+      .then((response) => {
+        if (!active || !response.data) return;
+        setAnalysisProgress(response.data.progress);
+        setAnalysisStage(response.data.stage);
+        if (response.data.status === "analyzed" && response.data.analysis) {
+          setAnalysis(response.data.analysis);
+        }
+      })
+      .catch(() => {
+        // A first visit may not have a previous Autopilot job; keep the upload form usable.
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const stats = useMemo(() => {

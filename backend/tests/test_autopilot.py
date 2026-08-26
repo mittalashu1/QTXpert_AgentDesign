@@ -174,3 +174,14 @@ async def test_stream_upload_cleans_partial_job_when_too_large(tmp_path):
         await service.save_upload_stream("too-large.apk", FakeUpload(), "owner", max_bytes=1024)
 
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_latest_job_status_is_owner_scoped(tmp_path):
+    service = _service(tmp_path)
+    job_id, _ = await service.save_upload("latest.apk", b"x" * 2048, "owner")
+
+    latest = await service.get_latest_job_status("owner")
+    assert latest is not None
+    assert latest.job_id == job_id
+    assert await service.get_latest_job_status("another-owner") is None
