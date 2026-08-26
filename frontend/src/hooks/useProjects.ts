@@ -16,3 +16,12 @@ export function useCreateProject() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects"] }),
   });
 }
+
+export function useUpdateProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name, description }: { id: string; name: string; description?: string | null }) =>
+      projectsApi.update(id, name, description).then((res) => res.data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects"] }),
+  });
+}

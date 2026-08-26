@@ -3,28 +3,33 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
 import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Card,
-  CardContent, Chip, Divider, FormControl, FormHelperText, InputLabel,
-  LinearProgress, MenuItem, Select, Stack, TextField, Typography,
+  CardContent, Chip, Divider, FormControl, FormHelperText, IconButton, InputLabel,
+  LinearProgress, MenuItem, Select, Stack, TextField, Tooltip, Typography,
 } from "@mui/material";
 import AddOutlinedIcon from "@mui/icons-material/AddOutlined";
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
+import CheckOutlinedIcon from "@mui/icons-material/CheckOutlined";
+import CloseOutlinedIcon from "@mui/icons-material/CloseOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import DeleteOutlineOutlinedIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import DownloadOutlinedIcon from "@mui/icons-material/DownloadOutlined";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import ExpandMoreOutlinedIcon from "@mui/icons-material/ExpandMoreOutlined";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import RefreshOutlinedIcon from "@mui/icons-material/RefreshOutlined";
 import { requirementsApi, testCasesApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import ProjectSelector from "@/components/ProjectSelector";
-import { EXPORT_FORMATS, GenerationRun, TestCase } from "@/types/domain";
+import { EXPORT_FORMATS, GenerationRun, GenerationRunSummary, TestCase } from "@/types/domain";
 
 const ACTIVE_STATUSES = ["pending", "normalizing", "analyzing", "generating_scenarios", "generating_test_cases", "risk_analysis"];
 const PROGRESS: Record<string, number> = { pending: 5, normalizing: 15, analyzing: 35, generating_scenarios: 55, generating_test_cases: 75, risk_analysis: 90, completed: 100, failed: 100 };
 const FILE_EXTENSIONS = ".pdf,.docx,.txt,.md,.json,.csv";
 const LOCAL_CHAT_STORAGE_KEY = "qtxpert-saved-chats";
+const RUN_RAIL_RENDER_LIMIT = 100;
 type SourceKind = "file" | "link";
 type InputSource = { id: string; label: string; description: string; kind: SourceKind; accept?: string; placeholder?: string };
+type RunRailEntry = GenerationRun | GenerationRunSummary;
 
 function apiErrorMessage(reason: unknown, fallback: string): string {
   const detail = (reason as AxiosError<{ detail?: string }>)?.response?.data?.detail;
@@ -69,12 +74,13 @@ function EditableCase({ testCase, onChange }: { testCase: TestCase; onChange: (n
   </Accordion>;
 }
 
-
 function readSavedChats(): GenerationRun[] {
   if (typeof window === "undefined") return [];
   try {
     const parsed = JSON.parse(window.localStorage.getItem(LOCAL_CHAT_STORAGE_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((item) => item && typeof item === "object" && typeof item.id === "string")
+      : [];
   } catch {
     return [];
   }
@@ -88,21 +94,28 @@ function shortHeading(value: unknown, maxLength = 92) {
   return firstSentence.length > maxLength ? `${firstSentence.slice(0, maxLength - 1).trimEnd()}…` : firstSentence;
 }
 
-function runTitle(run: GenerationRun) {
+function runTitle(run: RunRailEntry) {
+  const fullRun = "test_cases" in run ? run : null;
+  const summaryRun = "test_case_count" in run ? run : null;
   const candidates: unknown[] = [
     run.title,
     run.requirement_summary,
-    run.test_scenarios?.[0]?.["title"],
-    run.test_scenarios?.[0]?.["scenario"],
-    run.functional_breakdown?.[0]?.["title"],
-    run.functional_breakdown?.[0]?.["name"],
-    run.test_cases?.[0]?.scenario,
+    summaryRun?.first_scenario,
+    fullRun?.test_scenarios?.[0]?.["title"],
+    fullRun?.test_scenarios?.[0]?.["scenario"],
+    fullRun?.functional_breakdown?.[0]?.["title"],
+    fullRun?.functional_breakdown?.[0]?.["name"],
+    fullRun?.test_cases?.[0]?.scenario,
   ];
   const heading = candidates.map((candidate) => shortHeading(candidate)).find(Boolean);
   if (heading) return heading;
   const profile = shortHeading(run.generation_profile?.replaceAll("_", " "), 40) || "feature";
   const date = run.created_at ? new Date(run.created_at).toLocaleDateString() : "";
   return `Test set • ${profile}${date ? ` • ${date}` : ""}`;
+}
+
+function runCaseCount(run: RunRailEntry) {
+  return "test_case_count" in run ? run.test_case_count : run.test_cases?.length ?? 0;
 }
 
 function inputHeading(source: InputSource, files: File[], sourceUrl: string, prompt: string) {
@@ -125,30 +138,78 @@ function inputHeading(source: InputSource, files: File[], sourceUrl: string, pro
   return `${source.label} test design`;
 }
 
-function RunRail({ runs, activeId, onSelect, onNew }: { runs: GenerationRun[]; activeId?: string; onSelect: (run: GenerationRun) => void; onNew: () => void }) {
+function RunRail({ runs, activeId, openingId, renamingId, onSelect, onRename, onNew }: {
+  runs: RunRailEntry[];
+  activeId?: string;
+  openingId?: string | null;
+  renamingId?: string | null;
+  onSelect: (run: RunRailEntry) => void | Promise<void>;
+  onRename: (run: RunRailEntry, title: string) => Promise<void>;
+  onNew: () => void;
+}) {
   const [search, setSearch] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
   const visibleRuns = runs.filter((run) => runTitle(run).toLowerCase().includes(search.toLowerCase()));
+  const displayedRuns = visibleRuns.slice(0, RUN_RAIL_RENDER_LIMIT);
+
+  const beginRename = (run: RunRailEntry) => {
+    setEditingId(run.id);
+    setEditingTitle(runTitle(run));
+  };
+  const finishRename = async (run: RunRailEntry) => {
+    const title = editingTitle.trim();
+    if (!title) return;
+    await onRename(run, title);
+    setEditingId(null);
+    setEditingTitle("");
+  };
+
   return <Card variant="outlined" sx={{ width: { xs: "100%", lg: 300 }, flexShrink: 0, position: { lg: "sticky" }, top: 16, borderRadius: 3 }}>
-    <CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.25 }}>
-        <Box><Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Test runs</Typography><Typography variant="caption" color="text.secondary">Revisit and improve your suites</Typography></Box>
-        <Button size="small" startIcon={<AddOutlinedIcon />} onClick={onNew} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>New test</Button>
+    <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
+        <Box><Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Test runs</Typography><Typography sx={{ fontSize: ".7rem" }} color="text.secondary">Revisit and improve saved suites</Typography></Box>
+        <Button size="small" startIcon={<AddOutlinedIcon />} onClick={onNew} sx={{ textTransform: "none", whiteSpace: "nowrap", minWidth: 0 }}>New</Button>
       </Stack>
-      <TextField size="small" fullWidth value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search runs" sx={{ mb: 1.25 }} />
-      <Stack spacing={1} sx={{ maxHeight: { lg: "calc(100vh - 250px)" }, overflowY: "auto", pr: 0.25 }}>
-        {visibleRuns.map((run) => {
+      <TextField size="small" fullWidth value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search runs" sx={{ mb: 1 }} />
+      <Stack spacing={0.6} sx={{ maxHeight: { lg: "calc(100vh - 235px)" }, overflowY: "auto", pr: 0.25, minHeight: 0, "& > .MuiCard-root": { flexShrink: 0 } }}>
+        {displayedRuns.map((run) => {
           const title = runTitle(run);
           const selected = activeId === run.id;
-          return <Card key={run.id} variant="outlined" onClick={() => onSelect(run)} sx={{ cursor: "pointer", borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s", "&:hover": { borderColor: "primary.main" } }}>
-            <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
-              <Typography variant="body2" sx={{ fontWeight: 700, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{title}</Typography>
-              <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 0.75 }}>
-                <Chip size="small" label={run.status.replaceAll("_", " ")} color={run.status === "completed" ? "success" : run.status === "failed" ? "error" : "default"} />
-                <Typography variant="caption" color="text.secondary">{run.test_cases?.length ?? 0} cases</Typography>
+          const status = run.status || "completed";
+          const opening = openingId === run.id;
+          const editing = editingId === run.id;
+          const renaming = renamingId === run.id;
+          return <Card key={run.id} variant="outlined" onClick={() => { if (!opening && !editing) void onSelect(run); }} sx={{ cursor: opening ? "progress" : editing ? "default" : "pointer", flexShrink: 0, minHeight: 50, opacity: opening || renaming ? 0.7 : 1, borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s, opacity .15s", "&:hover": { borderColor: "primary.main" } }}>
+            <CardContent sx={{ px: 1, py: 0.7, "&:last-child": { pb: 0.7 } }}>
+              {editing ? <Stack direction="row" spacing={0.25} alignItems="center">
+                <TextField
+                  variant="standard"
+                  value={editingTitle}
+                  onChange={(event) => setEditingTitle(event.target.value)}
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") { event.preventDefault(); void finishRename(run); }
+                    if (event.key === "Escape") { setEditingId(null); setEditingTitle(""); }
+                  }}
+                  autoFocus
+                  fullWidth
+                  inputProps={{ maxLength: 500, style: { fontSize: "0.76rem", fontWeight: 650 } }}
+                />
+                <IconButton size="small" disabled={renaming || !editingTitle.trim()} onClick={(event) => { event.stopPropagation(); void finishRename(run); }} aria-label="Save test run name"><CheckOutlinedIcon sx={{ fontSize: 16 }} /></IconButton>
+                <IconButton size="small" disabled={renaming} onClick={(event) => { event.stopPropagation(); setEditingId(null); setEditingTitle(""); }} aria-label="Cancel rename"><CloseOutlinedIcon sx={{ fontSize: 16 }} /></IconButton>
+              </Stack> : <Stack direction="row" spacing={0.25} alignItems="center" sx={{ minWidth: 0 }}>
+                <Tooltip title={title} placement="top" enterDelay={500}><Typography noWrap sx={{ flex: 1, minWidth: 0, fontSize: ".76rem", lineHeight: 1.25, fontWeight: 700 }}>{title}</Typography></Tooltip>
+                <Tooltip title="Rename test run"><IconButton size="small" onClick={(event) => { event.stopPropagation(); beginRename(run); }} aria-label="Rename test run" sx={{ p: 0.35 }}><EditOutlinedIcon sx={{ fontSize: 14 }} /></IconButton></Tooltip>
+              </Stack>}
+              <Stack direction="row" spacing={0.65} alignItems="center" sx={{ mt: 0.35 }}>
+                <Chip size="small" label={opening ? "loading…" : renaming ? "saving…" : status.replaceAll("_", " ")} color={status === "completed" ? "success" : status === "failed" ? "error" : "default"} sx={{ height: 19, "& .MuiChip-label": { px: 0.7, fontSize: ".61rem", lineHeight: 1 } }} />
+                <Typography color="text.secondary" sx={{ fontSize: ".67rem", whiteSpace: "nowrap" }}>{runCaseCount(run)} cases</Typography>
               </Stack>
             </CardContent>
           </Card>;
         })}
+        {visibleRuns.length > displayedRuns.length && <Typography variant="caption" color="text.secondary" sx={{ px: 0.5, py: 1 }}>Showing the first {RUN_RAIL_RENDER_LIMIT} of {visibleRuns.length} runs. Use search to find older suites.</Typography>}
         {!visibleRuns.length && <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>No saved runs yet. Start a new test to create one.</Typography>}
       </Stack>
     </CardContent>
@@ -158,24 +219,21 @@ function RunRail({ runs, activeId, onSelect, onNew }: { runs: GenerationRun[]; a
 export default function GenerateTestCasesPage() {
   const { selectedProjectId } = useSelectedProject();
   const queryClient = useQueryClient();
-  const { data: historyRuns = [] } = useQuery<GenerationRun[]>({
-    queryKey: ["generation-history", selectedProjectId],
-    queryFn: () => testCasesApi.history(selectedProjectId!).then((res) => res.data),
+  const { data: historyRunSummaries = [] } = useQuery<GenerationRunSummary[]>({
+    queryKey: ["generation-history-summaries", selectedProjectId],
+    queryFn: () => testCasesApi.historySummaries(selectedProjectId!, 500).then((res) => res.data),
     enabled: Boolean(selectedProjectId),
   });
   const [localRuns, setLocalRuns] = useState<GenerationRun[]>(() => readSavedChats());
-  const allRuns = useMemo(
+  const allRuns = useMemo<RunRailEntry[]>(
     () => {
-      const serverCaseIds = new Map(historyRuns.map((serverRun) => [serverRun.id, new Set((serverRun.test_cases ?? []).map((testCase) => testCase.id))]));
-      const visibleLocalRuns = localRuns.filter((localRun) => {
-        // Older builds created a local copy whenever a server run was saved.
-        // Hide those copies when their case IDs match the canonical server run.
-        const localCaseIds = new Set((localRun.test_cases ?? []).map((testCase) => testCase.id));
-        return !Array.from(serverCaseIds.values()).some((serverIds) => Array.from(localCaseIds).some((id) => serverIds.has(id)));
-      });
-      return [...visibleLocalRuns, ...historyRuns.filter((serverRun) => !localRuns.some((localRun) => localRun.id === serverRun.id))];
+      const projectLocalRuns = localRuns.filter((localRun) => !selectedProjectId || localRun.project_id === selectedProjectId);
+      const serverIds = new Set(historyRunSummaries.map((serverRun) => serverRun.id));
+      const visibleLocalRuns = projectLocalRuns.filter((localRun) => !serverIds.has(localRun.id));
+      return [...visibleLocalRuns, ...historyRunSummaries]
+        .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
     },
-    [historyRuns, localRuns],
+    [historyRunSummaries, localRuns, selectedProjectId],
   );
   const [selectedSource, setSelectedSource] = useState("document");
   const [sourceUrl, setSourceUrl] = useState("");
@@ -186,6 +244,8 @@ export default function GenerateTestCasesPage() {
   const [draftCases, setDraftCases] = useState<TestCase[]>([]);
   const [saved, setSaved] = useState(false);
   const [localPreview, setLocalPreview] = useState(false);
+  const [openingRunId, setOpeningRunId] = useState<string | null>(null);
+  const [renamingRunId, setRenamingRunId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -224,7 +284,7 @@ export default function GenerateTestCasesPage() {
       setSaved(false);
       setMessage(hasServerCases ? "Generation started. Live progress will appear here." : "Generation is running against your supplied inputs. Real test cases will appear when analysis completes.");
       setError(null);
-      queryClient.invalidateQueries({ queryKey: ["generation-history", selectedProjectId] });
+      queryClient.invalidateQueries({ queryKey: ["generation-history-summaries", selectedProjectId] });
     },
     onError: (reason) => { setError(apiErrorMessage(reason, "Generation failed.")); setMessage(null); },
   });
@@ -268,8 +328,6 @@ export default function GenerateTestCasesPage() {
   };
   const saveChatSnapshot = (sourceRun: GenerationRun, cases: TestCase[]) => {
     const isLocal = sourceRun.id.startsWith("local-");
-    // Server runs are already canonical history records. Creating a local
-    // copy here is what caused an edit to appear as a second test set.
     if (!isLocal) return null;
     const snapshot: GenerationRun = {
       ...sourceRun,
@@ -286,12 +344,56 @@ export default function GenerateTestCasesPage() {
   };
   const startNewChat = () => {
     const savedChat = run?.id.startsWith("local-") ? saveChatSnapshot(run, draftCases) : null;
-    setResult(null); setDraftCases([]); setFiles([]); setSelectedSource("document"); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setError(null);
+    setResult(null); setDraftCases([]); setFiles([]); setSelectedSource("document"); setSourceUrl(""); setPrompt(""); setSaved(false); setLocalPreview(false); setOpeningRunId(null); setRenamingRunId(null); setError(null);
     setMessage(savedChat ? "Saved the current chat to Test runs. Add a source or describe a new flow to begin." : "Started a new test-design chat. Add a source or describe the flow to begin.");
   };
-  const openRun = (historyRun: GenerationRun) => {
-    setResult(historyRun); setDraftCases(historyRun.test_cases ?? []); setLocalPreview(historyRun.id.startsWith("local-")); setSaved(historyRun.id.startsWith("local-")); setError(null);
-    setMessage(historyRun.id.startsWith("local-") ? "Reopened a saved chat. Edit any field to continue improving it." : "Reopened this test run. Edit any field to improve the suite.");
+  const openRun = async (historyRun: RunRailEntry) => {
+    setError(null);
+    if ("test_cases" in historyRun) {
+      setResult(historyRun); setDraftCases(historyRun.test_cases ?? []); setLocalPreview(historyRun.id.startsWith("local-")); setSaved(historyRun.id.startsWith("local-"));
+      setMessage(historyRun.id.startsWith("local-") ? "Reopened a saved chat. Edit any field to continue improving it." : "Reopened this test run. Edit any field to improve the suite.");
+      return;
+    }
+    setOpeningRunId(historyRun.id);
+    try {
+      const fullRun = await queryClient.fetchQuery({
+        queryKey: ["generation-run", historyRun.id],
+        queryFn: () => testCasesApi.getRun(historyRun.id).then((response) => response.data),
+        staleTime: 30_000,
+      });
+      setResult(fullRun);
+      setDraftCases(fullRun.test_cases ?? []);
+      setLocalPreview(false);
+      setSaved(false);
+      setMessage("Reopened this test run. Edit any field to improve the suite.");
+    } catch (reason) {
+      setError(apiErrorMessage(reason, "Could not load this test run."));
+    } finally {
+      setOpeningRunId(null);
+    }
+  };
+  const renameRun = async (historyRun: RunRailEntry, title: string) => {
+    setRenamingRunId(historyRun.id);
+    setError(null);
+    try {
+      if (historyRun.id.startsWith("local-")) {
+        const next = localRuns.map((item) => item.id === historyRun.id ? { ...item, title } : item);
+        setLocalRuns(next);
+        localStorage.setItem(LOCAL_CHAT_STORAGE_KEY, JSON.stringify(next));
+        if (result?.id === historyRun.id) setResult({ ...result, title });
+      } else {
+        const updated = (await testCasesApi.updateRunTitle(historyRun.id, title)).data;
+        queryClient.setQueryData(["generation-run", historyRun.id], updated);
+        if (result?.id === historyRun.id) setResult(updated);
+        await queryClient.invalidateQueries({ queryKey: ["generation-history-summaries", selectedProjectId] });
+      }
+      setMessage("Test run name updated.");
+    } catch (reason) {
+      setError(apiErrorMessage(reason, "Could not rename this test run."));
+      throw reason;
+    } finally {
+      setRenamingRunId(null);
+    }
   };
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -308,7 +410,7 @@ export default function GenerateTestCasesPage() {
       setMessage("Changes saved to this test set. No new generation run was created.");
       if (!updatedRun.id.startsWith("local-")) {
         queryClient.setQueryData(["generation-run", updatedRun.id], updatedRun);
-        queryClient.invalidateQueries({ queryKey: ["generation-history", selectedProjectId] });
+        queryClient.invalidateQueries({ queryKey: ["generation-history-summaries", selectedProjectId] });
       }
       setError(null);
     },
@@ -320,7 +422,7 @@ export default function GenerateTestCasesPage() {
     setDraftCases((current) => current.map((item, idx) => idx === index ? next : item));
   };
 
-  const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={3} alignItems="flex-start"><RunRail runs={allRuns} activeId={run?.id} onSelect={openRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
+  const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={3} alignItems="flex-start"><RunRail runs={allRuns} activeId={run?.id} openingId={openingRunId} renamingId={renamingRunId} onSelect={openRun} onRename={renameRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
 
   if (run) return workspace(<Stack spacing={3}>
     <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h5" sx={{ fontWeight: 700 }}>{runTitle(run)}</Typography><Typography color="text.secondary">{run.status === "completed" ? `${draftCases.length} editable test cases` : draftCases.length ? `${draftCases.length} test cases ready • generating more` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap"><Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button><Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={saveMutation.isPending || (run.status !== "completed" && !localPreview)}>{saveMutation.isPending ? "Saving…" : saved ? "Saved" : "Save suite"}</Button><Button onClick={startNewChat}>＋ New chat</Button></Stack></Stack>
@@ -343,4 +445,3 @@ export default function GenerateTestCasesPage() {
     </Stack></CardContent></Card><Typography variant="caption" color="text.secondary">Signed-in workspace • generation runs are stored in Test runs • exports are available after completion</Typography>
   </Stack>);
 }
-

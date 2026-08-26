@@ -3,12 +3,13 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database.models.generation_run import GenerationRun, RunStatus
 from app.database.models.project import Project
+from app.database.models.test_case import TestCase
 
 
 class GenerationRunRepository:
@@ -31,6 +32,62 @@ class GenerationRunRepository:
             .order_by(GenerationRun.created_at.desc())
         )
         return list(result.scalars().all())
+
+    async def list_summaries_for_project(
+        self,
+        project_id: UUID,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Return lightweight history metadata without hydrating every test case.
+
+        The Test Design rail only needs a title/status/count until a run is
+        opened. Correlated scalar subqueries keep this to one portable SQL
+        query and avoid transferring the large steps/test-data payload for all
+        historical suites.
+        """
+        test_case_count = (
+            select(func.count(TestCase.id))
+            .where(TestCase.generation_run_id == GenerationRun.id)
+            .correlate(GenerationRun)
+            .scalar_subquery()
+        )
+        first_scenario = (
+            select(TestCase.scenario)
+            .where(TestCase.generation_run_id == GenerationRun.id)
+            .order_by(TestCase.created_at.asc())
+            .limit(1)
+            .correlate(GenerationRun)
+            .scalar_subquery()
+        )
+        result = await self._db.execute(
+            select(
+                GenerationRun,
+                test_case_count.label("test_case_count"),
+                first_scenario.label("first_scenario"),
+            )
+            .where(GenerationRun.project_id == project_id)
+            .order_by(GenerationRun.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        summaries: list[dict] = []
+        for run, count, scenario in result.all():
+            summaries.append({
+                "id": run.id,
+                "project_id": run.project_id,
+                "status": run.status,
+                "llm_provider": run.llm_provider,
+                "llm_model": run.llm_model,
+                "generation_profile": run.generation_profile,
+                "title": run.title,
+                "requirement_summary": run.requirement_summary,
+                "first_scenario": scenario,
+                "test_case_count": int(count or 0),
+                "created_at": run.created_at,
+            })
+        return summaries
 
     async def get_for_owner(self, run_id: UUID, owner_id: UUID) -> Optional[GenerationRun]:
         result = await self._db.execute(
@@ -74,4 +131,3 @@ class GenerationRunRepository:
         )
         if result.rowcount:
             await self._db.commit()
-

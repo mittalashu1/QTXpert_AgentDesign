@@ -6,7 +6,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.middleware import RateLimitMiddleware
-from app.api.routes import auth, autopilot, executions, export, health, requirements, settings, test_cases, usage
+from app.api.routes import (
+    auth,
+    autopilot,
+    document_intelligence,
+    executions,
+    export,
+    health,
+    requirements,
+    settings,
+    test_cases,
+    uploads,
+    usage,
+)
 from app.config import get_settings
 
 settings_obj = get_settings()
@@ -18,7 +30,7 @@ logger = logging.getLogger("qtxpert")
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings_obj.APP_NAME,
-        version="0.2.0-autopilot-prototype",
+        version="0.4.0-document-intelligence",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
@@ -36,6 +48,8 @@ def create_app() -> FastAPI:
     prefix = settings_obj.API_V1_PREFIX
     app.include_router(auth.router, prefix=prefix)
     app.include_router(requirements.router, prefix=prefix)
+    app.include_router(uploads.router, prefix=prefix)
+    app.include_router(document_intelligence.router, prefix=prefix)
     app.include_router(test_cases.router, prefix=prefix)
     app.include_router(executions.router, prefix=prefix)
     app.include_router(autopilot.router, prefix=prefix)

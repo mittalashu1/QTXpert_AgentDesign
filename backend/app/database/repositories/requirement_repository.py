@@ -20,6 +20,13 @@ class ProjectRepository:
         await self._db.refresh(project)
         return project
 
+    async def update(self, project: Project, *, name: str, description: Optional[str]) -> Project:
+        project.name = name
+        project.description = description
+        await self._db.commit()
+        await self._db.refresh(project)
+        return project
+
     async def list_for_owner(self, owner_id: UUID) -> List[Project]:
         result = await self._db.execute(select(Project).where(Project.owner_id == owner_id))
         return list(result.scalars().all())
@@ -77,4 +84,3 @@ class RequirementRepository:
             )
         )
         return list(result.scalars().all())
-

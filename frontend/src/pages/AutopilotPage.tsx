@@ -1,4 +1,5 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Alert,
   Box,
@@ -30,7 +31,10 @@ import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import SecurityOutlinedIcon from "@mui/icons-material/SecurityOutlined";
 import AccountTreeOutlinedIcon from "@mui/icons-material/AccountTreeOutlined";
 import BugReportOutlinedIcon from "@mui/icons-material/BugReportOutlined";
+import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { apiClient } from "@/services/apiClient";
+import { uploadsApi } from "@/services/api";
+import { UploadedAsset } from "@/types/domain";
 
 type TestCase = {
   id: string;
@@ -108,8 +112,17 @@ const priorityColor: Record<TestCase["priority"], "error" | "warning" | "info" |
   low: "default",
 };
 
+function formatBytes(value: number) {
+  if (value < 1024 * 1024) return `${Math.max(1, value / 1024).toFixed(0)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
 export default function AutopilotPage() {
+  const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
+  const [storedApks, setStoredApks] = useState<UploadedAsset[]>([]);
+  const [selectedUploadId, setSelectedUploadId] = useState("");
+  const [repositoryLoading, setRepositoryLoading] = useState(false);
   const [context, setContext] = useState("");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [execution, setExecution] = useState<Execution | null>(null);
@@ -126,6 +139,18 @@ export default function AutopilotPage() {
   const [platformVersion, setPlatformVersion] = useState("14.0");
   const [appiumApp, setAppiumApp] = useState("");
 
+  const refreshStoredApks = async () => {
+    setRepositoryLoading(true);
+    try {
+      const response = await uploadsApi.list({ category: "apk" });
+      setStoredApks(response.data);
+    } catch {
+      setStoredApks([]);
+    } finally {
+      setRepositoryLoading(false);
+    }
+  };
+
   useEffect(() => {
     apiClient.get<ProviderStatus>("/autopilot/providers")
       .then((response) => {
@@ -134,6 +159,10 @@ export default function AutopilotPage() {
         if (response.data.recommended_provider === "appium") setDeviceName("Android Emulator");
       })
       .catch(() => setProviderStatus(null));
+  }, []);
+
+  useEffect(() => {
+    void refreshStoredApks();
   }, []);
 
   useEffect(() => {
@@ -185,46 +214,66 @@ export default function AutopilotPage() {
     };
   }, [analysis]);
 
+  const selectedStoredApk = useMemo(
+    () => storedApks.find((asset) => asset.id === selectedUploadId) ?? null,
+    [storedApks, selectedUploadId],
+  );
+
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected);
+    if (selected) setSelectedUploadId("");
     setAnalysis(null);
     setExecution(null);
     setArtifactAvailable(true);
     setError("");
   };
 
+  const pollAnalysis = async (jobId: string) => {
+    const deadline = Date.now() + 20 * 60 * 1000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      const poll = await apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 });
+      setAnalysisProgress(poll.data.progress);
+      setAnalysisStage(poll.data.stage);
+      setArtifactAvailable(poll.data.artifact_available !== false);
+      if (poll.data.status === "failed") throw new Error(poll.data.error || "Autopilot analysis failed");
+      if (poll.data.status === "analyzed" && poll.data.analysis) {
+        setAnalysis(poll.data.analysis);
+        return;
+      }
+    }
+    throw new Error("Analysis is still running after 20 minutes. The job is saved; retry status shortly.");
+  };
+
   const analyze = async () => {
-    if (!file) return;
+    if (!file && !selectedUploadId) return;
     setBusy(true);
     setError("");
     setExecution(null);
     try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append("context", context);
-      const response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, {
-        headers: { "Content-Type": "multipart/form-data" },
-        timeout: 300000,
-      });
+      let response;
+      if (selectedUploadId) {
+        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", {
+          upload_id: selectedUploadId,
+          context,
+        }, { timeout: 300000 });
+      } else {
+        const form = new FormData();
+        form.append("file", file as File);
+        form.append("context", context);
+        response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, {
+          headers: { "Content-Type": "multipart/form-data" },
+          timeout: 300000,
+        });
+        await refreshStoredApks();
+      }
+
       const jobId = response.data.job_id;
       setAnalysisProgress(response.data.progress);
       setAnalysisStage(response.data.stage);
       setArtifactAvailable(response.data.artifact_available !== false);
-      const deadline = Date.now() + 20 * 60 * 1000;
-      while (Date.now() < deadline) {
-        await new Promise((resolve) => window.setTimeout(resolve, 2000));
-        const poll = await apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 });
-        setAnalysisProgress(poll.data.progress);
-        setAnalysisStage(poll.data.stage);
-        setArtifactAvailable(poll.data.artifact_available !== false);
-        if (poll.data.status === "failed") throw new Error(poll.data.error || "Autopilot analysis failed");
-        if (poll.data.status === "analyzed" && poll.data.analysis) {
-          setAnalysis(poll.data.analysis);
-          return;
-        }
-      }
-      throw new Error("Analysis is still running after 20 minutes. The job is saved; retry status shortly.");
+      await pollAnalysis(jobId);
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || "Autopilot analysis failed");
     } finally {
@@ -265,24 +314,70 @@ export default function AutopilotPage() {
           <Chip size="small" label="ANDROID PROTOTYPE" color="primary" variant="outlined" />
         </Stack>
         <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>
-          Upload an APK once. QTXpert inspects the application, infers its testing surface, creates an initial autonomous test portfolio and prepares a safe smoke execution with evidence capture.
+          Upload an APK once, or reuse a build already stored in QTXpert. Autopilot inspects the application, infers its testing surface, creates an initial autonomous test portfolio and prepares safe execution with evidence capture.
         </Typography>
       </Box>
 
       <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
         <Grid container spacing={3}>
           <Grid item xs={12} md={5}>
-            <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}>
-              <CloudUploadOutlinedIcon sx={{ fontSize: 42, color: "primary.main", mb: 1 }} />
-              <Typography fontWeight={700}>{file?.name || "Drop or choose an Android APK"}</Typography>
-              {file && <Typography variant="caption" color="text.secondary">{(file.size / 1024 / 1024).toFixed(1)} MB</Typography>}
-              <Box sx={{ mt: 2 }}>
-                <Button component="label" variant="outlined">
-                  Choose APK
-                  <input hidden type="file" accept=".apk,application/vnd.android.package-archive" onChange={onFile} />
-                </Button>
-              </Box>
-            </Box>
+            <Stack spacing={2}>
+              <FormControl fullWidth size="small">
+                <InputLabel id="stored-apk-label">APK source</InputLabel>
+                <Select
+                  labelId="stored-apk-label"
+                  label="APK source"
+                  value={selectedUploadId}
+                  disabled={repositoryLoading || busy}
+                  onChange={(event) => {
+                    setSelectedUploadId(event.target.value);
+                    if (event.target.value) setFile(null);
+                    setAnalysis(null);
+                    setExecution(null);
+                    setError("");
+                  }}
+                >
+                  <MenuItem value="">Upload a new APK</MenuItem>
+                  {storedApks.map((asset) => (
+                    <MenuItem key={asset.id} value={asset.id}>
+                      {asset.filename} · {formatBytes(asset.size_bytes)} · {new Date(asset.created_at).toLocaleDateString()}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              {selectedStoredApk ? (
+                <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 3, bgcolor: "action.hover" }}>
+                  <Stack direction="row" spacing={1.2} alignItems="center">
+                    <FolderOutlinedIcon color="primary" />
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Reusing stored APK · {formatBytes(selectedStoredApk.size_bytes)} · uploaded {new Date(selectedStoredApk.created_at).toLocaleString()}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                  <Button size="small" sx={{ mt: 1.5 }} onClick={() => navigate("/test-data/uploads")}>Open Upload Repository</Button>
+                </Box>
+              ) : (
+                <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}>
+                  <CloudUploadOutlinedIcon sx={{ fontSize: 42, color: "primary.main", mb: 1 }} />
+                  <Typography fontWeight={700}>{file?.name || "Drop or choose an Android APK"}</Typography>
+                  {file && <Typography variant="caption" color="text.secondary">{(file.size / 1024 / 1024).toFixed(1)} MB</Typography>}
+                  <Box sx={{ mt: 2 }}>
+                    <Button component="label" variant="outlined" disabled={busy}>
+                      Choose APK
+                      <input hidden type="file" accept=".apk,application/vnd.android.package-archive" onChange={onFile} />
+                    </Button>
+                  </Box>
+                  {storedApks.length > 0 && (
+                    <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 1.5 }}>
+                      Or select one of {storedApks.length} stored APK{storedApks.length === 1 ? "" : "s"} above.
+                    </Typography>
+                  )}
+                </Box>
+              )}
+            </Stack>
           </Grid>
           <Grid item xs={12} md={7}>
             <TextField
@@ -295,11 +390,11 @@ export default function AutopilotPage() {
               onChange={(event) => setContext(event.target.value)}
               helperText="Do not paste production passwords or secrets. Autopilot will ask only for context it cannot infer."
             />
-            <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 2 }}>
-              <Button disabled={!file || busy} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>
-                {busy ? "Learning application…" : "Start Autopilot Analysis"}
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
+              <Button disabled={(!file && !selectedUploadId) || busy} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>
+                {busy ? "Learning application…" : selectedStoredApk ? "Analyze Stored APK" : "Start Autopilot Analysis"}
               </Button>
-              <Typography variant="caption" color="text.secondary">Prototype limit: Android APK, 250 MB</Typography>
+              <Typography variant="caption" color="text.secondary">Android APK · prototype limit 250 MB · new uploads are saved automatically</Typography>
             </Stack>
           </Grid>
         </Grid>
@@ -422,7 +517,7 @@ export default function AutopilotPage() {
                     : "BrowserStack credentials are not configured on the backend yet. Add BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY as Render secrets to enable real-device execution."}
                 </Alert>
               )}
-              {!artifactAvailable && <Alert sx={{ mt: 2 }} severity="warning">The analysis result was restored from durable storage, but the APK bytes are no longer on this service instance. Re-upload the APK to run smoke execution.</Alert>}
+              {!artifactAvailable && <Alert sx={{ mt: 2 }} severity="warning">This analysis was created before durable APK storage was enabled and the original APK is no longer available on this service instance. Upload that APK once more; future runs can reuse it from Test Data → Uploads.</Alert>}
               {execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke status: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.current_activity ? ` · ${execution.current_activity}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}
             </CardContent>
           </Card>

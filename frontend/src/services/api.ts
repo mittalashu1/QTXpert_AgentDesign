@@ -1,6 +1,7 @@
 import { apiClient } from "@/services/apiClient";
 import {
   GenerationRun,
+  GenerationRunSummary,
   Project,
   Requirement,
   User,
@@ -9,7 +10,14 @@ import {
   ExecutionRun,
   DashboardSummary,
   AICostSummary,
+  UploadedAsset,
+  DocumentAnalysisRun,
+  DocumentFinding,
+  DocumentFindingStatus,
+  DocumentProfile,
 } from "@/types/domain";
+
+const activeProjectId = () => localStorage.getItem("qtxpert-selected-project") || undefined;
 
 export const authApi = {
   login: (email: string, password: string) =>
@@ -59,6 +67,58 @@ export const projectsApi = {
   list: () => apiClient.get<Project[]>("/projects"),
   create: (name: string, description?: string) =>
     apiClient.post<Project>("/projects", { name, description }),
+  update: (id: string, name: string, description?: string | null) =>
+    apiClient.patch<Project>(`/projects/${id}`, { name, description: description ?? null }),
+};
+
+export const uploadsApi = {
+  list: (params?: { category?: string; extension?: string; project_id?: string }) => {
+    const projectId = params?.project_id || activeProjectId();
+    return apiClient.get<UploadedAsset[]>("/uploads", {
+      params: { ...params, ...(projectId ? { project_id: projectId } : {}) },
+    });
+  },
+  upload: (file: File, options?: { projectId?: string; sourceModule?: string; category?: string }) => {
+    const form = new FormData();
+    const projectId = options?.projectId || activeProjectId();
+    form.append("file", file);
+    if (projectId) form.append("project_id", projectId);
+    if (options?.sourceModule) form.append("source_module", options.sourceModule);
+    if (options?.category) form.append("category", options.category);
+    return apiClient.post<UploadedAsset>("/uploads", form, {
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 300000,
+    });
+  },
+  download: (id: string) => apiClient.get(`/uploads/${id}/content`, { responseType: "blob" }),
+  remove: (id: string) => apiClient.delete(`/uploads/${id}`),
+};
+
+export const documentIntelligenceApi = {
+  latest: (projectId: string) =>
+    apiClient.get<DocumentAnalysisRun | null>("/document-intelligence/runs/latest", {
+      params: { project_id: projectId },
+    }),
+  getRun: (runId: string) =>
+    apiClient.get<DocumentAnalysisRun>(`/document-intelligence/runs/${runId}`),
+  analyze: (payload: {
+    project_id: string;
+    asset_ids: string[];
+    profile: DocumentProfile;
+    additional_context?: string;
+  }) => apiClient.post<DocumentAnalysisRun>("/document-intelligence/analyze", payload),
+  reviewFinding: (
+    findingId: string,
+    payload: {
+      status: DocumentFindingStatus;
+      resolution_note?: string | null;
+      suggested_refinement?: string | null;
+    }
+  ) => apiClient.patch<DocumentFinding>(`/document-intelligence/findings/${findingId}`, payload),
+  publish: (runId: string) =>
+    apiClient.post<{ run_id: string; requirement_id: string; title: string; message: string }>(
+      `/document-intelligence/runs/${runId}/publish`
+    ),
 };
 
 export const requirementsApi = {
@@ -97,7 +157,13 @@ export const testCasesApi = {
     }),
   history: (projectId: string) =>
     apiClient.get<GenerationRun[]>("/history", { params: { project_id: projectId } }),
+  historySummaries: (projectId: string, limit = 200, offset = 0) =>
+    apiClient.get<GenerationRunSummary[]>("/history-summaries", {
+      params: { project_id: projectId, limit, offset },
+    }),
   getRun: (runId: string) => apiClient.get<GenerationRun>(`/history/${runId}`),
+  updateRunTitle: (runId: string, title: string) =>
+    apiClient.patch<GenerationRun>(`/history/${runId}/title`, { title }),
   updateRun: (runId: string, testCases: TestCase[]) =>
     apiClient.patch<GenerationRun>(`/history/${runId}`, {
       test_cases: testCases.map((testCase) => ({
@@ -131,4 +197,3 @@ export const settingsApi = {
       { provider }
     ),
 };
-

@@ -5,10 +5,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps.auth_deps import get_current_user
+from app.api.deps.auth_deps import get_current_user, require_roles
 from app.config import Settings, get_settings
 from app.database.models.requirement import RequirementSource
-from app.database.models.user import User
+from app.database.models.user import User, UserRole
 from app.database.repositories.requirement_repository import (
     ProjectRepository,
     RequirementRepository,
@@ -18,9 +18,11 @@ from app.schemas.requirement import (
     DirectPromptRequest,
     ProjectCreate,
     ProjectOut,
+    ProjectUpdate,
     RequirementOut,
 )
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
+from app.services.upload_repository import UploadRepositoryService
 
 router = APIRouter(tags=["requirements"])
 
@@ -28,7 +30,6 @@ router = APIRouter(tags=["requirements"])
 async def _require_owned_project(db: AsyncSession, project_id: UUID, user_id: UUID) -> None:
     project = await ProjectRepository(db).get_for_owner(project_id, user_id)
     if project is None:
-        # Do not reveal whether another user's project exists.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
 
 
@@ -51,6 +52,24 @@ async def list_projects(
     return await repo.list_for_owner(user.id)
 
 
+@router.patch("/projects/{project_id}", response_model=ProjectOut)
+async def update_project(
+    project_id: UUID,
+    payload: ProjectUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+):
+    """Rename/update a project. Project metadata changes are admin-only."""
+    repo = ProjectRepository(db)
+    project = await repo.get_for_owner(project_id, user.id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Project name cannot be empty")
+    return await repo.update(project, name=name, description=payload.description)
+
+
 @router.get("/requirements", response_model=List[RequirementOut])
 async def list_requirements(
     project_id: UUID,
@@ -70,7 +89,7 @@ async def upload_requirement(
     settings: Annotated[Settings, Depends(get_settings)],
     file: UploadFile = File(...),
 ):
-    """Method 1 (BRD upload) and Method 2 (Jira/Confluence export upload)."""
+    """Upload a BRD/Jira/Confluence export and retain its original file for reuse."""
     await _require_owned_project(db, project_id, user.id)
     extension = Path(file.filename or "").suffix.lower().lstrip(".")
     if extension not in settings.allowed_upload_extensions_list:
@@ -88,14 +107,10 @@ async def upload_requirement(
             )
         chunks.append(chunk)
     data = b"".join(chunks)
-    filename = file.filename or "upload"
+    filename = Path(file.filename or "upload").name
     try:
         text = extract_text(filename, data)
     except UnsupportedDocumentTypeError:
-        # Binary product inputs cannot be reduced to text by the document
-        # processor. Keep an explicit, auditable requirement record so the
-        # configured multimodal/provider integration can use the asset later,
-        # instead of silently dropping the user's upload.
         text = (
             f"Binary product input uploaded: {filename}.\n"
             f"File type: {extension or 'unknown'}\n"
@@ -110,6 +125,18 @@ async def upload_requirement(
             detail="Extracted requirement text is too large for a single generation run",
         )
 
+    asset = await UploadRepositoryService.create_from_bytes(
+        db,
+        data,
+        user.id,
+        filename=filename,
+        content_type=file.content_type,
+        project_id=project_id,
+        source_module="design",
+        category="document",
+        max_bytes=max_bytes,
+    )
+
     source = (
         RequirementSource.JIRA_EXPORT
         if filename.lower().endswith((".json", ".csv"))
@@ -122,7 +149,7 @@ async def upload_requirement(
         title=filename,
         source=source,
         raw_content=text,
-        source_file_path=filename,
+        source_file_path=f"upload:{asset.id}",
     )
 
 
@@ -147,4 +174,3 @@ async def submit_direct_prompt(
         source=RequirementSource.DIRECT_PROMPT,
         raw_content=payload.content,
     )
-

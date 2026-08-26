@@ -2,7 +2,7 @@ import logging
 from typing import Annotated, List
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user
@@ -16,6 +16,8 @@ from app.llm.base import LLMProviderError
 from app.schemas.test_case import (
     GenerateTestCasesRequest,
     GenerationRunOut,
+    GenerationRunSummaryOut,
+    GenerationRunTitleUpdate,
     UpdateGenerationRunRequest,
 )
 from app.services.test_generation_service import TestGenerationService
@@ -87,6 +89,22 @@ async def history(
     return await repo.list_for_project(project_id)
 
 
+@router.get("/history-summaries", response_model=List[GenerationRunSummaryOut])
+async def history_summaries(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    """Return lightweight project history for rails without hydrating test cases."""
+    await _require_owned_project(db, project_id, user.id)
+    repo = GenerationRunRepository(db)
+    await repo.fail_stale_for_project(project_id, settings.GENERATION_STALE_AFTER_SECONDS)
+    return await repo.list_summaries_for_project(project_id, limit=limit, offset=offset)
+
+
 @router.get("/history/{run_id}", response_model=GenerationRunOut)
 async def get_run(
     run_id: UUID,
@@ -99,8 +117,28 @@ async def get_run(
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
     await repo.fail_stale_for_project(run.project_id, settings.GENERATION_STALE_AFTER_SECONDS)
-    # Reload after a recovery check so the response returns the final status.
     run = await repo.get_for_owner(run_id, user.id)
+    return run
+
+
+@router.patch("/history/{run_id}/title", response_model=GenerationRunOut)
+async def update_run_title(
+    run_id: UUID,
+    payload: GenerationRunTitleUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Rename a Test Design run without regenerating or changing its test cases."""
+    repo = GenerationRunRepository(db)
+    run = await repo.get_for_owner(run_id, user.id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Test run name cannot be empty")
+    run.title = title
+    await db.commit()
+    await db.refresh(run, attribute_names=["test_cases"])
     return run
 
 
@@ -161,4 +199,3 @@ async def update_run(
     await db.commit()
     await db.refresh(run, attribute_names=["test_cases"])
     return run
-

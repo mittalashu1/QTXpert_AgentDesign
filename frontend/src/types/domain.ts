@@ -21,6 +21,83 @@ export interface Project {
   created_at: string;
 }
 
+export interface UploadedAsset {
+  id: string;
+  project_id: string | null;
+  filename: string;
+  extension: string;
+  content_type: string | null;
+  category: "apk" | "ipa" | "document" | "test_data" | "media" | "other" | string;
+  source_module: string;
+  storage_backend: string;
+  size_bytes: number;
+  sha256: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type DocumentProfile = "general" | "banking" | "retail" | "saas" | "government";
+export type DocumentFindingStatus = "open" | "accepted" | "rejected" | "resolved" | "needs_clarification";
+
+export interface DocumentInventoryItem {
+  asset_id: string;
+  filename: string;
+  document_type: string;
+  classification_confidence: number;
+  quality_score: number;
+  testability_score: number;
+  issue_count: number;
+  status: "good" | "attention" | "critical" | string;
+}
+
+export interface DocumentFinding {
+  id: string;
+  run_id: string;
+  asset_id: string | null;
+  finding_key: string;
+  category: string;
+  severity: "critical" | "high" | "medium" | "low" | string;
+  confidence: number;
+  title: string;
+  description: string;
+  testing_impact: string | null;
+  original_text: string | null;
+  suggested_refinement: string | null;
+  evidence: Array<{
+    asset_id?: string | null;
+    filename?: string;
+    excerpt?: string;
+    reason?: string;
+  }> | null;
+  status: DocumentFindingStatus | string;
+  resolution_note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentAnalysisRun {
+  id: string;
+  project_id: string;
+  requested_by_id: string;
+  status: "queued" | "extracting" | "analyzing" | "completed" | "failed" | string;
+  profile: DocumentProfile | string;
+  asset_ids: string[];
+  document_inventory: DocumentInventoryItem[] | null;
+  knowledge_model: Record<string, string[]> | null;
+  scores: Record<string, number> | null;
+  missing_documents: Array<{ document_type: string; priority: string; reason: string }> | null;
+  recommendations: string[] | null;
+  readiness_score: number;
+  readiness_status: string;
+  summary: string | null;
+  error_message: string | null;
+  published_requirement_id: string | null;
+  findings: DocumentFinding[];
+  created_at: string;
+  updated_at: string;
+}
+
 export type RequirementSource =
   | "brd_upload"
   | "jira_export"
@@ -92,6 +169,20 @@ export interface GenerationRun {
   test_cases: TestCase[];
 }
 
+export interface GenerationRunSummary {
+  id: string;
+  project_id: string;
+  status: RunStatus;
+  llm_provider: string;
+  llm_model: string;
+  generation_profile: "smoke" | "feature" | "regression" | "deep_regression" | string;
+  title?: string | null;
+  requirement_summary: string | null;
+  first_scenario: string | null;
+  test_case_count: number;
+  created_at: string;
+}
+
 export type ExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type ExecutionResultStatus = "pending" | "passed" | "failed" | "blocked" | "skipped";
 
@@ -153,6 +244,17 @@ export interface AICostBreakdown {
   unpriced_requests: number;
 }
 
+export interface AzureActualCost {
+  configured: boolean;
+  connected: boolean;
+  actual_cost: number | null;
+  currency: string | null;
+  last_synced_at: string | null;
+  scope: string | null;
+  resource_name: string | null;
+  error: string | null;
+}
+
 export interface AICostSummary {
   period_days: number;
   since: string;
@@ -162,6 +264,8 @@ export interface AICostSummary {
   estimated_cost_usd: number;
   unpriced_requests: number;
   by_model: AICostBreakdown[];
+  azure: AzureActualCost;
+  variance_usd: number | null;
 }
 
 export const EXPORT_FORMATS = [
@@ -174,4 +278,3 @@ export const EXPORT_FORMATS = [
   { value: "xray", label: "Xray" },
   { value: "azure_devops", label: "Azure DevOps Test Plans" },
 ] as const;
-
