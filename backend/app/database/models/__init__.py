@@ -21,31 +21,15 @@ from app.database.models.execution import (  # noqa: F401
 from app.database.models.llm_usage import LLMUsageEvent  # noqa: F401
 from app.database.models.uploaded_asset import UploadedAsset, UploadedAssetChunk  # noqa: F401
 from app.database.models.autopilot_job import AutopilotJob  # noqa: F401
+from app.database.models.document_intelligence import (  # noqa: F401
+    DocumentAnalysisRun,
+    DocumentFinding,
+)
 
 __all__ = [
-    "User",
-    "UserRole",
-    "Project",
-    "Requirement",
-    "RequirementSource",
-    "RequirementStatus",
-    "GenerationRun",
-    "RunStatus",
-    "TestCase",
-    "TestCaseType",
-    "Priority",
-    "Severity",
-    "RiskLevel",
-    "ApiConfiguration",
-    "AuditLog",
-    "ExecutionRun",
-    "ExecutionResult",
-    "ExecutionStatus",
-    "ResultStatus",
-    "Defect",
-    "DefectStatus",
-    "LLMUsageEvent",
-    "UploadedAsset",
-    "UploadedAssetChunk",
-    "AutopilotJob",
+    "User", "UserRole", "Project", "Requirement", "RequirementSource", "RequirementStatus",
+    "GenerationRun", "RunStatus", "TestCase", "TestCaseType", "Priority", "Severity", "RiskLevel",
+    "ApiConfiguration", "AuditLog", "ExecutionRun", "ExecutionResult", "ExecutionStatus", "ResultStatus",
+    "Defect", "DefectStatus", "LLMUsageEvent", "UploadedAsset", "UploadedAssetChunk", "AutopilotJob",
+    "DocumentAnalysisRun", "DocumentFinding",
 ]
