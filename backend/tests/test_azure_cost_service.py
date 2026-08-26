@@ -27,6 +27,12 @@ def test_extract_resource_cost_only_counts_target_resource():
     assert currency == "USD"
 
 
+def test_resource_name_is_derived_from_azure_openai_endpoint():
+    settings = Settings(_env_file=None, AZURE_ENDPOINT="https://qtxpert-ai.openai.azure.com/")
+
+    assert AzureCostService(settings).resource_name == "qtxpert-ai"
+
+
 @pytest.mark.asyncio
 async def test_unconfigured_cost_service_is_explicitly_not_connected():
     settings = Settings(_env_file=None, AZURE_ENDPOINT="https://qtxpert-ai.openai.azure.com/")
