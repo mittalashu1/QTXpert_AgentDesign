@@ -86,9 +86,28 @@ class GenerationRunOut(BaseModel):
     test_cases: List[TestCaseOut] = Field(default_factory=list)
 
 
+class GenerationRunSummaryOut(BaseModel):
+    """Lightweight run metadata for history rails and selectors.
+
+    The full generated test cases are intentionally excluded; clients fetch one
+    GenerationRunOut only when the user opens a specific run.
+    """
+
+    id: UUID
+    project_id: UUID
+    status: RunStatus
+    llm_provider: str
+    llm_model: str
+    generation_profile: str
+    title: Optional[str] = None
+    requirement_summary: Optional[str] = None
+    first_scenario: Optional[str] = None
+    test_case_count: int = 0
+    created_at: datetime
+
+
 class ExportRequest(BaseModel):
     generation_run_id: UUID
     format: str = Field(
         description="One of: json, csv, excel, markdown, testrail, zephyr, xray, azure_devops"
     )
-
