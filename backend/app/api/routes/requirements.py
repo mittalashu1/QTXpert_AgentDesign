@@ -21,6 +21,7 @@ from app.schemas.requirement import (
     RequirementOut,
 )
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
+from app.services.upload_repository import UploadRepositoryService
 
 router = APIRouter(tags=["requirements"])
 
@@ -70,7 +71,7 @@ async def upload_requirement(
     settings: Annotated[Settings, Depends(get_settings)],
     file: UploadFile = File(...),
 ):
-    """Method 1 (BRD upload) and Method 2 (Jira/Confluence export upload)."""
+    """Upload a BRD/Jira/Confluence export and retain its original file for reuse."""
     await _require_owned_project(db, project_id, user.id)
     extension = Path(file.filename or "").suffix.lower().lstrip(".")
     if extension not in settings.allowed_upload_extensions_list:
@@ -88,14 +89,10 @@ async def upload_requirement(
             )
         chunks.append(chunk)
     data = b"".join(chunks)
-    filename = file.filename or "upload"
+    filename = Path(file.filename or "upload").name
     try:
         text = extract_text(filename, data)
     except UnsupportedDocumentTypeError:
-        # Binary product inputs cannot be reduced to text by the document
-        # processor. Keep an explicit, auditable requirement record so the
-        # configured multimodal/provider integration can use the asset later,
-        # instead of silently dropping the user's upload.
         text = (
             f"Binary product input uploaded: {filename}.\n"
             f"File type: {extension or 'unknown'}\n"
@@ -110,6 +107,20 @@ async def upload_requirement(
             detail="Extracted requirement text is too large for a single generation run",
         )
 
+    # Keep the original bytes in one shared repository. The requirement row
+    # points to this durable asset instead of a disposable filename.
+    asset = await UploadRepositoryService.create_from_bytes(
+        db,
+        data,
+        user.id,
+        filename=filename,
+        content_type=file.content_type,
+        project_id=project_id,
+        source_module="design",
+        category="document",
+        max_bytes=max_bytes,
+    )
+
     source = (
         RequirementSource.JIRA_EXPORT
         if filename.lower().endswith((".json", ".csv"))
@@ -122,7 +133,7 @@ async def upload_requirement(
         title=filename,
         source=source,
         raw_content=text,
-        source_file_path=filename,
+        source_file_path=f"upload:{asset.id}",
     )
 
 
@@ -147,4 +158,3 @@ async def submit_direct_prompt(
         source=RequirementSource.DIRECT_PROMPT,
         raw_content=payload.content,
     )
-
