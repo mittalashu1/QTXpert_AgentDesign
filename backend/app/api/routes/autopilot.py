@@ -14,7 +14,11 @@ from app.schemas.autopilot import (
     AutopilotJobStatus,
     AutopilotProviderStatus,
 )
-from app.services.autopilot import AutopilotPrototypeService
+from app.services.autopilot import (
+    AutopilotPrototypeService,
+    AutopilotUploadInvalid,
+    AutopilotUploadTooLarge,
+)
 from app.services.autopilot_ir import AutopilotIRCompiler
 
 router = APIRouter(prefix="/autopilot", tags=["autopilot"])
@@ -65,24 +69,20 @@ async def analyze_mobile_app(
             detail="The current prototype supports Android APK files. IPA support is the next platform milestone.",
         )
 
-    max_bytes = settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    chunks: list[bytes] = []
-    total = 0
-    while chunk := await file.read(1024 * 1024):
-        total += len(chunk)
-        if total > max_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"APK exceeds the {settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB}MB Autopilot prototype limit",
-            )
-        chunks.append(chunk)
-
-    data = b"".join(chunks)
-    if len(data) < 1024:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="APK file is empty or invalid")
-
     service = _service(settings)
-    job_id, _ = await service.save_upload(filename, data, str(user.id), context=context)
+    max_bytes = settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    try:
+        job_id, _ = await service.save_upload_stream(
+            filename,
+            file,
+            str(user.id),
+            context=context,
+            max_bytes=max_bytes,
+        )
+    except AutopilotUploadTooLarge as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
+    except AutopilotUploadInvalid as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     background_tasks.add_task(service.analyze_safely, job_id)
     return await service.get_job_status(job_id)
 

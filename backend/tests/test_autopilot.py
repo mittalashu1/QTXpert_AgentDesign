@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.services.autopilot import AutopilotPrototypeService
+from app.services.autopilot import AutopilotPrototypeService, AutopilotUploadTooLarge
 
 
 def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
@@ -138,3 +138,39 @@ async def test_completed_background_analysis_returns_saved_result(tmp_path, monk
 
     assert result.status == "analyzed"
     assert result.analysis is not None
+
+
+@pytest.mark.asyncio
+async def test_large_upload_stream_is_written_incrementally(tmp_path):
+    service = _service(tmp_path)
+
+    class FakeUpload:
+        def __init__(self):
+            self.chunks = [b"a" * 1024, b"b" * 1024, b""]
+
+        async def read(self, _size):
+            return self.chunks.pop(0)
+
+    job_id, path = await service.save_upload_stream(
+        "large.apk",
+        FakeUpload(),
+        "owner",
+        max_bytes=4096,
+    )
+
+    assert path.read_bytes() == b"a" * 1024 + b"b" * 1024
+    assert (tmp_path / job_id / "job.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_stream_upload_cleans_partial_job_when_too_large(tmp_path):
+    service = _service(tmp_path)
+
+    class FakeUpload:
+        async def read(self, _size):
+            return b"x" * 2048
+
+    with pytest.raises(AutopilotUploadTooLarge):
+        await service.save_upload_stream("too-large.apk", FakeUpload(), "owner", max_bytes=1024)
+
+    assert list(tmp_path.iterdir()) == []

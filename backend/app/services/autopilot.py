@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,14 @@ from app.schemas.autopilot import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class AutopilotUploadTooLarge(ValueError):
+    """Raised when an Autopilot upload exceeds the configured byte limit."""
+
+
+class AutopilotUploadInvalid(ValueError):
+    """Raised when an Autopilot upload is empty or otherwise unusable."""
 
 
 _DANGEROUS_PERMISSION_HINTS = {
@@ -80,6 +89,63 @@ class AutopilotPrototypeService:
         }
         await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
         return job_id, apk_path
+
+    async def save_upload_stream(
+        self,
+        filename: str,
+        upload: Any,
+        owner_id: str,
+        context: str = "",
+        max_bytes: int = 0,
+    ) -> tuple[str, Path]:
+        """Persist an UploadFile incrementally instead of duplicating it in memory.
+
+        Starlette already spools large multipart bodies to a temporary file, so
+        reading one bounded chunk at a time and writing directly to the job file
+        keeps the process memory stable even for the 250 MB prototype limit.
+        """
+        job_id = str(uuid4())
+        job_dir = self._job_dir(job_id)
+        job_dir.mkdir(parents=True, exist_ok=False)
+        safe_name = Path(filename).name or "application.apk"
+        apk_path = job_dir / safe_name
+        total = 0
+        handle = None
+        try:
+            handle = await asyncio.to_thread(apk_path.open, "wb")
+            while chunk := await upload.read(1024 * 1024):
+                total += len(chunk)
+                if max_bytes and total > max_bytes:
+                    raise AutopilotUploadTooLarge(
+                        f"APK exceeds the {max_bytes // (1024 * 1024)}MB Autopilot prototype limit"
+                    )
+                await asyncio.to_thread(handle.write, chunk)
+            await asyncio.to_thread(handle.flush)
+            if total < 1024:
+                raise AutopilotUploadInvalid("APK file is empty or invalid")
+            seed = {
+                "job_id": job_id,
+                "owner_id": owner_id,
+                "filename": safe_name,
+                "context": context[:8000],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "apk_path": str(apk_path),
+                "status": "uploaded",
+                "stage": "queued",
+                "progress": 5,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
+            return job_id, apk_path
+        except Exception:
+            if handle is not None:
+                await asyncio.to_thread(handle.close)
+                handle = None
+            await asyncio.to_thread(shutil.rmtree, job_dir, ignore_errors=True)
+            raise
+        finally:
+            if handle is not None:
+                await asyncio.to_thread(handle.close)
 
     async def update_job(self, job_id: str, **changes: Any) -> Dict[str, Any]:
         path = self._job_dir(job_id) / "job.json"
