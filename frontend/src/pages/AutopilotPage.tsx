@@ -138,21 +138,38 @@ export default function AutopilotPage() {
 
   useEffect(() => {
     let active = true;
-    apiClient.get<AnalysisJob | null>("/autopilot/jobs/latest", { timeout: 15000 })
-      .then((response) => {
+    const applyJob = (job: AnalysisJob) => {
+      setAnalysisProgress(job.progress);
+      setAnalysisStage(job.stage);
+      setArtifactAvailable(job.artifact_available !== false);
+      if (job.status === "analyzed" && job.analysis) {
+        setAnalysis(job.analysis);
+      } else if (job.status === "failed" && job.error) {
+        setError(job.error);
+      }
+    };
+    const restore = async () => {
+      try {
+        const response = await apiClient.get<AnalysisJob | null>("/autopilot/jobs/latest", { timeout: 15000 });
         if (!active || !response.data) return;
-        setAnalysisProgress(response.data.progress);
-        setAnalysisStage(response.data.stage);
-        setArtifactAvailable(response.data.artifact_available !== false);
-        if (response.data.status === "analyzed" && response.data.analysis) {
-          setAnalysis(response.data.analysis);
-        } else if (response.data.status === "failed" && response.data.error) {
-          setError(response.data.error);
+        applyJob(response.data);
+        // If the page was refreshed while the worker was running, continue the
+        // same bounded polling loop instead of leaving the user on stale progress.
+        if (response.data.status === "uploaded" || response.data.status === "analyzing") {
+          const deadline = Date.now() + 20 * 60 * 1000;
+          while (active && Date.now() < deadline) {
+            await new Promise((resolve) => window.setTimeout(resolve, 2000));
+            if (!active) return;
+            const poll = await apiClient.get<AnalysisJob>(`/autopilot/jobs/${response.data.job_id}`, { timeout: 15000 });
+            applyJob(poll.data);
+            if (poll.data.status === "analyzed" || poll.data.status === "failed") break;
+          }
         }
-      })
-      .catch(() => {
+      } catch {
         // A first visit may not have a previous Autopilot job; keep the upload form usable.
-      });
+      }
+    };
+    void restore();
     return () => {
       active = false;
     };
@@ -173,6 +190,7 @@ export default function AutopilotPage() {
     setFile(selected);
     setAnalysis(null);
     setExecution(null);
+    setArtifactAvailable(true);
     setError("");
   };
 
