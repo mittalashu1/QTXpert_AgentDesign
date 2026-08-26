@@ -10,6 +10,10 @@ import {
   DashboardSummary,
   AICostSummary,
   UploadedAsset,
+  DocumentAnalysisRun,
+  DocumentFinding,
+  DocumentFindingStatus,
+  DocumentProfile,
 } from "@/types/domain";
 
 export const authApi = {
@@ -78,6 +82,33 @@ export const uploadsApi = {
   },
   download: (id: string) => apiClient.get(`/uploads/${id}/content`, { responseType: "blob" }),
   remove: (id: string) => apiClient.delete(`/uploads/${id}`),
+};
+
+export const documentIntelligenceApi = {
+  latest: (projectId: string) =>
+    apiClient.get<DocumentAnalysisRun | null>("/document-intelligence/runs/latest", {
+      params: { project_id: projectId },
+    }),
+  getRun: (runId: string) =>
+    apiClient.get<DocumentAnalysisRun>(`/document-intelligence/runs/${runId}`),
+  analyze: (payload: {
+    project_id: string;
+    asset_ids: string[];
+    profile: DocumentProfile;
+    additional_context?: string;
+  }) => apiClient.post<DocumentAnalysisRun>("/document-intelligence/analyze", payload),
+  reviewFinding: (
+    findingId: string,
+    payload: {
+      status: DocumentFindingStatus;
+      resolution_note?: string | null;
+      suggested_refinement?: string | null;
+    }
+  ) => apiClient.patch<DocumentFinding>(`/document-intelligence/findings/${findingId}`, payload),
+  publish: (runId: string) =>
+    apiClient.post<{ run_id: string; requirement_id: string; title: string; message: string }>(
+      `/document-intelligence/runs/${runId}/publish`
+    ),
 };
 
 export const requirementsApi = {
