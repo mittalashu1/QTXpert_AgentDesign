@@ -713,7 +713,10 @@ class AutopilotPrototypeService:
                 pass
 
         custom_id = f"qtxpert-{sha256[:24]}"
-        timeout = httpx.Timeout(240.0, connect=30.0)
+        timeout = httpx.Timeout(
+            float(self.settings.AUTOPILOT_BROWSERSTACK_UPLOAD_TIMEOUT_SECONDS),
+            connect=30.0,
+        )
         async with httpx.AsyncClient(
             auth=(self.settings.BROWSERSTACK_USERNAME or "", self.settings.BROWSERSTACK_ACCESS_KEY or ""),
             timeout=timeout,
@@ -790,8 +793,11 @@ class AutopilotPrototypeService:
                     screenshot_path,
                     source_path,
                     browserstack_options,
+                    self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
+                    self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
+                    self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
                 ),
-                timeout=240,
+                timeout=self.settings.AUTOPILOT_SMOKE_TIMEOUT_SECONDS,
             )
             result["provider"] = request.provider
             if request.provider == "browserstack":
@@ -828,6 +834,9 @@ class AutopilotPrototypeService:
         screenshot_path: Path,
         source_path: Path,
         browserstack_options: Dict[str, Any] | None = None,
+        install_timeout_ms: int = 300_000,
+        server_launch_timeout_ms: int = 120_000,
+        adb_exec_timeout_ms: int = 120_000,
     ) -> Dict[str, Any]:
         from appium import webdriver
         from appium.options.android import UiAutomator2Options
@@ -840,6 +849,11 @@ class AutopilotPrototypeService:
             "appium:noReset": request.no_reset,
             "appium:autoGrantPermissions": request.auto_grant_permissions,
             "appium:newCommandTimeout": 120,
+            "appium:androidInstallTimeout": install_timeout_ms,
+            "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
+            "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
+            "appium:adbExecTimeout": adb_exec_timeout_ms,
+            "appium:appWaitDuration": adb_exec_timeout_ms,
         }
         if request.platform_version:
             capabilities["appium:platformVersion"] = request.platform_version
