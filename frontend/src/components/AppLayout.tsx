@@ -51,12 +51,12 @@ export default function AppLayout() {
 
   return (
     <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
-      <AppBar position="fixed" elevation={0} sx={{ zIndex: (t) => t.zIndex.drawer + 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "background.paper", color: "text.primary" }}>
+      <AppBar position="fixed" elevation={0} sx={{ zIndex: (theme) => theme.zIndex.drawer + 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "background.paper", color: "text.primary" }}>
         <Toolbar sx={{ gap: 3 }}>
           <Typography variant="h6" sx={{ fontWeight: 800, minWidth: drawerWidth - 40 }}>QTXpert<Box component="span" sx={{ color: "primary.main" }}>AI</Box></Typography>
-          <Box sx={{ flex: 1, maxWidth: 420 }}><ProjectSelector /></Box>
+          <Box sx={{ flex: 1, maxWidth: 440 }}><ProjectSelector topLevel /></Box>
           <Tooltip title={mode === "dark" ? "Use light theme" : "Use dark theme"}><IconButton onClick={toggleMode}>{mode === "dark" ? <LightModeOutlinedIcon /> : <DarkModeOutlinedIcon />}</IconButton></Tooltip>
-          <IconButton onClick={(e) => setAnchorEl(e.currentTarget)}><Avatar sx={{ width: 34, height: 34, bgcolor: "primary.main", fontSize: 14 }}>{user?.full_name?.charAt(0).toUpperCase() ?? "U"}</Avatar></IconButton>
+          <IconButton onClick={(event) => setAnchorEl(event.currentTarget)}><Avatar sx={{ width: 34, height: 34, bgcolor: "primary.main", fontSize: 14 }}>{user?.full_name?.charAt(0).toUpperCase() ?? "U"}</Avatar></IconButton>
           <Menu anchorEl={anchorEl} open={Boolean(anchorEl)} onClose={() => setAnchorEl(null)}>
             <MenuItem onClick={() => { setAnchorEl(null); navigate("/profile"); }}>Profile</MenuItem>
             {user?.role === "admin" && <MenuItem onClick={() => { setAnchorEl(null); navigate("/administration/users"); }}>Administration</MenuItem>}
@@ -77,7 +77,6 @@ export default function AppLayout() {
                 {item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}
               </ListItemButton>
             ))}
-
             <ListItemButton onClick={() => setTestDataOpen((open) => !open)} sx={{ borderRadius: 2, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined }}>
               <ListItemIcon sx={{ minWidth: 38, color: "text.secondary" }}><StorageOutlinedIcon /></ListItemIcon>
               <ListItemText primary="Test Data" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
@@ -93,7 +92,7 @@ export default function AppLayout() {
             </Collapse>
           </List>
         </Box>
-        <Box sx={{ mt: "auto", p: 2 }}><Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "action.hover" }}><Typography variant="caption" color="primary.main" sx={{ fontWeight: 700 }}>AUTONOMOUS QE</Typography><Typography variant="body2" sx={{ mt: .5, fontWeight: 600 }}>Documents → intelligence → tests → execution</Typography><Typography variant="caption" color="text.secondary">QTXpert validates the requirement baseline before downstream test design and autonomous execution.</Typography></Box></Box>
+        <Box sx={{ mt: "auto", p: 2 }}><Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "action.hover" }}><Typography variant="caption" color="primary.main" sx={{ fontWeight: 700 }}>AUTONOMOUS QE</Typography><Typography variant="body2" sx={{ mt: .5, fontWeight: 600 }}>Documents → intelligence → tests → execution</Typography><Typography variant="caption" color="text.secondary">Every module follows the project selected in the top bar.</Typography></Box></Box>
       </Drawer>
       <Box component="main" sx={{ ml: `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
     </Box>
