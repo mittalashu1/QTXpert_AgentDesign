@@ -64,13 +64,12 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
 
-    # Microsoft Entra ID (Azure AD) - OAuth2 / OIDC, optional
     ENTRA_TENANT_ID: Optional[str] = None
     ENTRA_CLIENT_ID: Optional[str] = None
     ENTRA_CLIENT_SECRET: Optional[str] = None
 
     # ------------------------------------------------------------------ #
-    # LLM Providers - abstraction is selected by LLM_PROVIDER at runtime
+    # LLM Providers
     # ------------------------------------------------------------------ #
     LLM_PROVIDER: Literal[
         "router", "azure_openai", "openai", "anthropic", "gemini", "bedrock"
@@ -81,8 +80,6 @@ class Settings(BaseSettings):
     LLM_REQUEST_TIMEOUT_SECONDS: int = Field(default=75, ge=1, le=600)
     LLM_MAX_RETRIES: int = 2
     LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
-    # Router targets use provider:model. The first configured/available target
-    # in a tier is tried first; failures move across the list and then upward.
     LLM_ROUTER_LOW_COST: str = "gemini:gemini-2.5-flash-lite,azure_openai:configured"
     LLM_ROUTER_STANDARD: str = "gemini:gemini-2.5-flash,azure_openai:configured"
     LLM_ROUTER_COMPLEX: str = "azure_openai:configured"
@@ -91,23 +88,19 @@ class Settings(BaseSettings):
     LLM_COST_RATES_JSON: str = "{}"
 
     OPENAI_API_KEY: Optional[str] = None
-
     AZURE_OPENAI_API_KEY: Optional[str] = None
     AZURE_ENDPOINT: Optional[str] = None
     AZURE_OPENAI_API_VERSION: str = "2024-08-01-preview"
     AZURE_OPENAI_DEPLOYMENT: Optional[str] = None
-
     ANTHROPIC_API_KEY: Optional[str] = None
-
     GOOGLE_API_KEY: Optional[str] = None
-
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     AWS_REGION: str = "us-east-1"
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
     # ------------------------------------------------------------------ #
-    # Vector database (modular; Pinecone default implementation)
+    # Vector database
     # ------------------------------------------------------------------ #
     VECTOR_DB_PROVIDER: Literal["pinecone", "none"] = "none"
     PINECONE_API_KEY: Optional[str] = None
@@ -115,16 +108,12 @@ class Settings(BaseSettings):
     PINECONE_INDEX_NAME: str = "qtxpert-requirements"
 
     # ------------------------------------------------------------------ #
-    # Jira integration
+    # Jira / Confluence
     # ------------------------------------------------------------------ #
     JIRA_URL: Optional[str] = None
     JIRA_CLIENT_ID: Optional[str] = None
     JIRA_CLIENT_SECRET: Optional[str] = None
     JIRA_REDIRECT_URI: Optional[str] = None
-
-    # ------------------------------------------------------------------ #
-    # Confluence integration
-    # ------------------------------------------------------------------ #
     CONFLUENCE_URL: Optional[str] = None
     CONFLUENCE_CLIENT_ID: Optional[str] = None
     CONFLUENCE_CLIENT_SECRET: Optional[str] = None
@@ -139,7 +128,7 @@ class Settings(BaseSettings):
     MAX_SCENARIOS_PER_GENERATION: int = 40
     GENERATION_STALE_AFTER_SECONDS: int = 900
     ALLOWED_UPLOAD_EXTENSIONS: str = (
-        "pdf,docx,txt,md,json,csv,xlsx,xls,xml,yaml,yml,"
+        "pdf,docx,pptx,txt,md,json,csv,xlsx,xls,xml,yaml,yml,html,htm,"
         "apk,ipa,zip,mp4,mov,webm,png,jpg,jpeg"
     )
     UPLOAD_STORAGE_PATH: str = "./storage/uploads"
@@ -153,12 +142,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=250, ge=1, le=2048)
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
-    # Autopilot results are persisted separately. New APK originals are also
-    # retained by the shared Upload Repository so they can be re-materialized
-    # after a Render restart and reused by future analysis jobs.
     AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
 
-    # BrowserStack App Automate (optional real-device execution)
     BROWSERSTACK_USERNAME: Optional[str] = None
     BROWSERSTACK_ACCESS_KEY: Optional[str] = None
     BROWSERSTACK_HUB_URL: str = "https://hub-cloud.browserstack.com/wd/hub"
@@ -182,5 +167,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    """Cached settings singleton (dependency-injected across the app)."""
     return Settings()
