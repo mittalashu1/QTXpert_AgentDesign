@@ -100,6 +100,18 @@ class Settings(BaseSettings):
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
     # ------------------------------------------------------------------ #
+    # Azure Cost Management (optional admin reconciliation)
+    # ------------------------------------------------------------------ #
+    AZURE_COST_TENANT_ID: Optional[str] = None
+    AZURE_COST_CLIENT_ID: Optional[str] = None
+    AZURE_COST_CLIENT_SECRET: Optional[str] = None
+    AZURE_COST_SUBSCRIPTION_ID: Optional[str] = None
+    AZURE_COST_RESOURCE_GROUP: Optional[str] = None
+    AZURE_COST_RESOURCE_NAME: Optional[str] = None
+    AZURE_COST_API_VERSION: str = "2026-06-01"
+    AZURE_COST_TIMEOUT_SECONDS: int = Field(default=15, ge=1, le=60)
+
+    # ------------------------------------------------------------------ #
     # Vector database
     # ------------------------------------------------------------------ #
     VECTOR_DB_PROVIDER: Literal["pinecone", "none"] = "none"
