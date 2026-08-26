@@ -6,8 +6,10 @@ export const apiClient = axios.create({ baseURL: BASE_URL });
 
 apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   const token = localStorage.getItem("qtxpert-access-token");
-  if (token && config.headers) {
-    config.headers.Authorization = `Bearer ${token}`;
+  const projectId = localStorage.getItem("qtxpert-selected-project");
+  if (config.headers) {
+    if (token) config.headers.Authorization = `Bearer ${token}`;
+    if (projectId) config.headers["X-QTXpert-Project-ID"] = projectId;
   }
   return config;
 });
