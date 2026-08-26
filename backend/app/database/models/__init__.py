@@ -19,6 +19,7 @@ from app.database.models.execution import (  # noqa: F401
     Defect, DefectStatus, ExecutionResult, ExecutionRun, ExecutionStatus, ResultStatus,
 )
 from app.database.models.llm_usage import LLMUsageEvent  # noqa: F401
+from app.database.models.uploaded_asset import UploadedAsset, UploadedAssetChunk  # noqa: F401
 from app.database.models.autopilot_job import AutopilotJob  # noqa: F401
 
 __all__ = [
@@ -44,6 +45,7 @@ __all__ = [
     "Defect",
     "DefectStatus",
     "LLMUsageEvent",
+    "UploadedAsset",
+    "UploadedAssetChunk",
     "AutopilotJob",
 ]
-
