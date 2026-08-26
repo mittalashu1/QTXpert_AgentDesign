@@ -23,6 +23,7 @@ const ACTIVE_STATUSES = ["pending", "normalizing", "analyzing", "generating_scen
 const PROGRESS: Record<string, number> = { pending: 5, normalizing: 15, analyzing: 35, generating_scenarios: 55, generating_test_cases: 75, risk_analysis: 90, completed: 100, failed: 100 };
 const FILE_EXTENSIONS = ".pdf,.docx,.txt,.md,.json,.csv";
 const LOCAL_CHAT_STORAGE_KEY = "qtxpert-saved-chats";
+const RUN_RAIL_RENDER_LIMIT = 100;
 type SourceKind = "file" | "link";
 type InputSource = { id: string; label: string; description: string; kind: SourceKind; accept?: string; placeholder?: string };
 
@@ -69,12 +70,13 @@ function EditableCase({ testCase, onChange }: { testCase: TestCase; onChange: (n
   </Accordion>;
 }
 
-
 function readSavedChats(): GenerationRun[] {
   if (typeof window === "undefined") return [];
   try {
     const parsed = JSON.parse(window.localStorage.getItem(LOCAL_CHAT_STORAGE_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((item) => item && typeof item === "object" && typeof item.id === "string")
+      : [];
   } catch {
     return [];
   }
@@ -128,6 +130,7 @@ function inputHeading(source: InputSource, files: File[], sourceUrl: string, pro
 function RunRail({ runs, activeId, onSelect, onNew }: { runs: GenerationRun[]; activeId?: string; onSelect: (run: GenerationRun) => void; onNew: () => void }) {
   const [search, setSearch] = useState("");
   const visibleRuns = runs.filter((run) => runTitle(run).toLowerCase().includes(search.toLowerCase()));
+  const displayedRuns = visibleRuns.slice(0, RUN_RAIL_RENDER_LIMIT);
   return <Card variant="outlined" sx={{ width: { xs: "100%", lg: 300 }, flexShrink: 0, position: { lg: "sticky" }, top: 16, borderRadius: 3 }}>
     <CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.25 }}>
@@ -135,20 +138,22 @@ function RunRail({ runs, activeId, onSelect, onNew }: { runs: GenerationRun[]; a
         <Button size="small" startIcon={<AddOutlinedIcon />} onClick={onNew} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>New test</Button>
       </Stack>
       <TextField size="small" fullWidth value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search runs" sx={{ mb: 1.25 }} />
-      <Stack spacing={1} sx={{ maxHeight: { lg: "calc(100vh - 250px)" }, overflowY: "auto", pr: 0.25 }}>
-        {visibleRuns.map((run) => {
+      <Stack spacing={1} sx={{ maxHeight: { lg: "calc(100vh - 250px)" }, overflowY: "auto", pr: 0.25, minHeight: 0, "& > .MuiCard-root": { flexShrink: 0 } }}>
+        {displayedRuns.map((run) => {
           const title = runTitle(run);
           const selected = activeId === run.id;
-          return <Card key={run.id} variant="outlined" onClick={() => onSelect(run)} sx={{ cursor: "pointer", borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s", "&:hover": { borderColor: "primary.main" } }}>
+          const status = run.status || "completed";
+          return <Card key={run.id} variant="outlined" onClick={() => onSelect(run)} sx={{ cursor: "pointer", flexShrink: 0, minHeight: 82, borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s", "&:hover": { borderColor: "primary.main" } }}>
             <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
               <Typography variant="body2" sx={{ fontWeight: 700, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{title}</Typography>
               <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 0.75 }}>
-                <Chip size="small" label={run.status.replaceAll("_", " ")} color={run.status === "completed" ? "success" : run.status === "failed" ? "error" : "default"} />
+                <Chip size="small" label={status.replaceAll("_", " ")} color={status === "completed" ? "success" : status === "failed" ? "error" : "default"} />
                 <Typography variant="caption" color="text.secondary">{run.test_cases?.length ?? 0} cases</Typography>
               </Stack>
             </CardContent>
           </Card>;
         })}
+        {visibleRuns.length > displayedRuns.length && <Typography variant="caption" color="text.secondary" sx={{ px: 0.5, py: 1 }}>Showing the first {RUN_RAIL_RENDER_LIMIT} of {visibleRuns.length} runs. Use search to find older suites.</Typography>}
         {!visibleRuns.length && <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>No saved runs yet. Start a new test to create one.</Typography>}
       </Stack>
     </CardContent>
@@ -166,16 +171,16 @@ export default function GenerateTestCasesPage() {
   const [localRuns, setLocalRuns] = useState<GenerationRun[]>(() => readSavedChats());
   const allRuns = useMemo(
     () => {
+      const projectLocalRuns = localRuns.filter((localRun) => !selectedProjectId || localRun.project_id === selectedProjectId);
       const serverCaseIds = new Map(historyRuns.map((serverRun) => [serverRun.id, new Set((serverRun.test_cases ?? []).map((testCase) => testCase.id))]));
-      const visibleLocalRuns = localRuns.filter((localRun) => {
-        // Older builds created a local copy whenever a server run was saved.
-        // Hide those copies when their case IDs match the canonical server run.
+      const visibleLocalRuns = projectLocalRuns.filter((localRun) => {
         const localCaseIds = new Set((localRun.test_cases ?? []).map((testCase) => testCase.id));
         return !Array.from(serverCaseIds.values()).some((serverIds) => Array.from(localCaseIds).some((id) => serverIds.has(id)));
       });
-      return [...visibleLocalRuns, ...historyRuns.filter((serverRun) => !localRuns.some((localRun) => localRun.id === serverRun.id))];
+      return [...visibleLocalRuns, ...historyRuns.filter((serverRun) => !projectLocalRuns.some((localRun) => localRun.id === serverRun.id))]
+        .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
     },
-    [historyRuns, localRuns],
+    [historyRuns, localRuns, selectedProjectId],
   );
   const [selectedSource, setSelectedSource] = useState("document");
   const [sourceUrl, setSourceUrl] = useState("");
@@ -268,8 +273,6 @@ export default function GenerateTestCasesPage() {
   };
   const saveChatSnapshot = (sourceRun: GenerationRun, cases: TestCase[]) => {
     const isLocal = sourceRun.id.startsWith("local-");
-    // Server runs are already canonical history records. Creating a local
-    // copy here is what caused an edit to appear as a second test set.
     if (!isLocal) return null;
     const snapshot: GenerationRun = {
       ...sourceRun,
@@ -343,4 +346,3 @@ export default function GenerateTestCasesPage() {
     </Stack></CardContent></Card><Typography variant="caption" color="text.secondary">Signed-in workspace • generation runs are stored in Test runs • exports are available after completion</Typography>
   </Stack>);
 }
-
