@@ -131,14 +131,17 @@ class Settings(BaseSettings):
     CONFLUENCE_REDIRECT_URI: Optional[str] = None
 
     # ------------------------------------------------------------------ #
-    # File upload
+    # File upload / shared Upload Repository
     # ------------------------------------------------------------------ #
     MAX_UPLOAD_SIZE_MB: int = 25
     MAX_REQUIREMENT_TEXT_CHARS: int = 200_000
     MAX_REQUIREMENTS_PER_GENERATION: int = 20
     MAX_SCENARIOS_PER_GENERATION: int = 40
     GENERATION_STALE_AFTER_SECONDS: int = 900
-    ALLOWED_UPLOAD_EXTENSIONS: str = "pdf,docx,txt,md,json,csv,apk,ipa,zip,mp4,mov,webm"
+    ALLOWED_UPLOAD_EXTENSIONS: str = (
+        "pdf,docx,txt,md,json,csv,xlsx,xls,xml,yaml,yml,"
+        "apk,ipa,zip,mp4,mov,webm,png,jpg,jpeg"
+    )
     UPLOAD_STORAGE_PATH: str = "./storage/uploads"
 
     @property
@@ -150,9 +153,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=250, ge=1, le=2048)
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
-    # Result metadata is persisted in Postgres in deployed environments. The
-    # APK bytes stay on the job workspace because storing a 250 MB binary in a
-    # relational row is neither efficient nor required to render the result.
+    # Autopilot results are persisted separately. New APK originals are also
+    # retained by the shared Upload Repository so they can be re-materialized
+    # after a Render restart and reused by future analysis jobs.
     AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
 
     # BrowserStack App Automate (optional real-device execution)
