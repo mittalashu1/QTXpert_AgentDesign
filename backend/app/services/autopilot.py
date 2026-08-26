@@ -68,11 +68,19 @@ class AutopilotPrototypeService:
 
     @property
     def _durable_results_enabled(self) -> bool:
-        """Use the database for deployed jobs while keeping unit tests local."""
-        return bool(
-            getattr(self.settings, "AUTOPILOT_DB_PERSISTENCE_ENABLED", True)
-            and self.settings.APP_ENV != "local"
-        )
+        """Use the database for deployed jobs while keeping local tests local.
+
+        Render services normally set ``APP_ENV=production``. The connection
+        string check is an additional safeguard for an existing service whose
+        environment was created before that variable was added: a non-local
+        database should still get durable Autopilot results.
+        """
+        if not getattr(self.settings, "AUTOPILOT_DB_PERSISTENCE_ENABLED", True):
+            return False
+        if self.settings.APP_ENV != "local":
+            return True
+        database_url = str(getattr(self.settings, "POSTGRES_URL", "")).lower()
+        return not any(host in database_url for host in ("localhost", "127.0.0.1", "postgres:5432"))
 
     async def _persist_job(self, job: Dict[str, Any], analysis: Any = _MISSING) -> None:
         """Best-effort durable write; filesystem operation must never fail on DB hiccups."""
