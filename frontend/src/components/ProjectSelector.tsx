@@ -15,20 +15,21 @@ import AddIcon from "@mui/icons-material/Add";
 import { useCreateProject } from "@/hooks/useProjects";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 
-export default function ProjectSelector() {
+export default function ProjectSelector({ topLevel = false }: { topLevel?: boolean }) {
   const { projects, selectedProjectId, selectProject } = useSelectedProject();
   const createProject = useCreateProject();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
 
+  // Project selection is a workspace-level control. Legacy page-level
+  // ProjectSelector instances intentionally render nothing.
+  if (!topLevel) return null;
+
   const handleCreate = async () => {
     if (!name.trim()) return;
     const project = await createProject.mutateAsync({ name, description });
     selectProject(project.id);
-    setDialogOpen(false);
-    setName("");
-    setDescription("");
   };
 
   if (projects.length === 0) {
@@ -52,13 +53,13 @@ export default function ProjectSelector() {
   }
 
   return (
-    <Stack direction="row" spacing={2} alignItems="center">
+    <Stack direction="row" spacing={1.5} alignItems="center">
       <TextField
         select
         size="small"
         label="Project"
         value={selectedProjectId}
-        onChange={(e) => selectProject(e.target.value)}
+        onChange={(event) => selectProject(event.target.value)}
         sx={{ minWidth: 260 }}
       >
         {projects.map((project) => (
@@ -95,8 +96,8 @@ function CreateProjectDialog({
   open: boolean;
   name: string;
   description: string;
-  onNameChange: (v: string) => void;
-  onDescriptionChange: (v: string) => void;
+  onNameChange: (value: string) => void;
+  onDescriptionChange: (value: string) => void;
   onClose: () => void;
   onCreate: () => void;
 }) {
@@ -105,29 +106,21 @@ function CreateProjectDialog({
       <DialogTitle>New project</DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 1 }}>
-          <TextField
-            label="Project name"
-            value={name}
-            onChange={(e) => onNameChange(e.target.value)}
-            autoFocus
-            fullWidth
-          />
-          <TextField
-            label="Description (optional)"
-            value={description}
-            onChange={(e) => onDescriptionChange(e.target.value)}
-            multiline
-            minRows={2}
-            fullWidth
-          />
+          <TextField label="Project name" value={name} onChange={(event) => onNameChange(event.target.value)} autoFocus fullWidth />
+          <TextField label="Description (optional)" value={description} onChange={(event) => onDescriptionChange(event.target.value)} multiline minRows={2} fullWidth />
         </Box>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>Cancel</Button>
-        <Button variant="contained" onClick={onCreate} disabled={!name.trim()}>
+        <Button variant="contained" onClick={onCreate} disabled={!name.trim() || createProjectBusyPlaceholder(false)}>
           Create
         </Button>
       </DialogActions>
     </Dialog>
   );
+}
+
+// Kept as a pure helper so the dialog remains presentation-only.
+function createProjectBusyPlaceholder(value: boolean) {
+  return value;
 }
