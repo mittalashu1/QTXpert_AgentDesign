@@ -21,6 +21,22 @@ export interface Project {
   created_at: string;
 }
 
+export interface UploadedAsset {
+  id: string;
+  project_id: string | null;
+  filename: string;
+  extension: string;
+  content_type: string | null;
+  category: "apk" | "ipa" | "document" | "test_data" | "media" | "other" | string;
+  source_module: string;
+  storage_backend: string;
+  size_bytes: number;
+  sha256: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export type RequirementSource =
   | "brd_upload"
   | "jira_export"
@@ -174,4 +190,3 @@ export const EXPORT_FORMATS = [
   { value: "xray", label: "Xray" },
   { value: "azure_devops", label: "Azure DevOps Test Plans" },
 ] as const;
-
