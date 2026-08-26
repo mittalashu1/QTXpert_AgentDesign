@@ -169,6 +169,20 @@ export interface GenerationRun {
   test_cases: TestCase[];
 }
 
+export interface GenerationRunSummary {
+  id: string;
+  project_id: string;
+  status: RunStatus;
+  llm_provider: string;
+  llm_model: string;
+  generation_profile: "smoke" | "feature" | "regression" | "deep_regression" | string;
+  title?: string | null;
+  requirement_summary: string | null;
+  first_scenario: string | null;
+  test_case_count: number;
+  created_at: string;
+}
+
 export type ExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type ExecutionResultStatus = "pending" | "passed" | "failed" | "blocked" | "skipped";
 
