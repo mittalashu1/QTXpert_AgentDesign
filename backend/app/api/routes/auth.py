@@ -4,7 +4,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user, require_roles
@@ -68,8 +68,6 @@ async def bootstrap_admin(
         await db.flush()
         action = "admin_bootstrapped"
     else:
-        # A pre-existing account can safely become the first administrator only
-        # while there are no admins and the deployment bootstrap secret is known.
         user.full_name = payload.full_name
         user.hashed_password = hash_password(payload.password)
         user.role = UserRole.ADMIN
@@ -84,13 +82,13 @@ async def bootstrap_admin(
 
 @router.post("/register", status_code=status.HTTP_403_FORBIDDEN)
 async def register_disabled():
-    """Public self-registration is intentionally disabled; admins provision accounts."""
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Public registration is disabled. Contact an administrator.")
 
 
 @router.post("/login", response_model=TokenPair)
 async def login(payload: UserLogin, db: Annotated[AsyncSession, Depends(get_db_session)], settings: Annotated[Settings, Depends(get_settings)]):
-    user = (await db.execute(select(User).where(User.email == payload.email))).scalar_one_or_none()
+    normalized_email = str(payload.email).strip().lower()
+    user = (await db.execute(select(User).where(func.lower(User.email) == normalized_email))).scalar_one_or_none()
     if user is None or not user.hashed_password or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
     if not user.is_active:

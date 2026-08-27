@@ -23,11 +23,15 @@ from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotAnalysisRerunRequest,
     AutopilotAutomationBundle,
+    AutopilotDiscoveryRequest,
+    AutopilotDiscoveryResult,
     AutopilotExecutionRecord,
     AutopilotExecutionRequest,
     AutopilotExecutionResult,
     AutopilotJobStatus,
     AutopilotProviderStatus,
+    AutopilotSuiteRequest,
+    AutopilotSuiteResult,
 )
 from app.schemas.upload_repository import ReuseUploadedAssetRequest
 from app.services.autopilot import (
@@ -35,7 +39,9 @@ from app.services.autopilot import (
     AutopilotUploadInvalid,
     AutopilotUploadTooLarge,
 )
+from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_ir import AutopilotIRCompiler
+from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.upload_repository import (
     UploadRepositoryInvalid,
     UploadRepositoryService,
@@ -160,6 +166,16 @@ async def _mark_repository_available(
     if record is not None and record.repository_asset_id is not None:
         result.artifact_available = True
     return result
+
+
+def _record_discovery(record: Optional[AutopilotJob]):
+    """Validate a stored Runtime Discovery result before using it for IR."""
+    if record is None or record.discovery is None:
+        return None
+    try:
+        return AutopilotDiscoveryResult.model_validate(record.discovery)
+    except Exception:
+        return None
 
 
 async def _start_analysis_from_asset(
@@ -632,14 +648,97 @@ async def get_autopilot_automation(
     job_id: str,
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
 ):
+    """Compile QTX Test IR, consuming durable Runtime Discovery when available."""
     service = _service(settings)
     await _require_owned_job(service, job_id, user)
     try:
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
-    return AutopilotIRCompiler().compile_bundle(analysis)
+    record = await _safe_job_record(db, job_id, user.id)
+    return AutopilotIRCompiler().compile_bundle(analysis, _record_discovery(record))
+
+
+@router.post("/{job_id}/discover", response_model=AutopilotDiscoveryResult)
+async def run_autopilot_discovery(
+    job_id: str,
+    payload: AutopilotDiscoveryRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Perform bounded safe navigation and persist the discovered app map."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    await _ensure_local_artifact(db, service, job_id, user)
+    result = await AutopilotDiscoveryService(settings, service).run(job_id, payload)
+    record = await _safe_job_record(db, job_id, user.id)
+    if record is not None:
+        try:
+            record.discovery = result.model_dump(mode="json")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.warning("Autopilot discovery durable write skipped", exc_info=True)
+    return result
+
+
+@router.get("/{job_id}/discovery", response_model=AutopilotDiscoveryResult | None)
+async def get_autopilot_discovery(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Restore the latest durable runtime discovery result for this job."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    return _record_discovery(await _safe_job_record(db, job_id, user.id))
+
+
+@router.post("/{job_id}/suite", response_model=AutopilotSuiteResult)
+async def execute_autopilot_suite(
+    job_id: str,
+    payload: AutopilotSuiteRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Execute only QTX IR cases proven safe and deterministic."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    await _ensure_local_artifact(db, service, job_id, user)
+    record = await _safe_job_record(db, job_id, user.id)
+    result = await AutopilotSuiteService(settings, service).run(job_id, payload, _record_discovery(record))
+    if record is not None:
+        try:
+            record.suite_execution = result.model_dump(mode="json")
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.warning("Autopilot suite durable write skipped", exc_info=True)
+    return result
+
+
+@router.get("/{job_id}/suite", response_model=AutopilotSuiteResult | None)
+async def get_autopilot_suite(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Restore the latest durable safe-suite result for this build."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    record = await _safe_job_record(db, job_id, user.id)
+    if record is None or record.suite_execution is None:
+        return None
+    try:
+        return AutopilotSuiteResult.model_validate(record.suite_execution)
+    except ValueError:
+        return None
 
 
 @router.get("/{job_id}/executions", response_model=list[AutopilotExecutionRecord])

@@ -11,6 +11,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import axios from "axios";
 import { useAuth } from "@/contexts/AuthContext";
 
 interface LoginFormValues {
@@ -31,10 +32,26 @@ export default function LoginPage() {
   const onSubmit = async (values: LoginFormValues) => {
     setError(null);
     try {
-      await login(values.email, values.password);
+      await login(values.email.trim().toLowerCase(), values.password);
       navigate("/");
-    } catch {
-      setError("Incorrect email or password.");
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        const detail = err.response?.data?.detail;
+        if (status === 401) {
+          setError("Incorrect email or password.");
+        } else if (status === 403 && typeof detail === "string") {
+          setError(detail);
+        } else if (!err.response) {
+          setError("Unable to reach the QTXpert authentication service. Please try again shortly.");
+        } else if (typeof detail === "string") {
+          setError(detail);
+        } else {
+          setError("Sign-in failed because the authentication service returned an unexpected response.");
+        }
+      } else {
+        setError("Sign-in failed unexpectedly. Please try again.");
+      }
     }
   };
 
@@ -94,4 +111,3 @@ export default function LoginPage() {
     </Box>
   );
 }
-

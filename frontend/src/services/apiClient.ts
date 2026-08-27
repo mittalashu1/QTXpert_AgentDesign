@@ -31,7 +31,9 @@ apiClient.interceptors.response.use(
   (response) => response,
   async (error: AxiosError) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
-    if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
+    const requestUrl = originalRequest?.url || "";
+    const isAuthBootstrapRequest = requestUrl.includes("/auth/login") || requestUrl.includes("/auth/refresh");
+    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !isAuthBootstrapRequest) {
       originalRequest._retry = true;
       try {
         refreshInFlight = refreshInFlight || refreshAccessToken();
