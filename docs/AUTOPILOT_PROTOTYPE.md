@@ -65,7 +65,7 @@ supports:
 - BrowserStack App Automate (preferred cloud prototype path)
 - custom/private/local Appium endpoint
 
-The smoke runner starts an Android session, launches the uploaded build, captures screenshot and UI hierarchy, records package/activity/orientation, and closes the session. It does not execute a business transaction.
+The smoke runner starts an Android session, launches the uploaded build, waits for the session to expose a UI hierarchy, captures screenshot and UI hierarchy, records package/activity/orientation, validates that the expected application (rather than a launcher, permission screen, crash or ANR dialog) is foregrounded, and closes the session. It does not execute a business transaction. Unattended safe smoke enables Appium's runtime-permission auto-grant by default; the form can turn it off when permission prompts themselves are under test.
 
 ### 6. Durable results and reruns
 
@@ -77,6 +77,8 @@ Autopilot now keeps the complete run chain traceable across page refreshes and R
 - `GET /api/v1/autopilot/{job_id}/executions` returns the newest smoke history.
 - `POST /api/v1/autopilot/{job_id}/executions/{execution_id}/rerun` repeats a previous smoke with the exact same target settings.
 - `POST /api/v1/autopilot/{job_id}/rerun-analysis` creates a new analysis from the original stored APK or a replacement `upload_id`, preserving the previous context unless a new context is supplied.
+
+The Autopilot page exposes both rerun paths: **Rerun** beside a previous smoke repeats its exact provider/device/permission request, while **Rerun this analysis** can reuse the original APK or the stored APK currently selected in the source selector and can use edited context. Every attempt receives a new execution id and its own evidence directory, so reruns never overwrite an earlier result.
 
 The service also writes one JSON record per execution under the job's local `executions/` directory as a degraded-database fallback. On Render, the PostgreSQL/Upload Repository records are the durable source of truth; the local filesystem is only a working copy.
 
@@ -140,7 +142,7 @@ The local adapter needs an online device (`adb devices` shows `device`), a boot-
 
 The hosted Render API cannot reach your laptop's `127.0.0.1` and cannot read a local Windows APK path. For a hosted custom-Appium run, expose Appium through an authenticated TLS tunnel or private reachable endpoint and provide an app reference that the Appium host can read. Keep Appium bound to localhost; do not expose an unauthenticated `0.0.0.0:4723` endpoint.
 
-The verified local run completed successfully with the InvestNation UAT APK and produced launch screenshot/UI-source evidence under `outputs/local-smoke/`.
+The verified local run completed successfully with the InvestNation UAT APK on `emulator-5554` / Android 17 and produced launch screenshot/UI-source evidence under the per-run `outputs/local-smoke-runtime-validation/<job-id>/evidence/<execution-id>/` directory. A prior run exposed an Android System UI/launcher ANR; runtime validation now records that as a failed/blocked run instead of reporting a false pass.
 
 ### 8. Autopilot workspace
 

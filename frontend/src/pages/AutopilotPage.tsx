@@ -10,12 +10,14 @@ import {
   CircularProgress,
   Divider,
   FormControl,
+  FormControlLabel,
   Grid,
   InputLabel,
   MenuItem,
   Paper,
   Select,
   Stack,
+  Switch,
   Table,
   TableBody,
   TableCell,
@@ -174,6 +176,7 @@ export default function AutopilotPage() {
   const [deviceName, setDeviceName] = useState("Google Pixel 8");
   const [platformVersion, setPlatformVersion] = useState("14.0");
   const [appiumApp, setAppiumApp] = useState("");
+  const [autoGrantPermissions, setAutoGrantPermissions] = useState(true);
 
   const refreshStoredApks = useCallback(async (projectId: string) => {
     if (!projectId) {
@@ -358,7 +361,7 @@ export default function AutopilotPage() {
         platform_version: platformVersion || null,
         appium_app: provider === "appium" ? (appiumApp || null) : null,
         no_reset: false,
-        auto_grant_permissions: false,
+        auto_grant_permissions: autoGrantPermissions,
       }, { timeout: 600000 });
       setExecution(response.data);
       await refreshExecutionHistory(analysis.job_id);
@@ -397,7 +400,10 @@ export default function AutopilotPage() {
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
-        { context: context || undefined },
+        {
+          upload_id: selectedUploadId || undefined,
+          context: context || undefined,
+        },
         { timeout: 300000 },
       );
       setAnalysisProgress(response.data.progress);
@@ -441,9 +447,10 @@ export default function AutopilotPage() {
                   onChange={(event) => {
                     setSelectedUploadId(event.target.value);
                     if (event.target.value) setFile(null);
-                    setAnalysis(null);
-                    setExecution(null);
-                    setExecutionHistory([]);
+                    if (!analysis) {
+                      setExecution(null);
+                      setExecutionHistory([]);
+                    }
                     setError("");
                   }}
                 >
@@ -617,6 +624,15 @@ export default function AutopilotPage() {
                 <Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} /></Grid>
                 <Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(e) => setPlatformVersion(e.target.value)} /></Grid>
                 <Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="contained" disabled={smokeBusy || browserStackUnavailable || !artifactAvailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running" : "Run safe smoke"}</Button></Grid>
+                <Grid item xs={12}>
+                  <FormControlLabel
+                    control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />}
+                    label="Auto-grant runtime permissions for this smoke"
+                  />
+                  <Typography variant="caption" color="text.secondary" display="block">
+                    Enabled by default so unattended smoke runs do not stall on Android permission dialogs. Permission grant/deny behavior remains covered by the generated permission tests.
+                  </Typography>
+                </Grid>
                 {provider === "appium" && <>
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(e) => setAppiumUrl(e.target.value)} /></Grid>
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" placeholder="Leave blank when the Appium server can access the uploaded APK path" value={appiumApp} onChange={(e) => setAppiumApp(e.target.value)} /></Grid>

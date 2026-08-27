@@ -45,7 +45,7 @@ def upgrade() -> None:
         sa.Column("appium_url", sa.String(length=2048), nullable=True),
         sa.Column("appium_app", sa.String(length=2048), nullable=True),
         sa.Column("no_reset", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("auto_grant_permissions", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("auto_grant_permissions", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column("status", sa.String(length=20), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=False),

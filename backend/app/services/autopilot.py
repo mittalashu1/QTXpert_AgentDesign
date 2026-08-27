@@ -849,6 +849,7 @@ class AutopilotPrototypeService:
                     self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
                     self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
                     self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
+                    analysis.package_name,
                 ),
                 timeout=self.settings.AUTOPILOT_SMOKE_TIMEOUT_SECONDS,
             )
@@ -893,6 +894,7 @@ class AutopilotPrototypeService:
         install_timeout_ms: int = 300_000,
         server_launch_timeout_ms: int = 120_000,
         adb_exec_timeout_ms: int = 120_000,
+        expected_package: str | None = None,
     ) -> Dict[str, Any]:
         from appium import webdriver
         from appium.options.android import UiAutomator2Options
@@ -921,18 +923,62 @@ class AutopilotPrototypeService:
         try:
             time.sleep(3)
             driver.get_screenshot_as_file(str(screenshot_path))
-            source_path.write_text(driver.page_source or "", encoding="utf-8")
+            page_source = driver.page_source or ""
+            source_path.write_text(page_source, encoding="utf-8")
             current_package = getattr(driver, "current_package", None)
             current_activity = getattr(driver, "current_activity", None)
+            AutopilotPrototypeService._validate_runtime_state(
+                page_source,
+                current_package,
+                expected_package,
+            )
             return {
                 "session_id": driver.session_id,
                 "current_package": current_package,
                 "current_activity": current_activity,
                 "orientation": getattr(driver, "orientation", None),
                 "page_source_chars": source_path.stat().st_size if source_path.exists() else 0,
+                "expected_package": expected_package,
             }
         finally:
             driver.quit()
+
+    @staticmethod
+    def _validate_runtime_state(
+        page_source: str,
+        current_package: str | None,
+        expected_package: str | None,
+    ) -> None:
+        """Reject false-positive passes caused by Android system dialogs or another app."""
+        if not page_source.strip():
+            raise RuntimeError("Appium returned an empty UI hierarchy after launch")
+
+        lowered = page_source.lower()
+        system_failure_markers = (
+            "isn't responding",
+            "is not responding",
+            "has stopped",
+            "keeps stopping",
+            "application error",
+            "android:id/aerr_close",
+            "android:id/aerr_restart",
+        )
+        if any(marker in lowered for marker in system_failure_markers):
+            raise RuntimeError(
+                "Android displayed a crash or ANR dialog instead of a stable application screen"
+            )
+
+        if not expected_package:
+            return
+        package_in_hierarchy = (
+            f'package="{expected_package}"' in page_source
+            or f"package='{expected_package}'" in page_source
+        )
+        if current_package != expected_package and not package_in_hierarchy:
+            actual = current_package or "unknown"
+            raise RuntimeError(
+                f"Smoke reached foreground package {actual!r}; expected {expected_package!r}"
+            )
 
     @staticmethod
     def _looks_like_connector_problem(exc: Exception) -> bool:
@@ -944,7 +990,6 @@ class AutopilotPrototypeService:
                 "max retries",
                 "could not connect",
                 "invalid argument: app",
-                "unknown server-side error",
                 "browserstack is not configured",
                 "browserstack app upload failed (401)",
                 "browserstack app upload failed (403)",

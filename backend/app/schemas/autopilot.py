@@ -130,7 +130,7 @@ class AutopilotExecutionRequest(BaseModel):
         description="Optional app reference for a custom remote Appium provider. BrowserStack uploads the APK automatically.",
     )
     no_reset: bool = False
-    auto_grant_permissions: bool = False
+    auto_grant_permissions: bool = True
 
 
 class AutopilotExecutionResult(BaseModel):

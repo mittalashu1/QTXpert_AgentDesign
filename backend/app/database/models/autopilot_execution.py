@@ -51,7 +51,7 @@ class AutopilotExecution(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     appium_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
     appium_app: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
     no_reset: Mapped[bool] = mapped_column(default=False, nullable=False)
-    auto_grant_permissions: Mapped[bool] = mapped_column(default=False, nullable=False)
+    auto_grant_permissions: Mapped[bool] = mapped_column(default=True, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -67,11 +67,60 @@ def test_appium_connection_errors_are_blocked_not_product_failures():
     assert AutopilotPrototypeService._looks_like_connector_problem(exc) is True
 
 
+def test_app_launch_failures_are_recorded_as_failures_not_connector_blocks():
+    exc = RuntimeError(
+        "An unknown server-side error occurred while processing the command. "
+        "Cannot start the application; the main activity never started."
+    )
+    assert AutopilotPrototypeService._looks_like_connector_problem(exc) is False
+
+
+def test_safe_smoke_auto_grants_permissions_by_default():
+    from app.schemas.autopilot import AutopilotExecutionRequest
+
+    assert AutopilotExecutionRequest().auto_grant_permissions is True
+
+
 def test_missing_browserstack_configuration_is_blocked_not_product_failure():
     exc = RuntimeError(
         "BrowserStack is not configured. Set BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY as backend secrets."
     )
     assert AutopilotPrototypeService._looks_like_connector_problem(exc) is True
+
+
+def test_runtime_state_rejects_android_anr_dialog():
+    page_source = (
+        '<node package="android" text="Pixel Launcher isn\'t responding" '
+        'resource-id="android:id/aerr_close" />'
+    )
+
+    with pytest.raises(RuntimeError, match="ANR"):
+        AutopilotPrototypeService._validate_runtime_state(
+            page_source,
+            "com.fhc.InvestNation.uat",
+            "com.fhc.InvestNation.uat",
+        )
+
+
+def test_runtime_state_rejects_wrong_foreground_package():
+    page_source = '<node package="com.android.launcher" text="Home" />'
+
+    with pytest.raises(RuntimeError, match="expected"):
+        AutopilotPrototypeService._validate_runtime_state(
+            page_source,
+            "com.android.launcher",
+            "com.fhc.InvestNation.uat",
+        )
+
+
+def test_runtime_state_accepts_expected_application():
+    page_source = '<node package="com.fhc.InvestNation.uat" text="InvestNation" />'
+
+    AutopilotPrototypeService._validate_runtime_state(
+        page_source,
+        "com.fhc.InvestNation.uat",
+        "com.fhc.InvestNation.uat",
+    )
 
 
 def test_browserstack_configuration_requires_both_secrets(tmp_path):
