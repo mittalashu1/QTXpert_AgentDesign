@@ -478,7 +478,7 @@ async def analyze_mobile_app(
         raise HTTPException(
             status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
             detail=(
-                "The APK was analyzed locally but could not be saved to the Upload Repository. "
+                "The APK upload was received but could not be saved to the Upload Repository. "
                 "Increase repository/database capacity or configure object storage, then retry."
             ),
         ) from exc
