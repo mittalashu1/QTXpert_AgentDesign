@@ -16,7 +16,10 @@ import TestExecutionPage from "@/pages/TestExecutionPage";
 import TestReportsPage from "@/pages/TestReportsPage";
 import AutopilotPage from "@/pages/AutopilotPage";
 import UploadsPage from "@/pages/UploadsPage";
+import CostCenterPage from "@/pages/CostCenterPage";
 import { CircularProgress, Box } from "@mui/material";
+
+const COST_ADMIN_EMAIL = "admin@qtxpert.com";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
   const { user, isLoading } = useAuth();
@@ -34,6 +37,12 @@ function ProtectedRoute({ children }: { children: JSX.Element }) {
 function AdminRoute({ children }: { children: JSX.Element }) {
   const { user } = useAuth();
   return user?.role === "admin" ? children : <Navigate to="/" replace />;
+}
+
+function CostAdminRoute({ children }: { children: JSX.Element }) {
+  const { user } = useAuth();
+  const allowed = user?.role === "admin" && user.email.trim().toLowerCase() === COST_ADMIN_EMAIL;
+  return allowed ? children : <Navigate to="/" replace />;
 }
 
 export default function App() {
@@ -57,6 +66,7 @@ export default function App() {
         <Route path="prompt-library" element={<PromptLibraryPage />} />
         <Route path="help" element={<HelpPage />} />
         <Route path="administration/users" element={<AdminRoute><UsersPage /></AdminRoute>} />
+        <Route path="cost-center" element={<CostAdminRoute><CostCenterPage /></CostAdminRoute>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
