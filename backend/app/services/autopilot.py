@@ -75,6 +75,8 @@ class AutopilotPrototypeService:
         environment was created before that variable was added: a non-local
         database should still get durable Autopilot results.
         """
+        if getattr(self.settings, "AUTOPILOT_DEGRADED_MODE_ENABLED", False):
+            return False
         if not getattr(self.settings, "AUTOPILOT_DB_PERSISTENCE_ENABLED", True):
             return False
         if self.settings.APP_ENV != "local":

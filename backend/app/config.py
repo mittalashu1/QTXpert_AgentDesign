@@ -161,6 +161,12 @@ class Settings(BaseSettings):
     AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=250, ge=1, le=2048)
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
     AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
+    # Emergency single-instance mode used while the external database is
+    # unavailable (for example, a provider transfer quota outage).  Autopilot
+    # keeps jobs/results on the instance filesystem and only accepts already
+    # issued JWTs; turn this off after database access is restored so durability
+    # and normal account/project authorization resume.
+    AUTOPILOT_DEGRADED_MODE_ENABLED: bool = False
     # Large APKs can take several minutes to install on an emulator or a
     # cloud device. Keep these limits explicit and configurable instead of
     # relying on Appium's 90-second default.

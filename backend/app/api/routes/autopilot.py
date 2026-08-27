@@ -60,6 +60,7 @@ async def _active_project(
     db: AsyncSession,
     user: User,
     header_project_id: Optional[str],
+    settings: Settings,
 ) -> Optional[UUID]:
     if not header_project_id:
         return None
@@ -67,8 +68,23 @@ async def _active_project(
         project_id = UUID(header_project_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid project context") from exc
-    if await ProjectRepository(db).get_for_owner(project_id, user.id) is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    try:
+        if await ProjectRepository(db).get_for_owner(project_id, user.id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - exercised by an unavailable provider
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        if settings.AUTOPILOT_DEGRADED_MODE_ENABLED:
+            logger.warning("Project context validation skipped in degraded mode: %s", exc)
+            return None
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Project storage is temporarily unavailable; check the database plan/quota and retry.",
+        ) from exc
     return project_id
 
 
@@ -213,6 +229,37 @@ async def _start_analysis_from_asset(
     background_tasks.add_task(service.analyze_safely, job_id)
     result = await service.get_job_status(job_id)
     return await _mark_repository_available(db, result, user.id)
+
+
+async def _start_analysis_from_local_path(
+    *,
+    background_tasks: BackgroundTasks,
+    settings: Settings,
+    user: User,
+    source_path: Path,
+    filename: str,
+    context: str,
+) -> AutopilotJobStatus:
+    """Rerun a same-instance job while the durable database is unavailable."""
+    if not source_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The previous APK is not available on this instance. Upload the build again before rerunning it.",
+        )
+    service = _service(settings)
+    reader = _AsyncPathReader(source_path)
+    try:
+        job_id, _ = await service.save_upload_stream(
+            filename,
+            reader,
+            str(user.id),
+            context=context,
+            max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+        )
+    finally:
+        await reader.close()
+    background_tasks.add_task(service.analyze_safely, job_id)
+    return await service.get_job_status(job_id)
 
 
 def _parse_iso_datetime(value: str) -> datetime:
@@ -442,7 +489,7 @@ async def analyze_mobile_app(
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Upload an APK into the active project's repository, then analyze it."""
-    project_id = await _active_project(db, user, x_qtxpert_project_id)
+    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     filename = Path(file.filename or "application.apk").name
     if not filename.lower().endswith(".apk"):
         raise HTTPException(
@@ -465,43 +512,55 @@ async def analyze_mobile_app(
     except AutopilotUploadInvalid as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    try:
-        asset = await UploadRepositoryService.create_from_path(
-            db,
-            apk_path,
-            user.id,
-            filename=filename,
-            content_type=file.content_type or "application/vnd.android.package-archive",
-            project_id=project_id,
-            source_module="autopilot",
-            category="apk",
-            max_bytes=max_bytes,
-            minimum_bytes=1024,
+    asset: Optional[UploadedAsset] = None
+    if settings.AUTOPILOT_DEGRADED_MODE_ENABLED:
+        # The database provider is explicitly unavailable. Keep the APK and
+        # all analysis evidence on this instance so the user can complete a
+        # smoke run; normal durable repository writes resume when the flag is
+        # disabled after the provider quota is restored.
+        logger.warning(
+            "Autopilot APK repository write bypassed in degraded mode job_id=%s",
+            job_id,
         )
-    except UploadRepositoryTooLarge as exc:
-        await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
-    except UploadRepositoryInvalid as exc:
-        await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except Exception as exc:
-        # PostgreSQL chunk storage can be exhausted by a large APK. Return a
-        # useful actionable response instead of leaving the browser waiting
-        # for a 500/timeout, and discard only the just-created local job.
+    else:
         try:
-            await db.rollback()
-        except Exception:
-            pass
-        await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
-        logger.exception("Autopilot APK repository write failed: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-            detail=(
-                "The APK upload was received but could not be saved to the Upload Repository. "
-                "Increase repository/database capacity or configure object storage, then retry."
-            ),
-        ) from exc
-    await _link_repository_asset(db, service, job_id, asset.id)
+            asset = await UploadRepositoryService.create_from_path(
+                db,
+                apk_path,
+                user.id,
+                filename=filename,
+                content_type=file.content_type or "application/vnd.android.package-archive",
+                project_id=project_id,
+                source_module="autopilot",
+                category="apk",
+                max_bytes=max_bytes,
+                minimum_bytes=1024,
+            )
+        except UploadRepositoryTooLarge as exc:
+            await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+        except UploadRepositoryInvalid as exc:
+            await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except Exception as exc:
+            # PostgreSQL chunk storage can be exhausted by a large APK. Return
+            # a useful actionable response instead of leaving the browser
+            # waiting for a 500/timeout, and discard only this local job.
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
+            logger.exception("Autopilot APK repository write failed: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                detail=(
+                    "The APK upload was received but could not be saved to the Upload Repository. "
+                    "Increase repository/database capacity or configure object storage, then retry."
+                ),
+            ) from exc
+    if asset is not None:
+        await _link_repository_asset(db, service, job_id, asset.id)
     background_tasks.add_task(service.analyze_safely, job_id)
     result = await service.get_job_status(job_id)
     return await _mark_repository_available(db, result, user.id)
@@ -517,8 +576,18 @@ async def analyze_existing_mobile_app(
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Start a new Android analysis from an APK in the active project."""
-    project_id = await _active_project(db, user, x_qtxpert_project_id)
-    asset = await UploadRepositoryService.get_owned(db, payload.upload_id, user.id)
+    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    try:
+        asset = await UploadRepositoryService.get_owned(db, payload.upload_id, user.id)
+    except Exception as exc:  # pragma: no cover - exercised by an unavailable provider
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stored APK reuse is temporarily unavailable; upload the APK file again or restore database access.",
+        ) from exc
     if asset is None or asset.extension != "apk" or (project_id is not None and asset.project_id != project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK not found in this project")
     return await _start_analysis_from_asset(
@@ -545,7 +614,16 @@ async def rerun_autopilot_analysis(
     service = _service(settings)
     original = await _require_owned_job(service, job_id, user)
     original_record = await _safe_job_record(db, job_id, user.id)
-    project_id = await _active_project(db, user, x_qtxpert_project_id)
+    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    if settings.AUTOPILOT_DEGRADED_MODE_ENABLED and payload.upload_id is None:
+        return await _start_analysis_from_local_path(
+            background_tasks=background_tasks,
+            settings=settings,
+            user=user,
+            source_path=Path(str(original.get("apk_path", ""))),
+            filename=Path(str(original.get("filename", "application.apk"))).name,
+            context=payload.context if payload.context is not None else str(original.get("context", "")),
+        )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
         asset_id = original_record.repository_asset_id
@@ -554,7 +632,17 @@ async def rerun_autopilot_analysis(
             status_code=status.HTTP_409_CONFLICT,
             detail="This analysis has no reusable APK. Upload the build again before rerunning it.",
         )
-    asset = await UploadRepositoryService.get_owned(db, asset_id, user.id)
+    try:
+        asset = await UploadRepositoryService.get_owned(db, asset_id, user.id)
+    except Exception as exc:  # pragma: no cover - exercised by an unavailable provider
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stored APK reuse is temporarily unavailable; restore database access and retry.",
+        ) from exc
     if asset is None or (project_id is not None and asset.project_id != project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK not found in this project")
     context = payload.context if payload.context is not None else str(original.get("context", ""))
@@ -578,13 +666,26 @@ async def get_latest_autopilot_job(
 ):
     """Restore the latest Autopilot result for the active project."""
     service = _service(settings)
-    project_id = await _active_project(db, user, x_qtxpert_project_id)
+    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     query = select(AutopilotJob).where(AutopilotJob.owner_id == user.id)
     if project_id is not None:
         query = query.join(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
             UploadedAsset.project_id == project_id
         )
-    record = await db.scalar(query.order_by(AutopilotJob.created_at.desc()).limit(1))
+    try:
+        record = await db.scalar(query.order_by(AutopilotJob.created_at.desc()).limit(1))
+    except Exception as exc:  # pragma: no cover - exercised by an unavailable provider
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        if not settings.AUTOPILOT_DEGRADED_MODE_ENABLED:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Autopilot history is temporarily unavailable; check the database plan/quota and retry.",
+            ) from exc
+        logger.warning("Autopilot latest-job durable read skipped in degraded mode: %s", exc)
+        return await service.get_latest_job_status(str(user.id))
     if record is None:
         # The filesystem fallback is owner-wide and therefore only safe when no
         # project context exists (legacy/local clients).

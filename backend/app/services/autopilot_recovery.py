@@ -109,8 +109,11 @@ async def recover_interrupted_autopilot_jobs(settings: Settings) -> int:
                 .limit(10)
             )
             job_ids = [row.job_id for row in rows.all()]
-    except Exception:
-        logger.exception("Unable to inspect interrupted Autopilot jobs during startup")
+    except Exception as exc:
+        # A database quota outage must not make a healthy HTTP process look
+        # like an application crash. The health endpoint reports the same
+        # dependency state without flooding the production error log.
+        logger.warning("Unable to inspect interrupted Autopilot jobs during startup: %s", exc)
         return 0
 
     for job_id in job_ids:

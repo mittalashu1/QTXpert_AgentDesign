@@ -87,6 +87,13 @@ def create_app() -> FastAPI:
     async def root():
         return {"service": settings_obj.APP_NAME, "status": "running"}
 
+    @app.head("/")
+    async def root_head():
+        # Render may probe a web service with HEAD / when no explicit health
+        # path is configured. FastAPI does not automatically register HEAD for
+        # a GET route, so make that probe a clean 200 response.
+        return None
+
     return app
 
 
