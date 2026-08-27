@@ -1,4 +1,5 @@
 """FastAPI application entrypoint."""
+import asyncio
 import logging
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -20,10 +21,14 @@ from app.api.routes import (
     usage,
 )
 from app.config import get_settings
+from app.services.autopilot_recovery import recover_interrupted_autopilot_jobs
 
 settings_obj = get_settings()
 
 logging.basicConfig(level=settings_obj.LOG_LEVEL)
+# Androguard is very verbose at DEBUG and can flood production logs while parsing
+# large APK resource tables. Keep application logs useful without affecting analysis.
+logging.getLogger("androguard").setLevel(logging.WARNING)
 logger = logging.getLogger("qtxpert")
 
 
@@ -57,6 +62,14 @@ def create_app() -> FastAPI:
     app.include_router(settings.router, prefix=prefix)
     app.include_router(usage.router, prefix=prefix)
     app.include_router(health.router, prefix=prefix)
+
+    @app.on_event("startup")
+    async def recover_autopilot_after_restart() -> None:
+        # Do not block HTTP startup while a large APK is restored from the durable
+        # Upload Repository. The recovery task schedules bounded analysis workers.
+        app.state.autopilot_recovery = asyncio.create_task(
+            recover_interrupted_autopilot_jobs(settings_obj)
+        )
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
