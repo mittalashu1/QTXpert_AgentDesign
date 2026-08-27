@@ -91,19 +91,44 @@ type AnalysisJob = {
   status: "uploaded" | "analyzing" | "analyzed" | "failed";
   stage: string;
   progress: number;
+  context?: string;
   artifact_available?: boolean;
   error?: string;
   analysis?: Analysis | null;
 };
 
 type Execution = {
+  execution_id?: string;
+  job_id?: string;
   status: "passed" | "failed" | "blocked";
   provider: "browserstack" | "appium";
   duration_seconds: number;
+  device_name?: string;
+  started_at?: string;
+  finished_at?: string;
   current_package?: string;
   current_activity?: string;
+  screenshot_asset_id?: string;
+  page_source_asset_id?: string;
   error?: string;
   evidence: Record<string, unknown>;
+};
+
+type ExecutionRequest = {
+  provider: "browserstack" | "appium";
+  appium_url?: string | null;
+  device_name: string;
+  platform_version?: string | null;
+  appium_app?: string | null;
+  no_reset: boolean;
+  auto_grant_permissions: boolean;
+};
+
+type ExecutionRecord = Execution & {
+  execution_id: string;
+  job_id: string;
+  created_at: string;
+  request: ExecutionRequest;
 };
 
 const priorityColor: Record<TestCase["priority"], "error" | "warning" | "info" | "default"> = {
@@ -136,6 +161,7 @@ export default function AutopilotPage() {
   const [context, setContext] = useState("");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [execution, setExecution] = useState<Execution | null>(null);
+  const [executionHistory, setExecutionHistory] = useState<ExecutionRecord[]>([]);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [provider, setProvider] = useState<"browserstack" | "appium">("browserstack");
   const [busy, setBusy] = useState(false);
@@ -165,6 +191,22 @@ export default function AutopilotPage() {
     }
   }, []);
 
+  const refreshExecutionHistory = useCallback(async (jobId: string) => {
+    if (!jobId) {
+      setExecutionHistory([]);
+      return;
+    }
+    try {
+      const response = await apiClient.get<ExecutionRecord[]>(`/autopilot/${jobId}/executions`, { timeout: 15000 });
+      setExecutionHistory(response.data);
+      if (response.data.length > 0) setExecution(response.data[0]);
+    } catch {
+      // Keep the current request result visible if history is unavailable on
+      // an older deployment or during a transient database restart.
+      setExecutionHistory([]);
+    }
+  }, []);
+
   useEffect(() => {
     apiClient.get<ProviderStatus>("/autopilot/providers")
       .then((response) => {
@@ -184,9 +226,11 @@ export default function AutopilotPage() {
     const applyJob = (job: AnalysisJob) => {
       setAnalysisProgress(job.progress);
       setAnalysisStage(job.stage);
+      if (job.context !== undefined) setContext(job.context);
       setArtifactAvailable(job.artifact_available !== false);
       if (job.status === "analyzed" && job.analysis) {
         setAnalysis(job.analysis);
+        void refreshExecutionHistory(job.analysis.job_id);
       } else if (job.status === "failed" && job.error) {
         setError(job.error);
       }
@@ -217,7 +261,7 @@ export default function AutopilotPage() {
     return () => {
       active = false;
     };
-  }, [selectedProjectId]);
+  }, [refreshExecutionHistory, selectedProjectId]);
 
   const stats = useMemo(() => {
     if (!analysis) return null;
@@ -240,6 +284,7 @@ export default function AutopilotPage() {
     if (selected) setSelectedUploadId("");
     setAnalysis(null);
     setExecution(null);
+    setExecutionHistory([]);
     setArtifactAvailable(true);
     setError("");
   };
@@ -270,6 +315,7 @@ export default function AutopilotPage() {
     setBusy(true);
     setError("");
     setExecution(null);
+    setExecutionHistory([]);
     try {
       let response;
       if (selectedUploadId) {
@@ -315,10 +361,54 @@ export default function AutopilotPage() {
         auto_grant_permissions: false,
       }, { timeout: 600000 });
       setExecution(response.data);
+      await refreshExecutionHistory(analysis.job_id);
     } catch (err: unknown) {
       setError(readableError(err, "Smoke execution failed"));
     } finally {
       setSmokeBusy(false);
+    }
+  };
+
+  const rerunSmoke = async (executionId: string) => {
+    if (!analysis) return;
+    setSmokeBusy(true);
+    setError("");
+    try {
+      const response = await apiClient.post<Execution>(
+        `/autopilot/${analysis.job_id}/executions/${executionId}/rerun`,
+        {},
+        { timeout: 600000 },
+      );
+      setExecution(response.data);
+      await refreshExecutionHistory(analysis.job_id);
+    } catch (err: unknown) {
+      setError(readableError(err, "Smoke rerun failed"));
+    } finally {
+      setSmokeBusy(false);
+    }
+  };
+
+  const rerunAnalysis = async () => {
+    if (!analysis || !selectedProjectId) return;
+    setBusy(true);
+    setError("");
+    setExecution(null);
+    setExecutionHistory([]);
+    try {
+      const response = await apiClient.post<AnalysisJob>(
+        `/autopilot/${analysis.job_id}/rerun-analysis`,
+        { context: context || undefined },
+        { timeout: 300000 },
+      );
+      setAnalysisProgress(response.data.progress);
+      setAnalysisStage(response.data.stage);
+      setArtifactAvailable(response.data.artifact_available !== false);
+      setAnalysis(null);
+      await pollAnalysis(response.data.job_id);
+    } catch (err: unknown) {
+      setError(readableError(err, "Autopilot rerun failed"));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -353,6 +443,7 @@ export default function AutopilotPage() {
                     if (event.target.value) setFile(null);
                     setAnalysis(null);
                     setExecution(null);
+                    setExecutionHistory([]);
                     setError("");
                   }}
                 >
@@ -409,10 +500,12 @@ export default function AutopilotPage() {
               onChange={(event) => setContext(event.target.value)}
               helperText="Do not paste production passwords or secrets. Autopilot will ask only for context it cannot infer."
             />
+            <Alert severity="info">Autopilot currently reasons over the APK and this context field. Project documents remain in Document Intelligence and are not automatically included in this mobile analysis yet.</Alert>
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
               <Button disabled={(!file && !selectedUploadId) || busy || !selectedProjectId} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>
                 {busy ? "Learning application…" : selectedStoredApk ? "Analyze Stored APK" : "Start Autopilot Analysis"}
               </Button>
+              {analysis && <Button disabled={busy || !selectedProjectId} onClick={rerunAnalysis} variant="outlined" size="large">Rerun this analysis</Button>}
               <Typography variant="caption" color="text.secondary">Android APK · prototype limit 250 MB · new uploads are saved automatically</Typography>
             </Stack>
           </Grid>
@@ -539,6 +632,23 @@ export default function AutopilotPage() {
               )}
               {!artifactAvailable && <Alert sx={{ mt: 2 }} severity="warning">This analysis was created before durable APK storage was enabled and the original APK is no longer available on this service instance. Upload that APK once more; future runs can reuse it from Test Data → Uploads.</Alert>}
               {execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke status: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.current_activity ? ` · ${execution.current_activity}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}
+              {execution && (execution.screenshot_asset_id || execution.page_source_asset_id) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Evidence is retained in the project Upload Repository for this run.</Typography>}
+              {executionHistory.length > 0 && <Box sx={{ mt: 2 }}>
+                <Typography variant="subtitle2" fontWeight={800}>Previous smoke runs</Typography>
+                <Stack spacing={1} sx={{ mt: 1 }}>
+                  {executionHistory.map((item) => (
+                    <Paper key={item.execution_id} variant="outlined" sx={{ p: 1.25 }}>
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
+                        <Box>
+                          <Typography variant="body2" fontWeight={700}>{item.status.toUpperCase()} · {item.request.provider} · {item.request.device_name}</Typography>
+                          <Typography variant="caption" color="text.secondary">{new Date(item.created_at).toLocaleString()} · {item.duration_seconds}s</Typography>
+                        </Box>
+                        <Button size="small" variant="outlined" disabled={smokeBusy} onClick={() => rerunSmoke(item.execution_id)}>Rerun</Button>
+                      </Stack>
+                    </Paper>
+                  ))}
+                </Stack>
+              </Box>}
             </CardContent>
           </Card>
 

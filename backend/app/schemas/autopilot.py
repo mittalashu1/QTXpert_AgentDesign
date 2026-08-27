@@ -1,5 +1,7 @@
 """Schemas for the Android-first QTXpert Autopilot prototype."""
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -64,6 +66,7 @@ class AutopilotJobStatus(BaseModel):
     progress: int = Field(default=0, ge=0, le=100)
     created_at: str
     updated_at: str
+    context: str = ""
     artifact_available: bool = True
     error: Optional[str] = None
     analysis: Optional[AutopilotAnalysis] = None
@@ -131,6 +134,7 @@ class AutopilotExecutionRequest(BaseModel):
 
 
 class AutopilotExecutionResult(BaseModel):
+    execution_id: Optional[UUID] = None
     job_id: str
     status: Literal["passed", "failed", "blocked"]
     provider: Literal["browserstack", "appium"]
@@ -142,5 +146,22 @@ class AutopilotExecutionResult(BaseModel):
     current_activity: Optional[str] = None
     screenshot_path: Optional[str] = None
     page_source_path: Optional[str] = None
+    screenshot_asset_id: Optional[UUID] = None
+    page_source_asset_id: Optional[UUID] = None
     error: Optional[str] = None
     evidence: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AutopilotExecutionRecord(AutopilotExecutionResult):
+    """Durable execution result plus the exact request used for reruns."""
+
+    execution_id: UUID
+    request: AutopilotExecutionRequest
+    created_at: datetime
+
+
+class AutopilotAnalysisRerunRequest(BaseModel):
+    """Start another analysis using the original or a replacement APK."""
+
+    upload_id: Optional[UUID] = None
+    context: Optional[str] = Field(default=None, max_length=8000)

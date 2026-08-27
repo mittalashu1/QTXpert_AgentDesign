@@ -185,3 +185,34 @@ async def test_latest_job_status_is_owner_scoped(tmp_path):
     assert latest is not None
     assert latest.job_id == job_id
     assert await service.get_latest_job_status("another-owner") is None
+
+
+@pytest.mark.asyncio
+async def test_execution_history_files_are_per_run_and_reusable(tmp_path):
+    from app.api.routes.autopilot import _execution_record_from_file
+    from app.schemas.autopilot import AutopilotExecutionRequest, AutopilotExecutionResult
+
+    service = _service(tmp_path)
+    job_id, _ = await service.save_upload("history.apk", b"x" * 2048, "owner")
+    request = AutopilotExecutionRequest(provider="appium", device_name="emulator-5554")
+    result = AutopilotExecutionResult(
+        execution_id="11111111-1111-4111-8111-111111111111",
+        job_id=job_id,
+        status="blocked",
+        provider="appium",
+        started_at="2026-01-01T00:00:00+00:00",
+        finished_at="2026-01-01T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="emulator-5554",
+        error="Appium is unavailable",
+    )
+
+    await service._persist_execution_file(result, request)
+    records = await service.list_execution_files(job_id)
+
+    assert len(records) == 1
+    assert records[0]["execution_id"] == str(result.execution_id)
+    assert records[0]["request"]["device_name"] == "emulator-5554"
+    restored = _execution_record_from_file(records[0], job_id)
+    assert restored is not None
+    assert restored.execution_id == result.execution_id

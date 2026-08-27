@@ -182,6 +182,57 @@ class AutopilotPrototypeService:
     def _metadata_path(self, job_id: str) -> Path:
         return self._job_dir(job_id) / "analysis.json"
 
+    def _execution_dir(self, job_id: str) -> Path:
+        """Return the per-job execution directory used as a local fallback."""
+        return self._job_dir(job_id) / "executions"
+
+    async def _persist_execution_file(
+        self,
+        result: AutopilotExecutionResult,
+        request: AutopilotExecutionRequest,
+    ) -> None:
+        """Keep a local copy when the database is unavailable.
+
+        Production requests are additionally persisted in PostgreSQL by the
+        API route. The file fallback is intentionally one JSON file per run so
+        repeated smoke attempts never overwrite one another.
+        """
+        try:
+            execution_dir = self._execution_dir(result.job_id)
+            await asyncio.to_thread(execution_dir.mkdir, parents=True, exist_ok=True)
+            payload = {
+                "execution_id": str(result.execution_id),
+                "request": request.model_dump(mode="json"),
+                "result": result.model_dump(mode="json"),
+            }
+            path = execution_dir / f"{result.execution_id}.json"
+            await asyncio.to_thread(path.write_text, json.dumps(payload, indent=2), "utf-8")
+        except Exception as exc:  # pragma: no cover - defensive local fallback
+            logger.warning("Autopilot execution file write skipped: %s", exc)
+
+    async def list_execution_files(self, job_id: str) -> list[dict[str, Any]]:
+        """Read filesystem fallback execution records in newest-first order."""
+        directory = self._execution_dir(job_id)
+        if not directory.exists():
+            return []
+
+        def read_all() -> list[dict[str, Any]]:
+            records: list[dict[str, Any]] = []
+            for path in directory.glob("*.json"):
+                try:
+                    payload = json.loads(path.read_text("utf-8"))
+                    if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+                        records.append(payload)
+                except (OSError, ValueError):
+                    continue
+            records.sort(
+                key=lambda item: str(item.get("result", {}).get("started_at", "")),
+                reverse=True,
+            )
+            return records
+
+        return await asyncio.to_thread(read_all)
+
     async def save_upload(self, filename: str, data: bytes, owner_id: str, context: str = "") -> tuple[str, Path]:
         job_id = str(uuid4())
         job_dir = self._job_dir(job_id)
@@ -306,6 +357,7 @@ class AutopilotPrototypeService:
             progress=int(job.get("progress", 0)),
             created_at=job["created_at"],
             updated_at=job.get("updated_at", job["created_at"]),
+            context=str(job.get("context", "")),
             artifact_available=bool(artifact_path and Path(artifact_path).is_file()),
             error=job.get("error"),
             analysis=analysis,
@@ -755,7 +807,8 @@ class AutopilotPrototypeService:
         analysis = await self.load_analysis(job_id)
         started = datetime.now(timezone.utc)
         start_perf = time.perf_counter()
-        evidence_dir = self._job_dir(job_id) / "evidence"
+        execution_id = uuid4()
+        evidence_dir = self._job_dir(job_id) / "evidence" / str(execution_id)
         evidence_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = evidence_dir / "launch.png"
         source_path = evidence_dir / "page-source.xml"
@@ -810,7 +863,8 @@ class AutopilotPrototypeService:
             error = f"{type(exc).__name__}: {exc}"
 
         finished = datetime.now(timezone.utc)
-        return AutopilotExecutionResult(
+        execution = AutopilotExecutionResult(
+            execution_id=execution_id,
             job_id=job_id,
             status=execution_status,
             provider=request.provider,
@@ -825,6 +879,8 @@ class AutopilotPrototypeService:
             error=error,
             evidence=result,
         )
+        await self._persist_execution_file(execution, request)
+        return execution
 
     @staticmethod
     def _execute_appium_sync(
