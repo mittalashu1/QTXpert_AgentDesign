@@ -19,6 +19,8 @@ from app.database.session import get_db_session
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotAutomationBundle,
+    AutopilotDiscoveryRequest,
+    AutopilotDiscoveryResult,
     AutopilotExecutionRequest,
     AutopilotExecutionResult,
     AutopilotJobStatus,
@@ -30,6 +32,7 @@ from app.services.autopilot import (
     AutopilotUploadInvalid,
     AutopilotUploadTooLarge,
 )
+from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_ir import AutopilotIRCompiler
 from app.services.upload_repository import UploadRepositoryService
 
@@ -265,8 +268,6 @@ async def get_latest_autopilot_job(
         )
     record = await db.scalar(query.order_by(AutopilotJob.created_at.desc()).limit(1))
     if record is None:
-        # The filesystem fallback is owner-wide and therefore only safe when no
-        # project context exists (legacy/local clients).
         return await service.get_latest_job_status(str(user.id)) if project_id is None else None
 
     job = await _require_owned_job(service, record.job_id, user)
@@ -335,6 +336,42 @@ async def get_autopilot_automation(
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
     return AutopilotIRCompiler().compile_bundle(analysis)
+
+
+@router.post("/{job_id}/discover", response_model=AutopilotDiscoveryResult)
+async def run_autopilot_discovery(
+    job_id: str,
+    payload: AutopilotDiscoveryRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Perform bounded safe navigation and persist the discovered app map."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    await _ensure_local_artifact(db, service, job_id, user)
+    result = await AutopilotDiscoveryService(settings, service).run(job_id, payload)
+    record = await _job_record(db, job_id, user.id)
+    if record is not None:
+        record.discovery = result.model_dump(mode="json")
+        await db.commit()
+    return result
+
+
+@router.get("/{job_id}/discovery", response_model=AutopilotDiscoveryResult | None)
+async def get_autopilot_discovery(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Restore the latest durable runtime discovery result for this job."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    record = await _job_record(db, job_id, user.id)
+    if record is None or record.discovery is None:
+        return None
+    return AutopilotDiscoveryResult.model_validate(record.discovery)
 
 
 @router.post("/{job_id}/smoke", response_model=AutopilotExecutionResult)

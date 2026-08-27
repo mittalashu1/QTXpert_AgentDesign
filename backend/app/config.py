@@ -162,6 +162,7 @@ class Settings(BaseSettings):
     AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS: int = Field(default=120, ge=30, le=600)
     AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS: int = Field(default=120, ge=30, le=600)
     AUTOPILOT_SMOKE_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
+    AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
     AUTOPILOT_BROWSERSTACK_UPLOAD_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
 
     BROWSERSTACK_USERNAME: Optional[str] = None
