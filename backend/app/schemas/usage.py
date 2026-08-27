@@ -1,5 +1,6 @@
 """Response models for workspace-wide usage and cost reporting."""
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,20 @@ class AzureActualCost(BaseModel):
     error: str | None = None
 
 
+class CostSurface(BaseModel):
+    key: str
+    category: str
+    service: str
+    configured: bool | None = None
+    coverage: Literal["actual", "estimated", "manual", "not_configured"]
+    actual_cost: float | None = None
+    estimated_cost_usd: float | None = None
+    currency: str | None = None
+    billing_source: str
+    note: str
+    action: str | None = None
+
+
 class AICostSummary(BaseModel):
     period_days: int = Field(ge=1)
     since: datetime
@@ -37,3 +52,5 @@ class AICostSummary(BaseModel):
     by_model: list[AICostBreakdown] = Field(default_factory=list)
     azure: AzureActualCost = Field(default_factory=AzureActualCost)
     variance_usd: float | None = None
+    cost_surfaces: list[CostSurface] = Field(default_factory=list)
+    untracked_surface_count: int = 0

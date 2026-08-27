@@ -9,6 +9,7 @@ import AssessmentOutlinedIcon from "@mui/icons-material/AssessmentOutlined";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import StorageOutlinedIcon from "@mui/icons-material/StorageOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
+import AccountBalanceWalletOutlinedIcon from "@mui/icons-material/AccountBalanceWalletOutlined";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
@@ -18,6 +19,7 @@ import { useThemeMode } from "@/contexts/ThemeModeContext";
 import ProjectSelector from "@/components/ProjectSelector";
 
 const drawerWidth = 248;
+const COST_ADMIN_EMAIL = "admin@qtxpert.com";
 const navigation = [
   { to: "/", label: "Dashboard", icon: <DashboardOutlinedIcon />, end: true },
   { to: "/autopilot", label: "Autopilot", icon: <AutoAwesomeIcon />, badge: "NEW" },
@@ -34,6 +36,7 @@ export default function AppLayout() {
   const { mode, toggleMode } = useThemeMode();
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [testDataOpen, setTestDataOpen] = useState(location.pathname.startsWith("/test-data"));
+  const canViewCosts = user?.role === "admin" && user.email.trim().toLowerCase() === COST_ADMIN_EMAIL;
 
   useEffect(() => {
     if (location.pathname.startsWith("/test-data")) setTestDataOpen(true);
@@ -90,6 +93,14 @@ export default function AppLayout() {
                 </ListItemButton>
               </List>
             </Collapse>
+            {canViewCosts && <>
+              <Divider sx={{ my: 1.25 }} />
+              <ListItemButton component={NavLink} to="/cost-center" sx={navSx}>
+                <ListItemIcon sx={{ minWidth: 38, color: "text.secondary" }}><AccountBalanceWalletOutlinedIcon /></ListItemIcon>
+                <ListItemText primary="Cost Center" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
+                <Chip label="ADMIN" size="small" sx={{ height: 20, fontSize: 9, fontWeight: 800 }} />
+              </ListItemButton>
+            </>}
           </List>
         </Box>
         <Box sx={{ mt: "auto", p: 2 }}><Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "action.hover" }}><Typography variant="caption" color="primary.main" sx={{ fontWeight: 700 }}>AUTONOMOUS QE</Typography><Typography variant="body2" sx={{ mt: .5, fontWeight: 600 }}>Documents → intelligence → tests → execution</Typography><Typography variant="caption" color="text.secondary">Every module follows the project selected in the top bar.</Typography></Box></Box>
