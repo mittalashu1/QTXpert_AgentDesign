@@ -144,3 +144,78 @@ class AutopilotExecutionResult(BaseModel):
     page_source_path: Optional[str] = None
     error: Optional[str] = None
     evidence: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
+    """Bounded safe runtime exploration configuration.
+
+    Discovery never permits destructive/transactional controls. ``observe_only``
+    captures the current screen without tapping anything; otherwise QTXpert may
+    traverse only controls that match the conservative safe-navigation policy.
+    """
+
+    max_screens: int = Field(default=12, ge=1, le=40)
+    max_actions: int = Field(default=10, ge=0, le=50)
+    observe_only: bool = False
+
+
+class DiscoveryLocator(BaseModel):
+    strategy: Literal["accessibility_id", "id", "xpath"]
+    value: str
+    confidence: float = Field(ge=0, le=1)
+
+
+class DiscoveredControl(BaseModel):
+    control_id: str
+    semantic_label: str
+    class_name: str = ""
+    text: str = ""
+    content_description: str = ""
+    resource_id: str = ""
+    bounds: str = ""
+    clickable: bool = False
+    enabled: bool = True
+    input_capable: bool = False
+    risk: Literal["safe", "review", "blocked"] = "review"
+    risk_reason: Optional[str] = None
+    locators: List[DiscoveryLocator] = Field(default_factory=list)
+
+
+class DiscoveredScreen(BaseModel):
+    screen_id: str
+    fingerprint: str
+    package_name: Optional[str] = None
+    activity_name: Optional[str] = None
+    screenshot_path: Optional[str] = None
+    page_source_path: Optional[str] = None
+    controls: List[DiscoveredControl] = Field(default_factory=list)
+
+
+class DiscoveredTransition(BaseModel):
+    from_screen_id: str
+    to_screen_id: str
+    control_id: str
+    control_label: str
+    action: Literal["tap", "back"] = "tap"
+    duplicate_state: bool = False
+
+
+class AutopilotDiscoveryResult(BaseModel):
+    job_id: str
+    status: Literal["completed", "partial", "blocked", "failed"]
+    provider: Literal["browserstack", "appium"]
+    started_at: str
+    finished_at: str
+    duration_seconds: float
+    device_name: str
+    observe_only: bool = False
+    screen_count: int = 0
+    control_count: int = 0
+    safe_control_count: int = 0
+    blocked_control_count: int = 0
+    actions_attempted: int = 0
+    stop_reason: str = ""
+    screens: List[DiscoveredScreen] = Field(default_factory=list)
+    transitions: List[DiscoveredTransition] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
