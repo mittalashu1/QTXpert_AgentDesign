@@ -36,7 +36,11 @@ from app.services.autopilot import (
     AutopilotUploadTooLarge,
 )
 from app.services.autopilot_ir import AutopilotIRCompiler
-from app.services.upload_repository import UploadRepositoryService
+from app.services.upload_repository import (
+    UploadRepositoryInvalid,
+    UploadRepositoryService,
+    UploadRepositoryTooLarge,
+)
 
 router = APIRouter(prefix="/autopilot", tags=["autopilot"])
 logger = logging.getLogger(__name__)
@@ -101,10 +105,14 @@ async def _link_repository_asset(
     asset_id: UUID,
 ) -> None:
     await service.update_job(job_id, repository_asset_id=str(asset_id))
-    record = await db.scalar(select(AutopilotJob).where(AutopilotJob.job_id == job_id))
-    if record is not None:
-        record.repository_asset_id = asset_id
-        await db.commit()
+    try:
+        record = await db.scalar(select(AutopilotJob).where(AutopilotJob.job_id == job_id))
+        if record is not None:
+            record.repository_asset_id = asset_id
+            await db.commit()
+    except Exception as exc:  # pragma: no cover - degraded DB fallback
+        await db.rollback()
+        logger.warning("Autopilot repository link write skipped: %s", exc)
 
 
 async def _ensure_local_artifact(
@@ -438,18 +446,42 @@ async def analyze_mobile_app(
     except AutopilotUploadInvalid as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
-    asset = await UploadRepositoryService.create_from_path(
-        db,
-        apk_path,
-        user.id,
-        filename=filename,
-        content_type=file.content_type or "application/vnd.android.package-archive",
-        project_id=project_id,
-        source_module="autopilot",
-        category="apk",
-        max_bytes=max_bytes,
-        minimum_bytes=1024,
-    )
+    try:
+        asset = await UploadRepositoryService.create_from_path(
+            db,
+            apk_path,
+            user.id,
+            filename=filename,
+            content_type=file.content_type or "application/vnd.android.package-archive",
+            project_id=project_id,
+            source_module="autopilot",
+            category="apk",
+            max_bytes=max_bytes,
+            minimum_bytes=1024,
+        )
+    except UploadRepositoryTooLarge as exc:
+        await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    except UploadRepositoryInvalid as exc:
+        await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        # PostgreSQL chunk storage can be exhausted by a large APK. Return a
+        # useful actionable response instead of leaving the browser waiting
+        # for a 500/timeout, and discard only the just-created local job.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)
+        logger.exception("Autopilot APK repository write failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail=(
+                "The APK was analyzed locally but could not be saved to the Upload Repository. "
+                "Increase repository/database capacity or configure object storage, then retry."
+            ),
+        ) from exc
     await _link_repository_asset(db, service, job_id, asset.id)
     background_tasks.add_task(service.analyze_safely, job_id)
     result = await service.get_job_status(job_id)

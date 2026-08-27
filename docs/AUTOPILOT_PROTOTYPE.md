@@ -82,6 +82,8 @@ The Autopilot page exposes both rerun paths: **Rerun** beside a previous smoke r
 
 The service also writes one JSON record per execution under the job's local `executions/` directory as a degraded-database fallback. On Render, the PostgreSQL/Upload Repository records are the durable source of truth; the local filesystem is only a working copy.
 
+If the PostgreSQL chunk repository is full, a new APK upload now returns `507 Insufficient Storage` with an actionable capacity/object-storage message and removes only the incomplete local job. Existing stored APKs can still be selected for reuse where the repository remains readable.
+
 The current Android analysis consumes the APK and the optional Autopilot context. Project documents are stored by Document Intelligence but are not automatically injected into APK analysis yet; until that integration is implemented, summarize any document-derived acceptance criteria in the context field.
 
 ### 7. BrowserStack real-device adapter
