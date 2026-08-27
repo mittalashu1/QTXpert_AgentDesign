@@ -111,7 +111,10 @@ async def _link_repository_asset(
             record.repository_asset_id = asset_id
             await db.commit()
     except Exception as exc:  # pragma: no cover - degraded DB fallback
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         logger.warning("Autopilot repository link write skipped: %s", exc)
 
 
