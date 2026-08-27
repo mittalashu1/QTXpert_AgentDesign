@@ -1,4 +1,5 @@
 """Reusable FastAPI dependencies for authentication and authorization."""
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from app.database.models.user import User, UserRole
 from app.database.session import get_db_session
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+logger = logging.getLogger(__name__)
 
 
 async def get_current_user(
@@ -27,6 +29,19 @@ async def get_current_user(
     except (ValueError, TypeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid subject claim"
+        ) from exc
+    except Exception as exc:  # pragma: no cover - exercised by an unavailable provider
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.warning("Authentication database unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Authentication is temporarily unavailable because the database "
+                "provider rejected the connection. Check the database plan/quota and retry."
+            ),
         ) from exc
     user = result.scalar_one_or_none()
     if user is None or not user.is_active:

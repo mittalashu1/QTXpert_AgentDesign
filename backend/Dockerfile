@@ -37,4 +37,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -f http://localhost:8000/api/v1/health || exit 1
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# A database provider outage must not prevent the HTTP process from starting:
+# /api/v1/health can report the degraded dependency and the Autopilot local
+# fallback remains inspectable.  Migrations still run on every healthy start;
+# a failed attempt is logged and retried by the next deploy/restart.
+CMD ["sh", "-c", "if [ \"${RUN_MIGRATIONS:-true}\" = \"true\" ]; then alembic upgrade head || echo 'WARNING: database migrations were deferred; continuing in degraded mode' >&2; fi; exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

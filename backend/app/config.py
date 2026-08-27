@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     )
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
+    # Keep an unavailable/quota-exhausted provider from holding an HTTP request
+    # or the container startup indefinitely.  asyncpg applies
+    # ``command_timeout`` to statements as well as migration DDL.
+    DB_CONNECT_TIMEOUT_SECONDS: int = Field(default=10, ge=1, le=120)
+    DB_COMMAND_TIMEOUT_SECONDS: int = Field(default=60, ge=5, le=600)
+    DB_POOL_TIMEOUT_SECONDS: int = Field(default=15, ge=1, le=120)
     DB_ECHO: bool = False
 
     # ------------------------------------------------------------------ #

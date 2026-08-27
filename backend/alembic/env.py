@@ -44,6 +44,10 @@ async def run_migrations_online() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={
+            "timeout": settings.DB_CONNECT_TIMEOUT_SECONDS,
+            "command_timeout": settings.DB_COMMAND_TIMEOUT_SECONDS,
+        },
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
