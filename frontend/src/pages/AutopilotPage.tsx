@@ -13,6 +13,7 @@ import AccountTreeOutlinedIcon from "@mui/icons-material/AccountTreeOutlined";
 import BugReportOutlinedIcon from "@mui/icons-material/BugReportOutlined";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import TravelExploreOutlinedIcon from "@mui/icons-material/TravelExploreOutlined";
+import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import { apiClient } from "@/services/apiClient";
 import { uploadsApi } from "@/services/api";
 import { UploadedAsset } from "@/types/domain";
@@ -60,12 +61,35 @@ type Discovery = {
   blocked_control_count: number; actions_attempted: number; stop_reason: string;
   screens: DiscoveredScreen[]; warnings: string[]; error?: string | null;
 };
+type AutomationTest = {
+  test_id: string; title: string; suite: string; priority: "critical" | "high" | "medium" | "low";
+  readiness: "executable" | "discovery_required" | "approval_required";
+  promoted_by_discovery: boolean; readiness_reason?: string | null;
+};
+type AutomationBundle = {
+  job_id: string; schema_version: string; discovery_used: boolean; promoted_count: number;
+  executable_count: number; discovery_required_count: number; approval_required_count: number;
+  tests: AutomationTest[];
+};
+type SuiteTestResult = {
+  test_id: string; title: string; status: "passed" | "failed" | "blocked" | "skipped";
+  duration_seconds: number; error?: string | null;
+};
+type SuiteResult = {
+  job_id: string; status: "passed" | "failed" | "partial" | "blocked";
+  provider: "browserstack" | "appium"; duration_seconds: number; selected_count: number;
+  executed_count: number; passed_count: number; failed_count: number; skipped_count: number;
+  promoted_count: number; error?: string | null; tests: SuiteTestResult[];
+};
 
 const priorityColor: Record<TestCase["priority"], "error" | "warning" | "info" | "default"> = {
   critical: "error", high: "warning", medium: "info", low: "default",
 };
 const riskColor: Record<DiscoveredControl["risk"], "success" | "warning" | "error"> = {
   safe: "success", review: "warning", blocked: "error",
+};
+const readinessColor: Record<AutomationTest["readiness"], "success" | "warning" | "default"> = {
+  executable: "success", discovery_required: "default", approval_required: "warning",
 };
 
 function formatBytes(value: number) {
@@ -91,6 +115,8 @@ export default function AutopilotPage() {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [execution, setExecution] = useState<Execution | null>(null);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
+  const [automation, setAutomation] = useState<AutomationBundle | null>(null);
+  const [suite, setSuite] = useState<SuiteResult | null>(null);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [provider, setProvider] = useState<"browserstack" | "appium">("browserstack");
   const [busy, setBusy] = useState(false);
@@ -99,6 +125,7 @@ export default function AutopilotPage() {
   const [artifactAvailable, setArtifactAvailable] = useState(true);
   const [smokeBusy, setSmokeBusy] = useState(false);
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
+  const [suiteBusy, setSuiteBusy] = useState(false);
   const [discoveryMode, setDiscoveryMode] = useState<"safe" | "observe">("safe");
   const [error, setError] = useState("");
   const [appiumUrl, setAppiumUrl] = useState("http://127.0.0.1:4723");
@@ -112,6 +139,11 @@ export default function AutopilotPage() {
     try { setStoredApks((await uploadsApi.list({ category: "apk", project_id: projectId })).data); }
     catch { setStoredApks([]); }
     finally { setRepositoryLoading(false); }
+  }, []);
+
+  const refreshAutomation = useCallback(async (jobId: string) => {
+    try { setAutomation((await apiClient.get<AutomationBundle>(`/autopilot/${jobId}/automation`, { timeout: 15000 })).data); }
+    catch { setAutomation(null); }
   }, []);
 
   useEffect(() => {
@@ -162,10 +194,17 @@ export default function AutopilotPage() {
 
   useEffect(() => {
     let active = true;
-    if (!analysis?.job_id) { setDiscovery(null); return; }
-    apiClient.get<Discovery | null>(`/autopilot/${analysis.job_id}/discovery`, { timeout: 15000 })
-      .then((response) => { if (active) setDiscovery(response.data); })
-      .catch(() => { if (active) setDiscovery(null); });
+    if (!analysis?.job_id) { setDiscovery(null); setAutomation(null); setSuite(null); return; }
+    Promise.allSettled([
+      apiClient.get<Discovery | null>(`/autopilot/${analysis.job_id}/discovery`, { timeout: 15000 }),
+      apiClient.get<AutomationBundle>(`/autopilot/${analysis.job_id}/automation`, { timeout: 15000 }),
+      apiClient.get<SuiteResult | null>(`/autopilot/${analysis.job_id}/suite`, { timeout: 15000 }),
+    ]).then(([discoveryResult, automationResult, suiteResult]) => {
+      if (!active) return;
+      setDiscovery(discoveryResult.status === "fulfilled" ? discoveryResult.value.data : null);
+      setAutomation(automationResult.status === "fulfilled" ? automationResult.value.data : null);
+      setSuite(suiteResult.status === "fulfilled" ? suiteResult.value.data : null);
+    });
     return () => { active = false; };
   }, [analysis?.job_id]);
 
@@ -178,14 +217,14 @@ export default function AutopilotPage() {
   const selectedStoredApk = useMemo(() => storedApks.find((asset) => asset.id === selectedUploadId) ?? null, [storedApks, selectedUploadId]);
   const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen: screen.screen_id, control }))) ?? [], [discovery]);
 
-  const resetResult = () => { setAnalysis(null); setExecution(null); setDiscovery(null); setArtifactAvailable(true); setError(""); };
+  const resetResult = () => { setAnalysis(null); setExecution(null); setDiscovery(null); setAutomation(null); setSuite(null); setArtifactAvailable(true); setError(""); };
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected); if (selected) setSelectedUploadId(""); resetResult();
   };
   const analyze = async () => {
     if ((!file && !selectedUploadId) || !selectedProjectId) { setError("Select a project and APK before starting Autopilot."); return; }
-    setBusy(true); setError(""); setExecution(null); setDiscovery(null);
+    setBusy(true); setError(""); setExecution(null); setDiscovery(null); setAutomation(null); setSuite(null);
     try {
       let response;
       if (selectedUploadId) {
@@ -195,7 +234,7 @@ export default function AutopilotPage() {
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
         await refreshStoredApks(selectedProjectId);
       }
-      applyJob(response.data); await pollAnalysis(response.data.job_id);
+      applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id);
     } catch (err) { setError(readableError(err, "Autopilot analysis failed")); }
     finally { setBusy(false); }
   };
@@ -220,8 +259,20 @@ export default function AutopilotPage() {
         max_actions: discoveryMode === "observe" ? 0 : 10,
       }, { timeout: 660000 });
       setDiscovery(response.data);
+      await refreshAutomation(analysis.job_id);
     } catch (err) { setError(readableError(err, "Runtime discovery failed")); }
     finally { setDiscoveryBusy(false); }
+  };
+  const runSuite = async () => {
+    if (!analysis) return;
+    setSuiteBusy(true); setError("");
+    try {
+      const response = await apiClient.post<SuiteResult>(`/autopilot/${analysis.job_id}/suite`, {
+        ...executionPayload(), max_tests: 8, test_ids: [],
+      }, { timeout: 960000 });
+      setSuite(response.data);
+    } catch (err) { setError(readableError(err, "Autonomous safe-suite execution failed")); }
+    finally { setSuiteBusy(false); }
   };
   const runSmoke = async () => {
     if (!analysis) return;
@@ -237,7 +288,7 @@ export default function AutopilotPage() {
   return <Stack spacing={3}>
     <Box>
       <Stack direction="row" spacing={1.5} alignItems="center"><AutoAwesomeIcon color="primary" /><Typography variant="h4" fontWeight={800}>QTXpert Autopilot</Typography><Chip size="small" label="ANDROID" color="primary" variant="outlined" /></Stack>
-      <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>Upload or reuse an APK, understand the application, safely discover its runtime UI, generate the test portfolio and execute evidence-backed checks.</Typography>
+      <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>Upload or reuse an APK, understand the application, safely discover its runtime UI, resolve semantic automation and execute evidence-backed checks.</Typography>
     </Box>
 
     <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
@@ -273,7 +324,13 @@ export default function AutopilotPage() {
         {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Screen</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.slice(0, 150).map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen}-${control.control_id}`} hover><TableCell>{screen}</TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
-      <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Safe smoke execution</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Install, launch and capture screenshot/UI hierarchy without performing a business transaction.</Typography><Grid container spacing={2} sx={{ mt: .5 }}><Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution target</InputLabel><Select labelId="autopilot-provider-label" label="Execution target" value={provider} onChange={(event) => setProvider(event.target.value as "browserstack" | "appium")}><MenuItem value="browserstack">BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid><Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid><Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid><Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="contained" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke"}</Button></Grid>{provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}</Grid>{execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}</CardContent></Card>
+      <Card variant="outlined"><CardContent>
+        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><SmartToyOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Semantic automation & autonomous safe suite</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>QTX Test IR promotes a discovered journey only when every interaction has a safe deterministic locator and a deterministic assertion. Input-dependent, ambiguous and approval-required flows remain blocked.</Typography></Box><Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || !automation || automation.executable_count === 0} onClick={runSuite}>{suiteBusy ? "Running suite…" : "Run autonomous safe suite"}</Button></Stack>
+        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"}</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 320 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Readiness</TableCell><TableCell>Promotion</TableCell><TableCell>Reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 30).map((test) => <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell>{test.promoted_by_discovery ? <Chip size="small" label="Discovery → executable" color="success" variant="outlined" /> : "—"}</TableCell><TableCell sx={{ maxWidth: 420 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || "—"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer></>}
+        {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe suite: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} skipped · {suite.duration_seconds}s{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 320 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Status</TableCell><TableCell>Duration</TableCell><TableCell>Result</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell>{test.duration_seconds}s</TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || "Evidence captured"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>}</>}
+      </CardContent></Card>
+
+      <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography><Grid container spacing={2} sx={{ mt: .5 }}><Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution target</InputLabel><Select labelId="autopilot-provider-label" label="Execution target" value={provider} onChange={(event) => setProvider(event.target.value as "browserstack" | "appium")}><MenuItem value="browserstack">BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid><Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid><Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid><Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>{provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}</Grid>{execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}</CardContent></Card>
 
       {analysis.release_risks.length > 0 && <Alert severity="info"><b>Initial release risks:</b> {analysis.release_risks.join(" • ")}</Alert>}
     </>}

@@ -86,21 +86,29 @@ class QTXIRStep(BaseModel):
         "permission_flow",
         "network_condition",
         "intent",
+        "tap",
+        "assert_visible",
     ]
     description: str
     target: Optional[str] = None
     value: Optional[str] = None
     safe_for_autopilot: bool = True
+    screen_id: Optional[str] = None
+    locator_strategy: Optional[Literal["accessibility_id", "id", "xpath"]] = None
+    locator_value: Optional[str] = None
+    locator_confidence: Optional[float] = Field(default=None, ge=0, le=1)
 
 
 class QTXTestIR(BaseModel):
-    schema_version: str = "qtx-ir/0.1"
+    schema_version: str = "qtx-ir/0.2"
     test_id: str
     title: str
     suite: str
     priority: Literal["critical", "high", "medium", "low"]
     readiness: Literal["executable", "discovery_required", "approval_required"]
     source: Literal["deterministic", "ai"]
+    promoted_by_discovery: bool = False
+    readiness_reason: Optional[str] = None
     steps: List[QTXIRStep] = Field(default_factory=list)
     assertions: List[str] = Field(default_factory=list)
     appium_python: str = ""
@@ -110,7 +118,9 @@ class AutopilotAutomationBundle(BaseModel):
     job_id: str
     generated_at: str
     framework: str = "QTX Test IR + Appium Python"
-    schema_version: str = "qtx-ir/0.1"
+    schema_version: str = "qtx-ir/0.2"
+    discovery_used: bool = False
+    promoted_count: int = 0
     executable_count: int = 0
     discovery_required_count: int = 0
     approval_required_count: int = 0
@@ -147,12 +157,7 @@ class AutopilotExecutionResult(BaseModel):
 
 
 class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
-    """Bounded safe runtime exploration configuration.
-
-    Discovery never permits destructive/transactional controls. ``observe_only``
-    captures the current screen without tapping anything; otherwise QTXpert may
-    traverse only controls that match the conservative safe-navigation policy.
-    """
+    """Bounded safe runtime exploration configuration."""
 
     max_screens: int = Field(default=12, ge=1, le=40)
     max_actions: int = Field(default=10, ge=0, le=50)
@@ -219,3 +224,37 @@ class AutopilotDiscoveryResult(BaseModel):
     transitions: List[DiscoveredTransition] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[str] = None
+
+
+class AutopilotSuiteRequest(AutopilotExecutionRequest):
+    """Execute only IR cases that QTXpert has proven safe and deterministic."""
+
+    test_ids: List[str] = Field(default_factory=list, max_length=20)
+    max_tests: int = Field(default=8, ge=1, le=20)
+
+
+class AutopilotSuiteTestResult(BaseModel):
+    test_id: str
+    title: str
+    status: Literal["passed", "failed", "blocked", "skipped"]
+    duration_seconds: float = 0
+    error: Optional[str] = None
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AutopilotSuiteResult(BaseModel):
+    job_id: str
+    status: Literal["passed", "failed", "partial", "blocked"]
+    provider: Literal["browserstack", "appium"]
+    started_at: str
+    finished_at: str
+    duration_seconds: float
+    device_name: str
+    selected_count: int = 0
+    executed_count: int = 0
+    passed_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    promoted_count: int = 0
+    error: Optional[str] = None
+    tests: List[AutopilotSuiteTestResult] = Field(default_factory=list)

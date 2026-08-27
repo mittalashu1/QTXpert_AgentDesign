@@ -46,6 +46,7 @@ class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     analysis: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     discovery: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    suite_execution: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
