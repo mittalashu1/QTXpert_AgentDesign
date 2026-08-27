@@ -172,6 +172,13 @@ export default function CostCenterPage() {
         </Stack>
         {data.by_model.length ? <TableContainer><Table size="small"><TableHead><TableRow><TableCell>Provider</TableCell><TableCell>Model</TableCell><TableCell>Tier</TableCell><TableCell align="right">Requests</TableCell><TableCell align="right">Estimated cost</TableCell></TableRow></TableHead><TableBody>{data.by_model.map((item) => <TableRow key={`${item.provider}:${item.model}:${item.tier}`}><TableCell>{item.provider}</TableCell><TableCell>{item.model}</TableCell><TableCell>{item.tier}</TableCell><TableCell align="right">{number.format(item.request_count)}</TableCell><TableCell align="right">{money(item.estimated_cost_usd)}</TableCell></TableRow>)}</TableBody></Table></TableContainer> : <Typography color="text.secondary">No metered AI requests in this period.</Typography>}
       </CardContent></Card>
+
+      <Box sx={{ px: 0.5, pb: 1 }}>
+        <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.6 }}>
+          <Box component="span" sx={{ fontWeight: 800 }}>Footnote 1 — Future FinOps enhancement:</Box>{" "}
+          Actual provider charges are shown only where QTXpert has an authoritative billing feed. Costs for services such as Render, BrowserStack, GitHub/Actions, domain/DNS, Pinecone, PostgreSQL, Redis/worker infrastructure and other external providers may remain “Not available” until their billing APIs or invoice feeds are integrated. This is a tracked enhancement; future Cost Center releases should progressively connect those provider billing sources to build a consolidated QTXpert total-cost view.
+        </Typography>
+      </Box>
     </Stack>}
   </Box>;
 }
