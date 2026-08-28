@@ -184,6 +184,77 @@ def test_browserstack_configuration_requires_both_secrets(tmp_path):
     assert configured.settings.browserstack_configured is True
 
 
+@pytest.mark.asyncio
+async def test_browserstack_smoke_does_not_resolve_custom_appium_endpoint(tmp_path, monkeypatch):
+    """A BrowserStack request must use the cloud hub, not custom Appium resolution."""
+    service = _service(
+        tmp_path,
+        BROWSERSTACK_USERNAME="user",
+        BROWSERSTACK_ACCESS_KEY="key",
+    )
+    apk_path = tmp_path / "investnation.apk"
+    apk_path.write_bytes(b"apk")
+    analysis = AutopilotAnalysis(
+        job_id="11111111-1111-4111-8111-111111111111",
+        filename=apk_path.name,
+        sha256="a" * 64,
+        app_name="Investnation",
+        package_name="com.example.investnation",
+    )
+
+    async def load_job(_job_id):
+        return {"apk_path": str(apk_path), "filename": apk_path.name}
+
+    async def load_analysis(_job_id):
+        return analysis
+
+    async def browserstack_app_url(_job_id, _path, _sha256):
+        return "bs://investnation"
+
+    def fail_if_custom_resolver_called(_request):
+        raise AssertionError("BrowserStack execution must not resolve custom Appium")
+
+    captured = {}
+
+    def fake_execute(
+        appium_url,
+        app_reference,
+        _request,
+        screenshot_path,
+        source_path,
+        browserstack_options=None,
+        *_timeouts,
+    ):
+        captured.update(url=appium_url, app=app_reference, options=browserstack_options)
+        screenshot_path.write_bytes(b"png")
+        source_path.write_text(
+            '<node package="com.example.investnation" text="Investnation" />',
+            encoding="utf-8",
+        )
+        return {"current_package": "com.example.investnation"}
+
+    async def skip_persist(_execution, _request):
+        return None
+
+    monkeypatch.setattr(service, "load_job", load_job)
+    monkeypatch.setattr(service, "load_analysis", load_analysis)
+    monkeypatch.setattr(service, "_browserstack_app_url", browserstack_app_url)
+    monkeypatch.setattr(service, "resolve_appium_url", fail_if_custom_resolver_called)
+    monkeypatch.setattr(service, "_execute_appium_sync", fake_execute)
+    monkeypatch.setattr(service, "_persist_execution_file", skip_persist)
+
+    result = await service.execute_smoke(
+        analysis.job_id,
+        AutopilotExecutionRequest(provider="browserstack"),
+    )
+
+    assert result.status == "passed"
+    assert captured["url"] == service.settings.BROWSERSTACK_HUB_URL
+    assert captured["app"] == "bs://investnation"
+    assert captured["options"]["userName"] == "user"
+    assert captured["options"]["accessKey"] == "key"
+
+
 def test_capabilities_follow_manifest_permissions(tmp_path):
     service = _service(tmp_path)
     capabilities = service._capabilities(
