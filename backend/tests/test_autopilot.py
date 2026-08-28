@@ -191,13 +191,15 @@ def test_report_never_claims_runtime_pass_rate_without_execution():
     )
     report = build_test_audit_report(analysis, DEFAULT_AUTOPILOT_CONTEXT)
 
-    assert report.recommendation == "NO_GO"
+    assert report.recommendation == "PENDING"
     assert report.metrics.executed_test_cases is None
     assert report.metrics.pass_rate is None
     assert report.metrics.defect_count is None
-    assert any(risk.risk_id == "R-AUTO-002" for risk in report.risk_matrix)
+    assert report.last_run_at is None
+    assert report.risk_matrix == []
     assert report.application_overview.name == "Investnation by Finance House"
-    assert all(check.status in {"pending", "not_assessed", "warning", "fail"} for check in report.compliance_verification)
+    assert all(check.status == "pending" for check in report.compliance_verification)
+    assert all(check.dependency for check in report.compliance_verification)
 
 
 @pytest.mark.asyncio
