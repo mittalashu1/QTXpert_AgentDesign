@@ -142,7 +142,7 @@ In another PowerShell window, start an available emulator and verify it:
 
 The local adapter needs an online device (`adb devices` shows `device`), a boot-completed Android system, and an Appium `/status` response with `ready: true`. In the Autopilot form use the emulator id reported by adb (for this verified setup: `emulator-5554`), Android `17`, and `http://127.0.0.1:4723` **only when the QTXpert API is running on the same machine**.
 
-The hosted Render API cannot reach your laptop's `127.0.0.1` and cannot read a local Windows APK path. For a hosted custom-Appium run, expose Appium through an authenticated TLS tunnel or private reachable endpoint and provide an app reference that the Appium host can read. Keep Appium bound to localhost; do not expose an unauthenticated `0.0.0.0:4723` endpoint.
+The hosted Render API cannot reach your laptop's `127.0.0.1` and cannot read a local Windows APK path. The hosted UI disables Custom/local Appium until a reachable endpoint is configured, and the API rejects loopback targets before opening a session. For a hosted custom-Appium run, expose Appium through an authenticated TLS tunnel or private reachable endpoint and provide an app reference that the Appium host can read. Keep Appium bound to localhost; do not expose an unauthenticated `0.0.0.0:4723` endpoint.
 
 The verified local run completed successfully with the InvestNation UAT APK on `emulator-5554` / Android 17 and produced launch screenshot/UI-source evidence under the per-run `outputs/local-smoke-runtime-validation/<job-id>/evidence/<execution-id>/` directory. A prior run exposed an Android System UI/launcher ANR; runtime validation now records that as a failed/blocked run instead of reporting a false pass.
 
