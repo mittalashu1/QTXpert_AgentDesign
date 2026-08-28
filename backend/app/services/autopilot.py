@@ -953,7 +953,6 @@ class AutopilotPrototypeService:
                     "Upload the APK again before running smoke execution."
                 )
             app_reference = request.appium_app or str(apk_path)
-            appium_url = self.resolve_appium_url(request)
             browserstack_options: Dict[str, Any] | None = None
 
             if request.provider == "browserstack":
@@ -968,6 +967,12 @@ class AutopilotPrototypeService:
                     "debug": True,
                     "networkLogs": True,
                 }
+            else:
+                # Hosted custom Appium must be explicitly configured/reachable.
+                # BrowserStack uses its own hub URL and must not go through this
+                # resolver, which intentionally fails closed when no custom
+                # endpoint is configured.
+                appium_url = self.resolve_appium_url(request)
 
             result = await asyncio.wait_for(
                 asyncio.to_thread(
