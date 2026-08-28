@@ -573,6 +573,17 @@ class AutopilotPrototypeService:
             "file_count": 0,
         }
         try:
+            # Androguard 4.x uses Loguru for resource-table diagnostics. Its
+            # DEBUG stream can contain tens of thousands of lines for a normal
+            # APK and can exhaust Render's log/memory budget. Suppress only the
+            # third-party namespace; Autopilot's warnings and exceptions remain
+            # visible through the application logger.
+            try:
+                from loguru import logger as androguard_logger
+
+                androguard_logger.disable("androguard")
+            except Exception:
+                pass
             from androguard.core.apk import APK
 
             apk = APK(str(apk_path))
