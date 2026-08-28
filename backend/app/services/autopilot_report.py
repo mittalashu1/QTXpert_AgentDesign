@@ -149,9 +149,17 @@ def _application_overview(analysis: AutopilotAnalysis, context: str) -> Autopilo
     for label, terms in feature_terms:
         if _contains(context, *terms):
             features.append(label)
+    publisher = "Finance House" if _contains(context, "finance house") else "Not specified"
+    observed_name = analysis.app_name or _context_application_name(context) or "Android application"
+    # Keep the APK-observed name while making the executive-facing label
+    # unambiguous when the supplied context identifies the publisher. This is
+    # a label composition only; package/version remain evidence from the APK.
+    display_name = observed_name
+    if publisher != "Not specified" and publisher.lower() not in observed_name.lower():
+        display_name = f"{observed_name} by {publisher}"
     return AutopilotApplicationOverview(
-        name=analysis.app_name or _context_application_name(context) or "Android application",
-        publisher="Finance House" if _contains(context, "finance house") else "Not specified",
+        name=display_name,
+        publisher=publisher,
         platform="Android",
         package_name=analysis.package_name or "Not identified",
         version=analysis.version_name or analysis.version_code or "Not identified",

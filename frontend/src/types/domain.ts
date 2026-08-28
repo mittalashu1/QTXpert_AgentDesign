@@ -197,6 +197,7 @@ export interface Defect {
 export interface ExecutionResult {
   id: string;
   test_case_id: string;
+  execution_plan_case_id: string | null;
   test_case_key: string;
   scenario: string;
   status: ExecutionResultStatus;
@@ -209,6 +210,7 @@ export interface ExecutionResult {
 export interface ExecutionRun {
   id: string;
   project_id: string;
+  execution_plan_id: string | null;
   name: string;
   status: ExecutionStatus;
   browser: string;
@@ -221,6 +223,54 @@ export interface ExecutionRun {
   completed_at: string | null;
   created_at: string;
   results: ExecutionResult[];
+}
+
+export type ExecutionSuiteType = "smoke" | "feature" | "regression" | "deep_regression";
+export type ExecutionPlanStatus = "draft" | "ready" | "blocked" | "queued" | "running" | "completed" | "failed" | string;
+export type ExecutionPlanReadiness = "pending" | "not_selected" | "manual_review" | "ready" | "blocked" | "approval_required" | string;
+
+export interface ExecutionPlanCase {
+  id: string;
+  source_test_case_id: string | null;
+  selection_order: number;
+  selected: boolean;
+  execution_mode: "automated" | "manual";
+  readiness: ExecutionPlanReadiness;
+  blocker_reason: string | null;
+  test_case_key: string;
+  requirement_traceability: string | null;
+  test_type: string;
+  scenario: string;
+  objective: string;
+  priority: string;
+  severity: string;
+  preconditions: string | null;
+  test_data: Record<string, unknown> | null;
+  steps: string[];
+  expected_result: string;
+  post_conditions: string | null;
+  is_automation_candidate: boolean;
+  automation_type: string | null;
+  risk_level: string;
+}
+
+export interface ExecutionPlan {
+  id: string;
+  project_id: string;
+  source_generation_run_id: string | null;
+  name: string;
+  suite_type: ExecutionSuiteType;
+  status: ExecutionPlanStatus;
+  source_title: string | null;
+  source_created_at: string | null;
+  created_at: string;
+  updated_at: string;
+  total_cases: number;
+  selected_cases: number;
+  selected_automated_cases: number;
+  ready_cases: number;
+  blocked_cases: number;
+  cases: ExecutionPlanCase[];
 }
 
 export interface DashboardSummary {
@@ -278,3 +328,4 @@ export const EXPORT_FORMATS = [
   { value: "xray", label: "Xray" },
   { value: "azure_devops", label: "Azure DevOps Test Plans" },
 ] as const;
+

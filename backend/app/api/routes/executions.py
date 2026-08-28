@@ -76,7 +76,9 @@ async def _run_execution(run_id: UUID) -> None:
             select(ExecutionRun)
             .options(
                 selectinload(ExecutionRun.results).selectinload(ExecutionResult.test_case),
+                selectinload(ExecutionRun.results).selectinload(ExecutionResult.execution_plan_case),
                 selectinload(ExecutionRun.results).selectinload(ExecutionResult.defects),
+                selectinload(ExecutionRun.execution_plan),
             )
             .where(ExecutionRun.id == run_id)
         )
@@ -84,6 +86,8 @@ async def _run_execution(run_id: UUID) -> None:
             return
         run.status = ExecutionStatus.RUNNING
         run.started_at = datetime.now(timezone.utc)
+        if run.execution_plan is not None:
+            run.execution_plan.status = "running"
         await db.commit()
         try:
             from playwright.async_api import async_playwright
@@ -92,9 +96,16 @@ async def _run_execution(run_id: UUID) -> None:
                 browser = await browser_type.launch(headless=True)
                 context = await browser.new_context(ignore_https_errors=False)
                 for result in run.results:
+                    if result.status != ResultStatus.PENDING:
+                        continue
                     started = time.perf_counter()
                     try:
-                        steps = _compile_steps(result.test_case.steps or [], run.base_url)
+                        source_steps = (
+                            result.execution_plan_case.steps
+                            if result.execution_plan_case is not None
+                            else result.test_case.steps
+                        )
+                        steps = _compile_steps(source_steps or [], run.base_url)
                     except ValueError as exc:
                         result.status = ResultStatus.BLOCKED
                         result.error_message = str(exc)
@@ -136,6 +147,8 @@ async def _run_execution(run_id: UUID) -> None:
             run.blocked_tests = sum(x.status == ResultStatus.BLOCKED for x in run.results)
         finally:
             run.completed_at = datetime.now(timezone.utc)
+            if run.execution_plan is not None:
+                run.execution_plan.status = "completed" if run.status == ExecutionStatus.COMPLETED else "failed"
             await db.commit()
 
 
@@ -163,6 +176,7 @@ async def create_execution(payload: ExecutionCreate, background: BackgroundTasks
     await db.commit()
     run = await db.scalar(select(ExecutionRun).options(
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.test_case),
+        selectinload(ExecutionRun.results).selectinload(ExecutionResult.execution_plan_case),
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.defects),
     ).where(ExecutionRun.id == run.id))
     background.add_task(_run_execution, run.id)
@@ -174,6 +188,7 @@ async def list_executions(project_id: UUID, db: Annotated[AsyncSession, Depends(
     await _owned_project(db, project_id, user.id)
     return (await db.scalars(select(ExecutionRun).options(
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.test_case),
+        selectinload(ExecutionRun.results).selectinload(ExecutionResult.execution_plan_case),
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.defects),
     ).where(ExecutionRun.project_id == project_id).order_by(ExecutionRun.created_at.desc()).limit(50))).unique().all()
 
@@ -182,6 +197,7 @@ async def list_executions(project_id: UUID, db: Annotated[AsyncSession, Depends(
 async def get_execution(run_id: UUID, db: Annotated[AsyncSession, Depends(get_db_session)], user: Annotated[User, Depends(get_current_user)]):
     run = await db.scalar(select(ExecutionRun).join(Project).options(
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.test_case),
+        selectinload(ExecutionRun.results).selectinload(ExecutionResult.execution_plan_case),
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.defects),
     ).where(ExecutionRun.id == run_id, Project.owner_id == user.id))
     if run is None:
@@ -220,4 +236,5 @@ async def dashboard(project_id: UUID, db: Annotated[AsyncSession, Depends(get_db
     ).where(ExecutionRun.project_id == project_id).order_by(ExecutionRun.created_at.desc()).limit(5))).unique().all()
     denominator = int(passed) + int(failed)
     return DashboardSummary(requirements=requirements, test_cases=test_cases, execution_runs=run_count, pass_rate=round(int(passed) * 100 / denominator, 1) if denominator else 0, open_defects=open_defects, automation_candidates=automation, recent_runs=recent)
+
 
