@@ -89,8 +89,12 @@ class Settings(BaseSettings):
     LLM_REQUEST_TIMEOUT_SECONDS: int = Field(default=75, ge=1, le=600)
     LLM_MAX_RETRIES: int = 2
     LLM_REASONING_EFFORT: Literal["minimal", "low", "medium", "high", "xhigh"] = "low"
-    LLM_ROUTER_LOW_COST: str = "gemini:gemini-2.5-flash-lite,azure_openai:configured"
-    LLM_ROUTER_STANDARD: str = "gemini:gemini-2.5-flash,azure_openai:configured"
+    # Gemini 2.5 Flash-Lite is no longer available to new API users. Keep the
+    # low-cost route on the current stable Flash-Lite model and retain Azure as
+    # a configured fallback so context/report generation remains available when
+    # a provider is unavailable.
+    LLM_ROUTER_LOW_COST: str = "gemini:gemini-3.5-flash-lite,azure_openai:configured"
+    LLM_ROUTER_STANDARD: str = "gemini:gemini-3.5-flash,azure_openai:configured"
     LLM_ROUTER_COMPLEX: str = "azure_openai:configured"
     LLM_ROUTER_FALLBACK: str = "azure_openai:configured"
     LLM_ROUTER_COMPLEX_INPUT_CHARS: int = 30000
@@ -229,3 +233,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
