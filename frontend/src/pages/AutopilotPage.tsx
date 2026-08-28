@@ -34,7 +34,7 @@ type Analysis = {
   clarification_questions: string[]; tests: TestCase[]; release_risks: string[];
   warnings: string[]; capabilities: Record<string, boolean>;
 };
-type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; recommended_provider: "browserstack" | "appium" };
+type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: "browserstack" | "appium" };
 type AnalysisJob = {
   job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed";
   stage: string; progress: number; context?: string; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
@@ -199,6 +199,17 @@ function formatBytes(value: number) {
   if (value < 1024 * 1024) return `${Math.max(1, value / 1024).toFixed(0)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
+function isLoopbackAppiumUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  try {
+    const hostname = new URL(trimmed).hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
+  } catch {
+    return true;
+  }
+}
+
 function readableError(error: unknown, fallback: string) {
   const candidate = error as { response?: { data?: { detail?: unknown } }; message?: unknown };
   if (typeof candidate?.response?.data?.detail === "string") return candidate.response.data.detail;
@@ -247,7 +258,7 @@ export default function AutopilotPage() {
   const [suiteBusy, setSuiteBusy] = useState(false);
   const [discoveryMode, setDiscoveryMode] = useState<"safe" | "observe">("safe");
   const [error, setError] = useState("");
-  const [appiumUrl, setAppiumUrl] = useState("http://127.0.0.1:4723");
+  const [appiumUrl, setAppiumUrl] = useState("");
   const [deviceName, setDeviceName] = useState("Google Pixel 8");
   const [platformVersion, setPlatformVersion] = useState("14.0");
   const [appiumApp, setAppiumApp] = useState("");
@@ -311,8 +322,16 @@ export default function AutopilotPage() {
   useEffect(() => {
     apiClient.get<ProviderStatus>("/autopilot/providers").then((response) => {
       setProviderStatus(response.data);
-      setProvider(response.data.recommended_provider);
-      if (response.data.recommended_provider === "appium") setDeviceName("Android Emulator");
+      const preferred = response.data.recommended_provider === "browserstack" && response.data.browserstack_configured
+        ? "browserstack"
+        : response.data.custom_appium_available
+          ? "appium"
+          : "browserstack";
+      setProvider(preferred);
+      if (preferred === "appium") {
+        setDeviceName("Android Emulator");
+        setAppiumUrl(response.data.custom_appium_url || "");
+      }
     }).catch(() => setProviderStatus(null));
   }, []);
   useEffect(() => { void refreshStoredApks(selectedProjectId); }, [refreshStoredApks, selectedProjectId]);
@@ -534,8 +553,11 @@ export default function AutopilotPage() {
     finally { setBusy(false); }
   };
 
-  const browserStackUnavailable = provider === "browserstack" && providerStatus?.browserstack_configured === false;
-  const executionUnavailable = browserStackUnavailable || !artifactAvailable;
+  const browserStackUnavailable = provider === "browserstack" && providerStatus !== null && !providerStatus.browserstack_configured;
+  const customAppiumUnavailable = provider === "appium" && providerStatus !== null && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
+  const providerStatusPending = providerStatus === null;
+  const noExecutionProvider = providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
+  const executionUnavailable = providerStatusPending || browserStackUnavailable || customAppiumUnavailable || !artifactAvailable;
   const reportPending = report?.recommendation === "PENDING";
 
   return <Stack spacing={3}>
@@ -686,7 +708,12 @@ export default function AutopilotPage() {
         {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe suite: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} skipped · {suite.duration_seconds}s{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 320 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Status</TableCell><TableCell>Duration</TableCell><TableCell>Result</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell>{test.duration_seconds}s</TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || "Evidence captured"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
-      <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography><Grid container spacing={2} sx={{ mt: .5 }}><Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution target</InputLabel><Select labelId="autopilot-provider-label" label="Execution target" value={provider} onChange={(event) => setProvider(event.target.value as "browserstack" | "appium")}><MenuItem value="browserstack">BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid><Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid><Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid><Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>{provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}<Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions for this smoke" /><Typography variant="caption" color="text.secondary" display="block">Enabled by default so unattended smoke runs do not stall on Android permission dialogs. Permission grant/deny behavior remains covered by generated permission tests.</Typography></Grid></Grid>{execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}{execution && (execution.screenshot_asset_id || execution.page_source_asset_id) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Evidence is retained in the project Upload Repository for this run.</Typography>}{executionHistory.length > 0 && <Box sx={{ mt: 2 }}><Typography variant="subtitle2" fontWeight={800}>Previous smoke runs</Typography><Stack spacing={1} sx={{ mt: 1 }}>{executionHistory.map((item) => <Paper key={item.execution_id} variant="outlined" sx={{ p: 1.25 }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between"><Box><Typography variant="body2" fontWeight={700}>{item.status.toUpperCase()} · {item.request.provider} · {item.request.device_name}</Typography><Typography variant="caption" color="text.secondary">{new Date(item.created_at).toLocaleString()} · {item.duration_seconds}s</Typography></Box><Button size="small" variant="outlined" disabled={smokeBusy} onClick={() => rerunSmoke(item.execution_id)}>Rerun</Button></Stack></Paper>)}</Stack></Box>}</CardContent></Card>
+      <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>
+      {providerStatusPending && <Alert severity="info" sx={{ mt: 2 }}>Checking execution providers…</Alert>}
+      {noExecutionProvider && <Alert severity="warning" sx={{ mt: 2 }}>No hosted execution provider is configured. Configure BrowserStack credentials or enter a reachable HTTPS Appium endpoint before running.</Alert>}
+      {browserStackUnavailable && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose Custom / local Appium and enter a reachable endpoint.</Alert>}
+      {provider === "appium" && providerStatus?.custom_appium_reason && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus.custom_appium_reason}</Alert>}
+      <Grid container spacing={2} sx={{ mt: .5 }}><Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution target</InputLabel><Select labelId="autopilot-provider-label" label="Execution target" value={provider} onChange={(event) => setProvider(event.target.value as "browserstack" | "appium")}><MenuItem value="browserstack" disabled={providerStatus !== null && !providerStatus.browserstack_configured}>BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid><Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid><Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid><Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>{provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} helperText="Hosted runs require a reachable HTTPS endpoint; leave blank only when the backend has one configured." /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}<Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions for this smoke" /><Typography variant="caption" color="text.secondary" display="block">Enabled by default so unattended smoke runs do not stall on Android permission dialogs. Permission grant/deny behavior remains covered by generated permission tests.</Typography></Grid></Grid>{execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}{execution && (execution.screenshot_asset_id || execution.page_source_asset_id) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Evidence is retained in the project Upload Repository for this run.</Typography>}{executionHistory.length > 0 && <Box sx={{ mt: 2 }}><Typography variant="subtitle2" fontWeight={800}>Previous smoke runs</Typography><Stack spacing={1} sx={{ mt: 1 }}>{executionHistory.map((item) => <Paper key={item.execution_id} variant="outlined" sx={{ p: 1.25 }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between"><Box><Typography variant="body2" fontWeight={700}>{item.status.toUpperCase()} · {item.request.provider} · {item.request.device_name}</Typography><Typography variant="caption" color="text.secondary">{new Date(item.created_at).toLocaleString()} · {item.duration_seconds}s</Typography></Box><Button size="small" variant="outlined" disabled={smokeBusy} onClick={() => rerunSmoke(item.execution_id)}>Rerun</Button></Stack></Paper>)}</Stack></Box>}</CardContent></Card>
 
       {analysis.release_risks.length > 0 && <Alert severity="info"><b>Initial release risks:</b> {analysis.release_risks.join(" • ")}</Alert>}
     </>}
