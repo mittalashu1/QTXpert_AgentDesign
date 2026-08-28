@@ -38,8 +38,9 @@ def _unique(values: Iterable[str]) -> list[str]:
 
 def _context_application_name(context: str) -> Optional[str]:
     for line in context.splitlines():
-        if line.strip().lower().startswith("- application:"):
-            value = line.split(":", 1)[1].strip()
+        normalized = line.strip().lstrip("-* ")
+        if normalized.lower().startswith(("application:", "name:")):
+            value = normalized.split(":", 1)[1].strip()
             value = value.split("(", 1)[0].strip()
             return value or None
     return None
@@ -105,7 +106,9 @@ def _metrics(
         if executions
         else "Runtime execution has not been recorded; release evidence is incomplete."
     )
-    defect_count = failed if executed is not None else None
+    # A failed test is not automatically a defect. Keep the defect metric
+    # empty until a defect record or an explicitly validated count is attached.
+    defect_count = None
     return AutopilotReportMetrics(
         designed_test_cases=designed,
         executed_test_cases=executed,
