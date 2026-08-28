@@ -4,6 +4,8 @@ import pytest
 
 from app.config import Settings
 from app.services.autopilot import AutopilotPrototypeService, AutopilotUploadTooLarge
+from app.services.autopilot_context import DEFAULT_AUTOPILOT_CONTEXT
+from app.services.autopilot_report import build_test_audit_report
 
 
 def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
@@ -153,6 +155,33 @@ def test_capabilities_follow_manifest_permissions(tmp_path):
     assert capabilities["camera_test_candidate"] is False
 
 
+def test_default_context_is_fintech_and_guardrail_focused():
+    assert "CBUAE" in DEFAULT_AUTOPILOT_CONTEXT
+    assert "SCA" in DEFAULT_AUTOPILOT_CONTEXT
+    assert "Investnation" in DEFAULT_AUTOPILOT_CONTEXT
+    assert "Do not invent" in DEFAULT_AUTOPILOT_CONTEXT
+
+
+def test_report_never_claims_runtime_pass_rate_without_execution():
+    from app.schemas.autopilot import AutopilotAnalysis
+
+    analysis = AutopilotAnalysis(
+        job_id="11111111-1111-4111-8111-111111111111",
+        filename="investnation.apk",
+        sha256="a" * 64,
+        app_name="Investnation",
+        package_name="com.example.investnation",
+        permissions=["android.permission.INTERNET"],
+    )
+    report = build_test_audit_report(analysis, DEFAULT_AUTOPILOT_CONTEXT)
+
+    assert report.recommendation == "NO_GO"
+    assert report.metrics.executed_test_cases is None
+    assert report.metrics.pass_rate is None
+    assert any(risk.risk_id == "R-AUTO-002" for risk in report.risk_matrix)
+    assert all(check.status in {"pending", "not_assessed", "warning", "fail"} for check in report.compliance_verification)
+
+
 @pytest.mark.asyncio
 async def test_background_analysis_records_failure_instead_of_hanging(tmp_path, monkeypatch):
     service = _service(tmp_path)
@@ -265,3 +294,4 @@ async def test_execution_history_files_are_per_run_and_reusable(tmp_path):
     restored = _execution_record_from_file(records[0], job_id)
     assert restored is not None
     assert restored.execution_id == result.execution_id
+
