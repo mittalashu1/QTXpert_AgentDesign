@@ -124,6 +124,7 @@ class AutopilotTestAuditReport(BaseModel):
     recommendation: Literal["GO", "GO_WITH_CONDITIONS", "NO_GO"] = "NO_GO"
     rationale: str
     executive_findings: List[str] = Field(default_factory=list)
+    reported_issues: List[str] = Field(default_factory=list)
     application_overview: AutopilotApplicationOverview
     metrics: AutopilotReportMetrics
     functional_testing: List[AutopilotReportCheck] = Field(default_factory=list)
