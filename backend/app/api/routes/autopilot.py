@@ -43,6 +43,7 @@ from app.services.autopilot import (
     AutopilotUploadTooLarge,
 )
 from app.services.autopilot_discovery import AutopilotDiscoveryService
+from app.services.autopilot_context import default_context
 from app.services.autopilot_ir import AutopilotIRCompiler
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
@@ -58,6 +59,12 @@ logger = logging.getLogger(__name__)
 
 def _service(settings: Settings) -> AutopilotPrototypeService:
     return AutopilotPrototypeService(settings)
+
+
+def _effective_context(value: Optional[str]) -> str:
+    """Ensure every entry point uses a safe context, including direct API clients."""
+    cleaned = (value or "").strip()
+    return cleaned[:8000] if cleaned else default_context()
 
 
 async def _active_project(
@@ -205,7 +212,7 @@ async def _start_analysis_from_asset(
     settings: Settings,
     user: User,
     asset: UploadedAsset,
-    context: str,
+    context: Optional[str],
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK.
 
@@ -222,7 +229,7 @@ async def _start_analysis_from_asset(
             asset.filename,
             reader,
             str(user.id),
-            context=context,
+            context=_effective_context(context),
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
         )
     finally:
@@ -242,7 +249,7 @@ async def _start_analysis_from_local_path(
     user: User,
     source_path: Path,
     filename: str,
-    context: str,
+    context: Optional[str],
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -257,7 +264,7 @@ async def _start_analysis_from_local_path(
             filename,
             reader,
             str(user.id),
-            context=context,
+            context=_effective_context(context),
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
         )
     finally:
@@ -523,7 +530,7 @@ async def analyze_mobile_app(
             filename,
             file,
             str(user.id),
-            context=context,
+            context=_effective_context(context),
             max_bytes=max_bytes,
         )
     except AutopilotUploadTooLarge as exc:
