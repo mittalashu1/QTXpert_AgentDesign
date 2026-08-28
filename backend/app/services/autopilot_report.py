@@ -47,7 +47,21 @@ def _context_application_name(context: str) -> Optional[str]:
 
 def _reported_issues(context: str) -> list[str]:
     """Extract explicitly reported status lines without treating them as facts."""
-    markers = ("critical defect", "security status", "performance status", "current status", "timeout", "rounding")
+    markers = (
+        "critical defect",
+        "security status",
+        "performance status",
+        "current status",
+        "timeout",
+        "rounding",
+        "peak concurrency",
+        "payment-gateway",
+        "penetration",
+        "encryption",
+        "pass rate",
+        "defect count",
+        "test environment",
+    )
     issues: list[str] = []
     for line in context.splitlines():
         cleaned = line.strip().lstrip("-* ")
