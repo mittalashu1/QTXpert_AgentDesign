@@ -133,8 +133,9 @@ local filesystem is a cache only; it is not a durable shared artifact store.
 After the bucket is configured, migrate existing PostgreSQL-backed uploads
 from `backend/` with `python scripts/migrate_uploaded_assets.py`. The command
 is non-destructive by default; run it first without `--delete-chunks`, verify
-the object inventory and checksums, then repeat with `--delete-chunks` to
-reclaim the old binary rows.
+the object inventory and checksums, then run
+`python scripts/migrate_uploaded_assets.py --cleanup-only --delete-chunks` to
+re-verify object sizes and reclaim the old binary rows.
 
 Set the remaining secrets (LLM provider keys, Jira/Confluence credentials,
 Pinecone and object-store credentials) directly in the Render dashboard - they

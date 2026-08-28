@@ -3,8 +3,9 @@
 Run from ``backend/`` after setting ``UPLOAD_STORAGE_BACKEND=object_store`` and
 the object-store credentials in the environment.  The default mode is
 non-destructive: it verifies the uploaded object and changes only the asset
-metadata.  Pass ``--delete-chunks`` in a separate, reviewed run to reclaim the
-old PostgreSQL binary rows.
+metadata.  After checking the object inventory, run with both
+``--cleanup-only --delete-chunks`` to verify the migrated objects again and
+reclaim the old PostgreSQL binary rows.
 """
 from __future__ import annotations
 
@@ -48,22 +49,52 @@ async def _materialize_legacy(db, asset: UploadedAsset, target: Path) -> None:
         raise ValueError(f"{asset.filename}: SHA-256 mismatch while reading legacy chunks")
 
 
-async def migrate(*, limit: int | None, delete_chunks: bool) -> int:
+async def migrate(*, limit: int | None, delete_chunks: bool, cleanup_only: bool = False) -> int:
+    if cleanup_only and not delete_chunks:
+        raise ValueError("cleanup_only requires delete_chunks")
     settings = get_settings()
     storage = ObjectStorageService(settings)
     migrated = 0
 
     async with AsyncSessionLocal() as db:
-        query = (
-            select(UploadedAsset)
-            .where(UploadedAsset.storage_backend == "postgres_chunks")
-            .order_by(UploadedAsset.created_at.asc())
-        )
+        if cleanup_only:
+            query = (
+                select(UploadedAsset)
+                .where(
+                    UploadedAsset.storage_backend == "object_store",
+                    UploadedAsset.object_key.is_not(None),
+                )
+                .order_by(UploadedAsset.created_at.asc())
+            )
+        else:
+            query = (
+                select(UploadedAsset)
+                .where(UploadedAsset.storage_backend == "postgres_chunks")
+                .order_by(UploadedAsset.created_at.asc())
+            )
         if limit:
             query = query.limit(limit)
         assets = list((await db.scalars(query)).all())
 
         for asset in assets:
+            if cleanup_only:
+                if not asset.object_key:
+                    raise ValueError(f"{asset.filename}: migrated asset has no object key")
+                metadata = await storage.head(asset.object_key)
+                content_length = metadata.get("ContentLength")
+                if content_length is not None and int(content_length) != int(asset.size_bytes):
+                    raise ValueError(
+                        f"{asset.filename}: object size mismatch during cleanup "
+                        f"(metadata={asset.size_bytes}, object={content_length})"
+                    )
+                await db.execute(
+                    delete(UploadedAssetChunk).where(UploadedAssetChunk.asset_id == asset.id)
+                )
+                await db.commit()
+                migrated += 1
+                logger.info("Cleaned legacy chunks asset=%s filename=%s", asset.id, asset.filename)
+                continue
+
             object_key = UploadRepositoryService._object_key(settings, asset)
             temporary_path: Path | None = None
             try:
@@ -119,11 +150,24 @@ def main() -> None:
         action="store_true",
         help="Delete verified PostgreSQL chunk rows after each successful migration",
     )
+    parser.add_argument(
+        "--cleanup-only",
+        action="store_true",
+        help="Only clean chunks for assets already marked object_store (requires --delete-chunks)",
+    )
     args = parser.parse_args()
+    if args.cleanup_only and not args.delete_chunks:
+        parser.error("--cleanup-only requires --delete-chunks")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     import asyncio
 
-    count = asyncio.run(migrate(limit=args.limit, delete_chunks=args.delete_chunks))
+    count = asyncio.run(
+        migrate(
+            limit=args.limit,
+            delete_chunks=args.delete_chunks,
+            cleanup_only=args.cleanup_only,
+        )
+    )
     logger.info("Migrated %s asset(s)", count)
 
 
