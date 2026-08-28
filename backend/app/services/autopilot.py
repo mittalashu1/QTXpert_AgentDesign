@@ -30,11 +30,14 @@ from app.llm.base import LLMMessage
 from app.llm.factory import get_llm_provider
 from app.schemas.autopilot import (
     AutopilotAnalysis,
+    AutopilotContextRequest,
+    AutopilotContextResponse,
     AutopilotExecutionRequest,
     AutopilotExecutionResult,
     AutopilotJobStatus,
     AutopilotTest,
 )
+from app.services.autopilot_context import default_context
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -65,6 +68,66 @@ class AutopilotPrototypeService:
         self.root = Path(settings.AUTOPILOT_STORAGE_PATH).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._persistence_disabled_until = 0.0
+
+    async def generate_context(self, request: AutopilotContextRequest) -> AutopilotContextResponse:
+        """Generate a safe business profile, with a deterministic fallback.
+
+        Context generation is intentionally independent from APK analysis so a
+        user can prepare/refine the profile before starting a run. The LLM is
+        asked to preserve unknowns as placeholders and never to manufacture
+        metrics, credentials or compliance evidence.
+        """
+        baseline = default_context(request.application_name, request.platform)
+        if request.mode == "default":
+            return AutopilotContextResponse(context=baseline, source="default")
+
+        current = request.current_context.strip()
+        prompt = {
+            "application_name": request.application_name,
+            "package_name": request.package_name,
+            "platform": request.platform,
+            "focus": request.focus,
+            "current_context": current[:8000],
+            "default_profile": baseline,
+        }
+        try:
+            provider = get_llm_provider()
+            response = await provider.complete(
+                [
+                    LLMMessage(
+                        role="system",
+                        content=(
+                            "You are a senior fintech QA and compliance-context editor. "
+                            "Return strict JSON with one key, context, containing a concise but complete "
+                            "test context for an autonomous mobile QA agent. Preserve facts supplied by the user, "
+                            "use [TO CONFIRM] for unknowns, and never invent metrics, defects, credentials, "
+                            "penetration-test results, regulatory approvals or data-residency evidence. "
+                            "Keep payments, transfers, OTP and destructive actions approval-gated. Include "
+                            "application overview, critical journeys, environment/device scope, test data and "
+                            "compliance/reporting expectations."
+                        ),
+                    ),
+                    LLMMessage(role="user", content=json.dumps(prompt, ensure_ascii=False)),
+                ],
+                temperature=0.1,
+                max_tokens=2200,
+                response_format_json=True,
+            )
+            data = json.loads(response.content)
+            generated = str(data.get("context") or "").strip()
+            if generated:
+                return AutopilotContextResponse(context=generated[:8000], source="ai")
+        except Exception as exc:  # pragma: no cover - provider availability is environment-specific
+            logger.info("Autopilot context AI generation unavailable: %s", exc)
+
+        # For an "improve" request keep the user's text rather than silently
+        # replacing it. For a blank request return the ready-to-use profile.
+        fallback = current or baseline
+        return AutopilotContextResponse(
+            context=fallback[:8000],
+            source="fallback",
+            warning="AI context generation was unavailable; a safe deterministic profile was applied.",
+        )
 
     @property
     def _durable_results_enabled(self) -> bool:
@@ -1001,3 +1064,4 @@ class AutopilotPrototypeService:
                 "authentication",
             )
         )
+
