@@ -22,7 +22,7 @@ from app.schemas.requirement import (
     RequirementOut,
 )
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
-from app.services.upload_repository import UploadRepositoryService
+from app.services.upload_repository import UploadRepositoryService, UploadRepositoryStorageUnavailable
 
 router = APIRouter(tags=["requirements"])
 
@@ -125,17 +125,24 @@ async def upload_requirement(
             detail="Extracted requirement text is too large for a single generation run",
         )
 
-    asset = await UploadRepositoryService.create_from_bytes(
-        db,
-        data,
-        user.id,
-        filename=filename,
-        content_type=file.content_type,
-        project_id=project_id,
-        source_module="design",
-        category="document",
-        max_bytes=max_bytes,
-    )
+    try:
+        asset = await UploadRepositoryService.create_from_bytes(
+            db,
+            data,
+            user.id,
+            filename=filename,
+            content_type=file.content_type,
+            project_id=project_id,
+            source_module="design",
+            category="document",
+            max_bytes=max_bytes,
+            settings=settings,
+        )
+    except UploadRepositoryStorageUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="File storage is temporarily unavailable; check object-storage configuration and retry.",
+        ) from exc
 
     source = (
         RequirementSource.JIRA_EXPORT

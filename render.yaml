@@ -8,14 +8,40 @@ services:
     healthCheckPath: /api/v1/health
     envVars:
       - key: POSTGRES_URL
-        fromDatabase:
-          name: qtxpert-postgres
-          property: connectionString
-      - key: REDIS_URL
-        fromService:
-          name: qtxpert-redis
-          type: redis
-          property: connectionString
+        # Neon is the production database. Keep the value in Render's secret
+        # environment rather than creating a second Render Postgres instance.
+        sync: false
+      - key: DB_POOL_SIZE
+        value: "5"
+      - key: DB_MAX_OVERFLOW
+        value: "5"
+      - key: DB_CONNECT_TIMEOUT_SECONDS
+        value: "10"
+      - key: DB_COMMAND_TIMEOUT_SECONDS
+        value: "60"
+      - key: DB_POOL_TIMEOUT_SECONDS
+        value: "15"
+      - key: UPLOAD_STORAGE_BACKEND
+        # Switch to object_store only after the bucket credentials are set.
+        value: postgres_chunks
+      - key: OBJECT_STORAGE_ENDPOINT_URL
+        sync: false
+      - key: OBJECT_STORAGE_BUCKET
+        sync: false
+      - key: OBJECT_STORAGE_REGION
+        value: auto
+      - key: OBJECT_STORAGE_ACCESS_KEY_ID
+        sync: false
+      - key: OBJECT_STORAGE_SECRET_ACCESS_KEY
+        sync: false
+      - key: OBJECT_STORAGE_PREFIX
+        value: qtxpert
+      - key: OBJECT_STORAGE_SIGNED_URL_TTL_SECONDS
+        value: "900"
+      - key: OBJECT_STORAGE_MULTIPART_THRESHOLD_MB
+        value: "16"
+      - key: OBJECT_STORAGE_PART_SIZE_MB
+        value: "16"
       - key: JWT_SECRET
         generateValue: true
       - key: APP_ENV
@@ -44,19 +70,9 @@ services:
     runtime: docker
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
-    plan: starter
+    # The static frontend can use the free tier; keep paid capacity focused
+    # on the backend/worker that performs Autopilot analysis.
+    plan: free
     envVars:
       - key: VITE_API_BASE_URL
         value: https://qtxpert-backend.onrender.com/api/v1
-
-  - type: redis
-    name: qtxpert-redis
-    plan: starter
-    ipAllowList: []
-
-databases:
-  - name: qtxpert-postgres
-    plan: starter
-    databaseName: qtxpert
-    user: qtxpert
-

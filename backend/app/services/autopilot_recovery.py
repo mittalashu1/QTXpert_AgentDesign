@@ -65,6 +65,7 @@ async def _resume_one(settings: Settings, job_id: str) -> None:
                 record.repository_asset_id,
                 record.owner_id,
                 target,
+                settings=settings,
             )
         except Exception as exc:
             record = await db.scalar(select(AutopilotJob).where(AutopilotJob.job_id == job_id))

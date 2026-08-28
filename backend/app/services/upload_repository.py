@@ -1,22 +1,31 @@
 """Durable file repository shared by Design, Test Data and Autopilot.
 
-The first storage backend uses bounded PostgreSQL binary chunks. That gives the
-existing Render deployment durable reuse immediately without requiring another
-cloud account. The metadata explicitly records the backend so the chunk store
-can later be replaced by Azure Blob/S3 without changing module APIs.
+PostgreSQL chunks remain a backwards-compatible read path for existing assets.
+New deployments can select the S3-compatible object-store backend so large
+APKs, documents and evidence do not consume Neon database storage or transfer.
 """
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 from pathlib import Path
+import tempfile
 from typing import AsyncIterator, Optional
 from uuid import UUID
 
 from fastapi import UploadFile
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.database.models.uploaded_asset import UploadedAsset, UploadedAssetChunk
+from app.services.object_storage import (
+    ObjectStorageConfigurationError,
+    ObjectStorageService,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class UploadRepositoryError(ValueError):
@@ -31,6 +40,10 @@ class UploadRepositoryInvalid(UploadRepositoryError):
     pass
 
 
+class UploadRepositoryStorageUnavailable(UploadRepositoryError):
+    """Raised when the selected object store is unavailable or misconfigured."""
+
+
 class UploadRepositoryService:
     CHUNK_SIZE = 1024 * 1024
 
@@ -38,6 +51,29 @@ class UploadRepositoryService:
     TEST_DATA_EXTENSIONS = {"xlsx", "xls", "xml", "yaml", "yml"}
     MOBILE_EXTENSIONS = {"apk", "ipa"}
     MEDIA_EXTENSIONS = {"mp4", "mov", "webm", "png", "jpg", "jpeg"}
+
+    @staticmethod
+    def _settings(settings: Optional[Settings]) -> Settings:
+        return settings or get_settings()
+
+    @classmethod
+    def _object_storage(cls, settings: Optional[Settings]) -> Optional[ObjectStorageService]:
+        resolved = cls._settings(settings)
+        if resolved.UPLOAD_STORAGE_BACKEND != "object_store":
+            return None
+        try:
+            return ObjectStorageService(resolved)
+        except ObjectStorageConfigurationError as exc:
+            raise UploadRepositoryStorageUnavailable(str(exc)) from exc
+
+    @staticmethod
+    def _object_key(settings: Settings, asset: UploadedAsset) -> str:
+        prefix = str(settings.OBJECT_STORAGE_PREFIX or "qtxpert").strip("/") or "qtxpert"
+        # The asset UUID makes the key immutable and prevents filename/path
+        # collisions.  The user-visible name remains metadata only.
+        safe_name = Path(asset.filename).name.replace("/", "_").replace("\\", "_")
+        project = str(asset.project_id or "unscoped")
+        return f"{prefix}/projects/{project}/assets/{asset.id}/{safe_name}"
 
     @classmethod
     def category_for_filename(cls, filename: str) -> str:
@@ -66,8 +102,48 @@ class UploadRepositoryService:
         category: Optional[str] = None,
         max_bytes: int,
         minimum_bytes: int = 1,
+        settings: Optional[Settings] = None,
     ) -> UploadedAsset:
+        # For object storage, spool the incoming body to a short-lived local
+        # file and upload it from there.  This avoids ever inserting binary
+        # chunks into Neon while keeping memory bounded for 250MB APKs.  A
+        # future direct-upload UI can use the adapter's presigned URL methods
+        # to bypass the API hop entirely.
+        storage = cls._object_storage(settings)
         filename = Path(upload.filename or "upload").name
+        if storage is not None:
+            suffix = Path(filename).suffix or ".upload"
+            fd, temporary_name = tempfile.mkstemp(prefix="qtxpert-upload-", suffix=suffix)
+            os.close(fd)
+            temporary_path = Path(temporary_name)
+            total = 0
+            try:
+                with temporary_path.open("wb") as handle:
+                    while chunk := await upload.read(cls.CHUNK_SIZE):
+                        total += len(chunk)
+                        if max_bytes and total > max_bytes:
+                            raise UploadRepositoryTooLarge(
+                                f"File exceeds {max_bytes // (1024 * 1024)}MB limit"
+                            )
+                        handle.write(chunk)
+                if total < minimum_bytes:
+                    raise UploadRepositoryInvalid("Uploaded file is empty or invalid")
+                return await cls.create_from_path(
+                    db,
+                    temporary_path,
+                    owner_id,
+                    filename=filename,
+                    content_type=upload.content_type,
+                    project_id=project_id,
+                    source_module=source_module,
+                    category=category,
+                    max_bytes=max_bytes,
+                    minimum_bytes=minimum_bytes,
+                    settings=settings,
+                )
+            finally:
+                temporary_path.unlink(missing_ok=True)
+
         asset = cls._new_asset(
             owner_id,
             filename,
@@ -128,7 +204,10 @@ class UploadRepositoryService:
         category: Optional[str] = None,
         max_bytes: int = 0,
         minimum_bytes: int = 1,
+        settings: Optional[Settings] = None,
     ) -> UploadedAsset:
+        resolved_settings = cls._settings(settings)
+        storage = cls._object_storage(resolved_settings)
         safe_name = Path(filename or path.name).name
         asset = cls._new_asset(
             owner_id,
@@ -144,6 +223,7 @@ class UploadRepositoryService:
         hasher = hashlib.sha256()
         total = 0
         index = 0
+        object_key: Optional[str] = None
         try:
             with path.open("rb") as handle:
                 while True:
@@ -156,16 +236,17 @@ class UploadRepositoryService:
                             f"File exceeds {max_bytes // (1024 * 1024)}MB limit"
                         )
                     hasher.update(chunk)
-                    db.add(
-                        UploadedAssetChunk(
-                            asset_id=asset.id,
-                            chunk_index=index,
-                            data=chunk,
-                            size_bytes=len(chunk),
+                    if storage is None:
+                        db.add(
+                            UploadedAssetChunk(
+                                asset_id=asset.id,
+                                chunk_index=index,
+                                data=chunk,
+                                size_bytes=len(chunk),
+                            )
                         )
-                    )
                     index += 1
-                    if index % 12 == 0:
+                    if storage is None and index % 12 == 0:
                         await db.flush()
 
             if total < minimum_bytes:
@@ -173,11 +254,30 @@ class UploadRepositoryService:
             asset.size_bytes = total
             asset.sha256 = hasher.hexdigest()
             asset.status = "ready"
+            if storage is not None:
+                object_key = cls._object_key(resolved_settings, asset)
+                try:
+                    await storage.upload_path(
+                        path,
+                        object_key,
+                        content_type=content_type,
+                    )
+                except Exception as exc:
+                    raise UploadRepositoryStorageUnavailable(
+                        f"Object storage upload failed for {safe_name}: {exc}"
+                    ) from exc
+                asset.storage_backend = "object_store"
+                asset.object_key = object_key
             await db.commit()
             await db.refresh(asset)
             return asset
         except Exception:
             await db.rollback()
+            if storage is not None and object_key:
+                try:
+                    await storage.delete(object_key)
+                except Exception as cleanup_error:  # pragma: no cover - defensive cleanup
+                    logger.warning("Object storage cleanup failed for %s: %s", object_key, cleanup_error)
             raise
 
     @classmethod
@@ -193,6 +293,7 @@ class UploadRepositoryService:
         source_module: str = "design",
         category: Optional[str] = None,
         max_bytes: int = 0,
+        settings: Optional[Settings] = None,
     ) -> UploadedAsset:
         if max_bytes and len(data) > max_bytes:
             raise UploadRepositoryTooLarge(
@@ -200,6 +301,8 @@ class UploadRepositoryService:
             )
         if not data:
             raise UploadRepositoryInvalid("Uploaded file is empty or invalid")
+
+        storage = cls._object_storage(settings)
 
         asset = cls._new_asset(
             owner_id,
@@ -214,19 +317,44 @@ class UploadRepositoryService:
         asset.status = "ready"
         db.add(asset)
         await db.flush()
-        for index, start in enumerate(range(0, len(data), cls.CHUNK_SIZE)):
-            chunk = data[start : start + cls.CHUNK_SIZE]
-            db.add(
-                UploadedAssetChunk(
-                    asset_id=asset.id,
-                    chunk_index=index,
-                    data=chunk,
-                    size_bytes=len(chunk),
-                )
-            )
-        await db.commit()
-        await db.refresh(asset)
-        return asset
+        object_key: Optional[str] = None
+        try:
+            if storage is None:
+                for index, start in enumerate(range(0, len(data), cls.CHUNK_SIZE)):
+                    chunk = data[start : start + cls.CHUNK_SIZE]
+                    db.add(
+                        UploadedAssetChunk(
+                            asset_id=asset.id,
+                            chunk_index=index,
+                            data=chunk,
+                            size_bytes=len(chunk),
+                        )
+                    )
+            else:
+                object_key = cls._object_key(cls._settings(settings), asset)
+                try:
+                    await storage.upload_bytes(
+                        data,
+                        object_key,
+                        content_type=content_type,
+                    )
+                except Exception as exc:
+                    raise UploadRepositoryStorageUnavailable(
+                        f"Object storage upload failed for {asset.filename}: {exc}"
+                    ) from exc
+                asset.storage_backend = "object_store"
+                asset.object_key = object_key
+            await db.commit()
+            await db.refresh(asset)
+            return asset
+        except Exception:
+            await db.rollback()
+            if storage is not None and object_key:
+                try:
+                    await storage.delete(object_key)
+                except Exception as cleanup_error:  # pragma: no cover - defensive cleanup
+                    logger.warning("Object storage cleanup failed for %s: %s", object_key, cleanup_error)
+            raise
 
     @staticmethod
     def _new_asset(
@@ -286,19 +414,68 @@ class UploadRepositoryService:
         result = await db.scalars(query.order_by(UploadedAsset.created_at.desc()).limit(limit))
         return list(result.all())
 
-    @staticmethod
-    async def delete_owned(db: AsyncSession, asset_id: UUID, owner_id: UUID) -> bool:
-        result = await db.execute(
-            delete(UploadedAsset).where(
+    @classmethod
+    async def delete_owned(
+        cls,
+        db: AsyncSession,
+        asset_id: UUID,
+        owner_id: UUID,
+        *,
+        settings: Optional[Settings] = None,
+    ) -> bool:
+        asset = await db.scalar(
+            select(UploadedAsset).where(
                 UploadedAsset.id == asset_id,
                 UploadedAsset.owner_id == owner_id,
             )
         )
-        await db.commit()
-        return bool(result.rowcount)
+        if asset is None:
+            return False
 
-    @staticmethod
-    async def iter_content(db: AsyncSession, asset_id: UUID) -> AsyncIterator[bytes]:
+        storage: Optional[ObjectStorageService] = None
+        if asset.storage_backend == "object_store":
+            resolved_settings = cls._settings(settings)
+            if resolved_settings.UPLOAD_STORAGE_BACKEND != "object_store":
+                raise UploadRepositoryStorageUnavailable(
+                    "The asset uses object storage but the object-store backend is disabled"
+                )
+            storage = cls._object_storage(resolved_settings)
+        if storage is not None and asset.object_key:
+            try:
+                await storage.delete(asset.object_key)
+            except Exception as exc:
+                # Do not remove metadata while the object deletion is
+                # uncertain; the caller can retry safely.
+                raise UploadRepositoryStorageUnavailable(
+                    f"Object storage deletion failed for {asset.filename}: {exc}"
+                ) from exc
+        await db.delete(asset)
+        await db.commit()
+        return True
+
+    @classmethod
+    async def iter_content(
+        cls,
+        db: AsyncSession,
+        asset_id: UUID,
+        *,
+        settings: Optional[Settings] = None,
+    ) -> AsyncIterator[bytes]:
+        asset = await db.scalar(select(UploadedAsset).where(UploadedAsset.id == asset_id))
+        if asset is None:
+            return
+        if asset.storage_backend == "object_store":
+            if not asset.object_key:
+                return
+            storage = cls._object_storage(settings)
+            if storage is None:  # pragma: no cover - metadata/config mismatch
+                raise UploadRepositoryStorageUnavailable(
+                    "The asset uses object storage but the object-store backend is disabled"
+                )
+            async for data in storage.iter_content(asset.object_key):
+                yield data
+            return
+
         stream = await db.stream_scalars(
             select(UploadedAssetChunk.data)
             .where(UploadedAssetChunk.asset_id == asset_id)
@@ -314,6 +491,7 @@ class UploadRepositoryService:
         asset_id: UUID,
         owner_id: UUID,
         target_path: Path,
+        settings: Optional[Settings] = None,
     ) -> UploadedAsset:
         asset = await cls.get_owned(db, asset_id, owner_id)
         if asset is None:
@@ -322,7 +500,7 @@ class UploadRepositoryService:
         temporary = target_path.with_suffix(target_path.suffix + ".part")
         try:
             with temporary.open("wb") as handle:
-                async for chunk in cls.iter_content(db, asset.id):
+                async for chunk in cls.iter_content(db, asset.id, settings=settings):
                     handle.write(chunk)
             temporary.replace(target_path)
             return asset

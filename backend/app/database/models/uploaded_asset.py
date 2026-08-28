@@ -32,6 +32,9 @@ class UploadedAsset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     category: Mapped[str] = mapped_column(String(50), nullable=False, default="other")
     source_module: Mapped[str] = mapped_column(String(80), nullable=False, default="repository")
     storage_backend: Mapped[str] = mapped_column(String(30), nullable=False, default="postgres_chunks")
+    # Set only for object-store backed assets.  Legacy PostgreSQL chunk assets
+    # remain readable while the repository is migrated in the background.
+    object_key: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready")
@@ -45,7 +48,10 @@ class UploadedAsset(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 
 class UploadedAssetChunk(Base):
-    """Bounded binary chunks keep large APK uploads out of process memory."""
+    """Legacy bounded binary chunks kept for backwards-compatible reads.
+
+    New assets use ``UploadedAsset.object_key`` and do not create rows here.
+    """
 
     __tablename__ = "uploaded_asset_chunks"
     __table_args__ = (

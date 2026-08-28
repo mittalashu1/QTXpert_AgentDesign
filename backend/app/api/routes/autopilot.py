@@ -164,7 +164,7 @@ async def _ensure_local_artifact(
 
     target = service.root / job_id / Path(job.get("filename") or "application.apk").name
     try:
-        await UploadRepositoryService.materialize(db, asset_id, user.id, target)
+        await UploadRepositoryService.materialize(db, asset_id, user.id, target, settings=service.settings)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored APK was not found")
     await service.update_job(job_id, apk_path=str(target))
@@ -211,7 +211,7 @@ async def _start_analysis_from_asset(
     service = _service(settings)
     temp_dir = service.root / "_repository_reuse" / f"{asset.id}-{uuid4()}"
     temp_path = temp_dir / Path(asset.filename).name
-    await UploadRepositoryService.materialize(db, asset.id, user.id, temp_path)
+    await UploadRepositoryService.materialize(db, asset.id, user.id, temp_path, settings=settings)
     reader = _AsyncPathReader(temp_path)
     try:
         job_id, _ = await service.save_upload_stream(
@@ -270,6 +270,7 @@ async def _persist_evidence_asset(
     db: AsyncSession,
     user: User,
     job_record: AutopilotJob,
+    settings: Settings,
     path_value: Optional[str],
     *,
     filename: str,
@@ -299,6 +300,7 @@ async def _persist_evidence_asset(
             category="autopilot_evidence",
             max_bytes=25 * 1024 * 1024,
             minimum_bytes=1,
+            settings=settings,
         )
         return asset.id
     except Exception as exc:  # pragma: no cover - storage failures are defensive
@@ -321,6 +323,7 @@ async def _persist_execution(
         db,
         user,
         job_record,
+        service.settings,
         result.screenshot_path,
         filename=f"launch-{execution_id}.png",
         content_type="image/png",
@@ -329,6 +332,7 @@ async def _persist_execution(
         db,
         user,
         job_record,
+        service.settings,
         result.page_source_path,
         filename=f"page-source-{execution_id}.xml",
         content_type="application/xml",
@@ -535,6 +539,7 @@ async def analyze_mobile_app(
                 category="apk",
                 max_bytes=max_bytes,
                 minimum_bytes=1024,
+                settings=settings,
             )
         except UploadRepositoryTooLarge as exc:
             await asyncio.to_thread(shutil.rmtree, service.root / job_id, True)

@@ -16,6 +16,7 @@ from app.schemas.upload_repository import UploadedAssetOut
 from app.services.upload_repository import (
     UploadRepositoryInvalid,
     UploadRepositoryService,
+    UploadRepositoryStorageUnavailable,
     UploadRepositoryTooLarge,
 )
 
@@ -98,11 +99,17 @@ async def upload_to_repository(
             category=category,
             max_bytes=max_mb * 1024 * 1024,
             minimum_bytes=1024 if is_mobile_binary else 1,
+            settings=settings,
         )
     except UploadRepositoryTooLarge as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
     except UploadRepositoryInvalid as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except UploadRepositoryStorageUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="File storage is temporarily unavailable; check object-storage configuration and retry.",
+        ) from exc
 
 
 @router.get("/{asset_id}/content")
@@ -110,6 +117,7 @@ async def download_upload(
     asset_id: UUID,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     active_project_id = await _resolve_project(db, user.id, None, x_qtxpert_project_id)
@@ -123,7 +131,7 @@ async def download_upload(
             owned = await UploadRepositoryService.get_owned(session, asset_id, owner_id)
             if owned is None or owned.project_id != active_project_id:
                 return
-            async for chunk in UploadRepositoryService.iter_content(session, asset_id):
+            async for chunk in UploadRepositoryService.iter_content(session, asset_id, settings=settings):
                 yield chunk
 
     safe_filename = filename.replace('"', "")
@@ -139,10 +147,17 @@ async def delete_upload(
     asset_id: UUID,
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     active_project_id = await _resolve_project(db, user.id, None, x_qtxpert_project_id)
     await _owned_project_asset(db, asset_id, user.id, active_project_id)
-    deleted = await UploadRepositoryService.delete_owned(db, asset_id, user.id)
+    try:
+        deleted = await UploadRepositoryService.delete_owned(db, asset_id, user.id, settings=settings)
+    except UploadRepositoryStorageUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="File storage is temporarily unavailable; retry the delete after storage recovers.",
+        ) from exc
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload not found")

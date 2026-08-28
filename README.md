@@ -105,19 +105,33 @@ AI spend card (last 30 days by default). The endpoint is
 models without a configured rate remain visible as unpriced usage so the rate
 configuration can be completed without losing the audit trail.
 
-## Deployment (Render)
+## Deployment (Render + Neon)
 
-`render.yaml` defines two web services (backend, frontend), a managed
-Postgres database, and a managed Redis instance. After connecting the repo
-in the Render dashboard:
+Render runs the frontend and backend web services. Production relational data
+is hosted on Neon and is supplied to the backend as the secret `POSTGRES_URL`;
+do not apply a Blueprint that creates a second database or overwrites this
+connection string. The backend runs `alembic upgrade head` automatically on
+container start.
 
-1. Render provisions Postgres/Redis and wires their connection strings into
-   the backend automatically.
-2. Set the remaining secrets (LLM provider keys, Jira/Confluence
-   credentials, Pinecone) directly in the Render dashboard - they are
-   intentionally left out of `render.yaml`.
-3. Push to `main` to deploy; the backend runs `alembic upgrade head`
-   automatically on container start.
+Large uploaded artifacts should use an S3-compatible object store (Cloudflare
+R2, Amazon S3 or MinIO) rather than PostgreSQL binary chunks. Set
+`UPLOAD_STORAGE_BACKEND=object_store` only after configuring the bucket and
+secret credentials in Render. Existing `postgres_chunks` assets remain
+readable during migration.
+
+Keep object buckets private, use short-lived signed URLs, verify SHA-256 and
+apply lifecycle retention to incomplete uploads and old evidence. Render's
+local filesystem is a cache only; it is not a durable shared artifact store.
+
+After the bucket is configured, migrate existing PostgreSQL-backed uploads
+from `backend/` with `python scripts/migrate_uploaded_assets.py`. The command
+is non-destructive by default; run it first without `--delete-chunks`, verify
+the object inventory and checksums, then repeat with `--delete-chunks` to
+reclaim the old binary rows.
+
+Set the remaining secrets (LLM provider keys, Jira/Confluence credentials,
+Pinecone and object-store credentials) directly in the Render dashboard - they
+are intentionally left out of `render.yaml`. Push to `main` to deploy.
 
 ## Testing
 

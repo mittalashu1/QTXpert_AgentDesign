@@ -47,8 +47,11 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://qtxpert:qtxpert@localhost:5432/qtxpert",
         description="Async SQLAlchemy connection string",
     )
-    DB_POOL_SIZE: int = 10
-    DB_MAX_OVERFLOW: int = 20
+    # Keep the default pool deliberately small: Render currently runs one API
+    # instance and Neon bills compute/transfer, not idle application sockets.
+    # Increase only after measured concurrency requires it.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 5
     # Keep an unavailable/quota-exhausted provider from holding an HTTP request
     # or the container startup indefinitely.  asyncpg applies
     # ``command_timeout`` to statements as well as migration DDL.
@@ -150,6 +153,30 @@ class Settings(BaseSettings):
         "apk,ipa,zip,mp4,mov,webm,png,jpg,jpeg"
     )
     UPLOAD_STORAGE_PATH: str = "./storage/uploads"
+    # ``postgres_chunks`` remains the backwards-compatible default so an
+    # existing deployment can migrate without breaking old assets.  Set this
+    # to ``object_store`` after configuring an S3-compatible bucket (R2/S3/
+    # MinIO).  New uploads then keep only metadata in PostgreSQL.
+    UPLOAD_STORAGE_BACKEND: Literal["postgres_chunks", "object_store"] = "postgres_chunks"
+    OBJECT_STORAGE_ENDPOINT_URL: Optional[str] = None
+    OBJECT_STORAGE_BUCKET: Optional[str] = None
+    OBJECT_STORAGE_REGION: str = "auto"
+    OBJECT_STORAGE_ACCESS_KEY_ID: Optional[str] = None
+    OBJECT_STORAGE_SECRET_ACCESS_KEY: Optional[str] = None
+    OBJECT_STORAGE_PREFIX: str = "qtxpert"
+    OBJECT_STORAGE_SIGNED_URL_TTL_SECONDS: int = Field(default=900, ge=60, le=604800)
+    OBJECT_STORAGE_MULTIPART_THRESHOLD_MB: int = Field(default=16, ge=5, le=512)
+    OBJECT_STORAGE_PART_SIZE_MB: int = Field(default=16, ge=5, le=512)
+
+    @property
+    def object_storage_configured(self) -> bool:
+        """Whether the selected object-store backend has usable credentials."""
+        return bool(
+            self.UPLOAD_STORAGE_BACKEND == "object_store"
+            and self.OBJECT_STORAGE_BUCKET
+            and self.OBJECT_STORAGE_ACCESS_KEY_ID
+            and self.OBJECT_STORAGE_SECRET_ACCESS_KEY
+        )
 
     @property
     def allowed_upload_extensions_list(self) -> List[str]:
