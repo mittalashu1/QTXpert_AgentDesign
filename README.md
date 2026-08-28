@@ -113,6 +113,13 @@ do not apply a Blueprint that creates a second database or overwrites this
 connection string. The backend runs `alembic upgrade head` automatically on
 container start.
 
+For the lowest-cost operating profile, keep the frontend on Render Free and
+keep the backend on Free while the product is lightly used. Free services
+sleep and have external-traffic limits, so the production Autopilot profile is
+one paid Starter (0.5 CPU / 512 MB) backend with no separate worker until job
+volume justifies it. Upgrade only that backend deliberately; do not attach a
+Render disk or add a second Render database/cache.
+
 Large uploaded artifacts should use an S3-compatible object store (Cloudflare
 R2, Amazon S3 or MinIO) rather than PostgreSQL binary chunks. Set
 `UPLOAD_STORAGE_BACKEND=object_store` only after configuring the bucket and

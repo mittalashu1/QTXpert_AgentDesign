@@ -1,6 +1,8 @@
 services:
   - type: web
-    name: qtxpert-backend
+    # Match the existing production service name so a future Blueprint sync
+    # updates it instead of creating a second billable service.
+    name: QTXpert_AgentDesign_Backend
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
@@ -66,7 +68,9 @@ services:
       # dashboard - they are intentionally not templated here.
 
   - type: web
-    name: qtxpert-frontend
+    # Match the existing production service name; do not create a duplicate
+    # frontend when the Blueprint is synchronized.
+    name: QTXpert_AgentDesign
     runtime: docker
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
