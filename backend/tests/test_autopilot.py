@@ -4,7 +4,12 @@ import pytest
 
 from app.config import Settings
 from app.services.autopilot import AutopilotPrototypeService, AutopilotUploadTooLarge
-from app.services.autopilot_context import DEFAULT_AUTOPILOT_CONTEXT
+from app.services.autopilot_context import (
+    DEFAULT_AUTOPILOT_CONTEXT,
+    DEFAULT_AUTOPILOT_PROFILE_ID,
+    list_profiles,
+    profile_context,
+)
 from app.services.autopilot_report import build_test_audit_report
 
 
@@ -160,6 +165,17 @@ def test_default_context_is_fintech_and_guardrail_focused():
     assert "SCA" in DEFAULT_AUTOPILOT_CONTEXT
     assert "Investnation" in DEFAULT_AUTOPILOT_CONTEXT
     assert "Do not invent" in DEFAULT_AUTOPILOT_CONTEXT
+
+
+def test_profile_catalog_renders_a_dynamic_brief():
+    profiles = list_profiles()
+    ids = {profile.id for profile in profiles}
+
+    assert DEFAULT_AUTOPILOT_PROFILE_ID in ids
+    assert "payments_cards" in ids
+    assert "Profile category: UAE Digital Banking & Wealth" in DEFAULT_AUTOPILOT_CONTEXT
+    assert "CBUAE/SCA" in profile_context(DEFAULT_AUTOPILOT_PROFILE_ID)
+    assert "wallet" in profile_context("payments_cards").lower()
 
 
 def test_report_never_claims_runtime_pass_rate_without_execution():

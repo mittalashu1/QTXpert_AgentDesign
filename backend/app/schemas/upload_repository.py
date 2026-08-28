@@ -27,3 +27,5 @@ class UploadedAssetOut(BaseModel):
 class ReuseUploadedAssetRequest(BaseModel):
     upload_id: UUID
     context: str = Field(default="", max_length=8000)
+    profile_id: str = Field(default="uae_fintech", max_length=80)
+

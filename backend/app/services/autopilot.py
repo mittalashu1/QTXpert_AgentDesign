@@ -38,7 +38,7 @@ from app.schemas.autopilot import (
     AutopilotJobStatus,
     AutopilotTest,
 )
-from app.services.autopilot_context import default_context
+from app.services.autopilot_context import default_context, get_profile
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -85,9 +85,10 @@ class AutopilotPrototypeService:
         asked to preserve unknowns as placeholders and never to manufacture
         metrics, credentials or compliance evidence.
         """
-        baseline = default_context(request.application_name, request.platform)
+        profile = get_profile(request.profile_id)
+        baseline = default_context(request.application_name, request.platform, profile.id)
         if request.mode == "default":
-            return AutopilotContextResponse(context=baseline, source="default")
+            return AutopilotContextResponse(context=baseline, source="default", profile_id=profile.id)
 
         current = request.current_context.strip()
         prompt = {
@@ -95,6 +96,10 @@ class AutopilotPrototypeService:
             "package_name": request.package_name,
             "platform": request.platform,
             "focus": request.focus,
+            "profile_id": profile.id,
+            "profile_name": profile.name,
+            "profile_description": profile.description,
+            "profile_brief": profile.brief_context,
             "current_context": current[:8000],
             "default_profile": baseline,
         }
@@ -106,7 +111,8 @@ class AutopilotPrototypeService:
                         role="system",
                         content=(
                             "You are a senior fintech QA and compliance-context editor. "
-                            "Return strict JSON with one key, context, containing a concise but complete "
+                            "Return strict JSON with one key, context, containing a concise (under 1,800 "
+                            "characters) but complete "
                             "test context for an autonomous mobile QA agent. Preserve facts supplied by the user, "
                             "use [TO CONFIRM] for unknowns, and never invent metrics, defects, credentials, "
                             "penetration-test results, regulatory approvals or data-residency evidence. "
@@ -124,16 +130,21 @@ class AutopilotPrototypeService:
             data = json.loads(response.content)
             generated = str(data.get("context") or "").strip()
             if generated:
-                return AutopilotContextResponse(context=generated[:8000], source="ai")
+                if not generated.lower().startswith("profile category:"):
+                    generated = f"Profile category: {profile.name}\n{generated}"
+                return AutopilotContextResponse(context=generated[:2400], source="ai", profile_id=profile.id)
         except Exception as exc:  # pragma: no cover - provider availability is environment-specific
             logger.info("Autopilot context AI generation unavailable: %s", exc)
 
         # For an "improve" request keep the user's text rather than silently
         # replacing it. For a blank request return the ready-to-use profile.
         fallback = current or baseline
+        if current and not current.lower().startswith("profile category:"):
+            fallback = f"Profile category: {profile.name}\n{current}"
         return AutopilotContextResponse(
-            context=fallback[:8000],
+            context=fallback[:2400],
             source="fallback",
+            profile_id=profile.id,
             warning="AI context generation was unavailable; a safe deterministic profile was applied.",
         )
 

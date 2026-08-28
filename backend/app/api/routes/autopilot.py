@@ -32,6 +32,7 @@ from app.schemas.autopilot import (
     AutopilotExecutionResult,
     AutopilotJobStatus,
     AutopilotProviderStatus,
+    AutopilotProfileOption,
     AutopilotTestAuditReport,
     AutopilotSuiteRequest,
     AutopilotSuiteResult,
@@ -43,7 +44,7 @@ from app.services.autopilot import (
     AutopilotUploadTooLarge,
 )
 from app.services.autopilot_discovery import AutopilotDiscoveryService
-from app.services.autopilot_context import default_context
+from app.services.autopilot_context import default_context, list_profiles
 from app.services.autopilot_ir import AutopilotIRCompiler
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
@@ -61,10 +62,10 @@ def _service(settings: Settings) -> AutopilotPrototypeService:
     return AutopilotPrototypeService(settings)
 
 
-def _effective_context(value: Optional[str]) -> str:
+def _effective_context(value: Optional[str], profile_id: str = "uae_fintech") -> str:
     """Ensure every entry point uses a safe context, including direct API clients."""
     cleaned = (value or "").strip()
-    return cleaned[:8000] if cleaned else default_context()
+    return cleaned[:8000] if cleaned else default_context(profile_id=profile_id)
 
 
 async def _active_project(
@@ -213,6 +214,7 @@ async def _start_analysis_from_asset(
     user: User,
     asset: UploadedAsset,
     context: Optional[str],
+    profile_id: str = "uae_fintech",
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK.
 
@@ -229,7 +231,7 @@ async def _start_analysis_from_asset(
             asset.filename,
             reader,
             str(user.id),
-            context=_effective_context(context),
+            context=_effective_context(context, profile_id),
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
         )
     finally:
@@ -250,6 +252,7 @@ async def _start_analysis_from_local_path(
     source_path: Path,
     filename: str,
     context: Optional[str],
+    profile_id: str = "uae_fintech",
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -264,7 +267,7 @@ async def _start_analysis_from_local_path(
             filename,
             reader,
             str(user.id),
-            context=_effective_context(context),
+            context=_effective_context(context, profile_id),
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
         )
     finally:
@@ -504,6 +507,15 @@ async def generate_autopilot_context(
     return await _service(settings).generate_context(payload)
 
 
+@router.get("/profiles", response_model=list[AutopilotProfileOption])
+async def get_autopilot_profiles(
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Return the selectable profile categories used to seed brief context."""
+    _ = user
+    return list_profiles()
+
+
 @router.post("/analyze", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
 async def analyze_mobile_app(
     background_tasks: BackgroundTasks,
@@ -512,6 +524,7 @@ async def analyze_mobile_app(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     file: UploadFile = File(...),
     context: str = Form(default=""),
+    profile_id: str = Form(default="uae_fintech"),
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Upload an APK into the active project's repository, then analyze it."""
@@ -530,7 +543,7 @@ async def analyze_mobile_app(
             filename,
             file,
             str(user.id),
-            context=_effective_context(context),
+            context=_effective_context(context, profile_id),
             max_bytes=max_bytes,
         )
     except AutopilotUploadTooLarge as exc:
@@ -624,6 +637,7 @@ async def analyze_existing_mobile_app(
         user=user,
         asset=asset,
         context=payload.context,
+        profile_id=payload.profile_id,
     )
 
 
@@ -650,6 +664,7 @@ async def rerun_autopilot_analysis(
             source_path=Path(str(original.get("apk_path", ""))),
             filename=Path(str(original.get("filename", "application.apk"))).name,
             context=payload.context if payload.context is not None else str(original.get("context", "")),
+            profile_id=payload.profile_id,
         )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
@@ -680,6 +695,7 @@ async def rerun_autopilot_analysis(
         user=user,
         asset=asset,
         context=context,
+        profile_id=payload.profile_id,
     )
 
 

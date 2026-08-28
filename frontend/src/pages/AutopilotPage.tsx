@@ -39,7 +39,6 @@ type AnalysisJob = {
   job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed";
   stage: string; progress: number; context?: string; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
 };
-type ContextResponse = { context: string; source: "default" | "ai" | "fallback"; warning?: string | null };
 type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
 type ReportCheck = {
   key: string; title: string; status: ReportCheckStatus; summary: string;
@@ -116,39 +115,65 @@ type SuiteResult = {
   promoted_count: number; error?: string | null; tests: SuiteTestResult[];
 };
 
-const DEFAULT_AUTOPILOT_CONTEXT = `Act as an expert Fintech QA Lead and Compliance Auditor specializing in UAE digital banking and wealth-management platforms.
+type ProfileOption = {
+  id: string; name: string; description: string; brief_context: string;
+};
+type ContextResponse = { context: string; source: "default" | "ai" | "fallback"; profile_id?: string; warning?: string | null };
 
-Application profile
-- Application: Investnation by Finance House (replace with the actual app name if different)
-- Target market: UAE residents and investors
-- Regulatory scope: Central Bank of the UAE (CBUAE) and Securities and Commodities Authority (SCA)
-- Platform: Android/iOS mobile application; test only non-production environments unless explicitly approved
+const DEFAULT_PROFILE_ID = "uae_fintech";
+const DEFAULT_PROFILE_OPTIONS: ProfileOption[] = [
+  {
+    id: "uae_fintech", name: "UAE Digital Banking & Wealth",
+    description: "UAE fintech QA, investment journeys and CBUAE/SCA evidence.",
+    brief_context: "Act as a Fintech QA Lead and Compliance Auditor for Investnation by Finance House. Scope UAE PASS, digital KYC, risk profiling, Saver/Flex/Growth portfolios and the Investnation Credit Card. Apply CBUAE/SCA, security and data-residency checks on Android. Use non-production data; keep payments, transfers, OTP and destructive actions approval-gated. Produce an evidence-led executive Test and Audit Report. Do not invent metrics, defects or compliance evidence.",
+  },
+  {
+    id: "payments_cards", name: "Payments & Cards",
+    description: "Wallets, cards, checkout, transaction integrity and fraud controls.",
+    brief_context: "Act as a Payments QA Lead. Validate the Android app's wallet, card, checkout, authentication, ledger, refunds, limits and fraud controls. Keep money movement, OTP and irreversible actions approval-gated; use non-production data. Capture device, API, audit-log and transaction evidence. Do not invent metrics, defects or security/compliance evidence.",
+  },
+  {
+    id: "healthcare_regulated", name: "Healthcare & Regulated Data",
+    description: "Patient journeys, privacy, consent, access control and regulated data handling.",
+    brief_context: "Act as a Healthcare QA and Privacy Auditor for the Android app. Validate identity, consent, patient/provider journeys, sensitive-data handling, access control, audit trails and retention/deletion safeguards. Use synthetic data; keep clinical, payment and destructive actions approval-gated. Produce an evidence-led release report and do not invent metrics, defects or regulatory evidence.",
+  },
+  {
+    id: "ecommerce_marketplace", name: "E-commerce & Marketplace",
+    description: "Catalog, search, cart, checkout, orders, delivery and refunds.",
+    brief_context: "Act as an E-commerce QA Lead for the Android app. Validate catalog/search, account, cart, checkout, payment hand-off, order state, delivery, returns and refunds. Use non-production products and payment data; keep purchases, refunds and destructive actions approval-gated. Report only observed evidence and mark missing metrics, defects and compliance controls as pending validation.",
+  },
+  {
+    id: "general_mobile", name: "General Mobile Application",
+    description: "A neutral profile for apps without a specialised industry scope.",
+    brief_context: "Act as a Senior Mobile QA Lead for the Android application. Discover critical user journeys, permissions, navigation, resilience, accessibility and security guardrails. Use non-production data; keep authentication, payments and destructive actions approval-gated. Create an evidence-led executive release report and do not invent metrics, defects or compliance evidence.",
+  },
+  {
+    id: "custom", name: "Custom profile",
+    description: "Start with a short neutral brief and tailor it in the context editor.",
+    brief_context: "Act as a Senior QA Lead for the Android application. Focus on critical journeys, risk controls, security, performance and release evidence. Use non-production data and keep irreversible actions approval-gated. Add product-specific details below; do not invent metrics, defects or compliance evidence.",
+  },
+];
+function contextForProfile(profile: ProfileOption) {
+  const application = profile.id === DEFAULT_PROFILE_ID ? "Investnation by Finance House" : "[TO CONFIRM]";
+  return `Profile category: ${profile.name}\nApplication: ${application}\n${profile.brief_context}`;
+}
 
-Business capabilities to consider
-- UAE PASS authentication and digital KYC onboarding
-- Automated risk profiling and suitability checks
-- Managed investment portfolios: Saver, Flex and Growth
-- Investnation Credit Card with a credit limit of up to 90% against invested funds while compound interest continues
+function profileIdFromContext(value: string, profiles: ProfileOption[]) {
+  const marker = value.match(/^Profile category:\s*(.+)$/im)?.[1]?.trim().toLowerCase();
+  if (marker) {
+    const match = profiles.find((profile) => profile.name.toLowerCase() === marker);
+    if (match) return match.id;
+  }
+  // Older jobs predate the profile marker. Recognise the original UAE
+  // fintech context so the selector remains truthful after a page refresh.
+  const lowered = value.toLowerCase();
+  if (["cbuae", "sca", "uae pass", "investnation", "finance house"].some((term) => lowered.includes(term))) {
+    return DEFAULT_PROFILE_ID;
+  }
+  return "custom";
+}
 
-Safety and evidence rules
-- Keep payments, transfers, card issuance, customer notifications, deletion, OTP and other irreversible actions blocked unless a named test environment, test account and explicit approval are supplied.
-- Use real-device evidence where available. Record the device/OS, build hash, timestamps, screenshots, UI hierarchy and API/audit-log references.
-- Treat values written as examples or placeholders as unverified until execution evidence confirms them.
-
-Execution metrics to capture (never assume the example values)
-- Total test cases executed, pass rate, failed/blocked counts and defect severity counts (critical/major/medium/low)
-- Test environment and device matrix: real iOS 17/18, Android 13/14 and BrowserStack or SauceLabs where applicable
-
-Current status inputs (reported values require validation)
-- UAE PASS authentication timeout or registration-drop symptoms during peak hours
-- Credit-card limit calculation and rounding against fluctuating portfolio values
-- Security status, penetration-test result, TLS/encryption verification and key-storage evidence
-- Peak concurrency, latency, payment-gateway and debit-card top-up observations
-
-Report requirements
-- Produce an executive-ready Test and Audit Report with a GO/NO-GO release recommendation.
-- Cover onboarding, portfolio engine and credit-card integration; performance, mobile footprint and security guardrails; CBUAE/SCA logging and data residency; a risk matrix and engineering recommendations.
-- Do not invent pass rates, defect counts, penetration-test results or compliance evidence. Mark missing evidence as pending validation.`;
+const DEFAULT_AUTOPILOT_CONTEXT = contextForProfile(DEFAULT_PROFILE_OPTIONS[0]);
 
 const priorityColor: Record<TestCase["priority"], "error" | "warning" | "info" | "default"> = {
   critical: "error", high: "warning", medium: "info", low: "default",
@@ -198,6 +223,8 @@ export default function AutopilotPage() {
   const [storedApks, setStoredApks] = useState<UploadedAsset[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState("");
   const [repositoryLoading, setRepositoryLoading] = useState(false);
+  const [profiles, setProfiles] = useState<ProfileOption[]>(DEFAULT_PROFILE_OPTIONS);
+  const [profileId, setProfileId] = useState(DEFAULT_PROFILE_ID);
   const [context, setContext] = useState(DEFAULT_AUTOPILOT_CONTEXT);
   const [contextSource, setContextSource] = useState<"default" | "ai" | "fallback" | "custom">("default");
   const [contextBusy, setContextBusy] = useState(false);
@@ -225,6 +252,21 @@ export default function AutopilotPage() {
   const [platformVersion, setPlatformVersion] = useState("14.0");
   const [appiumApp, setAppiumApp] = useState("");
   const [autoGrantPermissions, setAutoGrantPermissions] = useState(true);
+
+  const selectedProfile = useMemo(
+    () => profiles.find((profile) => profile.id === profileId) ?? DEFAULT_PROFILE_OPTIONS[0],
+    [profileId, profiles],
+  );
+
+  const refreshProfiles = useCallback(async () => {
+    try {
+      const response = await apiClient.get<ProfileOption[]>("/autopilot/profiles", { timeout: 15000 });
+      if (response.data.length > 0) setProfiles(response.data);
+    } catch {
+      // The local catalog is intentionally kept as a safe fallback for older
+      // deployments while the backend rolls forward.
+    }
+  }, []);
 
   const refreshStoredApks = useCallback(async (projectId: string) => {
     if (!projectId) { setStoredApks([]); return; }
@@ -264,6 +306,9 @@ export default function AutopilotPage() {
   }, []);
 
   useEffect(() => {
+    void refreshProfiles();
+  }, [refreshProfiles]);
+  useEffect(() => {
     apiClient.get<ProviderStatus>("/autopilot/providers").then((response) => {
       setProviderStatus(response.data);
       setProvider(response.data.recommended_provider);
@@ -274,7 +319,11 @@ export default function AutopilotPage() {
 
   const applyJob = useCallback((job: AnalysisJob) => {
     setAnalysisProgress(job.progress); setAnalysisStage(job.stage);
-    if (job.context !== undefined && job.context.trim()) { setContext(job.context); setContextSource("custom"); }
+    if (job.context !== undefined && job.context.trim()) {
+      setContext(job.context);
+      setProfileId(profileIdFromContext(job.context, profiles));
+      setContextSource("custom");
+    }
     setArtifactAvailable(job.artifact_available !== false);
     if (job.status === "analyzed" && job.analysis) {
       setAnalysis(job.analysis);
@@ -282,7 +331,7 @@ export default function AutopilotPage() {
       void refreshReport(job.analysis.job_id);
     }
     if (job.status === "failed" && job.error) setError(job.error);
-  }, [refreshExecutionHistory, refreshReport]);
+  }, [profiles, refreshExecutionHistory, refreshReport]);
   const pollAnalysis = useCallback(async (jobId: string) => {
     const deadline = Date.now() + 20 * 60 * 1000;
     while (Date.now() < deadline) {
@@ -346,17 +395,26 @@ export default function AutopilotPage() {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected); if (selected) setSelectedUploadId(""); resetResult();
   };
+  const selectProfile = (nextProfileId: string) => {
+    const nextProfile = profiles.find((profile) => profile.id === nextProfileId) ?? DEFAULT_PROFILE_OPTIONS[0];
+    setProfileId(nextProfile.id);
+    setContext(contextForProfile(nextProfile));
+    setContextSource("default");
+    setContextNotice(`${nextProfile.name} brief applied. You can edit it before starting the run.`);
+    setError("");
+  };
   const generateContext = async (mode: "default" | "generate" | "improve") => {
     if (mode === "default") {
-      setContext(DEFAULT_AUTOPILOT_CONTEXT);
+      setContext(contextForProfile(selectedProfile));
       setContextSource("default");
-      setContextNotice("Default UAE fintech context applied. Review placeholders before running.");
+      setContextNotice(`${selectedProfile.name} brief applied. Review it before running.`);
       return;
     }
     setContextBusy(true); setContextNotice(""); setError("");
     try {
       const response = await apiClient.post<ContextResponse>("/autopilot/context/generate", {
         mode,
+        profile_id: profileId,
         current_context: context,
         application_name: analysis?.app_name || selectedStoredApk?.filename?.replace(/\.apk$/i, "") || null,
         package_name: analysis?.package_name || null,
@@ -364,6 +422,7 @@ export default function AutopilotPage() {
         focus: "UAE fintech release readiness, functional QA and CBUAE/SCA audit evidence",
       }, { timeout: 90000 });
       setContext(response.data.context);
+      setProfileId(response.data.profile_id || profileId);
       setContextSource(response.data.source);
       setContextNotice(response.data.warning || (response.data.source === "ai" ? "AI-generated context applied. Review it before analysis." : "Safe fallback context applied."));
     } catch (err) {
@@ -376,9 +435,9 @@ export default function AutopilotPage() {
     try {
       let response;
       if (selectedUploadId) {
-        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context }, { timeout: 300000 });
+        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId }, { timeout: 300000 });
       } else {
-        const form = new FormData(); form.append("file", file as File); form.append("context", context);
+        const form = new FormData(); form.append("file", file as File); form.append("context", context); form.append("profile_id", profileId);
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
         await refreshStoredApks(selectedProjectId);
       }
@@ -458,7 +517,7 @@ export default function AutopilotPage() {
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
-        { upload_id: selectedUploadId || undefined, context: context || undefined },
+        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId },
         { timeout: 300000 },
       );
       applyJob(response.data);
@@ -479,6 +538,29 @@ export default function AutopilotPage() {
     </Box>
 
     <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
+      <Box sx={{ mb: 2.5 }}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} justifyContent="space-between">
+          <Box>
+            <Typography variant="overline" color="primary" fontWeight={800} letterSpacing={1}>1 · Choose a test profile</Typography>
+            <Typography variant="body2" color="text.secondary">The profile controls the brief context, generated journeys and report controls.</Typography>
+          </Box>
+          <Chip size="small" label={`Profile: ${selectedProfile.name}`} color="primary" variant="outlined" />
+        </Stack>
+        <Grid container spacing={2} alignItems="center" sx={{ mt: .25 }}>
+          <Grid item xs={12} md={5}>
+            <FormControl fullWidth size="small" disabled={busy || contextBusy}>
+              <InputLabel id="autopilot-profile-label">Profile category</InputLabel>
+              <Select labelId="autopilot-profile-label" label="Profile category" value={selectedProfile.id} onChange={(event) => selectProfile(event.target.value)}>
+                {profiles.map((profile) => <MenuItem key={profile.id} value={profile.id}>{profile.name}</MenuItem>)}
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} md={7}>
+            <Typography variant="body2" color="text.secondary">{selectedProfile.description}</Typography>
+            <Typography variant="caption" color="text.secondary">Changing the profile replaces the brief; you can refine it below.</Typography>
+          </Grid>
+        </Grid>
+      </Box>
       <Grid container spacing={3}>
         <Grid item xs={12} md={5}><Stack spacing={2}>
           <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">APK source</InputLabel><Select labelId="stored-apk-label" label="APK source" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { setSelectedUploadId(event.target.value); if (event.target.value) setFile(null); if (!analysis) resetResult(); else setError(""); }}>
@@ -488,9 +570,9 @@ export default function AutopilotPage() {
           : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || "Choose an Android APK"}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>Choose APK<input hidden type="file" accept=".apk,application/vnd.android.package-archive" onChange={onFile} /></Button></Box></Box>}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
-          <TextField fullWidth multiline minRows={9} label="Business and compliance context" placeholder="Describe the environment, release-critical journeys, approved test data and prohibited actions." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText="This context is sent to the analysis prompt and drives the executive Test and Audit Report. Never paste production passwords, tokens or OTPs." />
+          <TextField fullWidth multiline minRows={5} maxRows={9} inputProps={{ maxLength: 2400 }} label="Brief context" placeholder="Select a profile above, or add a short product-specific context." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText="This brief is sent to the analysis prompt and report. Never paste production passwords, tokens or OTPs." />
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
-            <Button size="small" variant="outlined" onClick={() => void generateContext("default")} disabled={contextBusy}>Use UAE fintech default</Button>
+            <Button size="small" variant="outlined" onClick={() => void generateContext("default")} disabled={contextBusy}>Reset to profile brief</Button>
             <Button size="small" variant="outlined" onClick={() => void generateContext(context.trim() ? "improve" : "generate")} disabled={contextBusy} startIcon={contextBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon />}>{contextBusy ? "Writing context…" : context.trim() ? "Improve with AI" : "Generate with AI"}</Button>
             <Chip size="small" label={`Context: ${contextSource}`} color={contextSource === "ai" ? "primary" : "default"} variant="outlined" />
           </Stack>

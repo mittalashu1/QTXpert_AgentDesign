@@ -1,49 +1,142 @@
-"""Guided business-context profiles for the autonomous mobile QA agent."""
+"""Profile-driven business context for the autonomous mobile QA agent.
+
+The UI shows a short context so a user can understand what will be tested at a
+glance. The selected profile is also sent to the API, which keeps direct API
+clients and reruns consistent with the profile selected in the browser.
+"""
 
 from __future__ import annotations
 
-DEFAULT_AUTOPILOT_CONTEXT = """Act as an expert Fintech QA Lead and Compliance Auditor specializing in UAE digital banking and wealth-management platforms.
+from typing import Any
 
-Application profile
-- Application: Investnation by Finance House (replace with the actual app name if different)
-- Target market: UAE residents and investors
-- Regulatory scope: Central Bank of the UAE (CBUAE) and Securities and Commodities Authority (SCA)
-- Platform: Android/iOS mobile application; test only non-production environments unless explicitly approved
-
-Business capabilities to consider
-- UAE PASS authentication and digital KYC onboarding
-- Automated risk profiling and suitability checks
-- Managed investment portfolios: Saver, Flex and Growth
-- Investnation Credit Card with a credit limit of up to 90% against invested funds while compound interest continues
-
-Safety and evidence rules
-- Keep payments, transfers, card issuance, customer notifications, deletion, OTP and other irreversible actions blocked unless a named test environment, test account and explicit approval are supplied.
-- Use real-device evidence where available. Record the device/OS, build hash, timestamps, screenshots, UI hierarchy and API/audit-log references.
-- Treat values written as examples or placeholders as unverified until execution evidence confirms them.
-
-Execution metrics to capture (never assume the example values)
-- Total test cases executed, pass rate, failed/blocked counts and defect severity counts (critical/major/medium/low)
-- Test environment and device matrix: real iOS 17/18, Android 13/14 and BrowserStack or SauceLabs where applicable
-
-Current status inputs (reported values require validation)
-- UAE PASS authentication timeout or registration-drop symptoms during peak hours
-- Credit-card limit calculation and rounding against fluctuating portfolio values
-- Security status, penetration-test result, TLS/encryption verification and key-storage evidence
-- Peak concurrency, latency, payment-gateway and debit-card top-up observations
-
-Report requirements
-- Produce an executive-ready Test and Audit Report with a GO/NO-GO release recommendation.
-- Cover onboarding, portfolio engine and credit-card integration; performance, mobile footprint and security guardrails; CBUAE/SCA logging and data residency; a risk matrix and engineering recommendations.
-- Do not invent pass rates, defect counts, penetration-test results or compliance evidence. Mark missing evidence as pending validation."""
+from app.schemas.autopilot import AutopilotProfileOption
 
 
-def default_context(application_name: str | None = None, platform: str = "Android") -> str:
-    """Return a safe default profile with optional app/platform substitutions."""
+DEFAULT_AUTOPILOT_PROFILE_ID = "uae_fintech"
 
-    value = DEFAULT_AUTOPILOT_CONTEXT
+_PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "uae_fintech",
+        "name": "UAE Digital Banking & Wealth",
+        "description": "UAE fintech QA, investment journeys and CBUAE/SCA evidence.",
+        "brief_context": (
+            "Act as a Fintech QA Lead and Compliance Auditor for Investnation by Finance House. "
+            "Scope UAE PASS, digital KYC, risk profiling, Saver/Flex/Growth portfolios and the "
+            "Investnation Credit Card (up to 90% against invested funds). Apply CBUAE/SCA audit, "
+            "security and data-residency checks on {platform}. Use non-production data only; keep "
+            "payments, transfers, OTP and destructive actions approval-gated. Produce an evidence-led "
+            "executive Test and Audit Report. Do not invent metrics, defects or compliance evidence."
+        ),
+    },
+    {
+        "id": "payments_cards",
+        "name": "Payments & Cards",
+        "description": "Wallets, cards, checkout, transaction integrity and fraud controls.",
+        "brief_context": (
+            "Act as a Payments QA Lead. Validate the {platform} app's wallet, card, checkout, "
+            "authentication, ledger consistency, refunds, limits and fraud/abuse controls. Keep "
+            "money movement, OTP and irreversible actions approval-gated; use non-production data. "
+            "Capture device, API, audit-log and transaction evidence for an executive release report. "
+            "Do not invent metrics, defects or security/compliance evidence."
+        ),
+    },
+    {
+        "id": "healthcare_regulated",
+        "name": "Healthcare & Regulated Data",
+        "description": "Patient journeys, privacy, consent, access control and regulated data handling.",
+        "brief_context": (
+            "Act as a Healthcare QA and Privacy Auditor for the {platform} app. Validate identity, "
+            "consent, patient/provider journeys, sensitive-data handling, access control, audit trails "
+            "and retention/deletion safeguards. Use synthetic data only and keep clinical, payment and "
+            "destructive actions approval-gated. Produce an evidence-led release report; do not invent "
+            "metrics, defects, privacy or regulatory evidence."
+        ),
+    },
+    {
+        "id": "ecommerce_marketplace",
+        "name": "E-commerce & Marketplace",
+        "description": "Catalog, search, cart, checkout, orders, delivery and refunds.",
+        "brief_context": (
+            "Act as an E-commerce QA Lead for the {platform} app. Validate catalog/search, account, "
+            "cart, checkout, payment hand-off, order state, delivery, returns and refunds across "
+            "supported devices. Use non-production products and payment data; keep purchases, refunds "
+            "and destructive actions approval-gated. Report only observed evidence and mark missing "
+            "metrics, defects and compliance controls as pending validation."
+        ),
+    },
+    {
+        "id": "general_mobile",
+        "name": "General Mobile Application",
+        "description": "A neutral profile for apps without a specialised industry scope.",
+        "brief_context": (
+            "Act as a Senior Mobile QA Lead for the {platform} application. Discover critical user "
+            "journeys, permissions, navigation, resilience, accessibility and security guardrails. "
+            "Use non-production data; keep authentication, payments and destructive actions approval-gated. "
+            "Create an evidence-led executive release report and do not invent metrics, defects or "
+            "compliance evidence."
+        ),
+    },
+    {
+        "id": "custom",
+        "name": "Custom profile",
+        "description": "Start with a short neutral brief and tailor it in the context editor.",
+        "brief_context": (
+            "Act as a Senior QA Lead for the {platform} application. Focus on the product's critical "
+            "journeys, risk controls, security, performance and release evidence. Use non-production "
+            "data and keep irreversible actions approval-gated. Add product-specific details below; "
+            "do not invent metrics, defects or compliance evidence."
+        ),
+    },
+)
+
+
+def list_profiles() -> list[AutopilotProfileOption]:
+    """Return selectable profiles in their stable UI order."""
+
+    return [AutopilotProfileOption.model_validate(item) for item in _PROFILE_DEFINITIONS]
+
+
+def get_profile(profile_id: str | None) -> AutopilotProfileOption:
+    """Resolve an unknown profile safely to the neutral custom profile."""
+
+    requested = (profile_id or DEFAULT_AUTOPILOT_PROFILE_ID).strip().lower()
+    for item in list_profiles():
+        if item.id == requested:
+            return item
+    return next(item for item in list_profiles() if item.id == "custom")
+
+
+def profile_context(
+    profile_id: str | None = DEFAULT_AUTOPILOT_PROFILE_ID,
+    application_name: str | None = None,
+    platform: str = "Android",
+) -> str:
+    """Render the concise context associated with a selected profile."""
+
+    profile = get_profile(profile_id)
+    platform_label = platform.strip() or "Android"
+    brief = profile.brief_context.replace("{platform}", platform_label)
+    resolved_application = application_name.strip() if application_name else (
+        "Investnation by Finance House" if profile.id == DEFAULT_AUTOPILOT_PROFILE_ID else "[TO CONFIRM]"
+    )
     if application_name:
-        value = value.replace("Investnation by Finance House (replace with the actual app name if different)", application_name)
-    if platform and platform.lower() != "android":
-        value = value.replace("Android/iOS mobile application", f"{platform} mobile application")
-    return value
+        # Keep the profile-specific UAE product name when no override exists,
+        # while allowing other profiles to identify the uploaded application.
+        if profile.id == DEFAULT_AUTOPILOT_PROFILE_ID:
+            brief = brief.replace("Investnation by Finance House", application_name.strip())
+    return f"Profile category: {profile.name}\nApplication: {resolved_application}\n{brief}"[:2400]
+
+
+# Backwards-compatible name used by existing API clients and tests.
+DEFAULT_AUTOPILOT_CONTEXT = profile_context(DEFAULT_AUTOPILOT_PROFILE_ID)
+
+
+def default_context(
+    application_name: str | None = None,
+    platform: str = "Android",
+    profile_id: str | None = DEFAULT_AUTOPILOT_PROFILE_ID,
+) -> str:
+    """Return a concise, profile-driven context with optional substitutions."""
+
+    return profile_context(profile_id, application_name=application_name, platform=platform)
 

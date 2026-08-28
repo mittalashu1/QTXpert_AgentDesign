@@ -52,10 +52,20 @@ class AutopilotAnalysis(BaseModel):
 ReportCheckStatus = Literal["pass", "fail", "warning", "pending", "not_assessed"]
 
 
+class AutopilotProfileOption(BaseModel):
+    """A selectable business/QA profile used to seed the brief context."""
+
+    id: str
+    name: str
+    description: str
+    brief_context: str
+
+
 class AutopilotContextRequest(BaseModel):
     """Request for the guided business-context writer used by Autopilot."""
 
     mode: Literal["default", "generate", "improve"] = "generate"
+    profile_id: str = Field(default="uae_fintech", max_length=80)
     current_context: str = Field(default="", max_length=8000)
     application_name: Optional[str] = Field(default=None, max_length=200)
     package_name: Optional[str] = Field(default=None, max_length=300)
@@ -66,6 +76,7 @@ class AutopilotContextRequest(BaseModel):
 class AutopilotContextResponse(BaseModel):
     context: str
     source: Literal["default", "ai", "fallback"]
+    profile_id: str = "uae_fintech"
     warning: Optional[str] = None
 
 
@@ -261,6 +272,7 @@ class AutopilotAnalysisRerunRequest(BaseModel):
 
     upload_id: Optional[UUID] = None
     context: Optional[str] = Field(default=None, max_length=8000)
+    profile_id: str = Field(default="uae_fintech", max_length=80)
 
 
 class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
