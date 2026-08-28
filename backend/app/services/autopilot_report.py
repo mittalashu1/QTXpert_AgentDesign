@@ -123,6 +123,19 @@ def _metrics(
     )
 
 
+def _last_run_at(
+    suite: Optional[AutopilotSuiteResult],
+    executions: list[AutopilotExecutionRecord],
+) -> Optional[str]:
+    """Return the most recent completed execution timestamp, if any."""
+
+    timestamps: list[str] = []
+    if suite is not None and suite.finished_at:
+        timestamps.append(str(suite.finished_at))
+    timestamps.extend(str(item.finished_at) for item in executions if item.finished_at)
+    return max(timestamps) if timestamps else None
+
+
 def _application_overview(analysis: AutopilotAnalysis, context: str) -> AutopilotApplicationOverview:
     regulators = [name for name in ("CBUAE", "SCA") if _contains(context, name)]
     features: list[str] = []
@@ -156,12 +169,23 @@ def _functional_checks(analysis: AutopilotAnalysis, context: str, has_runtime: b
         ("credit_card", "Investnation Credit Card integration", ("credit card", "credit limit")),
     )
     for key, title, terms in areas:
+        if not has_runtime:
+            checks.append(
+                AutopilotReportCheck(
+                    key=key,
+                    title=title,
+                    status="pending",
+                    summary="Pending — execution is yet to be completed.",
+                    dependency="Execution is yet to be completed.",
+                    evidence=[],
+                    recommendation="Will populate after the Autopilot run.",
+                )
+            )
+            continue
         described = _contains(context, *terms)
-        status = "pending" if described and not has_runtime else "warning" if described else "not_assessed"
+        status = "warning" if described else "not_assessed"
         summary = (
-            "The supplied business context identifies this as a release-critical journey; runtime/oracle evidence is still required."
-            if described and not has_runtime
-            else "The journey is in scope, but the latest runtime evidence did not prove it end to end."
+            "The journey is in scope, but the latest runtime evidence did not prove it end to end."
             if described
             else "This journey is not described in the supplied context and cannot be inferred reliably from an APK alone."
         )
@@ -179,6 +203,25 @@ def _functional_checks(analysis: AutopilotAnalysis, context: str, has_runtime: b
 
 
 def _nonfunctional_checks(analysis: AutopilotAnalysis, discovery: Optional[AutopilotDiscoveryResult], has_runtime: bool) -> list[AutopilotReportCheck]:
+    if not has_runtime:
+        pending_controls = (
+            ("performance", "Performance and peak concurrency", "Approved load/performance execution is required."),
+            ("mobile_footprint", "Mobile footprint and device compatibility", "Real-device matrix evidence is required."),
+            ("security", "Security guardrails and package posture", "Dynamic security evidence is required."),
+        )
+        return [
+            AutopilotReportCheck(
+                key=key,
+                title=title,
+                status="pending",
+                summary="Pending — execution is yet to be completed.",
+                dependency=dependency,
+                evidence=[],
+                recommendation="Will populate after the Autopilot run.",
+            )
+            for key, title, dependency in pending_controls
+        ]
+
     security_status = "fail" if analysis.debuggable is True else "pending"
     security_summary = (
         "The APK is marked debuggable; this is a release blocker unless an approved exception exists."
@@ -191,6 +234,7 @@ def _nonfunctional_checks(analysis: AutopilotAnalysis, discovery: Optional[Autop
             title="Performance and peak concurrency",
             status="pending",
             summary="APK analysis and a mobile smoke run do not measure concurrency, gateway latency or sustained performance.",
+            dependency="Approved load/performance execution is required.",
             evidence=["No load-test result is attached to this Autopilot job"],
             recommendation="Run an approved load profile and capture p95/p99 latency, error rate and payment-gateway timings.",
         ),
@@ -199,6 +243,7 @@ def _nonfunctional_checks(analysis: AutopilotAnalysis, discovery: Optional[Autop
             title="Mobile footprint and device compatibility",
             status="pending" if not discovery else "warning",
             summary="Static package metadata is available; memory, battery, startup and iOS/cross-device coverage require runtime measurements.",
+            dependency="Real-device matrix evidence is required." if not discovery else None,
             evidence=[f"Android manifest inventory: {len(analysis.permissions)} permissions, {len(analysis.activities)} activities"]
             + ([f"Runtime discovery captured {discovery.screen_count} screen(s)"] if discovery else []),
             recommendation="Execute the release matrix on supported iOS/Android real devices and capture resource telemetry.",
@@ -208,13 +253,31 @@ def _nonfunctional_checks(analysis: AutopilotAnalysis, discovery: Optional[Autop
             title="Security guardrails and package posture",
             status=security_status,
             summary=security_summary,
+            dependency="Dynamic security evidence is required." if security_status == "pending" else None,
             evidence=["Static APK manifest inspection"] + (["Debuggable flag is true"] if analysis.debuggable is True else []),
             recommendation="Run approved dynamic security testing and verify TLS, key storage, logging redaction and least-privilege permissions.",
         ),
     ]
 
 
-def _compliance_checks(context: str) -> list[AutopilotReportCheck]:
+def _compliance_checks(context: str, has_runtime: bool) -> list[AutopilotReportCheck]:
+    if not has_runtime:
+        return [
+            AutopilotReportCheck(
+                key=key,
+                title=title,
+                status="pending",
+                summary="Pending — execution is yet to be completed.",
+                dependency="Execution and compliance evidence are required.",
+                evidence=[],
+                recommendation="Will populate after the Autopilot run.",
+            )
+            for key, title in (
+                ("regulatory_logging", "CBUAE/SCA audit logging and traceability"),
+                ("data_residency", "Data residency and cross-border processing"),
+            )
+        ]
+
     in_scope = _contains(context, "cbuae", "sca", "regulatory", "data residency")
     status = "pending" if in_scope else "not_assessed"
     evidence = ["Regulatory scope is named in the supplied context"] if in_scope else ["No regulatory scope supplied"]
@@ -224,6 +287,7 @@ def _compliance_checks(context: str) -> list[AutopilotReportCheck]:
             title="CBUAE/SCA audit logging and traceability",
             status=status,
             summary="The APK cannot prove immutable audit logs, retention, clock synchronization, privileged-access review or regulator-ready traceability.",
+            dependency="Backend audit logs and residency evidence are required." if status == "pending" else None,
             evidence=evidence,
             recommendation="Attach backend audit-log samples, retention policy, access reviews and evidence of tamper protection.",
         ),
@@ -232,6 +296,7 @@ def _compliance_checks(context: str) -> list[AutopilotReportCheck]:
             title="Data residency and cross-border processing",
             status=status,
             summary="Data residency, processing locations, subprocessors and transfer controls require infrastructure and legal evidence outside the APK.",
+            dependency="Backend audit logs and residency evidence are required." if status == "pending" else None,
             evidence=evidence,
             recommendation="Document UAE residency requirements, hosting regions, cross-border transfer controls and deletion/retention behavior.",
         ),
@@ -249,10 +314,11 @@ def build_test_audit_report(
     executions = executions or []
     metrics = _metrics(analysis, suite, executions)
     has_runtime = bool(metrics.executed_test_cases)
+    last_run_at = _last_run_at(suite, executions)
     functional = _functional_checks(analysis, context, has_runtime)
     nonfunctional = _nonfunctional_checks(analysis, discovery, has_runtime)
-    compliance = _compliance_checks(context)
-    reported_issues = _reported_issues(context)
+    compliance = _compliance_checks(context, has_runtime)
+    reported_issues = _reported_issues(context) if has_runtime else []
 
     risks: list[AutopilotReportRisk] = []
     if analysis.debuggable is True:
@@ -332,9 +398,18 @@ def build_test_audit_report(
             )
         )
 
-    if metrics.failed_count or metrics.blocked_count or analysis.debuggable is True or not has_runtime:
+    # Before a completed run, the report is a roadmap rather than a finding
+    # register. Do not expose static guesses or context-only risks as conclusive
+    # release evidence.
+    if not has_runtime:
+        risks = []
+
+    if not has_runtime:
+        recommendation = "PENDING"
+        rationale = "Decision pending: execution is yet to be completed."
+    elif metrics.failed_count or metrics.blocked_count or analysis.debuggable is True:
         recommendation = "NO_GO"
-        rationale = "Do not release: one or more release-blocking findings exist or runtime evidence is incomplete."
+        rationale = "Do not release: one or more release-blocking findings exist."
     elif any(check.status in {"pending", "fail"} for check in compliance):
         recommendation = "GO_WITH_CONDITIONS"
         rationale = "Runtime evidence is positive, but regulatory and non-functional evidence must be completed and approved."
@@ -342,36 +417,37 @@ def build_test_audit_report(
         recommendation = "GO_WITH_CONDITIONS"
         rationale = "The available evidence supports a conditional release; retain the listed guardrails and monitoring actions."
 
-    findings = [metrics.evidence_state]
-    if analysis.debuggable is True:
-        findings.append("Critical: the uploaded build is debuggable.")
-    if metrics.failed_count:
-        findings.append(f"{metrics.failed_count} failed execution result(s) require triage.")
     if not has_runtime:
-        findings.append("No runtime pass rate or defect count is claimed until execution is recorded.")
-    if discovery:
-        findings.append(f"Runtime discovery observed {discovery.screen_count} screen(s) and {discovery.control_count} control(s).")
-    if reported_issues:
-        findings.append("The context contains reported status/issue inputs; they are shown as unverified until evidence is attached.")
-
-    recommendations = [
-        "Run the bounded safe smoke and autonomous safe suite on an approved real-device target.",
-        "Supply non-production credentials, representative data and explicit approval boundaries for authenticated or financial journeys.",
-        "Attach backend/API, performance, security and compliance evidence before the release decision is changed to GO.",
-    ]
-    evidence = [
-        f"Static APK analysis: SHA-256 {analysis.sha256}",
-        f"Manifest inventory: {len(analysis.permissions)} permission(s), {len(analysis.activities)} activity(ies), {len(analysis.services)} service(s)",
-    ]
-    if has_runtime:
-        evidence.append(metrics.evidence_state)
+        findings = ["Pending — execution is yet to be completed."]
+        recommendations = ["Run Autopilot execution to populate metrics, findings, risk decisions and evidence."]
+        evidence = ["Pending — runtime evidence is not available."]
     else:
-        evidence.append("Runtime evidence: not available for this report.")
+        findings = [metrics.evidence_state]
+        if analysis.debuggable is True:
+            findings.append("Critical: the uploaded build is debuggable.")
+        if metrics.failed_count:
+            findings.append(f"{metrics.failed_count} failed execution result(s) require triage.")
+        if discovery:
+            findings.append(f"Runtime discovery observed {discovery.screen_count} screen(s) and {discovery.control_count} control(s).")
+        if reported_issues:
+            findings.append("The context contains reported status/issue inputs; they are shown as unverified until evidence is attached.")
+
+        recommendations = [
+            "Run the bounded safe smoke and autonomous safe suite on an approved real-device target.",
+            "Supply non-production credentials, representative data and explicit approval boundaries for authenticated or financial journeys.",
+            "Attach backend/API, performance, security and compliance evidence before the release decision is changed to GO.",
+        ]
+        evidence = [
+            f"Static APK analysis: SHA-256 {analysis.sha256}",
+            f"Manifest inventory: {len(analysis.permissions)} permission(s), {len(analysis.activities)} activity(ies), {len(analysis.services)} service(s)",
+            metrics.evidence_state,
+        ]
 
     return AutopilotTestAuditReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
         recommendation=recommendation,
         rationale=rationale,
+        last_run_at=last_run_at,
         executive_findings=_unique(findings),
         reported_issues=reported_issues,
         application_overview=_application_overview(analysis, context),
