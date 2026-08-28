@@ -53,7 +53,7 @@ type ReportRisk = {
 };
 type AuditReport = {
   schema_version: string; generated_at: string; report_title: string; prepared_for: string; role: string;
-  recommendation: "GO" | "GO_WITH_CONDITIONS" | "NO_GO"; rationale: string; executive_findings: string[];
+  recommendation: "GO" | "GO_WITH_CONDITIONS" | "NO_GO"; rationale: string; executive_findings: string[]; reported_issues: string[];
   application_overview: {
     name: string; publisher: string; platform: string; package_name: string; version: string;
     target_market: string; regulatory_bodies: string[]; core_features: string[];
@@ -134,6 +134,16 @@ Safety and evidence rules
 - Keep payments, transfers, card issuance, customer notifications, deletion, OTP and other irreversible actions blocked unless a named test environment, test account and explicit approval are supplied.
 - Use real-device evidence where available. Record the device/OS, build hash, timestamps, screenshots, UI hierarchy and API/audit-log references.
 - Treat values written as examples or placeholders as unverified until execution evidence confirms them.
+
+Execution metrics to capture (never assume the example values)
+- Total test cases executed, pass rate, failed/blocked counts and defect severity counts (critical/major/medium/low)
+- Test environment and device matrix: real iOS 17/18, Android 13/14 and BrowserStack or SauceLabs where applicable
+
+Current status inputs (reported values require validation)
+- UAE PASS authentication timeout or registration-drop symptoms during peak hours
+- Credit-card limit calculation and rounding against fluctuating portfolio values
+- Security status, penetration-test result, TLS/encryption verification and key-storage evidence
+- Peak concurrency, latency, payment-gateway and debit-card top-up observations
 
 Report requirements
 - Produce an executive-ready Test and Audit Report with a GO/NO-GO release recommendation.
@@ -512,6 +522,7 @@ export default function AutopilotPage() {
         </Grid>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>{report.metrics.evidence_state}</Typography>
         {report.executive_findings.length > 0 && <Stack spacing={.5} sx={{ mt: 1.5 }}>{report.executive_findings.map((finding) => <Typography key={finding} variant="body2">• {finding}</Typography>)}</Stack>}
+        {report.reported_issues.length > 0 && <Alert severity="warning" sx={{ mt: 1.5 }}><b>Context-reported status (unverified):</b><Stack spacing={.25} sx={{ mt: .5 }}>{report.reported_issues.map((issue) => <Typography key={issue} variant="body2">• {issue}</Typography>)}</Stack></Alert>}
         <Divider sx={{ my: 2 }} />
         <Typography variant="subtitle1" fontWeight={800}>Application overview</Typography>
         <Grid container spacing={1.5} sx={{ mt: .25 }}>
