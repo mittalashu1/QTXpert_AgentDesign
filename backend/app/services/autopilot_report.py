@@ -36,6 +36,15 @@ def _unique(values: Iterable[str]) -> list[str]:
     return result
 
 
+def _context_application_name(context: str) -> Optional[str]:
+    for line in context.splitlines():
+        if line.strip().lower().startswith("- application:"):
+            value = line.split(":", 1)[1].strip()
+            value = value.split("(", 1)[0].strip()
+            return value or None
+    return None
+
+
 def _metrics(
     analysis: AutopilotAnalysis,
     suite: Optional[AutopilotSuiteResult],
@@ -100,7 +109,7 @@ def _application_overview(analysis: AutopilotAnalysis, context: str) -> Autopilo
         if _contains(context, *terms):
             features.append(label)
     return AutopilotApplicationOverview(
-        name=analysis.app_name or "Android application",
+        name=analysis.app_name or _context_application_name(context) or "Android application",
         publisher="Finance House" if _contains(context, "finance house") else "Not specified",
         platform="Android",
         package_name=analysis.package_name or "Not identified",
