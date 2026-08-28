@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
 from uuid import UUID, uuid4
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, UploadFile, status
 from sqlalchemy import select
@@ -489,9 +490,24 @@ async def get_autopilot_providers(
 ):
     _ = user
     configured = settings.browserstack_configured
+    configured_appium_url = (settings.AUTOPILOT_CUSTOM_APPIUM_URL or "").strip() or None
+    if configured_appium_url:
+        parsed_appium = urlparse(configured_appium_url)
+        if parsed_appium.username or parsed_appium.password:
+            # Never echo credentials back to the browser.
+            configured_appium_url = None
+    custom_available = settings.APP_ENV == "local" or configured_appium_url is not None
+    reason = None
+    if not custom_available:
+        reason = (
+            "No reachable Appium endpoint is configured for this hosted service. "
+            "Use BrowserStack or set AUTOPILOT_CUSTOM_APPIUM_URL to an authenticated HTTPS endpoint."
+        )
     return AutopilotProviderStatus(
         browserstack_configured=configured,
-        custom_appium_available=True,
+        custom_appium_available=custom_available,
+        custom_appium_reason=reason,
+        custom_appium_url=configured_appium_url,
         recommended_provider="browserstack" if configured else "appium",
     )
 

@@ -173,7 +173,9 @@ class AutopilotJobStatus(BaseModel):
 
 class AutopilotProviderStatus(BaseModel):
     browserstack_configured: bool = False
-    custom_appium_available: bool = True
+    custom_appium_available: bool = False
+    custom_appium_reason: Optional[str] = None
+    custom_appium_url: Optional[str] = None
     recommended_provider: Literal["browserstack", "appium"] = "appium"
 
 

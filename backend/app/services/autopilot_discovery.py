@@ -178,7 +178,7 @@ class AutopilotDiscoveryService:
             raise RuntimeError("Uploaded APK artifact is unavailable for runtime discovery")
 
         app_reference = request.appium_app or str(apk_path)
-        appium_url = request.appium_url or "http://127.0.0.1:4723"
+        appium_url = self.prototype.resolve_appium_url(request)
         browserstack_options: Dict[str, Any] | None = None
         if request.provider == "browserstack":
             app_reference = await self.prototype._browserstack_app_url(job_id, apk_path, analysis.sha256)

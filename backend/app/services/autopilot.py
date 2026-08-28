@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from uuid import uuid4
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import select
@@ -900,6 +901,39 @@ class AutopilotPrototypeService:
         await asyncio.to_thread(cache_path.write_text, json.dumps(cache, indent=2), "utf-8")
         return str(app_url)
 
+    def resolve_appium_url(self, request: AutopilotExecutionRequest) -> str:
+        """Resolve and validate a custom Appium endpoint before opening a session.
+
+        Hosted Render containers cannot reach a customer's laptop at
+        127.0.0.1:4723. Keep that convenience only for local development and
+        fail with an actionable message everywhere else.
+        """
+        configured = (self.settings.AUTOPILOT_CUSTOM_APPIUM_URL or "").strip()
+        supplied = (request.appium_url or "").strip()
+        value = supplied or configured
+        if not value and self.settings.APP_ENV == "local":
+            value = "http://127.0.0.1:4723"
+        if not value:
+            raise RuntimeError(
+                "Custom Appium is not configured for this hosted service. "
+                "Choose BrowserStack or provide a reachable HTTPS Appium endpoint."
+            )
+
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise RuntimeError("Custom Appium endpoint must be a valid HTTP(S) URL.")
+        if parsed.username or parsed.password:
+            raise RuntimeError(
+                "Do not embed Appium credentials in the URL; configure authentication at the tunnel or service layer."
+            )
+        hostname = parsed.hostname.lower()
+        if self.settings.APP_ENV != "local" and hostname in {"localhost", "127.0.0.1", "::1"}:
+            raise RuntimeError(
+                "Hosted Autopilot cannot reach a laptop Appium server at 127.0.0.1. "
+                "Use BrowserStack or an authenticated, reachable HTTPS Appium endpoint."
+            )
+        return value.rstrip("/")
+
     async def execute_smoke(self, job_id: str, request: AutopilotExecutionRequest) -> AutopilotExecutionResult:
         job = await self.load_job(job_id)
         analysis = await self.load_analysis(job_id)
@@ -919,7 +953,7 @@ class AutopilotPrototypeService:
                     "Upload the APK again before running smoke execution."
                 )
             app_reference = request.appium_app or str(apk_path)
-            appium_url = request.appium_url or "http://127.0.0.1:4723"
+            appium_url = self.resolve_appium_url(request)
             browserstack_options: Dict[str, Any] | None = None
 
             if request.provider == "browserstack":
@@ -1093,6 +1127,9 @@ class AutopilotPrototypeService:
                 "browserstack app upload failed (403)",
                 "uploaded apk artifact is unavailable",
                 "uploaded apk artifact",
+            "custom appium is not configured",
+            "custom appium endpoint",
+            "hosted autopilot cannot reach",
                 "unauthorized",
                 "authentication",
             )
