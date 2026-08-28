@@ -45,6 +45,17 @@ def _context_application_name(context: str) -> Optional[str]:
     return None
 
 
+def _reported_issues(context: str) -> list[str]:
+    """Extract explicitly reported status lines without treating them as facts."""
+    markers = ("critical defect", "security status", "performance status", "current status", "timeout", "rounding")
+    issues: list[str] = []
+    for line in context.splitlines():
+        cleaned = line.strip().lstrip("-* ")
+        if cleaned and any(marker in cleaned.lower() for marker in markers):
+            issues.append(cleaned[:500])
+    return _unique(issues)[:12]
+
+
 def _metrics(
     analysis: AutopilotAnalysis,
     suite: Optional[AutopilotSuiteResult],
@@ -224,6 +235,7 @@ def build_test_audit_report(
     functional = _functional_checks(analysis, context, has_runtime)
     nonfunctional = _nonfunctional_checks(analysis, discovery, has_runtime)
     compliance = _compliance_checks(context)
+    reported_issues = _reported_issues(context)
 
     risks: list[AutopilotReportRisk] = []
     if analysis.debuggable is True:
@@ -289,6 +301,19 @@ def build_test_audit_report(
                 mitigation="Complete the compliance evidence pack and obtain Compliance/Legal sign-off before production release.",
             )
         )
+    if reported_issues:
+        risks.append(
+            AutopilotReportRisk(
+                risk_id="R-AUTO-006",
+                title="Context-reported production concerns require validation",
+                severity="high",
+                likelihood="medium",
+                impact="high",
+                status="pending_validation",
+                evidence="; ".join(reported_issues[:3]),
+                mitigation="Convert each reported concern into an executable, evidence-linked test and obtain owner sign-off.",
+            )
+        )
 
     if metrics.failed_count or metrics.blocked_count or analysis.debuggable is True or not has_runtime:
         recommendation = "NO_GO"
@@ -309,6 +334,8 @@ def build_test_audit_report(
         findings.append("No runtime pass rate or defect count is claimed until execution is recorded.")
     if discovery:
         findings.append(f"Runtime discovery observed {discovery.screen_count} screen(s) and {discovery.control_count} control(s).")
+    if reported_issues:
+        findings.append("The context contains reported status/issue inputs; they are shown as unverified until evidence is attached.")
 
     recommendations = [
         "Run the bounded safe smoke and autonomous safe suite on an approved real-device target.",
@@ -329,6 +356,7 @@ def build_test_audit_report(
         recommendation=recommendation,
         rationale=rationale,
         executive_findings=_unique(findings),
+        reported_issues=reported_issues,
         application_overview=_application_overview(analysis, context),
         metrics=metrics,
         functional_testing=functional,
