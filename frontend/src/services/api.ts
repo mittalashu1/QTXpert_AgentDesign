@@ -8,6 +8,8 @@ import {
   UserRole,
   TestCase,
   ExecutionRun,
+  ExecutionPlan,
+  ExecutionSuiteType,
   DashboardSummary,
   AICostSummary,
   UploadedAsset,
@@ -51,6 +53,31 @@ export const executionsApi = {
   get: (runId: string) => apiClient.get<ExecutionRun>(`/executions/${runId}`),
   createDefect: (resultId: string, payload: { title: string; severity: string; description: string }) =>
     apiClient.post(`/execution-results/${resultId}/defects`, payload),
+};
+
+export const executionPlansApi = {
+  list: (projectId: string) =>
+    apiClient.get<ExecutionPlan[]>("/execution-plans", { params: { project_id: projectId } }),
+  get: (planId: string) => apiClient.get<ExecutionPlan>(`/execution-plans/${planId}`),
+  import: (payload: {
+    project_id: string;
+    generation_run_id: string;
+    name?: string;
+    suite_type: ExecutionSuiteType;
+  }) => apiClient.post<ExecutionPlan>("/execution-plans/import", payload),
+  updateCases: (
+    planId: string,
+    cases: Array<{ id: string; selected: boolean; execution_mode: "automated" | "manual" }>,
+  ) => apiClient.patch<ExecutionPlan>(`/execution-plans/${planId}/cases`, { cases }),
+  preflight: (planId: string, baseUrl: string) =>
+    apiClient.post<ExecutionPlan>(`/execution-plans/${planId}/preflight`, { base_url: baseUrl }),
+  execute: (planId: string, payload: { base_url: string; name?: string; browser?: "chromium" }) =>
+    apiClient.post<ExecutionRun>(`/execution-plans/${planId}/execute`, payload),
+  rerun: (planId: string, sourceExecutionId: string, name?: string) =>
+    apiClient.post<ExecutionRun>(`/execution-plans/${planId}/rerun`, {
+      source_execution_id: sourceExecutionId,
+      name,
+    }),
 };
 
 export const usersApi = {
@@ -197,3 +224,4 @@ export const settingsApi = {
       { provider }
     ),
 };
+
