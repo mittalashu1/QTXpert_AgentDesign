@@ -52,7 +52,8 @@ services:
         value: production
       - key: AUTOPILOT_RECOVERY_ENABLED
         # Web instances must not replay large APK jobs during a deploy.
-        value: "false"      - key: LLM_PROVIDER
+        value: "false"
+      - key: LLM_PROVIDER
         value: router
       - key: LLM_ROUTER_LOW_COST
         value: gemini:gemini-3.5-flash-lite,azure_openai:configured
