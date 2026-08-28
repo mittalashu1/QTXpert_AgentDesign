@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -41,6 +42,13 @@ from app.services.autopilot_context import default_context
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
+
+# APK parsers can briefly use hundreds of MiB for resource tables. Render's
+# low-cost instance has a small memory envelope, so serialize the expensive
+# analysis section across requests and restart recovery. The semaphore lives
+# at process scope and is acquired from a worker thread so it never blocks the
+# async event loop.
+_ANALYSIS_SLOT = threading.BoundedSemaphore(1)
 
 
 class AutopilotUploadTooLarge(ValueError):
@@ -462,6 +470,7 @@ class AutopilotPrototypeService:
 
     async def analyze_safely(self, job_id: str) -> None:
         started = time.perf_counter()
+        await asyncio.to_thread(_ANALYSIS_SLOT.acquire)
         try:
             await self.update_job(job_id, status="analyzing", stage="reading_apk", progress=15, error=None)
             await asyncio.wait_for(self.analyze(job_id), timeout=900)
@@ -476,6 +485,8 @@ class AutopilotPrototypeService:
                 progress=100,
                 error=f"{type(exc).__name__}: {exc}"[:1000],
             )
+        finally:
+            _ANALYSIS_SLOT.release()
 
     async def load_job(self, job_id: str) -> Dict[str, Any]:
         path = self._job_dir(job_id) / "job.json"
