@@ -74,6 +74,48 @@ def test_appium_connection_errors_are_blocked_not_product_failures():
     assert AutopilotPrototypeService._looks_like_connector_problem(exc) is True
 
 
+def test_hosted_appium_requires_a_reachable_endpoint(tmp_path):
+    from app.schemas.autopilot import AutopilotExecutionRequest
+
+    service = _service(tmp_path, APP_ENV="production")
+    with pytest.raises(RuntimeError, match="not configured"):
+        service.resolve_appium_url(AutopilotExecutionRequest(provider="appium"))
+
+
+def test_hosted_appium_rejects_loopback_endpoints(tmp_path):
+    from app.schemas.autopilot import AutopilotExecutionRequest
+
+    service = _service(tmp_path, APP_ENV="production")
+    with pytest.raises(RuntimeError, match="cannot reach"):
+        service.resolve_appium_url(
+            AutopilotExecutionRequest(
+                provider="appium",
+                appium_url="http://127.0.0.1:4723",
+            )
+        )
+
+
+def test_local_appium_keeps_loopback_convenience(tmp_path):
+    from app.schemas.autopilot import AutopilotExecutionRequest
+
+    service = _service(tmp_path, APP_ENV="local")
+    assert service.resolve_appium_url(
+        AutopilotExecutionRequest(provider="appium")
+    ) == "http://127.0.0.1:4723"
+
+
+def test_hosted_appium_accepts_explicit_https_endpoint(tmp_path):
+    from app.schemas.autopilot import AutopilotExecutionRequest
+
+    service = _service(tmp_path, APP_ENV="production")
+    assert service.resolve_appium_url(
+        AutopilotExecutionRequest(
+            provider="appium",
+            appium_url="https://appium.example.test/wd/hub/",
+        )
+    ) == "https://appium.example.test/wd/hub"
+
+
 def test_app_launch_failures_are_recorded_as_failures_not_connector_blocks():
     exc = RuntimeError(
         "An unknown server-side error occurred while processing the command. "
