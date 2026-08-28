@@ -103,9 +103,9 @@ export default function AppLayout() {
             </>}
           </List>
         </Box>
-        <Box sx={{ mt: "auto", p: 2 }}><Box sx={{ p: 1.5, borderRadius: 2, bgcolor: "action.hover" }}><Typography variant="caption" color="primary.main" sx={{ fontWeight: 700 }}>AUTONOMOUS QE</Typography><Typography variant="body2" sx={{ mt: .5, fontWeight: 600 }}>Documents → intelligence → tests → execution</Typography><Typography variant="caption" color="text.secondary">Every module follows the project selected in the top bar.</Typography></Box></Box>
       </Drawer>
       <Box component="main" sx={{ ml: `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
     </Box>
   );
 }
+
