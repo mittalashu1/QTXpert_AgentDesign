@@ -9,11 +9,9 @@ result instead of creating duplicate jobs or test portfolios.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Set
 
 from sqlalchemy import select
 
@@ -24,14 +22,6 @@ from app.services.autopilot import AutopilotPrototypeService
 from app.services.upload_repository import UploadRepositoryService
 
 logger = logging.getLogger(__name__)
-
-# Keep strong references to recovery tasks until completion.
-_RECOVERY_TASKS: Set[asyncio.Task] = set()
-
-
-def _track(task: asyncio.Task) -> None:
-    _RECOVERY_TASKS.add(task)
-    task.add_done_callback(_RECOVERY_TASKS.discard)
 
 
 async def _resume_one(settings: Settings, job_id: str) -> None:
@@ -91,7 +81,7 @@ async def _resume_one(settings: Settings, job_id: str) -> None:
 
 
 async def recover_interrupted_autopilot_jobs(settings: Settings) -> int:
-    """Schedule recovery for recent in-flight jobs from the previous process.
+    """Recover recent in-flight jobs from the previous process, one at a time.
 
     A 24-hour window prevents very old abandoned jobs from unexpectedly consuming
     compute after a later deployment. The latest ten jobs are enough for the
@@ -117,8 +107,15 @@ async def recover_interrupted_autopilot_jobs(settings: Settings) -> int:
         logger.warning("Unable to inspect interrupted Autopilot jobs during startup: %s", exc)
         return 0
 
+    # A single APK parse can allocate a large resource table. Starting several
+    # recovery workers at once made the 512 MiB Render instance hit its memory
+    # limit during deploys. The caller already runs this coroutine in a detached
+    # startup task, so processing one job at a time does not delay HTTP startup.
     for job_id in job_ids:
-        _track(asyncio.create_task(_resume_one(settings, job_id)))
+        try:
+            await _resume_one(settings, job_id)
+        except Exception:
+            logger.exception("Unexpected Autopilot restart recovery error job_id=%s", job_id)
 
     if job_ids:
         logger.warning(
@@ -127,3 +124,4 @@ async def recover_interrupted_autopilot_jobs(settings: Settings) -> int:
             ", ".join(job_id[:8] for job_id in job_ids),
         )
     return len(job_ids)
+
