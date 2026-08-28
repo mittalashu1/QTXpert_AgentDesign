@@ -311,6 +311,24 @@ def _compliance_checks(context: str, has_runtime: bool) -> list[AutopilotReportC
     ]
 
 
+def _coverage_is_conclusive(
+    analysis: AutopilotAnalysis,
+    suite: Optional[AutopilotSuiteResult],
+) -> bool:
+    """Require every generated coverage bucket to have passed runtime evidence."""
+
+    if suite is None or suite.status != "passed" or not suite.executed_count:
+        return False
+    if suite.deferred_count or suite.failed_count or suite.skipped_count:
+        return False
+    if any(test.status != "passed" for test in suite.tests):
+        return False
+
+    required_buckets = {test.bucket for test in analysis.tests}
+    passed_buckets = {test.bucket for test in suite.tests if test.status == "passed"}
+    return bool(required_buckets) and required_buckets.issubset(passed_buckets)
+
+
 def build_test_audit_report(
     analysis: AutopilotAnalysis,
     context: str,
@@ -330,6 +348,7 @@ def build_test_audit_report(
     nonfunctional = _nonfunctional_checks(analysis, discovery, has_runtime)
     compliance = _compliance_checks(context, has_runtime)
     reported_issues = _reported_issues(context) if has_runtime else []
+    coverage_conclusive = _coverage_is_conclusive(analysis, suite)
 
     risks: list[AutopilotReportRisk] = []
     if analysis.debuggable is True:
@@ -421,6 +440,9 @@ def build_test_audit_report(
     elif metrics.failed_count or metrics.blocked_count or analysis.debuggable is True:
         recommendation = "NO_GO"
         rationale = "Do not release: one or more release-blocking findings exist."
+    elif not coverage_conclusive:
+        recommendation = "PENDING"
+        rationale = "Decision pending: the complete functional, UAT and generated coverage buckets are not conclusively evidenced."
     elif any(check.status in {"pending", "fail"} for check in compliance):
         recommendation = "GO_WITH_CONDITIONS"
         rationale = "Runtime evidence is positive, but regulatory and non-functional evidence must be completed and approved."
