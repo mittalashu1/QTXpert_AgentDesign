@@ -23,6 +23,8 @@ from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotAnalysisRerunRequest,
     AutopilotAutomationBundle,
+    AutopilotContextRequest,
+    AutopilotContextResponse,
     AutopilotDiscoveryRequest,
     AutopilotDiscoveryResult,
     AutopilotExecutionRecord,
@@ -30,6 +32,7 @@ from app.schemas.autopilot import (
     AutopilotExecutionResult,
     AutopilotJobStatus,
     AutopilotProviderStatus,
+    AutopilotTestAuditReport,
     AutopilotSuiteRequest,
     AutopilotSuiteResult,
 )
@@ -41,6 +44,7 @@ from app.services.autopilot import (
 )
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_ir import AutopilotIRCompiler
+from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.upload_repository import (
     UploadRepositoryInvalid,
@@ -482,6 +486,17 @@ async def get_autopilot_providers(
     )
 
 
+@router.post("/context/generate", response_model=AutopilotContextResponse)
+async def generate_autopilot_context(
+    payload: AutopilotContextRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Return the default UAE-fintech profile or an AI-refined context."""
+    _ = user
+    return await _service(settings).generate_context(payload)
+
+
 @router.post("/analyze", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
 async def analyze_mobile_app(
     background_tasks: BackgroundTasks,
@@ -847,14 +862,13 @@ async def get_autopilot_suite(
         return None
 
 
-@router.get("/{job_id}/executions", response_model=list[AutopilotExecutionRecord])
-async def list_autopilot_executions(
+async def _execution_records_for_job(
     job_id: str,
-    user: Annotated[User, Depends(get_current_user)],
-    settings: Annotated[Settings, Depends(get_settings)],
-    db: Annotated[AsyncSession, Depends(get_db_session)],
-):
-    """Return durable smoke history, newest first."""
+    user: User,
+    settings: Settings,
+    db: AsyncSession,
+) -> list[AutopilotExecutionRecord]:
+    """Load durable execution history with a same-instance fallback."""
     service = _service(settings)
     await _require_owned_job(service, job_id, user)
     job_record = await _safe_job_record(db, job_id, user.id)
@@ -882,6 +896,50 @@ async def list_autopilot_executions(
         if record is not None:
             records.append(record)
     return records
+
+
+@router.get("/{job_id}/executions", response_model=list[AutopilotExecutionRecord])
+async def list_autopilot_executions(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Return durable smoke history, newest first."""
+    return await _execution_records_for_job(job_id, user, settings, db)
+
+
+@router.get("/{job_id}/report", response_model=AutopilotTestAuditReport)
+async def get_autopilot_report(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Build an executive Test and Audit Report from the latest evidence."""
+    service = _service(settings)
+    job = await _require_owned_job(service, job_id, user)
+    try:
+        analysis = await service.load_analysis(job_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
+
+    record = await _safe_job_record(db, job_id, user.id)
+    discovery = _record_discovery(record)
+    suite = None
+    if record is not None and record.suite_execution is not None:
+        try:
+            suite = AutopilotSuiteResult.model_validate(record.suite_execution)
+        except ValueError:
+            suite = None
+    executions = await _execution_records_for_job(job_id, user, settings, db)
+    return build_test_audit_report(
+        analysis,
+        str(job.get("context", "")),
+        discovery=discovery,
+        suite=suite,
+        executions=executions,
+    )
 
 
 @router.post("/{job_id}/smoke", response_model=AutopilotExecutionResult)
@@ -968,3 +1026,4 @@ async def rerun_autopilot_smoke(
         job_id=job_id,
         request=request,
     )
+
