@@ -192,6 +192,10 @@ class Settings(BaseSettings):
     AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=250, ge=1, le=2048)
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
     AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
+    # Startup recovery can replay a large APK analysis after a process restart.
+    # Keep it opt-in until a dedicated worker/queue is configured so deploys
+    # do not compete with authentication traffic for the web instance's memory.
+    AUTOPILOT_RECOVERY_ENABLED: bool = False
     # Emergency single-instance mode used while the external database is
     # unavailable (for example, a provider transfer quota outage).  Autopilot
     # keeps jobs/results on the instance filesystem and only accepts already

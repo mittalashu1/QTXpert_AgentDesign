@@ -17,16 +17,32 @@ import TestReportsPage from "@/pages/TestReportsPage";
 import AutopilotPage from "@/pages/AutopilotPage";
 import UploadsPage from "@/pages/UploadsPage";
 import CostCenterPage from "@/pages/CostCenterPage";
-import { CircularProgress, Box } from "@mui/material";
+import { Alert, Box, Button, CircularProgress } from "@mui/material";
 
 const COST_ADMIN_EMAIL = "admin@qtxpert.com";
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
-  const { user, isLoading } = useAuth();
+  const { user, isLoading, authUnavailable, retryAuth } = useAuth();
   if (isLoading) {
     return (
       <Box display="flex" justifyContent="center" alignItems="center" minHeight="100vh">
         <CircularProgress />
+      </Box>
+    );
+  }
+  if (authUnavailable) {
+    return (
+      <Box display="flex" justifyContent="center" alignItems="center" minHeight="100vh" px={2}>
+        <Alert
+          severity="warning"
+          action={
+            <Button color="inherit" size="small" onClick={retryAuth}>
+              Retry
+            </Button>
+          }
+        >
+          The authentication service is temporarily unavailable. Your session is preserved; retry in a moment.
+        </Alert>
       </Box>
     );
   }

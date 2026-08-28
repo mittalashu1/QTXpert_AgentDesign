@@ -8,6 +8,13 @@ from app.database.session import get_db_session
 
 router = APIRouter(tags=["health"])
 
+@router.get("/health/live")
+async def health_live():
+    """Return a dependency-free liveness response for the process probe."""
+    return {"status": "ok"}
+
+
+
 
 @router.get("/health")
 async def health(db: Annotated[AsyncSession, Depends(get_db_session)]):

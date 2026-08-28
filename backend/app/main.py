@@ -67,8 +67,13 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def recover_autopilot_after_restart() -> None:
-        # Do not block HTTP startup while a large APK is restored from the durable
-        # Upload Repository. The recovery task schedules bounded analysis workers.
+        # Recovery is opt-in. A large APK replay belongs on a worker/queue; doing
+        # it automatically on the web instance can starve authentication during
+        # Render deploys and trigger the 512 MiB memory limit.
+        if not settings_obj.AUTOPILOT_RECOVERY_ENABLED:
+            logger.info("Autopilot restart recovery disabled; skipping startup scan")
+            app.state.autopilot_recovery = None
+            return
         app.state.autopilot_recovery = asyncio.create_task(
             recover_interrupted_autopilot_jobs(settings_obj)
         )

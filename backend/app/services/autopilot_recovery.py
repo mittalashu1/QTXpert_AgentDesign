@@ -87,6 +87,10 @@ async def recover_interrupted_autopilot_jobs(settings: Settings) -> int:
     compute after a later deployment. The latest ten jobs are enough for the
     current single-worker prototype and keep startup recovery bounded.
     """
+    if not settings.AUTOPILOT_RECOVERY_ENABLED:
+        logger.info("Autopilot restart recovery is disabled by configuration")
+        return 0
+
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
     try:
         async with AsyncSessionLocal() as db:

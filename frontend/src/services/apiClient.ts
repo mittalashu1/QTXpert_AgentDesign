@@ -43,12 +43,17 @@ apiClient.interceptors.response.use(
           originalRequest.headers.Authorization = `Bearer ${newToken}`;
         }
         return apiClient(originalRequest);
-      } catch {
+      } catch (refreshError) {
         refreshInFlight = null;
-        localStorage.removeItem("qtxpert-access-token");
-        localStorage.removeItem("qtxpert-refresh-token");
-        window.location.href = "/login";
-        return Promise.reject(error);
+        const refreshStatus = axios.isAxiosError(refreshError) ? refreshError.response?.status : undefined;
+        // A restart, network blip, or 5xx from Neon must not destroy a valid
+        // session. Only a definitive refresh rejection invalidates tokens.
+        if (refreshStatus === 401 || refreshStatus === 403) {
+          localStorage.removeItem("qtxpert-access-token");
+          localStorage.removeItem("qtxpert-refresh-token");
+          window.location.href = "/login";
+        }
+        return Promise.reject(refreshError);
       }
     }
     return Promise.reject(error);

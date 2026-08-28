@@ -35,7 +35,7 @@ USER appuser
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+    CMD-SHELL curl -fsS "http://127.0.0.1:\${PORT:-8000}/api/v1/health/live" >/dev/null || exit 1
 
 # A database provider outage must not prevent the HTTP process from starting:
 # /api/v1/health can report the degraded dependency and the Autopilot local
