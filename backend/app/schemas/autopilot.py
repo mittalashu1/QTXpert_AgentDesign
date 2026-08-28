@@ -49,6 +49,91 @@ class AutopilotAnalysis(BaseModel):
     capabilities: Dict[str, bool] = Field(default_factory=dict)
 
 
+ReportCheckStatus = Literal["pass", "fail", "warning", "pending", "not_assessed"]
+
+
+class AutopilotContextRequest(BaseModel):
+    """Request for the guided business-context writer used by Autopilot."""
+
+    mode: Literal["default", "generate", "improve"] = "generate"
+    current_context: str = Field(default="", max_length=8000)
+    application_name: Optional[str] = Field(default=None, max_length=200)
+    package_name: Optional[str] = Field(default=None, max_length=300)
+    platform: str = Field(default="Android", max_length=80)
+    focus: Optional[str] = Field(default=None, max_length=500)
+
+
+class AutopilotContextResponse(BaseModel):
+    context: str
+    source: Literal["default", "ai", "fallback"]
+    warning: Optional[str] = None
+
+
+class AutopilotReportCheck(BaseModel):
+    key: str
+    title: str
+    status: ReportCheckStatus = "pending"
+    summary: str
+    evidence: List[str] = Field(default_factory=list)
+    recommendation: Optional[str] = None
+
+
+class AutopilotReportRisk(BaseModel):
+    risk_id: str
+    title: str
+    severity: Literal["critical", "high", "medium", "low"]
+    likelihood: Literal["high", "medium", "low"]
+    impact: Literal["critical", "high", "medium", "low"]
+    status: Literal["open", "mitigated", "pending_validation", "accepted"] = "open"
+    evidence: str
+    mitigation: str
+
+
+class AutopilotApplicationOverview(BaseModel):
+    name: str
+    publisher: str = "Not specified"
+    platform: str = "Android"
+    package_name: str = "Not identified"
+    version: str = "Not identified"
+    target_market: str = "Not specified"
+    regulatory_bodies: List[str] = Field(default_factory=list)
+    core_features: List[str] = Field(default_factory=list)
+
+
+class AutopilotReportMetrics(BaseModel):
+    designed_test_cases: int = 0
+    executed_test_cases: Optional[int] = None
+    passed_count: int = 0
+    failed_count: int = 0
+    blocked_count: int = 0
+    skipped_count: int = 0
+    pass_rate: Optional[float] = None
+    defect_count: Optional[int] = None
+    environment: List[str] = Field(default_factory=list)
+    evidence_state: str = "Runtime execution has not been recorded."
+
+
+class AutopilotTestAuditReport(BaseModel):
+    """Executive release-readiness report derived from evidence and context."""
+
+    schema_version: str = "qtx-audit-report/1.0"
+    generated_at: str
+    report_title: str = "Test and Audit Report"
+    prepared_for: str = "Executive management"
+    role: str = "Fintech QA Lead and Compliance Auditor"
+    recommendation: Literal["GO", "GO_WITH_CONDITIONS", "NO_GO"] = "NO_GO"
+    rationale: str
+    executive_findings: List[str] = Field(default_factory=list)
+    application_overview: AutopilotApplicationOverview
+    metrics: AutopilotReportMetrics
+    functional_testing: List[AutopilotReportCheck] = Field(default_factory=list)
+    non_functional_testing: List[AutopilotReportCheck] = Field(default_factory=list)
+    compliance_verification: List[AutopilotReportCheck] = Field(default_factory=list)
+    risk_matrix: List[AutopilotReportRisk] = Field(default_factory=list)
+    recommendations: List[str] = Field(default_factory=list)
+    evidence: List[str] = Field(default_factory=list)
+
+
 class AutopilotJobSummary(BaseModel):
     job_id: str
     filename: str
@@ -279,3 +364,4 @@ class AutopilotSuiteResult(BaseModel):
     promoted_count: int = 0
     error: Optional[str] = None
     tests: List[AutopilotSuiteTestResult] = Field(default_factory=list)
+
