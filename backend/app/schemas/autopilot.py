@@ -85,6 +85,7 @@ class AutopilotReportCheck(BaseModel):
     title: str
     status: ReportCheckStatus = "pending"
     summary: str
+    dependency: Optional[str] = None
     evidence: List[str] = Field(default_factory=list)
     recommendation: Optional[str] = None
 
@@ -132,8 +133,9 @@ class AutopilotTestAuditReport(BaseModel):
     report_title: str = "Test and Audit Report"
     prepared_for: str = "Executive management"
     role: str = "Fintech QA Lead and Compliance Auditor"
-    recommendation: Literal["GO", "GO_WITH_CONDITIONS", "NO_GO"] = "NO_GO"
+    recommendation: Literal["GO", "GO_WITH_CONDITIONS", "NO_GO", "PENDING"] = "PENDING"
     rationale: str
+    last_run_at: Optional[str] = None
     executive_findings: List[str] = Field(default_factory=list)
     reported_issues: List[str] = Field(default_factory=list)
     application_overview: AutopilotApplicationOverview
