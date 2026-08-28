@@ -291,8 +291,14 @@ async def import_execution_plan(
     )
     db.add(plan)
     await db.flush()
-    for index, test_case in enumerate(sorted(run.test_cases, key=lambda item: item.created_at)):
-        plan.cases.append(_case_snapshot(test_case, plan.id, index))
+    # The relationship collection is select-in loaded and is not safe to
+    # lazy-load from an async endpoint after ``flush``. Persist the immutable
+    # snapshot rows directly instead of appending to an unloaded collection;
+    # the subsequent owned reload returns the cases in selection order.
+    db.add_all(
+        _case_snapshot(test_case, plan.id, index)
+        for index, test_case in enumerate(sorted(run.test_cases, key=lambda item: item.created_at))
+    )
     await db.commit()
     return _plan_payload(await _load_plan(db, plan.id, user.id))
 
