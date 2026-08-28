@@ -290,20 +290,34 @@ async def _persist_evidence_asset(
     *,
     filename: str,
     content_type: str,
+    repository_asset_id: Optional[UUID] = None,
 ) -> Optional[UUID]:
-    """Copy small smoke evidence files into the durable Upload Repository."""
+    """Copy small smoke evidence files into the durable Upload Repository.
+
+    Evidence is best-effort: a storage outage must never turn a completed
+    device run into an HTTP 500.  Snapshot the repository asset id before any
+    database rollback so the second evidence file and execution row can still
+    be persisted when the object store rejects an upload.
+    """
     if not path_value:
         return None
     path = Path(path_value)
     if not path.is_file():
         return None
     project_id = None
-    if job_record.repository_asset_id:
-        source = await db.scalar(
-            select(UploadedAsset).where(UploadedAsset.id == job_record.repository_asset_id)
-        )
-        project_id = source.project_id if source is not None else None
     try:
+        resolved_repository_asset_id = repository_asset_id
+        if resolved_repository_asset_id is None:
+            try:
+                resolved_repository_asset_id = job_record.repository_asset_id
+            except Exception as exc:  # pragma: no cover - detached ORM row
+                logger.warning("Autopilot evidence metadata unavailable: %s", exc)
+                resolved_repository_asset_id = None
+        if resolved_repository_asset_id:
+            source = await db.scalar(
+                select(UploadedAsset).where(UploadedAsset.id == resolved_repository_asset_id)
+            )
+            project_id = source.project_id if source is not None else None
         asset = await UploadRepositoryService.create_from_path(
             db,
             path,
@@ -319,7 +333,10 @@ async def _persist_evidence_asset(
         )
         return asset.id
     except Exception as exc:  # pragma: no cover - storage failures are defensive
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception as rollback_error:  # pragma: no cover - defensive
+            logger.warning("Autopilot evidence rollback skipped: %s", rollback_error)
         logger.warning("Autopilot evidence persistence skipped: %s", exc)
         return None
 
@@ -334,6 +351,11 @@ async def _persist_execution(
 ) -> AutopilotExecutionResult:
     """Persist the result and durable evidence references without masking it."""
     execution_id = result.execution_id or uuid4()
+    # Rollbacks in evidence persistence expire ORM attributes.  Capture the
+    # scalar identifiers before attempting either object-store upload.
+    owner_id = user.id
+    job_record_id = job_record.id
+    repository_asset_id = job_record.repository_asset_id
     screenshot_asset_id = await _persist_evidence_asset(
         db,
         user,
@@ -342,6 +364,7 @@ async def _persist_execution(
         result.screenshot_path,
         filename=f"launch-{execution_id}.png",
         content_type="image/png",
+        repository_asset_id=repository_asset_id,
     )
     page_source_asset_id = await _persist_evidence_asset(
         db,
@@ -351,6 +374,7 @@ async def _persist_execution(
         result.page_source_path,
         filename=f"page-source-{execution_id}.xml",
         content_type="application/xml",
+        repository_asset_id=repository_asset_id,
     )
     evidence = dict(result.evidence or {})
     if screenshot_asset_id:
@@ -370,9 +394,9 @@ async def _persist_execution(
     await service._persist_execution_file(result, request)
     execution = AutopilotExecution(
         id=execution_id,
-        autopilot_job_id=job_record.id,
-        owner_id=user.id,
-        repository_asset_id=job_record.repository_asset_id,
+        autopilot_job_id=job_record_id,
+        owner_id=owner_id,
+        repository_asset_id=repository_asset_id,
         provider=request.provider,
         device_name=request.device_name,
         platform_version=request.platform_version,
