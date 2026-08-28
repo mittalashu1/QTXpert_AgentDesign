@@ -14,6 +14,7 @@ import BugReportOutlinedIcon from "@mui/icons-material/BugReportOutlined";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import TravelExploreOutlinedIcon from "@mui/icons-material/TravelExploreOutlined";
 import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
+import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import { apiClient } from "@/services/apiClient";
 import { uploadsApi } from "@/services/api";
 import { UploadedAsset } from "@/types/domain";
@@ -37,6 +38,33 @@ type ProviderStatus = { browserstack_configured: boolean; custom_appium_availabl
 type AnalysisJob = {
   job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed";
   stage: string; progress: number; context?: string; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
+};
+type ContextResponse = { context: string; source: "default" | "ai" | "fallback"; warning?: string | null };
+type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
+type ReportCheck = {
+  key: string; title: string; status: ReportCheckStatus; summary: string;
+  evidence: string[]; recommendation?: string | null;
+};
+type ReportRisk = {
+  risk_id: string; title: string; severity: "critical" | "high" | "medium" | "low";
+  likelihood: "high" | "medium" | "low"; impact: "critical" | "high" | "medium" | "low";
+  status: "open" | "mitigated" | "pending_validation" | "accepted";
+  evidence: string; mitigation: string;
+};
+type AuditReport = {
+  schema_version: string; generated_at: string; report_title: string; prepared_for: string; role: string;
+  recommendation: "GO" | "GO_WITH_CONDITIONS" | "NO_GO"; rationale: string; executive_findings: string[];
+  application_overview: {
+    name: string; publisher: string; platform: string; package_name: string; version: string;
+    target_market: string; regulatory_bodies: string[]; core_features: string[];
+  };
+  metrics: {
+    designed_test_cases: number; executed_test_cases: number | null; passed_count: number; failed_count: number;
+    blocked_count: number; skipped_count: number; pass_rate: number | null; defect_count: number | null;
+    environment: string[]; evidence_state: string;
+  };
+  functional_testing: ReportCheck[]; non_functional_testing: ReportCheck[]; compliance_verification: ReportCheck[];
+  risk_matrix: ReportRisk[]; recommendations: string[]; evidence: string[];
 };
 type Execution = {
   execution_id?: string; job_id?: string; device_name?: string; started_at?: string; finished_at?: string;
@@ -88,6 +116,30 @@ type SuiteResult = {
   promoted_count: number; error?: string | null; tests: SuiteTestResult[];
 };
 
+const DEFAULT_AUTOPILOT_CONTEXT = `Act as an expert Fintech QA Lead and Compliance Auditor specializing in UAE digital banking and wealth-management platforms.
+
+Application profile
+- Application: Investnation by Finance House (replace with the actual app name if different)
+- Target market: UAE residents and investors
+- Regulatory scope: Central Bank of the UAE (CBUAE) and Securities and Commodities Authority (SCA)
+- Platform: Android/iOS mobile application; test only non-production environments unless explicitly approved
+
+Business capabilities to consider
+- UAE PASS authentication and digital KYC onboarding
+- Automated risk profiling and suitability checks
+- Managed investment portfolios: Saver, Flex and Growth
+- Investnation Credit Card with a credit limit of up to 90% against invested funds while compound interest continues
+
+Safety and evidence rules
+- Keep payments, transfers, card issuance, customer notifications, deletion, OTP and other irreversible actions blocked unless a named test environment, test account and explicit approval are supplied.
+- Use real-device evidence where available. Record the device/OS, build hash, timestamps, screenshots, UI hierarchy and API/audit-log references.
+- Treat values written as examples or placeholders as unverified until execution evidence confirms them.
+
+Report requirements
+- Produce an executive-ready Test and Audit Report with a GO/NO-GO release recommendation.
+- Cover onboarding, portfolio engine and credit-card integration; performance, mobile footprint and security guardrails; CBUAE/SCA logging and data residency; a risk matrix and engineering recommendations.
+- Do not invent pass rates, defect counts, penetration-test results or compliance evidence. Mark missing evidence as pending validation.`;
+
 const priorityColor: Record<TestCase["priority"], "error" | "warning" | "info" | "default"> = {
   critical: "error", high: "warning", medium: "info", low: "default",
 };
@@ -97,6 +149,16 @@ const riskColor: Record<DiscoveredControl["risk"], "success" | "warning" | "erro
 const readinessColor: Record<AutomationTest["readiness"], "success" | "warning" | "default"> = {
   executable: "success", discovery_required: "default", approval_required: "warning",
 };
+const reportStatusColor: Record<ReportCheckStatus, "success" | "error" | "warning" | "info" | "default"> = {
+  pass: "success", fail: "error", warning: "warning", pending: "info", not_assessed: "default",
+};
+const reportRiskColor: Record<ReportRisk["severity"], "error" | "warning" | "info" | "default"> = {
+  critical: "error", high: "error", medium: "warning", low: "info",
+};
+
+function reportStatusLabel(status: string) {
+  return status.replaceAll("_", " ").toUpperCase();
+}
 
 function formatBytes(value: number) {
   if (value < 1024 * 1024) return `${Math.max(1, value / 1024).toFixed(0)} KB`;
@@ -110,6 +172,15 @@ function readableError(error: unknown, fallback: string) {
   return fallback;
 }
 
+function ReportChecksTable({ checks }: { checks: ReportCheck[] }) {
+  return <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Control area</TableCell><TableCell>Status</TableCell><TableCell>Evidence-led assessment</TableCell><TableCell>Next action</TableCell></TableRow></TableHead><TableBody>{checks.map((check) => <TableRow key={check.key} hover><TableCell sx={{ minWidth: 210 }}><Typography variant="body2" fontWeight={700}>{check.title}</Typography></TableCell><TableCell><Chip size="small" label={reportStatusLabel(check.status)} color={reportStatusColor[check.status]} variant="outlined" /></TableCell><TableCell sx={{ minWidth: 300 }}><Typography variant="body2">{check.summary}</Typography>{check.evidence.map((item) => <Typography key={item} variant="caption" color="text.secondary" display="block">• {item}</Typography>)}</TableCell><TableCell sx={{ minWidth: 280 }}><Typography variant="caption" color="text.secondary">{check.recommendation || "—"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>;
+}
+
+function ReportRiskTable({ risks }: { risks: ReportRisk[] }) {
+  if (risks.length === 0) return <Alert severity="success" sx={{ mt: 1.5 }}>No open risks were derived from the available evidence.</Alert>;
+  return <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Risk</TableCell><TableCell>Severity</TableCell><TableCell>Likelihood / impact</TableCell><TableCell>Evidence and mitigation</TableCell></TableRow></TableHead><TableBody>{risks.map((risk) => <TableRow key={risk.risk_id} hover><TableCell sx={{ minWidth: 220 }}><Typography variant="body2" fontWeight={700}>{risk.title}</Typography><Typography variant="caption" color="text.secondary">{risk.risk_id} · {reportStatusLabel(risk.status)}</Typography></TableCell><TableCell><Chip size="small" label={risk.severity.toUpperCase()} color={reportRiskColor[risk.severity]} variant="outlined" /></TableCell><TableCell>{risk.likelihood.toUpperCase()} / {risk.impact.toUpperCase()}</TableCell><TableCell sx={{ minWidth: 340 }}><Typography variant="caption" display="block">{risk.evidence}</Typography><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Mitigation: {risk.mitigation}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>;
+}
+
 export default function AutopilotPage() {
   const navigate = useNavigate();
   const { selectedProjectId } = useSelectedProject();
@@ -117,8 +188,12 @@ export default function AutopilotPage() {
   const [storedApks, setStoredApks] = useState<UploadedAsset[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState("");
   const [repositoryLoading, setRepositoryLoading] = useState(false);
-  const [context, setContext] = useState("");
+  const [context, setContext] = useState(DEFAULT_AUTOPILOT_CONTEXT);
+  const [contextSource, setContextSource] = useState<"default" | "ai" | "fallback" | "custom">("default");
+  const [contextBusy, setContextBusy] = useState(false);
+  const [contextNotice, setContextNotice] = useState("");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
+  const [report, setReport] = useState<AuditReport | null>(null);
   const [execution, setExecution] = useState<Execution | null>(null);
   const [executionHistory, setExecutionHistory] = useState<ExecutionRecord[]>([]);
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
@@ -154,6 +229,17 @@ export default function AutopilotPage() {
     catch { setAutomation(null); }
   }, []);
 
+  const refreshReport = useCallback(async (jobId: string) => {
+    if (!jobId) { setReport(null); return; }
+    try {
+      setReport((await apiClient.get<AuditReport>(`/autopilot/${jobId}/report`, { timeout: 20000 })).data);
+    } catch {
+      // A report is derived data; keep the analysis visible if an older
+      // deployment cannot serve the new endpoint yet.
+      setReport(null);
+    }
+  }, []);
+
   const refreshExecutionHistory = useCallback(async (jobId: string) => {
     if (!jobId) { setExecutionHistory([]); return; }
     try {
@@ -178,14 +264,15 @@ export default function AutopilotPage() {
 
   const applyJob = useCallback((job: AnalysisJob) => {
     setAnalysisProgress(job.progress); setAnalysisStage(job.stage);
-    if (job.context !== undefined) setContext(job.context);
+    if (job.context !== undefined && job.context.trim()) { setContext(job.context); setContextSource("custom"); }
     setArtifactAvailable(job.artifact_available !== false);
     if (job.status === "analyzed" && job.analysis) {
       setAnalysis(job.analysis);
       void refreshExecutionHistory(job.analysis.job_id);
+      void refreshReport(job.analysis.job_id);
     }
     if (job.status === "failed" && job.error) setError(job.error);
-  }, [refreshExecutionHistory]);
+  }, [refreshExecutionHistory, refreshReport]);
   const pollAnalysis = useCallback(async (jobId: string) => {
     const deadline = Date.now() + 20 * 60 * 1000;
     while (Date.now() < deadline) {
@@ -219,16 +306,18 @@ export default function AutopilotPage() {
 
   useEffect(() => {
     let active = true;
-    if (!analysis?.job_id) { setDiscovery(null); setAutomation(null); setSuite(null); return; }
+    if (!analysis?.job_id) { setDiscovery(null); setAutomation(null); setSuite(null); setReport(null); return; }
     Promise.allSettled([
       apiClient.get<Discovery | null>(`/autopilot/${analysis.job_id}/discovery`, { timeout: 15000 }),
       apiClient.get<AutomationBundle>(`/autopilot/${analysis.job_id}/automation`, { timeout: 15000 }),
       apiClient.get<SuiteResult | null>(`/autopilot/${analysis.job_id}/suite`, { timeout: 15000 }),
-    ]).then(([discoveryResult, automationResult, suiteResult]) => {
+      apiClient.get<AuditReport>(`/autopilot/${analysis.job_id}/report`, { timeout: 20000 }),
+    ]).then(([discoveryResult, automationResult, suiteResult, reportResult]) => {
       if (!active) return;
       setDiscovery(discoveryResult.status === "fulfilled" ? discoveryResult.value.data : null);
       setAutomation(automationResult.status === "fulfilled" ? automationResult.value.data : null);
       setSuite(suiteResult.status === "fulfilled" ? suiteResult.value.data : null);
+      setReport(reportResult.status === "fulfilled" ? reportResult.value.data : null);
     });
     return () => { active = false; };
   }, [analysis?.job_id]);
@@ -242,14 +331,38 @@ export default function AutopilotPage() {
   const selectedStoredApk = useMemo(() => storedApks.find((asset) => asset.id === selectedUploadId) ?? null, [storedApks, selectedUploadId]);
   const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen: screen.screen_id, control }))) ?? [], [discovery]);
 
-  const resetResult = () => { setAnalysis(null); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setArtifactAvailable(true); setError(""); };
+  const resetResult = () => { setAnalysis(null); setReport(null); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setArtifactAvailable(true); setError(""); };
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected); if (selected) setSelectedUploadId(""); resetResult();
   };
+  const generateContext = async (mode: "default" | "generate" | "improve") => {
+    if (mode === "default") {
+      setContext(DEFAULT_AUTOPILOT_CONTEXT);
+      setContextSource("default");
+      setContextNotice("Default UAE fintech context applied. Review placeholders before running.");
+      return;
+    }
+    setContextBusy(true); setContextNotice(""); setError("");
+    try {
+      const response = await apiClient.post<ContextResponse>("/autopilot/context/generate", {
+        mode,
+        current_context: context,
+        application_name: analysis?.app_name || selectedStoredApk?.filename?.replace(/\.apk$/i, "") || null,
+        package_name: analysis?.package_name || null,
+        platform: "Android",
+        focus: "UAE fintech release readiness, functional QA and CBUAE/SCA audit evidence",
+      }, { timeout: 90000 });
+      setContext(response.data.context);
+      setContextSource(response.data.source);
+      setContextNotice(response.data.warning || (response.data.source === "ai" ? "AI-generated context applied. Review it before analysis." : "Safe fallback context applied."));
+    } catch (err) {
+      setError(readableError(err, "Context generation failed"));
+    } finally { setContextBusy(false); }
+  };
   const analyze = async () => {
     if ((!file && !selectedUploadId) || !selectedProjectId) { setError("Select a project and APK before starting Autopilot."); return; }
-    setBusy(true); setError(""); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null);
+    setBusy(true); setError(""); setContextNotice(""); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setReport(null);
     try {
       let response;
       if (selectedUploadId) {
@@ -259,7 +372,7 @@ export default function AutopilotPage() {
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
         await refreshStoredApks(selectedProjectId);
       }
-      applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id);
+      applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id);
     } catch (err) { setError(readableError(err, "Autopilot analysis failed")); }
     finally { setBusy(false); }
   };
@@ -285,6 +398,7 @@ export default function AutopilotPage() {
       }, { timeout: 660000 });
       setDiscovery(response.data);
       await refreshAutomation(analysis.job_id);
+      await refreshReport(analysis.job_id);
     } catch (err) { setError(readableError(err, "Runtime discovery failed")); }
     finally { setDiscoveryBusy(false); }
   };
@@ -296,6 +410,7 @@ export default function AutopilotPage() {
         ...executionPayload(), max_tests: 8, test_ids: [],
       }, { timeout: 960000 });
       setSuite(response.data);
+      await refreshReport(analysis.job_id);
     } catch (err) { setError(readableError(err, "Autonomous safe-suite execution failed")); }
     finally { setSuiteBusy(false); }
   };
@@ -305,6 +420,7 @@ export default function AutopilotPage() {
     try {
       setExecution((await apiClient.post<Execution>(`/autopilot/${analysis.job_id}/smoke`, executionPayload(), { timeout: 660000 })).data);
       await refreshExecutionHistory(analysis.job_id);
+      await refreshReport(analysis.job_id);
     }
     catch (err) { setError(readableError(err, "Smoke execution failed")); }
     finally { setSmokeBusy(false); }
@@ -321,13 +437,14 @@ export default function AutopilotPage() {
       );
       setExecution(response.data);
       await refreshExecutionHistory(analysis.job_id);
+      await refreshReport(analysis.job_id);
     } catch (err) { setError(readableError(err, "Smoke rerun failed")); }
     finally { setSmokeBusy(false); }
   };
 
   const rerunAnalysis = async () => {
     if (!analysis || !selectedProjectId) return;
-    setBusy(true); setError(""); setExecution(null); setExecutionHistory([]);
+    setBusy(true); setError(""); setExecution(null); setExecutionHistory([]); setReport(null);
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
@@ -337,7 +454,7 @@ export default function AutopilotPage() {
       applyJob(response.data);
       setAnalysis(null);
       await pollAnalysis(response.data.job_id);
-      await refreshAutomation(response.data.job_id);
+      await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id);
     } catch (err) { setError(readableError(err, "Autopilot rerun failed")); }
     finally { setBusy(false); }
   };
@@ -361,8 +478,14 @@ export default function AutopilotPage() {
           : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || "Choose an Android APK"}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>Choose APK<input hidden type="file" accept=".apk,application/vnd.android.package-archive" onChange={onFile} /></Button></Box></Box>}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
-          <TextField fullWidth multiline minRows={5} label="Optional business context" placeholder="Example: UAT retail banking app. Login and balance inquiry are critical. Do not perform real transfers or customer notifications." value={context} onChange={(event) => setContext(event.target.value)} helperText="Do not paste production passwords or secrets. Autopilot will ask only for context it cannot infer." />
-          <Alert severity="info" sx={{ mt: 1.5 }}>Autopilot currently reasons over the APK and this context field. Project documents remain in Document Intelligence and are not automatically included in this mobile analysis yet.</Alert>
+          <TextField fullWidth multiline minRows={9} label="Business and compliance context" placeholder="Describe the environment, release-critical journeys, approved test data and prohibited actions." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText="This context is sent to the analysis prompt and drives the executive Test and Audit Report. Never paste production passwords, tokens or OTPs." />
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
+            <Button size="small" variant="outlined" onClick={() => void generateContext("default")} disabled={contextBusy}>Use UAE fintech default</Button>
+            <Button size="small" variant="outlined" onClick={() => void generateContext(context.trim() ? "improve" : "generate")} disabled={contextBusy} startIcon={contextBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon />}>{contextBusy ? "Writing context…" : context.trim() ? "Improve with AI" : "Generate with AI"}</Button>
+            <Chip size="small" label={`Context: ${contextSource}`} color={contextSource === "ai" ? "primary" : "default"} variant="outlined" />
+          </Stack>
+          {contextNotice && <Alert severity="info" sx={{ mt: 1.5 }}>{contextNotice}</Alert>}
+          <Alert severity="info" sx={{ mt: 1.5 }}>Autopilot reasons over the APK and this context. The report labels user-supplied statements separately from observed execution evidence; missing metrics remain pending validation.</Alert>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
             <Button disabled={(!file && !selectedUploadId) || busy || !selectedProjectId} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{busy ? "Learning application…" : selectedStoredApk ? "Analyze stored APK" : "Start Autopilot analysis"}</Button>
             {analysis && <Button disabled={busy || !selectedProjectId} onClick={rerunAnalysis} variant="outlined" size="large">Rerun this analysis</Button>}
@@ -375,6 +498,42 @@ export default function AutopilotPage() {
     {error && <Alert severity="error">{error}</Alert>}
 
     {analysis && stats && <>
+      {report && <Card variant="outlined" sx={{ borderRadius: 3, borderColor: report.recommendation === "NO_GO" ? "error.main" : "warning.main" }}><CardContent>
+        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}>
+          <Stack direction="row" spacing={1} alignItems="center"><FactCheckOutlinedIcon color="primary" /><Box><Typography variant="h6" fontWeight={800}>{report.report_title}</Typography><Typography variant="caption" color="text.secondary">{report.role} · {report.prepared_for} · {new Date(report.generated_at).toLocaleString()}</Typography></Box></Stack>
+          <Chip label={`RELEASE: ${report.recommendation.replaceAll("_", "-")}`} color={report.recommendation === "NO_GO" ? "error" : "warning"} sx={{ fontWeight: 800 }} />
+        </Stack>
+        <Alert severity={report.recommendation === "NO_GO" ? "error" : "warning"} sx={{ mt: 2 }}><b>{report.recommendation.replaceAll("_", "-")}</b> — {report.rationale}</Alert>
+        <Grid container spacing={1.5} sx={{ mt: .5 }}>
+          <Grid item xs={6} sm={3}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Designed cases</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.designed_test_cases}</Typography></Box></Grid>
+          <Grid item xs={6} sm={3}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Executed</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.executed_test_cases ?? "—"}</Typography></Box></Grid>
+          <Grid item xs={6} sm={3}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Pass rate</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.pass_rate === null ? "—" : `${report.metrics.pass_rate}%`}</Typography></Box></Grid>
+          <Grid item xs={6} sm={3}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Open risks</Typography><Typography variant="h5" fontWeight={800}>{report.risk_matrix.filter((risk) => risk.status === "open" || risk.status === "pending_validation").length}</Typography></Box></Grid>
+        </Grid>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>{report.metrics.evidence_state}</Typography>
+        {report.executive_findings.length > 0 && <Stack spacing={.5} sx={{ mt: 1.5 }}>{report.executive_findings.map((finding) => <Typography key={finding} variant="body2">• {finding}</Typography>)}</Stack>}
+        <Divider sx={{ my: 2 }} />
+        <Typography variant="subtitle1" fontWeight={800}>Application overview</Typography>
+        <Grid container spacing={1.5} sx={{ mt: .25 }}>
+          <Grid item xs={6} md={3}><Typography variant="caption" color="text.secondary">Application</Typography><Typography fontWeight={700}>{report.application_overview.name}</Typography></Grid>
+          <Grid item xs={6} md={3}><Typography variant="caption" color="text.secondary">Publisher</Typography><Typography fontWeight={700}>{report.application_overview.publisher}</Typography></Grid>
+          <Grid item xs={6} md={3}><Typography variant="caption" color="text.secondary">Package / version</Typography><Typography variant="body2" sx={{ wordBreak: "break-all" }}>{report.application_overview.package_name} · {report.application_overview.version}</Typography></Grid>
+          <Grid item xs={6} md={3}><Typography variant="caption" color="text.secondary">Regulatory scope</Typography><Typography variant="body2">{report.application_overview.regulatory_bodies.join(", ")}</Typography></Grid>
+          <Grid item xs={12}><Typography variant="caption" color="text.secondary">Core capabilities</Typography><Typography variant="body2">{report.application_overview.core_features.join(" · ")}</Typography></Grid>
+        </Grid>
+        <Divider sx={{ my: 2 }} />
+        <Typography variant="subtitle1" fontWeight={800}>Functional testing specifications</Typography>
+        <ReportChecksTable checks={report.functional_testing} />
+        <Typography variant="subtitle1" fontWeight={800} sx={{ mt: 2 }}>Non-functional testing specifications</Typography>
+        <ReportChecksTable checks={report.non_functional_testing} />
+        <Typography variant="subtitle1" fontWeight={800} sx={{ mt: 2 }}>Audit and regulatory compliance verification</Typography>
+        <ReportChecksTable checks={report.compliance_verification} />
+        <Typography variant="subtitle1" fontWeight={800} sx={{ mt: 2 }}>Risk matrix</Typography>
+        <ReportRiskTable risks={report.risk_matrix} />
+        <Typography variant="subtitle1" fontWeight={800} sx={{ mt: 2 }}>Engineering recommendations</Typography>
+        <Stack spacing={.5} sx={{ mt: 1 }}>{report.recommendations.map((item) => <Typography key={item} variant="body2">• {item}</Typography>)}</Stack>
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1.5 }}>Evidence basis: {report.evidence.join(" · ")}</Typography>
+      </CardContent></Card>}
       {analysis.warnings.length > 0 && <Alert severity="warning">{analysis.warnings.join(" ")}</Alert>}
       <Grid container spacing={2}>{[["Generated tests", stats.tests], ["Test suites", stats.suites], ["Autonomous-safe", stats.autonomous], ["Critical / high", stats.critical]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Card variant="outlined"><CardContent><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h4" fontWeight={800}>{value}</Typography></CardContent></Card></Grid>)}</Grid>
 
@@ -403,3 +562,4 @@ export default function AutopilotPage() {
     </>}
   </Stack>;
 }
+
