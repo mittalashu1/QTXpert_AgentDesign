@@ -313,7 +313,10 @@ def build_test_audit_report(
 ) -> AutopilotTestAuditReport:
     executions = executions or []
     metrics = _metrics(analysis, suite, executions)
-    has_runtime = bool(metrics.executed_test_cases)
+    # A smoke execution is runtime evidence even when a previously attempted
+    # suite contains zero executable cases. Keep the report from reverting to
+    # its pre-run placeholder state in that situation.
+    has_runtime = bool(metrics.executed_test_cases) or bool(executions)
     last_run_at = _last_run_at(suite, executions)
     functional = _functional_checks(analysis, context, has_runtime)
     nonfunctional = _nonfunctional_checks(analysis, discovery, has_runtime)
