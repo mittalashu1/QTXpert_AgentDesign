@@ -21,6 +21,16 @@ Safety and evidence rules
 - Use real-device evidence where available. Record the device/OS, build hash, timestamps, screenshots, UI hierarchy and API/audit-log references.
 - Treat values written as examples or placeholders as unverified until execution evidence confirms them.
 
+Execution metrics to capture (never assume the example values)
+- Total test cases executed, pass rate, failed/blocked counts and defect severity counts (critical/major/medium/low)
+- Test environment and device matrix: real iOS 17/18, Android 13/14 and BrowserStack or SauceLabs where applicable
+
+Current status inputs (reported values require validation)
+- UAE PASS authentication timeout or registration-drop symptoms during peak hours
+- Credit-card limit calculation and rounding against fluctuating portfolio values
+- Security status, penetration-test result, TLS/encryption verification and key-storage evidence
+- Peak concurrency, latency, payment-gateway and debit-card top-up observations
+
 Report requirements
 - Produce an executive-ready Test and Audit Report with a GO/NO-GO release recommendation.
 - Cover onboarding, portfolio engine and credit-card integration; performance, mobile footprint and security guardrails; CBUAE/SCA logging and data residency; a risk matrix and engineering recommendations.
