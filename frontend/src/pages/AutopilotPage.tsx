@@ -42,7 +42,7 @@ type AnalysisJob = {
 type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
 type ReportCheck = {
   key: string; title: string; status: ReportCheckStatus; summary: string;
-  evidence: string[]; recommendation?: string | null;
+  dependency?: string | null; evidence: string[]; recommendation?: string | null;
 };
 type ReportRisk = {
   risk_id: string; title: string; severity: "critical" | "high" | "medium" | "low";
@@ -52,7 +52,7 @@ type ReportRisk = {
 };
 type AuditReport = {
   schema_version: string; generated_at: string; report_title: string; prepared_for: string; role: string;
-  recommendation: "GO" | "GO_WITH_CONDITIONS" | "NO_GO"; rationale: string; executive_findings: string[]; reported_issues: string[];
+  recommendation: "GO" | "GO_WITH_CONDITIONS" | "NO_GO" | "PENDING"; rationale: string; last_run_at: string | null; executive_findings: string[]; reported_issues: string[];
   application_overview: {
     name: string; publisher: string; platform: string; package_name: string; version: string;
     target_market: string; regulatory_bodies: string[]; core_features: string[];
@@ -208,7 +208,7 @@ function readableError(error: unknown, fallback: string) {
 }
 
 function ReportChecksTable({ checks }: { checks: ReportCheck[] }) {
-  return <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Control area</TableCell><TableCell>Status</TableCell><TableCell>Evidence-led assessment</TableCell><TableCell>Next action</TableCell></TableRow></TableHead><TableBody>{checks.map((check) => <TableRow key={check.key} hover><TableCell sx={{ minWidth: 210 }}><Typography variant="body2" fontWeight={700}>{check.title}</Typography></TableCell><TableCell><Chip size="small" label={reportStatusLabel(check.status)} color={reportStatusColor[check.status]} variant="outlined" /></TableCell><TableCell sx={{ minWidth: 300 }}><Typography variant="body2">{check.summary}</Typography>{check.evidence.map((item) => <Typography key={item} variant="caption" color="text.secondary" display="block">• {item}</Typography>)}</TableCell><TableCell sx={{ minWidth: 280 }}><Typography variant="caption" color="text.secondary">{check.recommendation || "—"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>;
+  return <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Control area</TableCell><TableCell>Status</TableCell><TableCell>Evidence-led assessment</TableCell><TableCell>Next action</TableCell></TableRow></TableHead><TableBody>{checks.map((check) => { const pending = check.status === "pending"; return <TableRow key={check.key} hover><TableCell sx={{ minWidth: 210 }}><Typography variant="body2" fontWeight={700}>{check.title}</Typography></TableCell><TableCell><Chip size="small" label={reportStatusLabel(check.status)} color={reportStatusColor[check.status]} variant="outlined" /></TableCell><TableCell sx={{ minWidth: 300 }}><Typography variant="body2">{pending ? (check.dependency || "Execution is yet to be completed.") : check.summary}</Typography>{!pending && check.evidence.map((item) => <Typography key={item} variant="caption" color="text.secondary" display="block">• {item}</Typography>)}</TableCell><TableCell sx={{ minWidth: 280 }}><Typography variant="caption" color="text.secondary">{pending ? "Pending" : check.recommendation || "—"}</Typography></TableCell></TableRow>; })}</TableBody></Table></TableContainer>;
 }
 
 function ReportRiskTable({ risks }: { risks: ReportRisk[] }) {
@@ -536,6 +536,7 @@ export default function AutopilotPage() {
 
   const browserStackUnavailable = provider === "browserstack" && providerStatus?.browserstack_configured === false;
   const executionUnavailable = browserStackUnavailable || !artifactAvailable;
+  const reportPending = report?.recommendation === "PENDING";
 
   return <Stack spacing={3}>
     <Box>
@@ -593,26 +594,53 @@ export default function AutopilotPage() {
       {busy && <Box sx={{ mt: 2 }}><Box sx={{ height: 4, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}><Box sx={{ height: "100%", width: `${Math.max(3, analysisProgress)}%`, bgcolor: "primary.main", transition: "width .4s ease" }} /></Box><Typography variant="caption" color="text.secondary">{analysisStage.replaceAll("_", " ")} · {analysisProgress}%</Typography></Box>}
     </Paper>
 
+    {!analysis && <Card variant="outlined" sx={{ borderRadius: 3 }}><CardContent>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
+        <Box><Typography variant="h6" fontWeight={800}>What Autopilot will deliver</Typography><Typography variant="body2" color="text.secondary">These areas stay pending until a conclusive run supplies evidence.</Typography></Box>
+        <Chip size="small" label="PENDING — run not started" color="info" variant="outlined" />
+      </Stack>
+      <Grid container spacing={1.25} sx={{ mt: 1 }}>
+        {[
+          ["Application understanding & test design", "Generated journeys and coverage"],
+          ["Safe runtime discovery & smoke", "Screens, controls and launch evidence"],
+          ["Execution metrics", "Pass rate, failures, blocked and last run"],
+          ["Security & performance", "Device, resource and load evidence"],
+          ["Compliance & release decision", "CBUAE/SCA controls, risks and recommendation"],
+        ].map(([title, detail]) => <Grid item xs={12} sm={6} md key={title}><Box sx={{ height: "100%", p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}><Stack direction="row" spacing={1} alignItems="flex-start"><Chip size="small" label="PENDING" color="info" variant="outlined" /><Box><Typography variant="body2" fontWeight={700}>{title}</Typography><Typography variant="caption" color="text.secondary">{detail}</Typography></Box></Stack></Box></Grid>)}
+      </Grid>
+    </CardContent></Card>}
+
     {error && <Alert severity="error">{error}</Alert>}
 
     {analysis && stats && <>
-      {report && <Card variant="outlined" sx={{ borderRadius: 3, borderColor: report.recommendation === "NO_GO" ? "error.main" : "warning.main" }}><CardContent>
+      {report && <Card variant="outlined" sx={{ borderRadius: 3, borderColor: report.recommendation === "NO_GO" ? "error.main" : reportPending ? "info.main" : "warning.main" }}><CardContent>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}>
-          <Stack direction="row" spacing={1} alignItems="center"><FactCheckOutlinedIcon color="primary" /><Box><Typography variant="h6" fontWeight={800}>{report.report_title}</Typography><Typography variant="caption" color="text.secondary">{report.role} · {report.prepared_for} · {new Date(report.generated_at).toLocaleString()}</Typography></Box></Stack>
-          <Chip label={`RELEASE: ${report.recommendation.replaceAll("_", "-")}`} color={report.recommendation === "NO_GO" ? "error" : "warning"} sx={{ fontWeight: 800 }} />
+          <Stack direction="row" spacing={1} alignItems="center"><FactCheckOutlinedIcon color="primary" /><Box><Typography variant="h6" fontWeight={800}>{report.report_title}</Typography><Typography variant="caption" color="text.secondary">{report.role} · {report.prepared_for}</Typography><Typography variant="caption" color="text.secondary" display="block">Last run: {report.last_run_at ? new Date(report.last_run_at).toLocaleString() : "Pending — execution is yet to be completed."}</Typography></Box></Stack>
+          <Chip label={`RELEASE: ${report.recommendation.replaceAll("_", "-")}`} color={report.recommendation === "NO_GO" ? "error" : reportPending ? "info" : "warning"} sx={{ fontWeight: 800 }} />
         </Stack>
-        <Alert severity={report.recommendation === "NO_GO" ? "error" : "warning"} sx={{ mt: 2 }}><b>{report.recommendation.replaceAll("_", "-")}</b> — {report.rationale}</Alert>
-        <Grid container spacing={1.5} sx={{ mt: .5 }}>
+        <Alert severity={report.recommendation === "NO_GO" ? "error" : reportPending ? "info" : "warning"} sx={{ mt: 2 }}><b>{report.recommendation.replaceAll("_", "-")}</b> — {report.rationale}</Alert>
+        {reportPending ? <Grid container spacing={1.5} sx={{ mt: .5 }}>
+          {[["Decision", "PENDING"], ["Execution", "Pending"], ["Functional", "Pending"], ["Non-functional", "Pending"], ["Compliance", "Pending"], ["Last run", "—"]].map(([label, value]) => <Grid item xs={6} sm={4} md={2} key={label}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}
+        </Grid> : <Grid container spacing={1.5} sx={{ mt: .5 }}>
           <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Designed cases</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.designed_test_cases}</Typography></Box></Grid>
           <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Executed</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.executed_test_cases ?? "—"}</Typography></Box></Grid>
           <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Pass rate</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.pass_rate === null ? "—" : `${report.metrics.pass_rate}%`}</Typography></Box></Grid>
           <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Failed / blocked</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.failed_count} / {report.metrics.blocked_count}</Typography></Box></Grid>
           <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Defects</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.defect_count ?? "—"}</Typography></Box></Grid>
           <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Open risks</Typography><Typography variant="h5" fontWeight={800}>{report.risk_matrix.filter((risk) => risk.status === "open" || risk.status === "pending_validation").length}</Typography></Box></Grid>
-        </Grid>
+        </Grid>}
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>{report.metrics.evidence_state}</Typography>
-        {report.executive_findings.length > 0 && <Stack spacing={.5} sx={{ mt: 1.5 }}>{report.executive_findings.map((finding) => <Typography key={finding} variant="body2">• {finding}</Typography>)}</Stack>}
-        {report.reported_issues.length > 0 && <Alert severity="warning" sx={{ mt: 1.5 }}><b>Context-reported status (unverified):</b><Stack spacing={.25} sx={{ mt: .5 }}>{report.reported_issues.map((issue) => <Typography key={issue} variant="body2">• {issue}</Typography>)}</Stack></Alert>}
+        {!reportPending && report.executive_findings.length > 0 && <Stack spacing={.5} sx={{ mt: 1.5 }}>{report.executive_findings.map((finding) => <Typography key={finding} variant="body2">• {finding}</Typography>)}</Stack>}
+        {!reportPending && report.reported_issues.length > 0 && <Alert severity="warning" sx={{ mt: 1.5 }}><b>Context-reported status (unverified):</b><Stack spacing={.25} sx={{ mt: .5 }}>{report.reported_issues.map((issue) => <Typography key={issue} variant="body2">• {issue}</Typography>)}</Stack></Alert>}
+        {reportPending ? <Grid container spacing={1.25} sx={{ mt: 2 }}>
+          {[
+            ["Functional testing", "Pending — execution is yet to be completed."],
+            ["Non-functional testing", "Pending — device, load and security evidence are required."],
+            ["Compliance verification", "Pending — audit logs and residency evidence are required."],
+            ["Risk matrix", "Pending — populated from conclusive findings."],
+            ["Engineering recommendations", "Pending — generated after evidence review."],
+          ].map(([title, detail]) => <Grid item xs={12} sm={6} key={title}><Box sx={{ p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}><Typography variant="body2" fontWeight={700}>{title}</Typography><Typography variant="caption" color="text.secondary">{detail}</Typography></Box></Grid>)}
+        </Grid> : <>
         <Divider sx={{ my: 2 }} />
         <Typography variant="subtitle1" fontWeight={800}>Application overview</Typography>
         <Grid container spacing={1.5} sx={{ mt: .25 }}>
@@ -634,6 +662,7 @@ export default function AutopilotPage() {
         <Typography variant="subtitle1" fontWeight={800} sx={{ mt: 2 }}>Engineering recommendations</Typography>
         <Stack spacing={.5} sx={{ mt: 1 }}>{report.recommendations.map((item) => <Typography key={item} variant="body2">• {item}</Typography>)}</Stack>
         <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1.5 }}>Evidence basis: {report.evidence.join(" · ")}</Typography>
+        </>}
       </CardContent></Card>}
       {analysis.warnings.length > 0 && <Alert severity="warning">{analysis.warnings.join(" ")}</Alert>}
       <Grid container spacing={2}>{[["Generated tests", stats.tests], ["Test suites", stats.suites], ["Autonomous-safe", stats.autonomous], ["Critical / high", stats.critical]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Card variant="outlined"><CardContent><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h4" fontWeight={800}>{value}</Typography></CardContent></Card></Grid>)}</Grid>
