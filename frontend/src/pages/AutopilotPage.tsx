@@ -397,6 +397,10 @@ export default function AutopilotPage() {
   };
   const selectProfile = (nextProfileId: string) => {
     const nextProfile = profiles.find((profile) => profile.id === nextProfileId) ?? DEFAULT_PROFILE_OPTIONS[0];
+    // A report is evidence for the context used by its job. Clear an older
+    // result when the governing profile changes so it cannot be mistaken for
+    // an assessment of the newly selected scope.
+    resetResult();
     setProfileId(nextProfile.id);
     setContext(contextForProfile(nextProfile));
     setContextSource("default");
@@ -405,6 +409,7 @@ export default function AutopilotPage() {
   };
   const generateContext = async (mode: "default" | "generate" | "improve") => {
     if (mode === "default") {
+      resetResult();
       setContext(contextForProfile(selectedProfile));
       setContextSource("default");
       setContextNotice(`${selectedProfile.name} brief applied. Review it before running.`);
@@ -421,6 +426,7 @@ export default function AutopilotPage() {
         platform: "Android",
         focus: "UAE fintech release readiness, functional QA and CBUAE/SCA audit evidence",
       }, { timeout: 90000 });
+      resetResult();
       setContext(response.data.context);
       setProfileId(response.data.profile_id || profileId);
       setContextSource(response.data.source);
