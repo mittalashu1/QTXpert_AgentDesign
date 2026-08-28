@@ -208,6 +208,11 @@ class Settings(BaseSettings):
     AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
     AUTOPILOT_SUITE_TIMEOUT_SECONDS: int = Field(default=900, ge=60, le=3600)
     AUTOPILOT_BROWSERSTACK_UPLOAD_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
+    # Optional reachable Appium endpoint for hosted deployments. A hosted
+    # Render service cannot reach a customer's laptop at 127.0.0.1; keep this
+    # unset unless Appium is exposed through an authenticated TLS tunnel or a
+    # private network endpoint.
+    AUTOPILOT_CUSTOM_APPIUM_URL: Optional[str] = None
 
     BROWSERSTACK_USERNAME: Optional[str] = None
     BROWSERSTACK_ACCESS_KEY: Optional[str] = None
@@ -218,6 +223,10 @@ class Settings(BaseSettings):
     @property
     def browserstack_configured(self) -> bool:
         return bool(self.BROWSERSTACK_USERNAME and self.BROWSERSTACK_ACCESS_KEY)
+
+    @property
+    def custom_appium_configured(self) -> bool:
+        return bool((self.AUTOPILOT_CUSTOM_APPIUM_URL or "").strip())
 
     # ------------------------------------------------------------------ #
     # Rate limiting
