@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Alert,
@@ -90,6 +90,15 @@ const metricDefinitions: Array<{ key: MetricKey; helper: string }> = [
   { key: "open_defects", helper: "requiring triage" },
   { key: "automation_candidates", helper: "ready for automation" },
 ];
+
+const metricIcons: Record<MetricKey, ReactNode> = {
+  requirements: <AssignmentOutlinedIcon />,
+  test_cases: <CheckCircleOutlineOutlinedIcon />,
+  execution_runs: <HistoryOutlinedIcon />,
+  pass_rate: <CheckCircleOutlineOutlinedIcon />,
+  open_defects: <BugReportOutlinedIcon />,
+  automation_candidates: <AutoAwesomeOutlinedIcon />,
+};
 
 const widgetDefinitions: Array<{ key: WidgetKey; label: string; description: string }> = [
   { key: "metrics", label: "Executive metrics", description: "The KPI cards at the top of the dashboard." },
@@ -329,10 +338,9 @@ export default function DashboardPage() {
             <Typography variant="caption" color="text.secondary">{visibleMetricDefinitions.length} of {metricDefinitions.length} metrics shown</Typography>
           </Stack>
           <Grid container spacing={2}>
-            {visibleMetricDefinitions.map(({ key, helper }, index) => {
+            {visibleMetricDefinitions.map(({ key, helper }) => {
               const value = metricValues[key];
               const tone = key === "open_defects" && Number(value) > 0 ? "error.main" : key === "pass_rate" ? "success.main" : "primary.main";
-              const icons = [<AssignmentOutlinedIcon key="requirements" />, <CheckCircleOutlineOutlinedIcon key="tests" />, <HistoryOutlinedIcon key="runs" />, <CheckCircleOutlineOutlinedIcon key="pass" />, <BugReportOutlinedIcon key="defects" />, <AutoAwesomeOutlinedIcon key="automation" />];
               return (
                 <Grid key={key} size={{ xs: 12, sm: 6, lg: 4 }}>
                   <Card variant="outlined" sx={{ height: "100%", borderRadius: 3, transition: "transform .2s ease, box-shadow .2s ease", "&:hover": { transform: "translateY(-2px)", boxShadow: 3 } }}>
@@ -342,7 +350,7 @@ export default function DashboardPage() {
                           <Typography variant="body2" color="text.secondary">{preferences.metricLabels[key]}</Typography>
                           <Typography variant="h3" sx={{ mt: 0.75, color: tone }}>{value}</Typography>
                         </Box>
-                        <Box sx={{ p: 1, borderRadius: 2, bgcolor: "action.hover", color: tone, display: "flex" }}>{icons[index]}</Box>
+                        <Box sx={{ p: 1, borderRadius: 2, bgcolor: "action.hover", color: tone, display: "flex" }}>{metricIcons[key]}</Box>
                       </Stack>
                       <Typography variant="caption" color="text.secondary">{helper}</Typography>
                       {key === "pass_rate" && <LinearProgress variant="determinate" value={Number(data?.pass_rate ?? 0)} color={data?.pass_rate && data.pass_rate >= 90 ? "success" : "primary"} sx={{ mt: 1.25, height: 5, borderRadius: 4 }} />}
