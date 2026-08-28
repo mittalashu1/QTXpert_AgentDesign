@@ -109,6 +109,7 @@ type AutomationTest = {
 type AutomationBundle = {
   job_id: string; schema_version: string; discovery_used: boolean; promoted_count: number;
   executable_count: number; discovery_required_count: number; approval_required_count: number;
+  bucket_counts?: Record<string, number>;
   tests: AutomationTest[];
 };
 type SuiteTestResult = {
