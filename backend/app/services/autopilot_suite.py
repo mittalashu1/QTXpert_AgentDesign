@@ -53,16 +53,36 @@ class AutopilotSuiteService:
         bundle = AutopilotIRCompiler().compile_bundle(analysis, discovery)
 
         requested_ids = set(request.test_ids)
-        candidates = [
+        requested_buckets = set(request.buckets)
+        selected = [
             test
             for test in bundle.tests
-            if test.readiness == "executable"
-            and self._supported(test)
-            and (not requested_ids or test.test_id in requested_ids)
+            if (not requested_ids or test.test_id in requested_ids)
+            and (not requested_buckets or test.bucket in requested_buckets)
         ][: request.max_tests]
+        candidates = [
+            test
+            for test in selected
+            if test.readiness == "executable" and self._supported(test)
+        ]
+        deferred = [test for test in selected if test not in candidates]
+        deferred_results = self._deferred_results(deferred) if request.include_deferred else []
 
         started = datetime.now(timezone.utc)
         start_perf = time.perf_counter()
+        if not selected:
+            finished = datetime.now(timezone.utc)
+            return AutopilotSuiteResult(
+                job_id=job_id,
+                status="blocked",
+                provider=request.provider,
+                started_at=started.isoformat(),
+                finished_at=finished.isoformat(),
+                duration_seconds=round(time.perf_counter() - start_perf, 2),
+                device_name=request.device_name,
+                error="No tests match the requested bucket or test selection.",
+                bucket_counts={},
+            )
         if not candidates:
             finished = datetime.now(timezone.utc)
             return AutopilotSuiteResult(
@@ -73,31 +93,38 @@ class AutopilotSuiteService:
                 finished_at=finished.isoformat(),
                 duration_seconds=round(time.perf_counter() - start_perf, 2),
                 device_name=request.device_name,
-                selected_count=0,
-                error="No safe deterministic executable tests are available for the requested selection.",
+                selected_count=len(selected),
+                executed_count=0,
+                deferred_count=len(deferred),
+                skipped_count=len(deferred_results),
+                bucket_counts=self._bucket_counts(selected),
+                error="No safe deterministic executable tests are available; deferred cases list their dependencies.",
+                tests=deferred_results,
             )
 
         apk_path = Path(job.get("apk_path") or "")
-        if not apk_path.is_file() and not request.appium_app:
-            raise RuntimeError("Uploaded APK artifact is unavailable for autonomous suite execution")
-
         app_reference = request.appium_app or str(apk_path)
-        appium_url = self.prototype.resolve_appium_url(request)
         browserstack_options: Dict[str, Any] | None = None
-        if request.provider == "browserstack":
-            app_reference = await self.prototype._browserstack_app_url(job_id, apk_path, analysis.sha256)
-            appium_url = self.settings.BROWSERSTACK_HUB_URL
-            browserstack_options = {
-                "userName": self.settings.BROWSERSTACK_USERNAME,
-                "accessKey": self.settings.BROWSERSTACK_ACCESS_KEY,
-                "projectName": self.settings.BROWSERSTACK_PROJECT_NAME,
-                "buildName": f"Autopilot Suite {analysis.app_name or analysis.package_name or job['filename']}",
-                "sessionName": f"Safe Suite {job_id[:8]}",
-                "debug": True,
-                "networkLogs": True,
-            }
-
+        results: list[AutopilotSuiteTestResult]
         try:
+            if not apk_path.is_file() and not request.appium_app:
+                raise RuntimeError("Uploaded APK artifact is unavailable for autonomous suite execution")
+            if request.provider == "browserstack":
+                # BrowserStack owns the hub URL; do not resolve a local Appium
+                # endpoint first. That was the source of the hosted suite error.
+                app_reference = await self.prototype._browserstack_app_url(job_id, apk_path, analysis.sha256)
+                appium_url = self.settings.BROWSERSTACK_HUB_URL
+                browserstack_options = {
+                    "userName": self.settings.BROWSERSTACK_USERNAME,
+                    "accessKey": self.settings.BROWSERSTACK_ACCESS_KEY,
+                    "projectName": self.settings.BROWSERSTACK_PROJECT_NAME,
+                    "buildName": f"Autopilot Suite {analysis.app_name or analysis.package_name or job['filename']}",
+                    "sessionName": f"Safe Suite {job_id[:8]}",
+                    "debug": True,
+                    "networkLogs": True,
+                }
+            else:
+                appium_url = self.prototype.resolve_appium_url(request)
             results = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._run_sync,
@@ -114,10 +141,22 @@ class AutopilotSuiteService:
                 ),
                 timeout=self.settings.AUTOPILOT_SUITE_TIMEOUT_SECONDS,
             )
-            error = None
         except Exception as exc:
             finished = datetime.now(timezone.utc)
             blocked = self.prototype._looks_like_connector_problem(exc)
+            connector_error = f"{type(exc).__name__}: {exc}"[:1200]
+            failure_results = [
+                AutopilotSuiteTestResult(
+                    test_id=test.test_id,
+                    title=test.title,
+                    status="blocked",
+                    bucket=test.bucket,
+                    readiness=test.readiness,
+                    dependency=test.dependency,
+                    error=connector_error,
+                )
+                for test in candidates
+            ]
             return AutopilotSuiteResult(
                 job_id=job_id,
                 status="blocked" if blocked else "failed",
@@ -126,20 +165,32 @@ class AutopilotSuiteService:
                 finished_at=finished.isoformat(),
                 duration_seconds=round(time.perf_counter() - start_perf, 2),
                 device_name=request.device_name,
-                selected_count=len(candidates),
-                promoted_count=sum(test.promoted_by_discovery for test in candidates),
-                error=f"{type(exc).__name__}: {exc}"[:1200],
+                selected_count=len(selected),
+                executed_count=0,
+                deferred_count=len(deferred),
+                skipped_count=len(deferred_results) + len(failure_results),
+                bucket_counts=self._bucket_counts(selected),
+                error=connector_error,
+                tests=failure_results + deferred_results,
             )
 
-        passed = sum(item.status == "passed" for item in results)
-        failed = sum(item.status == "failed" for item in results)
-        skipped = sum(item.status in {"skipped", "blocked"} for item in results)
-        if failed == 0 and passed == len(results):
+        result_map = {item.test_id: item for item in results}
+        deferred_map = {item.test_id: item for item in deferred_results}
+        ordered_results: list[AutopilotSuiteTestResult] = []
+        for test in selected:
+            item = result_map.get(test.test_id) or deferred_map.get(test.test_id)
+            if item is not None:
+                ordered_results.append(item)
+        passed = sum(item.status == "passed" for item in ordered_results)
+        failed = sum(item.status == "failed" for item in ordered_results)
+        blocked_count = sum(item.status == "blocked" for item in ordered_results)
+        skipped = sum(item.status == "skipped" for item in ordered_results)
+        if failed == 0 and blocked_count == 0 and skipped == 0 and passed == len(results):
             overall = "passed"
         elif passed > 0:
             overall = "partial"
         else:
-            overall = "failed"
+            overall = "blocked" if blocked_count else "failed"
 
         finished = datetime.now(timezone.utc)
         return AutopilotSuiteResult(
@@ -150,15 +201,39 @@ class AutopilotSuiteService:
             finished_at=finished.isoformat(),
             duration_seconds=round(time.perf_counter() - start_perf, 2),
             device_name=request.device_name,
-            selected_count=len(candidates),
+            selected_count=len(selected),
             executed_count=len(results),
+            deferred_count=len(deferred),
             passed_count=passed,
             failed_count=failed,
-            skipped_count=skipped,
+            skipped_count=skipped + blocked_count,
             promoted_count=sum(test.promoted_by_discovery for test in candidates),
-            error=error,
-            tests=results,
+            bucket_counts=self._bucket_counts(selected),
+            error=None,
+            tests=ordered_results,
         )
+
+    @staticmethod
+    def _bucket_counts(tests: list[QTXTestIR]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for test in tests:
+            counts[test.bucket] = counts.get(test.bucket, 0) + 1
+        return counts
+
+    @staticmethod
+    def _deferred_results(tests: list[QTXTestIR]) -> list[AutopilotSuiteTestResult]:
+        return [
+            AutopilotSuiteTestResult(
+                test_id=test.test_id,
+                title=test.title,
+                status="blocked",
+                bucket=test.bucket,
+                readiness=test.readiness,
+                dependency=test.dependency or test.readiness_reason,
+                error=test.readiness_reason or "This case is pending setup or safe deterministic locators.",
+            )
+            for test in tests
+        ]
 
     def _supported(self, test: QTXTestIR) -> bool:
         return bool(test.steps) and all(step.action in self.SUPPORTED_ACTIONS for step in test.steps)
@@ -230,6 +305,9 @@ class AutopilotSuiteService:
                         test_id=test.test_id,
                         title=test.title,
                         status=status,
+                        bucket=test.bucket,
+                        readiness=test.readiness,
+                        dependency=test.dependency,
                         duration_seconds=round(time.perf_counter() - test_started, 2),
                         error=error,
                         evidence=evidence,

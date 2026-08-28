@@ -20,10 +20,16 @@ import { uploadsApi } from "@/services/api";
 import { UploadedAsset } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 
+type TestBucket =
+  | "installation" | "page_level" | "functional" | "uat" | "ui" | "accessibility"
+  | "integration" | "performance" | "security" | "compatibility" | "resilience"
+  | "permissions" | "regression";
 type TestCase = {
   id: string; suite: string; title: string; priority: "critical" | "high" | "medium" | "low";
   objective: string; steps: string[]; expected: string[]; autonomous: boolean;
-  destructive: boolean; source: "deterministic" | "ai";
+  destructive: boolean; source: "deterministic" | "ai"; bucket?: TestBucket;
+  requires_auth?: boolean; requires_test_data?: boolean; dependency?: string | null;
+  evidence_required?: string[];
 };
 type Analysis = {
   job_id: string; filename: string; status: string; app_name?: string; package_name?: string;
@@ -97,7 +103,8 @@ type Discovery = {
 type AutomationTest = {
   test_id: string; title: string; suite: string; priority: "critical" | "high" | "medium" | "low";
   readiness: "executable" | "discovery_required" | "approval_required";
-  promoted_by_discovery: boolean; readiness_reason?: string | null;
+  bucket?: TestBucket; requires_auth?: boolean; requires_test_data?: boolean;
+  dependency?: string | null; promoted_by_discovery: boolean; readiness_reason?: string | null;
 };
 type AutomationBundle = {
   job_id: string; schema_version: string; discovery_used: boolean; promoted_count: number;
@@ -106,13 +113,14 @@ type AutomationBundle = {
 };
 type SuiteTestResult = {
   test_id: string; title: string; status: "passed" | "failed" | "blocked" | "skipped";
-  duration_seconds: number; error?: string | null;
+  bucket?: TestBucket; readiness?: "executable" | "discovery_required" | "approval_required" | null;
+  dependency?: string | null; duration_seconds: number; error?: string | null;
 };
 type SuiteResult = {
   job_id: string; status: "passed" | "failed" | "partial" | "blocked";
   provider: "browserstack" | "appium"; duration_seconds: number; selected_count: number;
-  executed_count: number; passed_count: number; failed_count: number; skipped_count: number;
-  promoted_count: number; error?: string | null; tests: SuiteTestResult[];
+  executed_count: number; deferred_count?: number; passed_count: number; failed_count: number; skipped_count: number;
+  promoted_count: number; bucket_counts?: Record<string, number>; error?: string | null; tests: SuiteTestResult[];
 };
 
 type ProfileOption = {
@@ -178,6 +186,25 @@ const DEFAULT_AUTOPILOT_CONTEXT = contextForProfile(DEFAULT_PROFILE_OPTIONS[0]);
 const priorityColor: Record<TestCase["priority"], "error" | "warning" | "info" | "default"> = {
   critical: "error", high: "warning", medium: "info", low: "default",
 };
+const TEST_BUCKETS: TestBucket[] = [
+  "installation", "page_level", "functional", "uat", "ui", "accessibility",
+  "integration", "performance", "security", "compatibility", "resilience",
+  "permissions", "regression",
+];
+const testBucketLabel: Record<TestBucket, string> = {
+  installation: "Installation", page_level: "Page-level", functional: "Functional",
+  uat: "UAT", ui: "UI", accessibility: "Accessibility", integration: "Integration",
+  performance: "Performance", security: "Security", compatibility: "Compatibility",
+  resilience: "Resilience", permissions: "Permissions", regression: "Regression",
+};
+function normalizedBucket(test: Pick<TestCase, "bucket"> | Pick<AutomationTest, "bucket"> | Pick<SuiteTestResult, "bucket">): TestBucket {
+  return test.bucket && TEST_BUCKETS.includes(test.bucket) ? test.bucket : "functional";
+}
+function testModeLabel(test: TestCase) {
+  if (test.destructive) return "Approval required";
+  if (test.requires_auth || test.requires_test_data || test.dependency) return "Setup required";
+  return "Autonomous-safe";
+}
 const riskColor: Record<DiscoveredControl["risk"], "success" | "warning" | "error"> = {
   safe: "success", review: "warning", blocked: "error",
 };
@@ -263,6 +290,8 @@ export default function AutopilotPage() {
   const [platformVersion, setPlatformVersion] = useState("14.0");
   const [appiumApp, setAppiumApp] = useState("");
   const [autoGrantPermissions, setAutoGrantPermissions] = useState(true);
+  const [testBucketFilter, setTestBucketFilter] = useState<"all" | TestBucket>("all");
+  const [suiteBucket, setSuiteBucket] = useState<"all" | TestBucket>("all");
 
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === profileId) ?? DEFAULT_PROFILE_OPTIONS[0],
@@ -405,7 +434,24 @@ export default function AutopilotPage() {
     suites: new Set(analysis.tests.map((test) => test.suite)).size,
     autonomous: analysis.tests.filter((test) => test.autonomous).length,
     critical: analysis.tests.filter((test) => ["critical", "high"].includes(test.priority)).length,
+    buckets: new Set(analysis.tests.map((test) => normalizedBucket(test))).size,
   } : null, [analysis]);
+  const bucketCounts = useMemo(() => {
+    const counts: Partial<Record<TestBucket, number>> = {};
+    for (const test of analysis?.tests ?? []) {
+      const bucket = normalizedBucket(test);
+      counts[bucket] = (counts[bucket] || 0) + 1;
+    }
+    return counts;
+  }, [analysis]);
+  const visibleTests = useMemo(
+    () => analysis?.tests.filter((test) => testBucketFilter === "all" || normalizedBucket(test) === testBucketFilter) ?? [],
+    [analysis, testBucketFilter],
+  );
+  const suiteExecutableCount = useMemo(
+    () => automation?.tests.filter((test) => test.readiness === "executable" && (suiteBucket === "all" || normalizedBucket(test) === suiteBucket)).length ?? 0,
+    [automation, suiteBucket],
+  );
   const selectedStoredApk = useMemo(() => storedApks.find((asset) => asset.id === selectedUploadId) ?? null, [storedApks, selectedUploadId]);
   const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen: screen.screen_id, control }))) ?? [], [discovery]);
 
@@ -501,7 +547,11 @@ export default function AutopilotPage() {
     setSuiteBusy(true); setError("");
     try {
       const response = await apiClient.post<SuiteResult>(`/autopilot/${analysis.job_id}/suite`, {
-        ...executionPayload(), max_tests: 8, test_ids: [],
+        ...executionPayload(),
+        max_tests: 20,
+        test_ids: [],
+        buckets: suiteBucket === "all" ? [] : [suiteBucket],
+        include_deferred: true,
       }, { timeout: 960000 });
       setSuite(response.data);
       await refreshReport(analysis.job_id);
@@ -687,14 +737,69 @@ export default function AutopilotPage() {
         </>}
       </CardContent></Card>}
       {analysis.warnings.length > 0 && <Alert severity="warning">{analysis.warnings.join(" ")}</Alert>}
-      <Grid container spacing={2}>{[["Generated tests", stats.tests], ["Test suites", stats.suites], ["Autonomous-safe", stats.autonomous], ["Critical / high", stats.critical]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Card variant="outlined"><CardContent><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h4" fontWeight={800}>{value}</Typography></CardContent></Card></Grid>)}</Grid>
+      <Grid container spacing={2}>{[["Generated tests", stats.tests], ["Coverage buckets", stats.buckets], ["Autonomous-safe", stats.autonomous], ["Critical / high", stats.critical]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Card variant="outlined"><CardContent><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h4" fontWeight={800}>{value}</Typography></CardContent></Card></Grid>)}</Grid>
 
       <Grid container spacing={3}>
         <Grid item xs={12} lg={8}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><AccountTreeOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Application intelligence</Typography></Stack><Typography sx={{ mt: 1.5 }}>{analysis.app_summary}</Typography><Divider sx={{ my: 2 }} /><Grid container spacing={2}><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Application</Typography><Typography fontWeight={700}>{analysis.app_name || "Unknown"}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Domain</Typography><Typography fontWeight={700}>{analysis.inferred_domain}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Version</Typography><Typography fontWeight={700}>{analysis.version_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Package</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.package_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Main activity</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.main_activity || "—"}</Typography></Grid></Grid></CardContent></Card></Grid>
         <Grid item xs={12} lg={4}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><SecurityOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Guardrails</Typography></Stack><Stack spacing={1} sx={{ mt: 1.5 }}><Chip label="Safe discovery: enabled" color="success" variant="outlined" /><Chip label="Transactions / destructive actions: blocked" color="warning" variant="outlined" /><Chip label={`Debuggable: ${analysis.debuggable === true ? "YES" : analysis.debuggable === false ? "No" : "Unknown"}`} variant="outlined" /></Stack></CardContent></Card></Grid>
       </Grid>
 
-      <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><BugReportOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Autonomous test portfolio</Typography></Stack><TableContainer sx={{ mt: 1.5, maxHeight: 420 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Suite</TableCell><TableCell>Priority</TableCell><TableCell>Source</TableCell><TableCell>Mode</TableCell></TableRow></TableHead><TableBody>{analysis.tests.map((test) => <TableRow key={test.id} hover><TableCell sx={{ minWidth: 300 }}><Typography fontWeight={700} variant="body2">{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.objective}</Typography></TableCell><TableCell>{test.suite}</TableCell><TableCell><Chip size="small" label={test.priority.toUpperCase()} color={priorityColor[test.priority]} variant="outlined" /></TableCell><TableCell>{test.source === "ai" ? "AI" : "RULE"}</TableCell><TableCell><Chip size="small" label={test.destructive ? "Approval required" : "Autonomous"} color={test.destructive ? "warning" : "success"} variant="outlined" /></TableCell></TableRow>)}</TableBody></Table></TableContainer></CardContent></Card>
+      <Card variant="outlined"><CardContent>
+        <Stack direction="row" spacing={1} alignItems="center">
+          <BugReportOutlinedIcon color="primary" />
+          <Box>
+            <Typography variant="h6" fontWeight={800}>Complete test coverage plan</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Autopilot always designs the full app plan. Functional, UAT, page-level, UI, installation, integration,
+              performance, security, compatibility and regression cases remain pending until their required evidence exists.
+            </Typography>
+          </Box>
+        </Stack>
+        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1.5 }}>
+          <Chip size="small" label={`All (${stats.tests})`} color={testBucketFilter === "all" ? "primary" : "default"} variant={testBucketFilter === "all" ? "filled" : "outlined"} onClick={() => setTestBucketFilter("all")} />
+          {TEST_BUCKETS.filter((bucket) => bucketCounts[bucket]).map((bucket) => (
+            <Chip
+              key={bucket}
+              size="small"
+              label={`${testBucketLabel[bucket]} (${bucketCounts[bucket]})`}
+              color={testBucketFilter === bucket ? "primary" : "default"}
+              variant={testBucketFilter === bucket ? "filled" : "outlined"}
+              onClick={() => setTestBucketFilter(bucket)}
+            />
+          ))}
+        </Stack>
+        <Alert severity="info" sx={{ mt: 1.5 }}>
+          A generated case is a plan, not a pass. Authenticated journeys require a secure non-production credential reference,
+          approved test data and an oracle/reset hook; no password is stored in the context or sent to the model.
+        </Alert>
+        <TableContainer sx={{ mt: 1.5, maxHeight: 460 }}>
+          <Table stickyHeader size="small">
+            <TableHead><TableRow>
+              <TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Priority</TableCell>
+              <TableCell>Source</TableCell><TableCell>Execution state</TableCell>
+            </TableRow></TableHead>
+            <TableBody>
+              {visibleTests.map((test) => {
+                const bucket = normalizedBucket(test);
+                const setupRequired = Boolean(test.requires_auth || test.requires_test_data || test.dependency);
+                return <TableRow key={test.id} hover>
+                  <TableCell sx={{ minWidth: 320 }}>
+                    <Typography fontWeight={700} variant="body2">{test.title}</Typography>
+                    <Typography variant="caption" color="text.secondary">{test.id} · {test.objective}</Typography>
+                  </TableCell>
+                  <TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell>
+                  <TableCell><Chip size="small" label={test.priority.toUpperCase()} color={priorityColor[test.priority]} variant="outlined" /></TableCell>
+                  <TableCell>{test.source === "ai" ? "AI" : "RULE"}</TableCell>
+                  <TableCell sx={{ minWidth: 250 }}>
+                    <Chip size="small" label={testModeLabel(test)} color={test.destructive ? "warning" : setupRequired ? "info" : "success"} variant="outlined" />
+                    {test.dependency && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>{test.dependency}</Typography>}
+                  </TableCell>
+                </TableRow>;
+              })}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </CardContent></Card>
 
       <Card variant="outlined"><CardContent>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Map screens and semantic controls from the running Android app. Payments, transfers, delete, submit, confirm and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : "Run discovery"}</Button></Stack></Stack>
@@ -703,9 +808,29 @@ export default function AutopilotPage() {
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent>
-        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><SmartToyOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Semantic automation & autonomous safe suite</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>QTX Test IR promotes a discovered journey only when every interaction has a safe deterministic locator and a deterministic assertion. Input-dependent, ambiguous and approval-required flows remain blocked.</Typography></Box><Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || !automation || automation.executable_count === 0} onClick={runSuite}>{suiteBusy ? "Running suite…" : "Run autonomous safe suite"}</Button></Stack>
-        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"}</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 320 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Readiness</TableCell><TableCell>Promotion</TableCell><TableCell>Reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 30).map((test) => <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell>{test.promoted_by_discovery ? <Chip size="small" label="Discovery → executable" color="success" variant="outlined" /> : "—"}</TableCell><TableCell sx={{ maxWidth: 420 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || "—"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer></>}
-        {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe suite: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} skipped · {suite.duration_seconds}s{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 320 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Status</TableCell><TableCell>Duration</TableCell><TableCell>Result</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell>{test.duration_seconds}s</TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || "Evidence captured"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>}</>}
+        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}>
+          <Box>
+            <Stack direction="row" spacing={1} alignItems="center"><SmartToyOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Semantic automation & safe execution</Typography></Stack>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>
+              Run only cases with safe deterministic actions. Functional/UAT cases are still shown with their setup dependency;
+              they cannot be reported as passed until credentials, data, locators and assertions are supplied.
+            </Typography>
+          </Box>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+            <FormControl size="small" sx={{ minWidth: 170 }}>
+              <InputLabel id="suite-bucket-label">Suite bucket</InputLabel>
+              <Select labelId="suite-bucket-label" label="Suite bucket" value={suiteBucket} onChange={(event) => setSuiteBucket(event.target.value as "all" | TestBucket)}>
+                <MenuItem value="all">All safe cases</MenuItem>
+                {TEST_BUCKETS.filter((bucket) => (automation?.bucket_counts?.[bucket] || bucketCounts[bucket])).map((bucket) => <MenuItem key={bucket} value={bucket}>{testBucketLabel[bucket]}</MenuItem>)}
+              </Select>
+            </FormControl>
+            <Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0} onClick={runSuite}>
+              {suiteBusy ? "Running suite…" : suiteBucket === "all" ? "Run safe subset" : `Run ${testBucketLabel[suiteBucket]} safe subset`}
+            </Button>
+          </Stack>
+        </Stack>
+        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · full plan buckets are listed above</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 80).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.dependency || test.readiness_reason || "—"}</Typography></TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
+        {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe subset: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / result</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || "Evidence captured"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>

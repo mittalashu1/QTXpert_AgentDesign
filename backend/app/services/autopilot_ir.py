@@ -32,6 +32,7 @@ class AutopilotIRCompiler:
         "QT-AUTO-SMOKE-001",
         "QT-AUTO-SMOKE-002",
         "QT-AUTO-UX-001",
+        "QT-AUTO-UI-001",
     }
     _TAP_RE = re.compile(r"^(?:tap|click|open|navigate\s+to|go\s+to|select|choose|press)\s+(.+)$", re.I)
     _ASSERT_RE = re.compile(r"^(?:verify|check|ensure|assert|observe|validate)\s+(.+)$", re.I)
@@ -48,6 +49,9 @@ class AutopilotIRCompiler:
         discovery: Optional[AutopilotDiscoveryResult] = None,
     ) -> AutopilotAutomationBundle:
         compiled = [self.compile_test(test, analysis, discovery) for test in analysis.tests]
+        bucket_counts: dict[str, int] = {}
+        for test in compiled:
+            bucket_counts[test.bucket] = bucket_counts.get(test.bucket, 0) + 1
         return AutopilotAutomationBundle(
             job_id=analysis.job_id,
             generated_at=datetime.now(timezone.utc).isoformat(),
@@ -56,6 +60,7 @@ class AutopilotIRCompiler:
             executable_count=sum(test.readiness == "executable" for test in compiled),
             discovery_required_count=sum(test.readiness == "discovery_required" for test in compiled),
             approval_required_count=sum(test.readiness == "approval_required" for test in compiled),
+            bucket_counts=bucket_counts,
             tests=compiled,
         )
 
@@ -72,6 +77,16 @@ class AutopilotIRCompiler:
         if test.destructive:
             readiness = "approval_required"
             readiness_reason = "The test is marked destructive and requires explicit customer approval."
+        elif test.requires_auth or test.requires_test_data:
+            readiness = "discovery_required"
+            dependencies = []
+            if test.requires_auth:
+                dependencies.append("a secure non-production credential reference")
+            if test.requires_test_data:
+                dependencies.append("approved synthetic test data/reset hooks")
+            readiness_reason = test.dependency or (
+                "Authenticated execution requires " + " and ".join(dependencies) + "."
+            )
         elif test.id in self.EXECUTABLE_IDS:
             readiness = "executable"
             readiness_reason = "Deterministic platform-level Autopilot check."
@@ -94,6 +109,10 @@ class AutopilotIRCompiler:
             priority=test.priority,
             readiness=readiness,
             source=test.source,
+            bucket=test.bucket,
+            requires_auth=test.requires_auth,
+            requires_test_data=test.requires_test_data,
+            dependency=test.dependency,
             promoted_by_discovery=promoted,
             readiness_reason=readiness_reason,
             steps=ir_steps,
@@ -120,6 +139,11 @@ class AutopilotIRCompiler:
             return [
                 QTXIRStep(action="inspect_ui", description="Read Android UI hierarchy and enumerate semantic controls."),
                 QTXIRStep(action="capture_evidence", description="Record UI hierarchy for accessibility and semantic analysis."),
+            ]
+        if test.id == "QT-AUTO-UI-001":
+            return [
+                QTXIRStep(action="inspect_ui", description="Inspect the current page for layout, labels and interaction metadata."),
+                QTXIRStep(action="capture_evidence", description="Capture the page screenshot and UI hierarchy for visual review."),
             ]
         if test.id in {"QT-AUTO-SEC-001", "QT-AUTO-SEC-DEBUG"}:
             return [QTXIRStep(action="static_assertion", description=step) for step in test.steps]

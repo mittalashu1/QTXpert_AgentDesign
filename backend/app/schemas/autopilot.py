@@ -6,6 +6,23 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+AutopilotTestBucket = Literal[
+    "installation",
+    "page_level",
+    "functional",
+    "uat",
+    "ui",
+    "accessibility",
+    "integration",
+    "performance",
+    "security",
+    "compatibility",
+    "resilience",
+    "permissions",
+    "regression",
+]
+
+
 class AutopilotTest(BaseModel):
     id: str
     suite: str
@@ -17,6 +34,14 @@ class AutopilotTest(BaseModel):
     autonomous: bool = True
     destructive: bool = False
     source: Literal["deterministic", "ai"] = "deterministic"
+    # A bucket describes the kind of coverage, independently from whether the
+    # case is executable now. This keeps the generated plan complete while
+    # allowing the runner/report to remain evidence-led.
+    bucket: AutopilotTestBucket = "functional"
+    requires_auth: bool = False
+    requires_test_data: bool = False
+    dependency: Optional[str] = None
+    evidence_required: List[str] = Field(default_factory=list)
 
 
 class AutopilotAnalysis(BaseModel):
@@ -211,6 +236,10 @@ class QTXTestIR(BaseModel):
     priority: Literal["critical", "high", "medium", "low"]
     readiness: Literal["executable", "discovery_required", "approval_required"]
     source: Literal["deterministic", "ai"]
+    bucket: AutopilotTestBucket = "functional"
+    requires_auth: bool = False
+    requires_test_data: bool = False
+    dependency: Optional[str] = None
     promoted_by_discovery: bool = False
     readiness_reason: Optional[str] = None
     steps: List[QTXIRStep] = Field(default_factory=list)
@@ -228,6 +257,7 @@ class AutopilotAutomationBundle(BaseModel):
     executable_count: int = 0
     discovery_required_count: int = 0
     approval_required_count: int = 0
+    bucket_counts: Dict[str, int] = Field(default_factory=dict)
     tests: List[QTXTestIR] = Field(default_factory=list)
 
 
@@ -350,16 +380,21 @@ class AutopilotDiscoveryResult(BaseModel):
 
 
 class AutopilotSuiteRequest(AutopilotExecutionRequest):
-    """Execute only IR cases that QTXpert has proven safe and deterministic."""
+    """Execute safe IR cases and report deferred cases with their dependencies."""
 
     test_ids: List[str] = Field(default_factory=list, max_length=20)
+    buckets: List[AutopilotTestBucket] = Field(default_factory=list, max_length=20)
     max_tests: int = Field(default=8, ge=1, le=20)
+    include_deferred: bool = True
 
 
 class AutopilotSuiteTestResult(BaseModel):
     test_id: str
     title: str
     status: Literal["passed", "failed", "blocked", "skipped"]
+    bucket: AutopilotTestBucket = "functional"
+    readiness: Optional[Literal["executable", "discovery_required", "approval_required"]] = None
+    dependency: Optional[str] = None
     duration_seconds: float = 0
     error: Optional[str] = None
     evidence: Dict[str, Any] = Field(default_factory=dict)
@@ -375,10 +410,12 @@ class AutopilotSuiteResult(BaseModel):
     device_name: str
     selected_count: int = 0
     executed_count: int = 0
+    deferred_count: int = 0
     passed_count: int = 0
     failed_count: int = 0
     skipped_count: int = 0
     promoted_count: int = 0
+    bucket_counts: Dict[str, int] = Field(default_factory=dict)
     error: Optional[str] = None
     tests: List[AutopilotSuiteTestResult] = Field(default_factory=list)
 
