@@ -1062,8 +1062,21 @@ class AutopilotPrototypeService:
             driver.get_screenshot_as_file(str(screenshot_path))
             page_source = driver.page_source or ""
             source_path.write_text(page_source, encoding="utf-8")
-            current_package = getattr(driver, "current_package", None)
-            current_activity = getattr(driver, "current_activity", None)
+            # BrowserStack's Appium build does not expose every optional
+            # mobile command (notably getCurrentPackage). Treat these values
+            # as advisory and keep the page-source package check authoritative.
+            try:
+                current_package = getattr(driver, "current_package", None)
+            except Exception:
+                current_package = None
+            try:
+                current_activity = getattr(driver, "current_activity", None)
+            except Exception:
+                current_activity = None
+            try:
+                orientation = getattr(driver, "orientation", None)
+            except Exception:
+                orientation = None
             AutopilotPrototypeService._validate_runtime_state(
                 page_source,
                 current_package,
@@ -1073,12 +1086,15 @@ class AutopilotPrototypeService:
                 "session_id": driver.session_id,
                 "current_package": current_package,
                 "current_activity": current_activity,
-                "orientation": getattr(driver, "orientation", None),
+                "orientation": orientation,
                 "page_source_chars": source_path.stat().st_size if source_path.exists() else 0,
                 "expected_package": expected_package,
             }
         finally:
-            driver.quit()
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
     @staticmethod
     def _validate_runtime_state(
