@@ -383,12 +383,28 @@ export default function AutopilotPage() {
   }, [profiles, refreshExecutionHistory, refreshReport]);
   const pollAnalysis = useCallback(async (jobId: string) => {
     const deadline = Date.now() + 20 * 60 * 1000;
+    let transientFailures = 0;
     while (Date.now() < deadline) {
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
-      const job = (await apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 })).data;
-      applyJob(job);
-      if (job.status === "failed") throw new Error(job.error || "Autopilot analysis failed");
-      if (job.status === "analyzed" && job.analysis) return job.analysis;
+      try {
+        const job = (await apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 })).data;
+        transientFailures = 0;
+        // Clear a temporary connection notice as soon as the saved job is
+        // reachable again. A failed job still sets its own actionable error.
+        setError("");
+        applyJob(job);
+        if (job.status === "failed") throw new Error(job.error || "Autopilot analysis failed");
+        if (job.status === "analyzed" && job.analysis) return job.analysis;
+      } catch (err) {
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        const retryable = !status || status === 408 || status === 425 || status === 429 || status >= 500;
+        if (!retryable) throw err;
+        transientFailures += 1;
+        // Render instance replacement, cold starts and short network blips
+        // must not discard a job that is persisted in the database.
+        setError(`Temporary connection interruption while checking analysis status. Retrying (${transientFailures})…`);
+        await new Promise((resolve) => window.setTimeout(resolve, Math.min(10000, 2000 + transientFailures * 1000)));
+      }
     }
     throw new Error("Analysis is still running after 20 minutes. The job is saved; retry status shortly.");
   }, [applyJob]);
@@ -406,7 +422,12 @@ export default function AutopilotPage() {
           await pollAnalysis(job.job_id);
           if (active) setBusy(false);
         }
-      } catch { if (active) setBusy(false); }
+      } catch (err) {
+        if (active) {
+          setBusy(false);
+          setError(readableError(err, "Unable to restore the latest Autopilot analysis"));
+        }
+      }
     };
     void restore();
     return () => { active = false; };
@@ -596,8 +617,10 @@ export default function AutopilotPage() {
         { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId },
         { timeout: 300000 },
       );
+      // Keep the last completed analysis visible while the replacement job
+      // is being persisted/polled. The new result replaces it atomically.
+      setDiscovery(null); setAutomation(null); setSuite(null);
       applyJob(response.data);
-      setAnalysis(null);
       await pollAnalysis(response.data.job_id);
       await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id);
     } catch (err) { setError(readableError(err, "Autopilot rerun failed")); }
