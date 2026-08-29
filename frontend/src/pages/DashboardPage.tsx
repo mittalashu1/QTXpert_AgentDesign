@@ -92,7 +92,7 @@ const metricDefinitions: Array<{ key: MetricKey; helper: string }> = [
   { key: "requirements", helper: "requirements in scope" },
   { key: "test_cases", helper: "designed test cases" },
   { key: "execution_runs", helper: "recorded execution cycles" },
-  { key: "pass_rate", helper: "across completed checks" },
+  { key: "pass_rate", helper: "passed tests across all execution results" },
   { key: "open_defects", helper: "requiring triage" },
   { key: "automation_candidates", helper: "ready for automation" },
 ];
@@ -325,6 +325,9 @@ export default function DashboardPage() {
             {visibleMetricDefinitions.map(({ key, helper }) => {
               const value = metricValues[key];
               const tone = key === "open_defects" && Number(value) > 0 ? "error.main" : key === "pass_rate" ? "success.main" : "primary.main";
+              const metricHelper = key === "pass_rate" && data
+                ? `${data.passed_tests} passed · `${data.executed_tests} executed of `${data.total_execution_tests} total tests`
+                : helper;
               return (
                 <Grid key={key} size={{ xs: 12, sm: 6, lg: 4 }}>
                   <Card variant="outlined" sx={{ height: "100%", borderRadius: 3, transition: "transform .2s ease, box-shadow .2s ease", "&:hover": { transform: "translateY(-2px)", boxShadow: 3 } }}>
@@ -337,7 +340,7 @@ export default function DashboardPage() {
                           </Box>
                           <Box sx={{ p: 1, borderRadius: 2, bgcolor: "action.hover", color: tone, display: "flex" }}>{metricIcons[key]}</Box>
                         </Stack>
-                        <Typography variant="caption" color="text.secondary">{helper}</Typography>
+                        <Typography variant="caption" color="text.secondary">{metricHelper}</Typography>
                         {key === "pass_rate" && <LinearProgress variant="determinate" value={Number(data?.pass_rate ?? 0)} color={data?.pass_rate && data.pass_rate >= 90 ? "success" : "primary"} sx={{ mt: 1.25, height: 5, borderRadius: 4 }} />}
                       </CardContent>
                     </CardActionArea>
@@ -384,7 +387,7 @@ export default function DashboardPage() {
                         <Typography variant="body2" fontWeight={700}>{data?.pass_rate ?? 0}%</Typography>
                       </Stack>
                       <LinearProgress variant="determinate" value={data?.pass_rate ?? 0} color={data?.pass_rate && data.pass_rate >= 90 ? "success" : "primary"} sx={{ height: 7, borderRadius: 4 }} />
-                      <Typography variant="caption" color="text.secondary">Based on completed execution results</Typography>
+                      <Typography variant="caption" color="text.secondary">{data?.passed_tests ?? 0} passed · {data?.executed_tests ?? 0} executed of {data?.total_execution_tests ?? 0} total tests</Typography>
                     </Box>
                   </Stack>
                 </CardContent>
