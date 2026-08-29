@@ -40,6 +40,11 @@ function categoryLabel(category: string) {
   return category.replaceAll("_", " ").replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
+function isExecutionEvidence(asset: UploadedAsset) {
+  return ["autopilot_evidence", "execution_evidence"].includes(asset.category)
+    || ["autopilot_evidence", "execution_report"].includes(asset.source_module);
+}
+
 export default function UploadsPage() {
   const queryClient = useQueryClient();
   const { selectedProjectId, selectedProject } = useSelectedProject();
@@ -77,7 +82,10 @@ export default function UploadsPage() {
     onError: (reason: any) => setError(reason?.response?.data?.detail || reason?.message || "Delete failed"),
   });
 
-  const rows = uploadsQuery.data ?? [];
+  // Execution evidence is report-owned. Keep the original APK/IPA and input
+  // files reusable here, but do not mix screenshots/page sources into the
+  // repository list that users treat as inputs.
+  const rows = (uploadsQuery.data ?? []).filter((asset) => !isExecutionEvidence(asset));
   const summary = useMemo(() => ({
     files: rows.length,
     apk: rows.filter((item) => item.category === "apk").length,
@@ -127,6 +135,7 @@ export default function UploadsPage() {
       </Stack>
 
       {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
+      <Alert severity="info">Original inputs are stored here for reuse. Execution screenshots, page sources and per-case outcomes are available in Test reports.</Alert>
       {(uploadMutation.isPending || uploadsQuery.isLoading) && <LinearProgress />}
 
       <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
@@ -164,7 +173,7 @@ export default function UploadsPage() {
             <Box sx={{ py: 7, textAlign: "center" }}>
               <FolderOutlinedIcon sx={{ fontSize: 48, color: "text.disabled", mb: 1 }} />
               <Typography fontWeight={700}>No files in this project yet</Typography>
-              <Typography variant="body2" color="text.secondary">Files added from Document Intelligence, Test Design, Test Data and Autopilot will appear here.</Typography>
+              <Typography variant="body2" color="text.secondary">Add APK/IPA packages, documents and test data here. Execution evidence is intentionally kept with its report.</Typography>
             </Box>
           ) : (
             <TableContainer sx={{ mt: 2 }}>
@@ -190,3 +199,4 @@ export default function UploadsPage() {
     </Stack>
   );
 }
+
