@@ -185,6 +185,8 @@ export interface GenerationRunSummary {
 
 export type ExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type ExecutionResultStatus = "pending" | "passed" | "failed" | "blocked" | "skipped";
+export type ExecutionTargetKind = "web" | "android" | "ios";
+export type ExecutionProvider = "playwright" | "browserstack" | "appium";
 
 export interface Defect {
   id: string;
@@ -214,7 +216,12 @@ export interface ExecutionRun {
   name: string;
   status: ExecutionStatus;
   browser: string;
-  base_url: string;
+  base_url: string | null;
+  target_kind: ExecutionTargetKind;
+  provider: ExecutionProvider;
+  app_asset_id: string | null;
+  device_name: string | null;
+  platform_version: string | null;
   total_tests: number;
   passed_tests: number;
   failed_tests: number;
