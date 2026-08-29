@@ -634,6 +634,7 @@ class AutopilotPrototypeService:
             AutopilotTest(
                 id="QT-AUTO-SMOKE-001",
                 suite="Smoke",
+                bucket="installation",
                 title="Install and cold-launch application",
                 priority="critical",
                 objective="Verify the uploaded build installs and reaches a stable foreground UI without an immediate crash.",
@@ -643,6 +644,7 @@ class AutopilotPrototypeService:
             AutopilotTest(
                 id="QT-AUTO-SMOKE-002",
                 suite="Smoke",
+                bucket="resilience",
                 title="Background and foreground recovery",
                 priority="high",
                 objective="Verify the app survives a basic lifecycle interruption.",
@@ -652,6 +654,7 @@ class AutopilotPrototypeService:
             AutopilotTest(
                 id="QT-AUTO-UX-001",
                 suite="Accessibility",
+                bucket="accessibility",
                 title="Initial-screen accessibility and semantic control scan",
                 priority="medium",
                 objective="Identify missing labels, inaccessible controls and obvious semantic UI defects on discovered entry screens.",
@@ -661,11 +664,119 @@ class AutopilotPrototypeService:
             AutopilotTest(
                 id="QT-AUTO-SEC-001",
                 suite="Security",
+                bucket="security",
                 title="Application package security posture baseline",
                 priority="high",
                 objective="Baseline manifest exposure, requested permissions and debug posture before deeper dynamic security testing.",
                 steps=["Inspect Android manifest", "Inventory permissions, exported components and debug posture", "Flag high-risk configuration for review"],
                 expected=["No unexplained high-risk package configuration remains unreviewed"],
+            ),
+            AutopilotTest(
+                id="QT-AUTO-PAGE-001",
+                suite="Page-level",
+                bucket="page_level",
+                title="Screen inventory and navigation coverage",
+                priority="high",
+                objective="Discover every safely reachable screen and maintain an evidence-backed navigation map.",
+                steps=["Inventory runtime screens", "Map safe navigation controls and transitions", "Record unreachable or approval-gated pages"],
+                expected=["Each discovered screen has a stable identity, entry path and captured UI hierarchy"],
+                dependency="Runtime screen discovery and an approved navigation map are required.",
+            ),
+            AutopilotTest(
+                id="QT-AUTO-FUNC-001",
+                suite="Functional",
+                bucket="functional",
+                title="Authenticated end-to-end functional journey",
+                priority="critical",
+                objective="Validate a complete release-critical business journey from authentication through its safe terminal state.",
+                steps=["Authenticate with an approved non-production account", "Execute the configured critical journey", "Verify business and API outcomes", "Run approved cleanup"],
+                expected=["The journey completes with correct state, messages, persistence and integration outcomes"],
+                requires_auth=True,
+                requires_test_data=True,
+                dependency="A secure non-production credential reference, role permissions, seeded test data, environment URL and reset hook are required.",
+                evidence_required=["journey screenshots", "API or business oracle", "cleanup result"],
+            ),
+            AutopilotTest(
+                id="QT-AUTO-FUNC-002",
+                suite="Functional negative paths",
+                bucket="functional",
+                title="Validation, negative and recovery paths",
+                priority="high",
+                objective="Verify boundary, invalid-input, backend-error and retry behavior without using production data.",
+                steps=["Load representative synthetic data", "Exercise approved negative and boundary conditions", "Observe error and recovery behavior", "Verify no invalid state is persisted"],
+                expected=["Validation is specific and controlled, recovery is possible and invalid state is not committed"],
+                requires_test_data=True,
+                dependency="Approved acceptance criteria, representative synthetic data and backend error/oracle access are required.",
+            ),
+            AutopilotTest(
+                id="QT-AUTO-UAT-001",
+                suite="UAT",
+                bucket="uat",
+                title="Business acceptance journey",
+                priority="critical",
+                objective="Validate signed-off user acceptance criteria for the primary business role and journey.",
+                steps=["Load signed-off acceptance criteria", "Authenticate as the approved UAT role", "Execute the primary business scenario with synthetic data", "Compare the outcome with acceptance evidence"],
+                expected=["Every acceptance criterion has a conclusive pass/fail result with traceable evidence"],
+                requires_auth=True,
+                requires_test_data=True,
+                dependency="Signed-off acceptance criteria, a non-production role, test data, an environment and cleanup hook are required.",
+            ),
+            AutopilotTest(
+                id="QT-AUTO-UI-001",
+                suite="UI",
+                bucket="ui",
+                title="Page-level UI visual and interaction baseline",
+                priority="medium",
+                objective="Capture an initial evidence baseline for layout, labels, viewport behavior and safe interactions.",
+                steps=["Inspect the current page layout and controls", "Capture screenshot and UI hierarchy", "Compare against approved device and visual baselines"],
+                expected=["The visible page has no obvious clipping, overlap, unreadable labels or inaccessible safe controls"],
+                dependency="Runtime screen discovery, supported viewport matrix and approved visual baselines are required.",
+            ),
+            AutopilotTest(
+                id="QT-AUTO-INTEGRATION-001",
+                suite="Integration",
+                bucket="integration",
+                title="Backend API and third-party integration contracts",
+                priority="high",
+                objective="Validate configured backend and third-party contracts across approved app journeys.",
+                steps=["Exercise approved API-backed journeys", "Correlate UI outcome with the trusted API oracle", "Verify timeout, error and retry contracts"],
+                expected=["UI and backend outcomes agree and integration failures are handled without data corruption"],
+                requires_test_data=True,
+                dependency="Non-production endpoints, API/oracle access, synthetic data and reset capability are required.",
+            ),
+            AutopilotTest(
+                id="QT-AUTO-PERF-001",
+                suite="Performance",
+                bucket="performance",
+                title="Startup, responsiveness and resource footprint",
+                priority="high",
+                objective="Measure startup and key interaction responsiveness on the approved device matrix.",
+                steps=["Measure cold and warm startup", "Measure key interaction latency", "Capture CPU, memory, network and battery indicators"],
+                expected=["Observed measurements are reported against approved thresholds without inventing a pass decision"],
+                dependency="Performance thresholds, representative devices and an approved measurement environment are required.",
+            ),
+            AutopilotTest(
+                id="QT-AUTO-COMPAT-001",
+                suite="Compatibility",
+                bucket="compatibility",
+                title="Supported Android and iOS device matrix",
+                priority="high",
+                objective="Validate installation, launch and primary safe journeys across the supported OS/device matrix.",
+                steps=["Install the release build on each approved device and OS", "Run launch and safe navigation checks", "Record platform-specific differences"],
+                expected=["Compatibility outcomes are traceable by device, OS and application version"],
+                dependency="A signed iOS build is required for iOS coverage; Android APK evidence applies only to Android.",
+            ),
+            AutopilotTest(
+                id="QT-AUTO-REG-001",
+                suite="Regression",
+                bucket="regression",
+                title="Repeatable release regression pack",
+                priority="high",
+                objective="Re-execute an approved baseline and compare the current build with the previous release.",
+                steps=["Load the selected baseline suite", "Execute eligible safe checks", "Compare results and evidence with the prior build", "Flag new or changed failures"],
+                expected=["Every baseline case has a current outcome and version-to-version comparison"],
+                requires_test_data=True,
+                dependency="A selected baseline, stable synthetic data and reset/cleanup reference are required.",
             ),
         ]
         if "android.permission.INTERNET" in meta.get("permissions", []):
@@ -673,6 +784,7 @@ class AutopilotPrototypeService:
                 AutopilotTest(
                     id="QT-AUTO-NET-001",
                     suite="Resilience",
+                    bucket="resilience",
                     title="Network loss and recovery behavior",
                     priority="high",
                     objective="Verify graceful behavior when connectivity is interrupted and restored.",
@@ -687,6 +799,7 @@ class AutopilotPrototypeService:
                     AutopilotTest(
                         id=f"QT-AUTO-PERM-{slug}",
                         suite="Permissions",
+                        bucket="permissions",
                         title=f"{label} permission grant and denial",
                         priority="medium",
                         objective=objective,
@@ -699,6 +812,7 @@ class AutopilotPrototypeService:
                 AutopilotTest(
                     id="QT-AUTO-SEC-DEBUG",
                     suite="Security",
+                    bucket="security",
                     title="Debuggable production-build finding",
                     priority="high",
                     objective="Confirm whether android:debuggable=true is intentional for this environment.",
@@ -748,18 +862,37 @@ class AutopilotPrototypeService:
                 priority = str(raw.get("priority", "medium")).lower()
                 if priority not in {"critical", "high", "medium", "low"}:
                     priority = "medium"
+                suite = str(raw.get("suite") or "AI Discovery")[:80]
+                title = str(raw["title"])[:240]
+                objective = str(raw.get("objective") or raw["title"])[:700]
+                steps = [str(x)[:500] for x in raw.get("steps", [])[:12]]
+                semantic_text = " ".join([suite, title, objective, *steps]).lower()
+                bucket = self._classify_test_bucket(suite, semantic_text)
+                requires_auth = any(
+                    token in semantic_text
+                    for token in ("authenticate", "authenticated", "authentication", "sign in", "signin", "login", "log in", "kyc", "account role")
+                )
+                requires_test_data = any(
+                    token in semantic_text
+                    for token in ("test data", "input", "form", "payment", "transfer", "transaction", "checkout", "portfolio", "credit card", "order", "seeded data")
+                )
+                destructive = bool(raw.get("destructive", False))
                 parsed_tests.append(
                     AutopilotTest(
                         id=f"QT-AI-{index:03d}",
-                        suite=str(raw.get("suite") or "AI Discovery")[:80],
-                        title=str(raw["title"])[:240],
+                        suite=suite,
+                        bucket=bucket,
+                        title=title,
                         priority=priority,
-                        objective=str(raw.get("objective") or raw["title"])[:700],
-                        steps=[str(x)[:500] for x in raw.get("steps", [])[:12]],
+                        objective=objective,
+                        steps=steps,
                         expected=[str(x)[:500] for x in raw.get("expected", [])[:8]],
-                        autonomous=not bool(raw.get("destructive", False)),
-                        destructive=bool(raw.get("destructive", False)),
+                        autonomous=not destructive,
+                        destructive=destructive,
                         source="ai",
+                        requires_auth=requires_auth,
+                        requires_test_data=requires_test_data,
+                        dependency=self._ai_dependency(bucket, requires_auth, requires_test_data, destructive),
                     )
                 )
             return {
@@ -772,6 +905,49 @@ class AutopilotPrototypeService:
             }
         except Exception:
             return {}
+
+    @staticmethod
+    def _classify_test_bucket(suite: str, semantic_text: str):
+        """Map variable AI suite labels to QTXpert's stable coverage taxonomy."""
+        suite_text = suite.lower()
+        rules = (
+            ("installation", ("install", "upgrade", "cold launch", "package deployment")),
+            ("uat", ("uat", "user acceptance", "acceptance criteria")),
+            ("accessibility", ("accessibility", "a11y", "screen reader", "wcag")),
+            ("performance", ("performance", "load", "latency", "throughput", "resource footprint", "startup time")),
+            ("security", ("security", "penetration", "vulnerability", "encryption", "tls", "data protection")),
+            ("integration", ("integration", "api", "backend", "third-party", "webhook", "contract")),
+            ("compatibility", ("compatibility", "device matrix", "os matrix", "cross-platform")),
+            ("permissions", ("permission", "privacy consent")),
+            ("regression", ("regression", "baseline comparison")),
+            ("resilience", ("resilience", "recovery", "offline", "network loss", "background", "interruption", "retry")),
+            ("page_level", ("page-level", "page level", "screen inventory", "screen coverage")),
+            ("ui", ("visual", "layout", "responsive ui", "user interface", "ui test")),
+        )
+        for bucket, signals in rules:
+            if any(signal in suite_text for signal in signals):
+                return bucket
+        for bucket, signals in rules:
+            if any(signal in semantic_text for signal in signals):
+                return bucket
+        return "functional"
+
+    @staticmethod
+    def _ai_dependency(bucket: str, requires_auth: bool, requires_test_data: bool, destructive: bool) -> str | None:
+        needs: list[str] = []
+        if requires_auth:
+            needs.extend(["an approved non-production credential reference", "account role", "safe authentication approval"])
+        if requires_test_data:
+            needs.extend(["synthetic test data", "reset/cleanup reference"])
+        if bucket == "uat":
+            needs.append("signed-off acceptance criteria")
+        if bucket == "integration":
+            needs.append("API/oracle reference")
+        if destructive:
+            needs.append("explicit supervised-run approval")
+        if not needs:
+            return None
+        return "Required: " + ", ".join(dict.fromkeys(needs)) + "."
 
     @staticmethod
     def _string_list(value: Any, limit: int) -> List[str]:

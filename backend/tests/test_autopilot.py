@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
+from app.schemas.autopilot import AutopilotAnalysis, AutopilotExecutionRequest
 from app.services.autopilot import AutopilotPrototypeService, AutopilotUploadTooLarge
 from app.services.autopilot_context import (
     DEFAULT_AUTOPILOT_CONTEXT,
@@ -37,6 +38,33 @@ def test_autopilot_generates_core_and_permission_tests(tmp_path):
     assert "Camera permission grant and denial" in titles
     assert "Notifications permission grant and denial" in titles
     assert all(test.destructive is False for test in tests)
+    assert {
+        "installation",
+        "page_level",
+        "functional",
+        "uat",
+        "ui",
+        "accessibility",
+        "integration",
+        "performance",
+        "security",
+        "compatibility",
+        "resilience",
+        "permissions",
+        "regression",
+    }.issubset({test.bucket for test in tests})
+
+
+def test_autopilot_classifies_ai_suites_and_setup_dependencies(tmp_path):
+    service = _service(tmp_path)
+
+    assert service._classify_test_bucket("UAT", "primary customer acceptance") == "uat"
+    assert service._classify_test_bucket("API contracts", "backend timeout") == "integration"
+    assert service._classify_test_bucket("Functional", "successful sign in") == "functional"
+    dependency = service._ai_dependency("uat", True, True, False)
+    assert dependency is not None
+    assert "credential reference" in dependency
+    assert "signed-off acceptance criteria" in dependency
 
 
 def test_autopilot_flags_debuggable_build(tmp_path):
@@ -88,10 +116,7 @@ def test_hosted_appium_rejects_loopback_endpoints(tmp_path):
     service = _service(tmp_path, APP_ENV="production")
     with pytest.raises(RuntimeError, match="cannot reach"):
         service.resolve_appium_url(
-            AutopilotExecutionRequest(
-                provider="appium",
-                appium_url="http://127.0.0.1:4723",
-            )
+            AutopilotExecutionRequest(provider="appium", appium_url="http://127.0.0.1:4723")
         )
 
 
@@ -99,9 +124,7 @@ def test_local_appium_keeps_loopback_convenience(tmp_path):
     from app.schemas.autopilot import AutopilotExecutionRequest
 
     service = _service(tmp_path, APP_ENV="local")
-    assert service.resolve_appium_url(
-        AutopilotExecutionRequest(provider="appium")
-    ) == "http://127.0.0.1:4723"
+    assert service.resolve_appium_url(AutopilotExecutionRequest(provider="appium")) == "http://127.0.0.1:4723"
 
 
 def test_hosted_appium_accepts_explicit_https_endpoint(tmp_path):
@@ -109,10 +132,7 @@ def test_hosted_appium_accepts_explicit_https_endpoint(tmp_path):
 
     service = _service(tmp_path, APP_ENV="production")
     assert service.resolve_appium_url(
-        AutopilotExecutionRequest(
-            provider="appium",
-            appium_url="https://appium.example.test/wd/hub/",
-        )
+        AutopilotExecutionRequest(provider="appium", appium_url="https://appium.example.test/wd/hub/")
     ) == "https://appium.example.test/wd/hub"
 
 
@@ -186,7 +206,12 @@ def test_browserstack_configuration_requires_both_secrets(tmp_path):
 
 @pytest.mark.asyncio
 async def test_browserstack_smoke_does_not_resolve_custom_appium_endpoint(tmp_path, monkeypatch):
-    """A BrowserStack request must use the cloud hub, not custom Appium resolution."""
+    """A configured BrowserStack run must use the BrowserStack hub directly.
+
+    The custom Appium resolver intentionally fails closed in hosted mode. It
+    must therefore never run for a BrowserStack request, otherwise a valid
+    cloud run is incorrectly blocked before the APK upload/session starts.
+    """
     service = _service(
         tmp_path,
         BROWSERSTACK_USERNAME="user",
@@ -225,7 +250,11 @@ async def test_browserstack_smoke_does_not_resolve_custom_appium_endpoint(tmp_pa
         browserstack_options=None,
         *_timeouts,
     ):
-        captured.update(url=appium_url, app=app_reference, options=browserstack_options)
+        captured.update(
+            url=appium_url,
+            app=app_reference,
+            options=browserstack_options,
+        )
         screenshot_path.write_bytes(b"png")
         source_path.write_text(
             '<node package="com.example.investnation" text="Investnation" />',
