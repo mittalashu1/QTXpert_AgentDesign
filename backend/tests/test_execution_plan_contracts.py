@@ -2,6 +2,7 @@ import pytest
 from uuid import uuid4
 
 from app.api.routes.execution_plans import _plan_payload, _preflight_plan
+from app.api.routes.executions import _compile_mobile_steps
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
 
 
@@ -60,4 +61,37 @@ async def test_manual_case_is_visible_but_not_runnable():
     assert plan.status == "draft"
     assert plan.cases[0].readiness == "manual_review"
     assert "manual execution" in (plan.cases[0].blocker_reason or "")
+
+
+def test_mobile_dsl_compiles_safe_actions_and_assertions():
+    assert _compile_mobile_steps([
+        "launch app",
+        "tap accessibility_id :: Sign in",
+        "fill id :: email :: qa@example.com",
+        "assert-text Welcome",
+        "assert-visible id :: account-menu",
+        "back",
+    ]) == [
+        ("tap", "accessibility_id", "Sign in"),
+        ("fill", "id", "email :: qa@example.com"),
+        ("assert-text", None, "Welcome"),
+        ("assert-visible", "id", "account-menu"),
+        ("back", None, None),
+    ]
+
+
+def test_mobile_dsl_blocks_unknown_prose():
+    with pytest.raises(ValueError, match="Unsupported mobile automation step"):
+        _compile_mobile_steps(["Transfer funds to the beneficiary"])
+
+
+@pytest.mark.asyncio
+async def test_mobile_preflight_allows_target_validation_to_defer_step_support():
+    plan = ExecutionPlan(name="Android smoke", suite_type="smoke", status="draft")
+    plan.cases.append(_case(steps=["tap accessibility_id :: Sign in"]))
+
+    await _preflight_plan(plan, None, target_kind="android")
+
+    assert plan.status == "ready"
+    assert plan.cases[0].readiness == "ready"
 
