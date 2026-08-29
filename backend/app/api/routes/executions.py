@@ -109,7 +109,11 @@ async def _validate_execution_target(
     if asset is None or asset.project_id != project_id:
         raise HTTPException(status_code=404, detail="The selected mobile app is not available in this project.")
     expected_extension = "apk" if target_kind == "android" else "ipa"
-    if asset.extension.lower() != expected_extension:
+    # Older repository rows may not have had ``extension`` populated.  Keep
+    # those assets reusable by deriving the type from the filename/category,
+    # while still enforcing a strict APK-versus-IPA match.
+    asset_extension = (asset.extension or Path(asset.filename).suffix.lstrip(".") or asset.category or "").lower()
+    if asset_extension != expected_extension:
         raise HTTPException(status_code=400, detail=f"{target_kind.title()} execution requires a .{expected_extension} asset.")
     normalized_device = (device_name or "").strip()
     if not normalized_device:
