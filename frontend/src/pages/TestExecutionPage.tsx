@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -8,12 +9,9 @@ import {
   CardContent,
   Checkbox,
   Chip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
   Divider,
   FormControl,
+  FormControlLabel,
   InputLabel,
   LinearProgress,
   MenuItem,
@@ -24,18 +22,20 @@ import {
   Stepper,
   TextField,
   Typography,
+  Switch,
 } from "@mui/material";
 import Grid from "@mui/material/Grid2";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import AddTaskOutlinedIcon from "@mui/icons-material/AddTaskOutlined";
 import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import RuleOutlinedIcon from "@mui/icons-material/RuleOutlined";
-import ReplayOutlinedIcon from "@mui/icons-material/ReplayOutlined";
+import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
+import OpenInNewOutlinedIcon from "@mui/icons-material/OpenInNewOutlined";
 import { AxiosError } from "axios";
-import { executionPlansApi, executionsApi, testCasesApi } from "@/services/api";
+import { executionPlansApi, executionsApi, testCasesApi, uploadsApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
-import type { ExecutionPlan, ExecutionPlanCase, ExecutionResult, ExecutionRun } from "@/types/domain";
+import type { ExecutionPlan, ExecutionPlanCase, ExecutionProvider, ExecutionTargetKind, UploadedAsset } from "@/types/domain";
 
 const STEPS = ["Import from Test Design", "Select cases", "Preflight and run", "Review evidence"];
 
@@ -44,8 +44,18 @@ function apiErrorMessage(reason: unknown, fallback: string): string {
   return typeof detail === "string" ? detail : reason instanceof Error ? reason.message : fallback;
 }
 
-function planTitle(plan: ExecutionPlan) {
-  return plan.name || plan.source_title || "Execution plan";
+function compactTitle(value: string, maxLength = 68) {
+  const normalized = value.trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function planTitle(plan: ExecutionPlan, maxLength = 68) {
+  return compactTitle(plan.name || plan.source_title || "Execution plan", maxLength);
+}
+
+function sourceRunTitle(run: { title?: string | null; requirement_summary: string | null; generation_profile: string }) {
+  return compactTitle(run.title || run.requirement_summary || `${run.generation_profile} test set`);
 }
 
 function readinessColor(readiness: string): "success" | "error" | "warning" | "info" | "default" {
@@ -65,26 +75,39 @@ function runStatusColor(status: string): "success" | "error" | "warning" | "info
 
 export default function TestExecutionPage() {
   const { selectedProjectId } = useSelectedProject();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [sourceRunId, setSourceRunId] = useState("");
   const [planId, setPlanId] = useState("");
   const [planName, setPlanName] = useState("");
   const [suiteType, setSuiteType] = useState<"smoke" | "feature" | "regression" | "deep_regression">("regression");
+  const [targetKind, setTargetKind] = useState<ExecutionTargetKind>("web");
+  const [provider, setProvider] = useState<ExecutionProvider>("playwright");
   const [baseUrl, setBaseUrl] = useState("");
+  const [appAssetId, setAppAssetId] = useState("");
+  const [deviceName, setDeviceName] = useState("Google Pixel 8");
+  const [platformVersion, setPlatformVersion] = useState("14.0");
+  const [appiumUrl, setAppiumUrl] = useState("");
+  const [appiumApp, setAppiumApp] = useState("");
+  const [noReset, setNoReset] = useState(false);
+  const [autoGrantPermissions, setAutoGrantPermissions] = useState(true);
   const [runName, setRunName] = useState("");
-  const [preflightBaseUrl, setPreflightBaseUrl] = useState("");
+  const [preflightSignature, setPreflightSignature] = useState("");
   const [caseFilter, setCaseFilter] = useState("all");
   const [caseSearch, setCaseSearch] = useState("");
   const [selection, setSelection] = useState<Record<string, boolean>>({});
   const [modes, setModes] = useState<Record<string, "automated" | "manual">>({});
   const [selectionDirty, setSelectionDirty] = useState(false);
-  const [defectResult, setDefectResult] = useState<ExecutionResult | null>(null);
-  const [defectTitle, setDefectTitle] = useState("");
-  const [defectDescription, setDefectDescription] = useState("");
+  const [uploadError, setUploadError] = useState("");
 
   const history = useQuery({
     queryKey: ["execution-source-runs", selectedProjectId],
     queryFn: () => testCasesApi.historySummaries(selectedProjectId!, 200, 0).then((response) => response.data),
+    enabled: Boolean(selectedProjectId),
+  });
+  const mobileAssets = useQuery({
+    queryKey: ["execution-mobile-assets", selectedProjectId],
+    queryFn: () => uploadsApi.list({ project_id: selectedProjectId! }).then((response) => response.data),
     enabled: Boolean(selectedProjectId),
   });
   const plans = useQuery({
@@ -104,12 +127,55 @@ export default function TestExecutionPage() {
     refetchInterval: (query) => query.state.data?.some((run) => ["queued", "running"].includes(run.status)) ? 4000 : false,
   });
 
+  const appUpload = useMutation({
+    mutationFn: (file: File) => uploadsApi.upload(file, {
+      projectId: selectedProjectId!,
+      sourceModule: "test_execution",
+      category: file.name.toLowerCase().endsWith(".ipa") ? "ipa" : "apk",
+    }).then((response) => response.data),
+    onSuccess: (asset: UploadedAsset) => {
+      setAppAssetId(asset.id);
+      setUploadError("");
+      queryClient.invalidateQueries({ queryKey: ["execution-mobile-assets", selectedProjectId] });
+      setPreflightSignature("");
+    },
+    onError: (reason) => setUploadError(apiErrorMessage(reason, "The mobile app could not be uploaded.")),
+  });
+
   const completedRuns = useMemo(
     () => (history.data ?? []).filter((run) => run.status === "completed" && run.test_case_count > 0),
     [history.data],
   );
   const currentPlan = plan.data;
   const currentCases = useMemo(() => currentPlan?.cases ?? [], [currentPlan]);
+  const availableMobileAssets = useMemo(
+    () => (mobileAssets.data ?? []).filter((asset) =>
+      (targetKind === "android" ? asset.extension.toLowerCase() === "apk" : targetKind === "ios" ? asset.extension.toLowerCase() === "ipa" : false)
+      && !["autopilot_evidence", "execution_evidence"].includes(asset.category),
+    ),
+    [mobileAssets.data, targetKind],
+  );
+  const targetPayload = useMemo(() => ({
+    target_kind: targetKind,
+    provider: targetKind === "web" ? "playwright" as const : provider,
+    ...(targetKind === "web"
+      ? { base_url: baseUrl.trim() }
+      : {
+        app_asset_id: appAssetId || undefined,
+        device_name: deviceName.trim() || undefined,
+        platform_version: platformVersion.trim() || undefined,
+        ...(provider === "appium" ? {
+          appium_url: appiumUrl.trim() || undefined,
+          appium_app: appiumApp.trim() || undefined,
+        } : {}),
+        no_reset: noReset,
+        auto_grant_permissions: autoGrantPermissions,
+      }),
+  }), [appAssetId, appiumApp, appiumUrl, autoGrantPermissions, baseUrl, deviceName, noReset, platformVersion, provider, targetKind]);
+  const targetSignature = useMemo(() => JSON.stringify(targetPayload), [targetPayload]);
+  const targetConfigured = targetKind === "web"
+    ? Boolean(baseUrl.trim())
+    : Boolean(appAssetId && deviceName.trim() && provider !== "playwright");
 
   useEffect(() => {
     if (!currentPlan) return;
@@ -124,6 +190,21 @@ export default function TestExecutionPage() {
     setSelectionDirty(false);
     setRunName((value) => value || `${currentPlan.name} run`);
   }, [currentPlan]);
+
+  useEffect(() => {
+    if (targetKind === "web") {
+      setProvider("playwright");
+      setAppAssetId("");
+      setPreflightSignature("");
+      return;
+    }
+    setProvider((value) => value === "playwright" ? "browserstack" : value);
+    const selected = (mobileAssets.data ?? []).find((asset) => asset.id === appAssetId);
+    if (selected && selected.extension.toLowerCase() !== (targetKind === "android" ? "apk" : "ipa")) {
+      setAppAssetId("");
+    }
+    setPreflightSignature("");
+  }, [appAssetId, mobileAssets.data, targetKind]);
 
   const importPlan = useMutation({
     mutationFn: () => executionPlansApi.import({
@@ -152,22 +233,22 @@ export default function TestExecutionPage() {
     onSuccess: (updated) => {
       queryClient.setQueryData(["execution-plan", updated.id], updated);
       queryClient.invalidateQueries({ queryKey: ["execution-plans", selectedProjectId] });
-      setPreflightBaseUrl("");
+      setPreflightSignature("");
       setSelectionDirty(false);
     },
   });
 
   const preflight = useMutation({
-    mutationFn: () => executionPlansApi.preflight(planId, baseUrl.trim()).then((response) => response.data),
+    mutationFn: () => executionPlansApi.preflight(planId, targetPayload).then((response) => response.data),
     onSuccess: (updated) => {
       queryClient.setQueryData(["execution-plan", updated.id], updated);
       queryClient.invalidateQueries({ queryKey: ["execution-plans", selectedProjectId] });
-      setPreflightBaseUrl(baseUrl.trim());
+      setPreflightSignature(targetSignature);
     },
   });
 
   const execute = useMutation({
-    mutationFn: () => executionPlansApi.execute(planId, { base_url: baseUrl.trim(), name: runName.trim() || undefined }).then((response) => response.data),
+    mutationFn: () => executionPlansApi.execute(planId, { ...targetPayload, name: runName.trim() || undefined }).then((response) => response.data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["executions", selectedProjectId] });
       queryClient.invalidateQueries({ queryKey: ["execution-plan", planId] });
@@ -175,28 +256,18 @@ export default function TestExecutionPage() {
     },
   });
 
-  const rerun = useMutation({
-    mutationFn: (run: ExecutionRun) => executionPlansApi.rerun(planId, run.id).then((response) => response.data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["executions", selectedProjectId] });
-      queryClient.invalidateQueries({ queryKey: ["execution-plan", planId] });
-    },
-  });
-
-  const createDefect = useMutation({
-    mutationFn: () => executionsApi.createDefect(defectResult!.id, {
-      title: defectTitle,
-      description: defectDescription,
-      severity: "major",
-    }),
-    onSuccess: () => {
-      setDefectResult(null);
-      setDefectTitle("");
-      setDefectDescription("");
-      queryClient.invalidateQueries({ queryKey: ["executions", selectedProjectId] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard", selectedProjectId] });
-    },
-  });
+  const onMobileFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const extension = file.name.toLowerCase().split(".").pop();
+    const expected = targetKind === "ios" ? "ipa" : "apk";
+    if (targetKind === "web" || extension !== expected) {
+      setUploadError(`Select a .${expected} file for the chosen mobile target.`);
+      return;
+    }
+    appUpload.mutate(file);
+  };
 
   const filteredCases = useMemo(() => {
     const search = caseSearch.trim().toLowerCase();
@@ -216,7 +287,7 @@ export default function TestExecutionPage() {
     currentPlan
     && selectedAutomated.length > 0
     && readyCount > 0
-    && preflightBaseUrl === baseUrl.trim()
+    && preflightSignature === targetSignature
     && !selectionDirty
     && !execute.isPending,
   );
@@ -252,8 +323,10 @@ export default function TestExecutionPage() {
               >
                 <MenuItem value=""><em>Select a generated test set</em></MenuItem>
                 {completedRuns.map((run) => (
-                  <MenuItem key={run.id} value={run.id}>
-                    {run.title || run.requirement_summary || `${run.generation_profile} test set`} · {run.test_case_count} cases · {new Date(run.created_at).toLocaleString()}
+                  <MenuItem key={run.id} value={run.id} title={run.title || run.requirement_summary || undefined}>
+                    <Box sx={{ maxWidth: { xs: 260, md: 560 }, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {sourceRunTitle(run)} · {run.test_case_count} cases · {new Date(run.created_at).toLocaleString()}
+                    </Box>
                   </MenuItem>
                 ))}
               </Select>
@@ -289,9 +362,9 @@ export default function TestExecutionPage() {
             <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ md: "center" }}>
               <FormControl fullWidth>
                 <InputLabel id="plan-label">Execution plan</InputLabel>
-                <Select labelId="plan-label" label="Execution plan" value={planId} onChange={(event) => { setPlanId(event.target.value); setPreflightBaseUrl(""); }}>
+                <Select labelId="plan-label" label="Execution plan" value={planId} onChange={(event) => { setPlanId(event.target.value); setPreflightSignature(""); }}>
                   <MenuItem value=""><em>Choose an imported plan</em></MenuItem>
-                  {plans.data.map((item) => <MenuItem key={item.id} value={item.id}>{planTitle(item)} · {item.selected_automated_cases} automated · {item.status}</MenuItem>)}
+                  {plans.data.map((item) => <MenuItem key={item.id} value={item.id} title={item.name || item.source_title || undefined}><Box sx={{ maxWidth: { xs: 260, md: 560 }, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{planTitle(item)} · {item.selected_automated_cases} automated · {item.status}</Box></MenuItem>)}
                 </Select>
               </FormControl>
               {currentPlan && <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
@@ -380,18 +453,79 @@ export default function TestExecutionPage() {
           <Card variant="outlined" sx={{ mb: 3 }}>
             <CardContent>
               <Typography variant="h6" sx={{ fontWeight: 800, mb: 0.5 }}>Preflight and execute</Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Preflight compiles the selected snapshot into the supported execution DSL. Unsupported or business-impacting steps remain visible as blockers.</Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Choose a web URL or a mobile package. Preflight validates the target and selected snapshot before any test is run.</Typography>
               <Grid container spacing={2} alignItems="center">
-                <Grid size={{ xs: 12, md: 5 }}><TextField fullWidth label="Application target URL" placeholder="https://staging.example.com" value={baseUrl} onChange={(event) => { setBaseUrl(event.target.value); setPreflightBaseUrl(""); }} /></Grid>
-                <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth label="Run name (optional)" value={runName} onChange={(event) => setRunName(event.target.value)} /></Grid>
-                <Grid size={{ xs: 12, md: 3 }}><Stack direction="row" spacing={1}><Button fullWidth variant="outlined" startIcon={<RuleOutlinedIcon />} disabled={!baseUrl.trim() || selectionDirty || preflight.isPending} onClick={() => preflight.mutate()}>{preflight.isPending ? "Checking…" : "Run preflight"}</Button><Button fullWidth variant="contained" startIcon={<PlayArrowIcon />} disabled={!canExecute} onClick={() => execute.mutate()}>{execute.isPending ? "Queuing…" : "Run selected"}</Button></Stack></Grid>
+                <Grid size={{ xs: 12, md: 3 }}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel id="target-kind-label">Application target</InputLabel>
+                    <Select labelId="target-kind-label" label="Application target" value={targetKind} onChange={(event) => setTargetKind(event.target.value as ExecutionTargetKind)}>
+                      <MenuItem value="web">Web application</MenuItem>
+                      <MenuItem value="android">Android APK</MenuItem>
+                      <MenuItem value="ios">iOS IPA</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+                {targetKind === "web" ? (
+                  <Grid size={{ xs: 12, md: 5 }}><TextField fullWidth size="small" label="Application target URL" placeholder="https://staging.example.com" value={baseUrl} onChange={(event) => { setBaseUrl(event.target.value); setPreflightSignature(""); }} helperText="Use a publicly reachable HTTPS staging URL." /></Grid>
+                ) : (
+                  <>
+                    <Grid size={{ xs: 12, md: 4 }}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel id="mobile-asset-label">APK / IPA package</InputLabel>
+                        <Select labelId="mobile-asset-label" label="APK / IPA package" value={appAssetId} onChange={(event) => { setAppAssetId(event.target.value); setPreflightSignature(""); }}>
+                          <MenuItem value=""><em>Select a stored {targetKind === "ios" ? "IPA" : "APK"}</em></MenuItem>
+                          {availableMobileAssets.map((asset) => <MenuItem key={asset.id} value={asset.id} title={asset.filename}><Box sx={{ maxWidth: { xs: 260, md: 380 }, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{asset.filename} · {(asset.size_bytes / 1024 / 1024).toFixed(1)} MB</Box></MenuItem>)}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid size={{ xs: 12, md: 2 }}>
+                      <Button component="label" fullWidth size="small" variant="outlined" startIcon={<CloudUploadOutlinedIcon />} disabled={appUpload.isPending}>
+                        {appUpload.isPending ? "Uploading…" : "Upload package"}
+                        <input hidden type="file" accept={targetKind === "ios" ? ".ipa,application/octet-stream" : ".apk,application/vnd.android.package-archive"} onChange={onMobileFile} />
+                      </Button>
+                    </Grid>
+                  </>
+                )}
+                <Grid size={{ xs: 12, md: targetKind === "web" ? 4 : 3 }}><TextField fullWidth size="small" label="Run name (optional)" value={runName} onChange={(event) => setRunName(event.target.value)} /></Grid>
+                {targetKind !== "web" && <>
+                  <Grid size={{ xs: 12, md: 3 }}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel id="mobile-provider-label">Execution provider</InputLabel>
+                      <Select labelId="mobile-provider-label" label="Execution provider" value={provider} onChange={(event) => { setProvider(event.target.value as ExecutionProvider); setPreflightSignature(""); }}>
+                        <MenuItem value="browserstack">BrowserStack real device</MenuItem>
+                        <MenuItem value="appium">Custom / local Appium</MenuItem>
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid size={{ xs: 12, md: 3 }}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => { setDeviceName(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "iPhone 15" : "Google Pixel 8"} /></Grid>
+                  <Grid size={{ xs: 12, md: 2 }}><TextField fullWidth size="small" label="OS version" value={platformVersion} onChange={(event) => { setPlatformVersion(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "17" : "14.0"} /></Grid>
+                  {provider === "appium" && <>
+                    <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth size="small" label="Appium server URL (optional)" value={appiumUrl} onChange={(event) => { setAppiumUrl(event.target.value); setPreflightSignature(""); }} helperText="Hosted runs need a reachable HTTPS endpoint; local development can use 127.0.0.1." /></Grid>
+                    <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth size="small" label="Remote app reference (optional)" value={appiumApp} onChange={(event) => { setAppiumApp(event.target.value); setPreflightSignature(""); }} helperText="Required for a hosted Appium lab unless it shares the API filesystem." /></Grid>
+                  </>}
+                  <Grid size={{ xs: 12 }}>
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+                      <FormControlLabel control={<Switch size="small" checked={noReset} onChange={(event) => { setNoReset(event.target.checked); setPreflightSignature(""); }} />} label="Keep app state (no reset)" />
+                      <FormControlLabel control={<Switch size="small" checked={autoGrantPermissions} onChange={(event) => { setAutoGrantPermissions(event.target.checked); setPreflightSignature(""); }} />} label="Auto-grant Android permissions" />
+                    </Stack>
+                  </Grid>
+                </>}
+                <Grid size={{ xs: 12 }}>
+                  <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="flex-end">
+                    <Button variant="outlined" startIcon={<RuleOutlinedIcon />} disabled={!targetConfigured || selectionDirty || preflight.isPending} onClick={() => preflight.mutate()}>{preflight.isPending ? "Checking…" : "Run preflight"}</Button>
+                    <Button variant="contained" startIcon={<PlayArrowIcon />} disabled={!canExecute} onClick={() => execute.mutate()}>{execute.isPending ? "Queuing…" : "Run selected"}</Button>
+                  </Stack>
+                </Grid>
               </Grid>
               <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 2 }}>
                 <Chip label={`${selectedAutomated.length} selected for automation`} color="primary" variant="outlined" />
                 <Chip label={`${currentPlan.ready_cases} ready`} color="success" variant="outlined" />
                 <Chip label={`${currentPlan.blocked_cases} blocked/approval`} color={currentPlan.blocked_cases ? "warning" : "default"} variant="outlined" />
-                {preflightBaseUrl && <Chip label="Preflight matches target" color="success" variant="outlined" />}
+                {preflightSignature && <Chip label="Preflight matches target" color="success" variant="outlined" />}
               </Stack>
+              {targetKind !== "web" && <Alert severity="info" sx={{ mt: 2 }}>Mobile results, device metadata and captured evidence are saved with the run in Test reports. The selected APK/IPA remains reusable in the project repository.</Alert>}
+              {uploadError && <Alert severity="error" sx={{ mt: 2 }}>{uploadError}</Alert>}
+              {mobileAssets.isError && <Alert severity="warning" sx={{ mt: 2 }}>Stored mobile packages could not be loaded. You can retry the page or upload a new package.</Alert>}
               {preflight.isError && <Alert severity="error" sx={{ mt: 2 }}>{apiErrorMessage(preflight.error, "The execution preflight failed.")}</Alert>}
               {execute.isError && <Alert severity="error" sx={{ mt: 2 }}>{apiErrorMessage(execute.error, "The execution could not be queued.")}</Alert>}
               {currentPlan.blocked_cases > 0 && <Alert severity="warning" sx={{ mt: 2 }}>Some selected cases need conversion, runtime discovery, or approval. They will not be silently executed.</Alert>}
@@ -402,28 +536,18 @@ export default function TestExecutionPage() {
 
       <Card variant="outlined">
         <CardContent>
-          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1.5 }}>
-            <Box><Typography variant="h6" sx={{ fontWeight: 800 }}>Execution evidence</Typography><Typography variant="body2" color="text.secondary">Runs remain linked to their imported plan and source Test Design snapshot.</Typography></Box>
-            {runs.isFetching && <LinearProgress sx={{ width: 120 }} />}
+          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={2}>
+            <Box>
+              <Typography variant="h6" sx={{ fontWeight: 800 }}>Results live in Test reports</Typography>
+              <Typography variant="body2" color="text.secondary">Execution history, per-case outcomes, defects and mobile evidence are report-owned. Original packages remain available in Uploads for reuse.</Typography>
+            </Box>
+            <Button variant="outlined" endIcon={<OpenInNewOutlinedIcon />} onClick={() => navigate("/reports")}>Open Test reports</Button>
           </Stack>
-          <Stack spacing={1.5}>
-            {planRuns.map((run) => <Card key={run.id} variant="outlined"><CardContent>
-              <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1}>
-                <Box><Typography fontWeight={800}>{run.name}</Typography><Typography variant="body2" color="text.secondary">{run.browser} · {run.base_url} · {new Date(run.created_at).toLocaleString()}</Typography></Box>
-                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap><Chip label={run.status} color={runStatusColor(run.status)} /><Chip label={`${run.passed_tests} passed`} variant="outlined" /><Chip label={`${run.failed_tests} failed`} variant="outlined" color="error" /><Chip label={`${run.blocked_tests} blocked`} variant="outlined" color="warning" />{currentPlan && <Button size="small" startIcon={<ReplayOutlinedIcon />} disabled={rerun.isPending || ["queued", "running"].includes(run.status)} onClick={() => rerun.mutate(run)}>Rerun</Button>}</Stack>
-              </Stack>
-              {run.results.length > 0 && <Stack spacing={1} sx={{ mt: 2 }}>{run.results.map((result) => <Box key={result.id} sx={{ p: 1.25, borderRadius: 2, bgcolor: "action.hover" }}><Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1}><Box><Typography variant="body2" fontWeight={700}>{result.test_case_key} · {result.scenario}</Typography><Typography variant="caption" color={result.status === "failed" ? "error.main" : "text.secondary"}>{result.error_message ?? `${result.duration_ms ?? 0} ms`}</Typography></Box><Stack direction="row" spacing={1} alignItems="center"><Chip size="small" label={result.status} color={result.status === "passed" ? "success" : result.status === "failed" ? "error" : result.status === "blocked" ? "warning" : "default"} />{result.status === "failed" && !result.defects.length && <Button size="small" color="error" onClick={() => { setDefectResult(result); setDefectTitle(`Failure: ${result.scenario}`); setDefectDescription(result.error_message ?? "Execution failed."); }}>Log defect</Button>}{result.defects.map((defect) => <Chip key={defect.id} size="small" label={defect.defect_key} variant="outlined" />)}</Stack></Stack></Box>)}</Stack>}
-            </CardContent></Card>)}
-            {!runs.isLoading && !planRuns.length && <Alert severity="info">No execution runs for this plan yet. Import a completed Design set, select cases, and run preflight first.</Alert>}
-          </Stack>
+          {runs.isFetching && <LinearProgress sx={{ mt: 2 }} />}
+          {!runs.isLoading && planRuns.length > 0 && <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 2 }}>{planRuns.slice(0, 3).map((run) => <Chip key={run.id} label={`${run.name}: ${run.status}`} color={runStatusColor(run.status)} variant="outlined" />)}</Stack>}
+          {!runs.isLoading && !planRuns.length && <Alert severity="info" sx={{ mt: 2 }}>No execution runs for this plan yet. Select cases and run preflight first.</Alert>}
         </CardContent>
       </Card>
-
-      <Dialog open={Boolean(defectResult)} onClose={() => setDefectResult(null)} fullWidth maxWidth="sm">
-        <DialogTitle>Log defect from execution evidence</DialogTitle>
-        <DialogContent><Stack spacing={2} sx={{ pt: 1 }}><TextField label="Title" value={defectTitle} onChange={(event) => setDefectTitle(event.target.value)} fullWidth /><TextField label="Description" value={defectDescription} onChange={(event) => setDefectDescription(event.target.value)} multiline minRows={4} fullWidth /><Alert severity="info">The defect remains linked to the failed execution result and imported test snapshot.</Alert></Stack></DialogContent>
-        <DialogActions><Button onClick={() => setDefectResult(null)}>Cancel</Button><Button variant="contained" color="error" disabled={!defectTitle || !defectDescription || createDefect.isPending} onClick={() => createDefect.mutate()}>Create defect</Button></DialogActions>
-      </Dialog>
     </Box>
   );
 }
