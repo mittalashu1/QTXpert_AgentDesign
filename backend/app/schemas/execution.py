@@ -7,13 +7,24 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 ExecutionSuiteType = Literal["smoke", "feature", "regression", "deep_regression"]
 ExecutionMode = Literal["automated", "manual"]
+ExecutionTargetKind = Literal["web", "android", "ios"]
+ExecutionProvider = Literal["playwright", "browserstack", "appium"]
 
 class ExecutionCreate(BaseModel):
     project_id: UUID
     name: str = Field(min_length=1, max_length=255)
-    base_url: HttpUrl
-    browser: str = Field(pattern="^chromium$")
+    base_url: HttpUrl | None = None
+    browser: str = Field(default="chromium", pattern="^chromium$")
     test_case_ids: list[UUID] = Field(min_length=1, max_length=100)
+    target_kind: ExecutionTargetKind = "web"
+    provider: ExecutionProvider = "playwright"
+    app_asset_id: UUID | None = None
+    device_name: str | None = Field(default=None, max_length=120)
+    platform_version: str | None = Field(default=None, max_length=40)
+    appium_url: str | None = Field(default=None, max_length=2048)
+    appium_app: str | None = Field(default=None, max_length=2048)
+    no_reset: bool = False
+    auto_grant_permissions: bool = True
 
 
 class ExecutionPlanImport(BaseModel):
@@ -38,11 +49,29 @@ class ExecutionPlanCasesUpdate(BaseModel):
 
 
 class ExecutionPlanPreflight(BaseModel):
-    base_url: HttpUrl
+    target_kind: ExecutionTargetKind = "web"
+    provider: ExecutionProvider = "playwright"
+    base_url: HttpUrl | None = None
+    app_asset_id: UUID | None = None
+    device_name: str | None = Field(default=None, max_length=120)
+    platform_version: str | None = Field(default=None, max_length=40)
+    appium_url: str | None = Field(default=None, max_length=2048)
+    appium_app: str | None = Field(default=None, max_length=2048)
+    no_reset: bool = False
+    auto_grant_permissions: bool = True
 
 
 class ExecutionPlanExecute(BaseModel):
-    base_url: HttpUrl
+    target_kind: ExecutionTargetKind = "web"
+    provider: ExecutionProvider = "playwright"
+    base_url: HttpUrl | None = None
+    app_asset_id: UUID | None = None
+    device_name: str | None = Field(default=None, max_length=120)
+    platform_version: str | None = Field(default=None, max_length=40)
+    appium_url: str | None = Field(default=None, max_length=2048)
+    appium_app: str | None = Field(default=None, max_length=2048)
+    no_reset: bool = False
+    auto_grant_permissions: bool = True
     name: str | None = Field(default=None, max_length=255)
     browser: Literal["chromium"] = "chromium"
 
@@ -85,7 +114,12 @@ class ExecutionRunOut(BaseModel):
     name: str
     status: str
     browser: str
-    base_url: str
+    base_url: str | None
+    target_kind: str = "web"
+    provider: str = "playwright"
+    app_asset_id: UUID | None = None
+    device_name: str | None = None
+    platform_version: str | None = None
     total_tests: int
     passed_tests: int
     failed_tests: int
