@@ -191,6 +191,8 @@ export const testCasesApi = {
   getRun: (runId: string) => apiClient.get<GenerationRun>(`/history/${runId}`),
   updateRunTitle: (runId: string, title: string) =>
     apiClient.patch<GenerationRun>(`/history/${runId}/title`, { title }),
+  deleteRun: (runId: string) =>
+    apiClient.delete<void>(`/history/${runId}`),
   updateRun: (runId: string, testCases: TestCase[]) =>
     apiClient.patch<GenerationRun>(`/history/${runId}`, {
       test_cases: testCases.map((testCase) => ({
