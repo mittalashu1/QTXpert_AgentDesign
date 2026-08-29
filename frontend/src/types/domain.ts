@@ -288,6 +288,13 @@ export interface DashboardSummary {
   open_defects: number;
   automation_candidates: number;
   recent_runs: ExecutionRun[];
+  total_execution_tests: number;
+  executed_tests: number;
+  passed_tests: number;
+  failed_tests: number;
+  blocked_tests: number;
+  skipped_tests: number;
+  pending_tests: number;
 }
 
 export interface AICostBreakdown {
