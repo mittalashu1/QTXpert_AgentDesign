@@ -185,5 +185,13 @@ class DashboardSummary(BaseModel):
     open_defects: int
     automation_candidates: int
     recent_runs: list[ExecutionRunOut]
-
-
+    # Execution-result counts make the dashboard denominator explicit.  The
+    # pass rate is calculated from all test results in the project, including
+    # blocked/pending results, rather than only the runs that happened to pass.
+    total_execution_tests: int = 0
+    executed_tests: int = 0
+    passed_tests: int = 0
+    failed_tests: int = 0
+    blocked_tests: int = 0
+    skipped_tests: int = 0
+    pending_tests: int = 0
