@@ -92,13 +92,19 @@ def safe_quit(driver: Any) -> None:
         pass
 
 
-def safe_background_application(driver: Any, seconds: float = 2.0) -> str:
+def safe_background_application(
+    driver: Any,
+    seconds: float = 2.0,
+    *,
+    package: Optional[str] = None,
+) -> str:
     """Background Android without depending on the optional ``backgroundApp`` extension.
 
-    BrowserStack's current UiAutomator2 endpoint rejects that extension.  The
-    standard Android key-code endpoint is supported by both BrowserStack and
-    local Appium, so preserve the native method where available and fall back
-    only for the provider-specific unknown-command error.
+    BrowserStack's current UiAutomator2 endpoint rejects both ``backgroundApp``
+    and ``pressKey``. Preserve the native method for local Appium; on that
+    provider-specific error, exercise a stronger terminate/relaunch lifecycle
+    using the standard application endpoint that BrowserStack supports. The
+    caller performs the foreground restore and records the returned mechanism.
     """
     try:
         driver.background_app(seconds)
@@ -108,10 +114,12 @@ def safe_background_application(driver: Any, seconds: float = 2.0) -> str:
         if "unknown mobile command" not in message or "backgroundapp" not in message:
             raise
 
-    # Android KEYCODE_HOME.  This avoids provider-specific ``mobile: shell``
-    # commands, which BrowserStack intentionally disables on hosted devices.
-    driver.press_keycode(3)
-    mechanism = "press_keycode_home"
+    if not package:
+        raise RuntimeError(
+            "This provider does not expose backgroundApp and no application package was available for the lifecycle fallback"
+        )
+    driver.terminate_app(package)
+    mechanism = "terminate_app_fallback"
     time.sleep(max(0.0, seconds))
     return mechanism
 

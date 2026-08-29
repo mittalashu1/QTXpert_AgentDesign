@@ -357,6 +357,7 @@ class AutopilotSuiteService:
         }
         actions: list[dict[str, Any]] = []
         for index, step in enumerate(test.steps, start=1):
+            mechanism: str | None = None
             if step.action == "launch_app":
                 if package and expected_package_state(driver, package) is not True:
                     driver.activate_app(package)
@@ -366,7 +367,7 @@ class AutopilotSuiteService:
                 if not source.strip():
                     raise AssertionError("No readable Android UI hierarchy was returned")
             elif step.action == "background_app":
-                safe_background_application(driver, 2)
+                mechanism = safe_background_application(driver, 2, package=package)
                 time.sleep(0.5)
             elif step.action == "restore_app":
                 if not package:
@@ -391,12 +392,15 @@ class AutopilotSuiteService:
                 source_path.write_text(driver.page_source or "", encoding="utf-8")
             else:
                 raise RuntimeError(f"IR action is not permitted by the safe suite runner: {step.action}")
-            actions.append({
+            action_evidence = {
                 "action": step.action,
                 "target": step.target,
                 "screen_id": step.screen_id,
                 "locator_confidence": step.locator_confidence,
-            })
+            }
+            if mechanism:
+                action_evidence["mechanism"] = mechanism
+            actions.append(action_evidence)
 
         identity = safe_app_identity(
             driver,

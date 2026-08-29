@@ -74,19 +74,31 @@ def test_evidence_and_cleanup_are_best_effort():
     safe_quit(driver)
 
 
-def test_background_falls_back_to_supported_home_key(monkeypatch):
+def test_background_falls_back_to_provider_supported_restart(monkeypatch):
     class Driver:
         calls = []
 
         def background_app(self, _seconds):
             raise RuntimeError('Unknown mobile command "backgroundApp"')
 
-        def press_keycode(self, keycode):
-            self.calls.append(keycode)
+        def terminate_app(self, package):
+            self.calls.append(package)
 
     monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
     driver = Driver()
 
-    assert safe_background_application(driver, 2) == "press_keycode_home"
-    assert driver.calls == [3]
+    assert safe_background_application(driver, 2, package="com.qtx.demo") == "terminate_app_fallback"
+    assert driver.calls == ["com.qtx.demo"]
+
+
+def test_background_preserves_native_local_appium_path(monkeypatch):
+    class Driver:
+        def background_app(self, seconds):
+            self.seconds = seconds
+
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
+    driver = Driver()
+
+    assert safe_background_application(driver, 2, package="com.qtx.demo") == "background_app"
+    assert driver.seconds == 2
 

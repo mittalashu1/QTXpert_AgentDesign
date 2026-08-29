@@ -364,7 +364,7 @@ class AutopilotIRCompiler:
                     """QTX {test.id}: {test.title}."""
                     from pathlib import Path
                     import time
-                    from app.services.appium_compat import safe_app_identity, safe_background_application, safe_page_source
+                    from app.services.appium_compat import safe_app_identity, safe_page_source
 
                     evidence_dir = Path(evidence_dir)
                     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -388,21 +388,21 @@ class AutopilotIRCompiler:
                     """QTX {test.id}: {test.title}."""
                     from pathlib import Path
                     import time
-                    from app.services.appium_compat import safe_app_identity, safe_page_source
+                    from app.services.appium_compat import safe_app_identity, safe_background_application, safe_page_source
 
                     evidence_dir = Path(evidence_dir)
                     evidence_dir.mkdir(parents=True, exist_ok=True)
                     identity = safe_app_identity(driver, page_source=safe_page_source(driver), package_hint={package_hint!r})
                     package = identity["package"]
                     assert package, "Unable to determine application package"
-                    safe_background_application(driver, 2)
+                    lifecycle_mechanism = safe_background_application(driver, 2, package=package)
                     time.sleep(1)
                     driver.activate_app(package)
                     time.sleep(2)
                     restored = safe_app_identity(driver, page_source=safe_page_source(driver))
                     assert restored["package"] == package, "Application did not recover to foreground"
                     driver.get_screenshot_as_file(str(evidence_dir / "{test.id.lower()}.png"))
-                    return {{"package": restored["package"], "activity": restored["activity"]}}
+                    return {{"package": restored["package"], "activity": restored["activity"], "lifecycle_mechanism": lifecycle_mechanism}}
                 '''
             ).strip()
 
