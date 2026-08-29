@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps.auth_deps import get_current_user
-from app.api.routes.executions import _compile_steps, _run_execution, _validated_target
+from app.api.routes.executions import _compile_steps, _run_execution, _validate_execution_target
+from app.config import Settings, get_settings
 from app.database.models.execution import ExecutionResult, ExecutionRun, ResultStatus
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
 from app.database.models.generation_run import GenerationRun, RunStatus
@@ -109,9 +110,10 @@ def _case_snapshot(test_case: TestCase, plan_id: UUID, index: int) -> ExecutionP
 
 async def _preflight_plan(
     plan: ExecutionPlan,
-    base_url: str,
+    base_url: str | None,
     *,
     case_ids: set[UUID] | None = None,
+    target_kind: str = "web",
 ) -> None:
     """Compile selected cases without guessing unsupported actions."""
     for case in plan.cases:
@@ -134,14 +136,21 @@ async def _preflight_plan(
             case.readiness = "approval_required"
             case.blocker_reason = f"Potentially business-impacting step requires approval: {impact}"
             continue
-        try:
-            _compile_steps(case.steps or [], base_url)
-        except ValueError as exc:
-            case.readiness = "blocked"
-            case.blocker_reason = str(exc)
-        else:
+        if target_kind in {"android", "ios"}:
+            # Mobile cases are compiled by the Appium adapter at run time.
+            # Keep the plan selectable here, but let unsupported prose become
+            # an explicit blocked result instead of pretending it passed.
             case.readiness = "ready"
             case.blocker_reason = None
+        else:
+            try:
+                _compile_steps(case.steps or [], base_url or "")
+            except ValueError as exc:
+                case.readiness = "blocked"
+                case.blocker_reason = str(exc)
+            else:
+                case.readiness = "ready"
+                case.blocker_reason = None
 
     considered = [
         case for case in plan.cases
@@ -163,12 +172,20 @@ async def _queue_plan_execution(
     background: BackgroundTasks,
     user: User,
     *,
-    base_url: str,
+    base_url: str | None,
     browser: str,
     name: str,
     case_ids: set[UUID] | None = None,
+    target_kind: str = "web",
+    provider: str = "playwright",
+    app_asset_id: UUID | None = None,
+    device_name: str | None = None,
+    platform_version: str | None = None,
+    appium_url: str | None = None,
+    appium_app: str | None = None,
+    target_metadata: dict | None = None,
 ) -> ExecutionRun:
-    await _preflight_plan(plan, base_url, case_ids=case_ids)
+    await _preflight_plan(plan, base_url, case_ids=case_ids, target_kind=target_kind)
     automated = [
         case for case in plan.cases
         if (case_ids is None and case.selected or case_ids is not None and case.id in case_ids)
@@ -200,6 +217,14 @@ async def _queue_plan_execution(
         name=name.strip() or plan.name,
         base_url=base_url,
         browser=browser,
+        target_kind=target_kind,
+        provider=provider,
+        app_asset_id=app_asset_id,
+        device_name=device_name,
+        platform_version=platform_version,
+        appium_url=appium_url,
+        appium_app=appium_app,
+        target_metadata=target_metadata,
         total_tests=len(automated),
     )
     db.add(run)
@@ -351,13 +376,26 @@ async def preflight_execution_plan(
     payload: ExecutionPlanPreflight,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ):
     plan = await _load_plan(db, plan_id, user.id)
-    try:
-        base_url = _validated_target(str(payload.base_url))
-    except (ValueError, OSError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    await _preflight_plan(plan, base_url)
+    target = await _validate_execution_target(
+        db,
+        user,
+        plan.project_id,
+        target_kind=payload.target_kind,
+        provider=payload.provider,
+        base_url=str(payload.base_url) if payload.base_url else None,
+        app_asset_id=payload.app_asset_id,
+        device_name=payload.device_name,
+        platform_version=payload.platform_version,
+        appium_url=payload.appium_url,
+        appium_app=payload.appium_app,
+        no_reset=payload.no_reset,
+        auto_grant_permissions=payload.auto_grant_permissions,
+        settings=settings,
+    )
+    await _preflight_plan(plan, target["base_url"], target_kind=target["target_kind"])
     await db.commit()
     return _plan_payload(await _load_plan(db, plan.id, user.id))
 
@@ -369,22 +407,43 @@ async def execute_execution_plan(
     background: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ):
     plan = await _load_plan(db, plan_id, user.id)
     if plan.status in {"queued", "running"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This execution plan is already running")
-    try:
-        base_url = _validated_target(str(payload.base_url))
-    except (ValueError, OSError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    target = await _validate_execution_target(
+        db,
+        user,
+        plan.project_id,
+        target_kind=payload.target_kind,
+        provider=payload.provider,
+        base_url=str(payload.base_url) if payload.base_url else None,
+        app_asset_id=payload.app_asset_id,
+        device_name=payload.device_name,
+        platform_version=payload.platform_version,
+        appium_url=payload.appium_url,
+        appium_app=payload.appium_app,
+        no_reset=payload.no_reset,
+        auto_grant_permissions=payload.auto_grant_permissions,
+        settings=settings,
+    )
     return await _queue_plan_execution(
         plan,
         db,
         background,
         user,
-        base_url=base_url,
-        browser=payload.browser,
+        base_url=target["base_url"],
+        browser=payload.browser if target["target_kind"] == "web" else target["provider"],
         name=(payload.name or plan.name),
+        target_kind=target["target_kind"],
+        provider=target["provider"],
+        app_asset_id=target["app_asset_id"],
+        device_name=target["device_name"],
+        platform_version=target["platform_version"],
+        appium_url=target["appium_url"],
+        appium_app=target["appium_app"],
+        target_metadata=target["target_metadata"],
     )
 
 
@@ -395,6 +454,7 @@ async def rerun_execution_plan(
     background: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ):
     plan = await _load_plan(db, plan_id, user.id)
     source = await db.scalar(
@@ -412,14 +472,38 @@ async def rerun_execution_plan(
     case_ids = {result.execution_plan_case_id for result in source.results if result.execution_plan_case_id is not None}
     if not case_ids:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The source run has no imported plan cases to rerun")
+    target = await _validate_execution_target(
+        db,
+        user,
+        plan.project_id,
+        target_kind=source.target_kind,
+        provider=source.provider,
+        base_url=source.base_url,
+        app_asset_id=source.app_asset_id,
+        device_name=source.device_name,
+        platform_version=source.platform_version,
+        appium_url=source.appium_url,
+        appium_app=source.appium_app,
+        no_reset=bool((source.target_metadata or {}).get("no_reset", False)),
+        auto_grant_permissions=bool((source.target_metadata or {}).get("auto_grant_permissions", True)),
+        settings=settings,
+    )
     return await _queue_plan_execution(
         plan,
         db,
         background,
         user,
-        base_url=source.base_url,
+        base_url=target["base_url"],
         browser=source.browser,
         name=(payload.name or f"Rerun · {source.name}"),
         case_ids=case_ids,
+        target_kind=target["target_kind"],
+        provider=target["provider"],
+        app_asset_id=target["app_asset_id"],
+        device_name=target["device_name"],
+        platform_version=target["platform_version"],
+        appium_url=target["appium_url"],
+        appium_app=target["appium_app"],
+        target_metadata={**(source.target_metadata or {}), **target["target_metadata"]},
     )
 
