@@ -3,10 +3,12 @@ from typing import Annotated, List
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
+from app.database.models.execution import ExecutionResult
 from app.database.models.generation_run import RunStatus
 from app.database.models.user import User
 from app.database.repositories.generation_run_repository import GenerationRunRepository
@@ -121,6 +123,50 @@ async def get_run(
     return run
 
 
+@router.delete("/history/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_run(
+    run_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Delete a saved test set while preserving execution evidence.
+
+    A generation that is still running must not be removed because the
+    background worker may still be writing to it. Likewise, a suite that has
+    execution results is retained as audit evidence; its execution plans keep
+    their snapshots even when a suite has no execution history.
+    """
+    repo = GenerationRunRepository(db)
+    run = await repo.get_for_owner(run_id, user.id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found")
+    active_statuses = {
+        RunStatus.PENDING,
+        RunStatus.NORMALIZING,
+        RunStatus.ANALYZING,
+        RunStatus.GENERATING_SCENARIOS,
+        RunStatus.GENERATING_TEST_CASES,
+        RunStatus.RISK_ANALYSIS,
+    }
+    if run.status in active_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Wait for generation to finish before deleting this test set.",
+        )
+    test_case_ids = [test_case.id for test_case in run.test_cases]
+    if test_case_ids:
+        linked_results = await db.scalar(
+            select(func.count(ExecutionResult.id)).where(ExecutionResult.test_case_id.in_(test_case_ids))
+        )
+        if linked_results:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This test set has recorded execution results and cannot be deleted. Keep it for audit history.",
+            )
+    await db.delete(run)
+    await db.commit()
+
+
 @router.patch("/history/{run_id}/title", response_model=GenerationRunOut)
 async def update_run_title(
     run_id: UUID,
@@ -199,3 +245,4 @@ async def update_run(
     await db.commit()
     await db.refresh(run, attribute_names=["test_cases"])
     return run
+
