@@ -425,7 +425,7 @@ export default function DashboardPage() {
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>Counts of items that need follow-up from the observed project data.</Typography>
                     </Box>
                     <Stack direction="row" spacing={1} alignItems="center">
-                      <Chip label={`${actionRequiredCount} total`} size="small" variant="outlined" />
+                      <Chip component={RouterLink} to="/reports" clickable aria-label={`Open all ${actionRequiredCount} action items`} label={`${actionRequiredCount} total`} size="small" variant="outlined" />
                       <WarningAmberOutlinedIcon color="action" />
                     </Stack>
                   </Stack>
