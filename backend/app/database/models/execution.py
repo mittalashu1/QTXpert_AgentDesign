@@ -41,7 +41,17 @@ class ExecutionRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[ExecutionStatus] = mapped_column(Enum(ExecutionStatus, name="execution_status", values_callable=lambda e: [x.value for x in e]), default=ExecutionStatus.QUEUED, nullable=False)
     browser: Mapped[str] = mapped_column(String(20), nullable=False)
-    base_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    base_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    target_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="web", server_default="web")
+    provider: Mapped[str] = mapped_column(String(30), nullable=False, default="playwright", server_default="playwright")
+    app_asset_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("uploaded_assets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    device_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    platform_version: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    appium_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    appium_app: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    target_metadata: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     total_tests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     passed_tests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     failed_tests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
