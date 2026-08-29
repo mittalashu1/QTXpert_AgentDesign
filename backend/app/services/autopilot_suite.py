@@ -15,6 +15,7 @@ from typing import Any, Dict
 from app.config import Settings
 from app.schemas.autopilot import (
     AutopilotDiscoveryResult,
+    AutopilotSetupProfile,
     AutopilotSuiteRequest,
     AutopilotSuiteResult,
     AutopilotSuiteTestResult,
@@ -22,6 +23,7 @@ from app.schemas.autopilot import (
     QTXTestIR,
 )
 from app.services.autopilot import AutopilotPrototypeService
+from app.services.appium_compat import expected_package_state, safe_app_identity, safe_page_source, safe_quit
 from app.services.autopilot_ir import AutopilotIRCompiler
 
 
@@ -47,10 +49,11 @@ class AutopilotSuiteService:
         job_id: str,
         request: AutopilotSuiteRequest,
         discovery: AutopilotDiscoveryResult | None,
+        setup: AutopilotSetupProfile | None = None,
     ) -> AutopilotSuiteResult:
         job = await self.prototype.load_job(job_id)
         analysis = await self.prototype.load_analysis(job_id)
-        bundle = AutopilotIRCompiler().compile_bundle(analysis, discovery)
+        bundle = AutopilotIRCompiler().compile_bundle(analysis, discovery, setup)
 
         requested_ids = set(request.test_ids)
         requested_buckets = set(request.buckets)
@@ -279,7 +282,12 @@ class AutopilotSuiteService:
         results: list[AutopilotSuiteTestResult] = []
         try:
             time.sleep(2)
-            package = package_hint or getattr(driver, "current_package", None)
+            initial_source = safe_page_source(driver)
+            package = safe_app_identity(
+                driver,
+                page_source=initial_source,
+                package_hint=package_hint,
+            )["package"]
             for test in tests:
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -290,10 +298,11 @@ class AutopilotSuiteService:
                     status = "passed"
                     error = None
                 except Exception as exc:
-                    evidence = {
-                        "package": getattr(driver, "current_package", None),
-                        "activity": getattr(driver, "current_activity", None),
-                    }
+                    evidence = safe_app_identity(
+                        driver,
+                        page_source=safe_page_source(driver),
+                        package_hint=package,
+                    )
                     status = "failed"
                     error = f"{type(exc).__name__}: {exc}"[:1200]
                     try:
@@ -315,7 +324,7 @@ class AutopilotSuiteService:
                 )
             return results
         finally:
-            driver.quit()
+            safe_quit(driver)
 
     @staticmethod
     def _reset_to_application(driver, package: str | None) -> None:
@@ -329,7 +338,7 @@ class AutopilotSuiteService:
         except Exception:
             # Some remote providers restrict lifecycle APIs; if the target app is
             # already foreground, continuing is safer than failing the whole suite.
-            if getattr(driver, "current_package", None) != package:
+            if expected_package_state(driver, package) is not True:
                 raise
 
     def _execute_test(self, driver, test: QTXTestIR, evidence_dir: Path, package: str | None) -> Dict[str, Any]:
@@ -343,7 +352,7 @@ class AutopilotSuiteService:
         actions: list[dict[str, Any]] = []
         for index, step in enumerate(test.steps, start=1):
             if step.action == "launch_app":
-                if package and getattr(driver, "current_package", None) != package:
+                if package and expected_package_state(driver, package) is not True:
                     driver.activate_app(package)
                     time.sleep(1)
             elif step.action == "inspect_ui":
@@ -358,7 +367,7 @@ class AutopilotSuiteService:
                     raise AssertionError("Unable to determine application package for restore")
                 driver.activate_app(package)
                 time.sleep(1)
-                if getattr(driver, "current_package", None) != package:
+                if expected_package_state(driver, package) is not True:
                     raise AssertionError("Application did not recover to foreground")
             elif step.action in {"tap", "assert_visible"}:
                 element = self._find_semantic_element(driver, step, locator_map)
@@ -383,9 +392,15 @@ class AutopilotSuiteService:
                 "locator_confidence": step.locator_confidence,
             })
 
+        identity = safe_app_identity(
+            driver,
+            page_source=safe_page_source(driver),
+            package_hint=package,
+        )
         return {
-            "package": getattr(driver, "current_package", None),
-            "activity": getattr(driver, "current_activity", None),
+            "package": identity["package"],
+            "activity": identity["activity"],
+            "identity_source": identity["identity_source"],
             "actions": actions,
             "evidence_dir": str(evidence_dir),
         }

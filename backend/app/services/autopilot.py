@@ -39,6 +39,7 @@ from app.schemas.autopilot import (
     AutopilotJobStatus,
     AutopilotTest,
 )
+from app.services.appium_compat import safe_app_identity, safe_page_source, safe_quit
 from app.services.autopilot_context import default_context, get_profile
 
 logger = logging.getLogger(__name__)
@@ -1269,19 +1270,15 @@ class AutopilotPrototypeService:
         try:
             time.sleep(3)
             driver.get_screenshot_as_file(str(screenshot_path))
-            page_source = driver.page_source or ""
+            page_source = safe_page_source(driver)
             source_path.write_text(page_source, encoding="utf-8")
-            # BrowserStack's Appium build does not expose every optional
-            # mobile command (notably getCurrentPackage). Treat these values
-            # as advisory and keep the page-source package check authoritative.
-            try:
-                current_package = getattr(driver, "current_package", None)
-            except Exception:
-                current_package = None
-            try:
-                current_activity = getattr(driver, "current_activity", None)
-            except Exception:
-                current_activity = None
+            identity = safe_app_identity(
+                driver,
+                page_source=page_source,
+                package_hint=expected_package,
+            )
+            current_package = identity["package"]
+            current_activity = identity["activity"]
             try:
                 orientation = getattr(driver, "orientation", None)
             except Exception:
@@ -1295,15 +1292,13 @@ class AutopilotPrototypeService:
                 "session_id": driver.session_id,
                 "current_package": current_package,
                 "current_activity": current_activity,
+                "identity_source": identity["identity_source"],
                 "orientation": orientation,
                 "page_source_chars": source_path.stat().st_size if source_path.exists() else 0,
                 "expected_package": expected_package,
             }
         finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            safe_quit(driver)
 
     @staticmethod
     def _validate_runtime_state(
@@ -1364,4 +1359,3 @@ class AutopilotPrototypeService:
                 "authentication",
             )
         )
-

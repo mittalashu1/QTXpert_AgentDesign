@@ -1,9 +1,10 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Divider,
-  FormControl, FormControlLabel, Grid, InputLabel, MenuItem, Paper, Select, Stack, Switch, Table,
-  TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography,
+  Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Dialog, DialogActions,
+  DialogContent, DialogTitle, Divider, FormControl, FormControlLabel, Grid, InputLabel,
+  MenuItem, Paper, Select, Stack, Switch, Table, TableBody, TableCell, TableContainer,
+  TableHead, TableRow, TextField, Typography,
 } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
@@ -91,7 +92,8 @@ type DiscoveredControl = {
 };
 type DiscoveredScreen = {
   screen_id: string; fingerprint: string; package_name?: string; activity_name?: string;
-  screenshot_path?: string; page_source_path?: string; controls: DiscoveredControl[];
+  screenshot_path?: string; page_source_path?: string; screenshot_asset_id?: string | null;
+  page_source_asset_id?: string | null; controls: DiscoveredControl[];
 };
 type Discovery = {
   job_id: string; status: "completed" | "partial" | "blocked" | "failed";
@@ -109,8 +111,8 @@ type AutomationTest = {
 type AutomationBundle = {
   job_id: string; schema_version: string; discovery_used: boolean; promoted_count: number;
   executable_count: number; discovery_required_count: number; approval_required_count: number;
-  bucket_counts?: Record<string, number>;
-  tests: AutomationTest[];
+  bucket_counts?: Record<string, number>; setup_provided_count?: number;
+  setup_missing_fields?: string[]; tests: AutomationTest[];
 };
 type SuiteTestResult = {
   test_id: string; title: string; status: "passed" | "failed" | "blocked" | "skipped";
@@ -128,6 +130,22 @@ type ProfileOption = {
   id: string; name: string; description: string; brief_context: string;
 };
 type ContextResponse = { context: string; source: "default" | "ai" | "fallback"; profile_id?: string; warning?: string | null };
+type SetupProfile = {
+  job_id: string; credential_reference: string; account_role: string; environment_name: string;
+  environment_url: string; test_data_reference: string; reset_hook_reference: string;
+  acceptance_criteria_reference: string; api_oracle_reference: string; navigation_notes: string;
+  safe_authentication_approved: boolean; approved_test_ids: string[]; updated_at?: string | null;
+  provided_fields: string[]; missing_fields: string[];
+};
+
+function emptySetup(jobId = ""): SetupProfile {
+  return {
+    job_id: jobId, credential_reference: "", account_role: "", environment_name: "",
+    environment_url: "", test_data_reference: "", reset_hook_reference: "",
+    acceptance_criteria_reference: "", api_oracle_reference: "", navigation_notes: "",
+    safe_authentication_approved: false, approved_test_ids: [], provided_fields: [], missing_fields: [],
+  };
+}
 
 const DEFAULT_PROFILE_ID = "uae_fintech";
 const DEFAULT_PROFILE_OPTIONS: ProfileOption[] = [
@@ -255,6 +273,32 @@ function ReportRiskTable({ risks }: { risks: ReportRisk[] }) {
   return <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Risk</TableCell><TableCell>Severity</TableCell><TableCell>Likelihood / impact</TableCell><TableCell>Evidence and mitigation</TableCell></TableRow></TableHead><TableBody>{risks.map((risk) => <TableRow key={risk.risk_id} hover><TableCell sx={{ minWidth: 220 }}><Typography variant="body2" fontWeight={700}>{risk.title}</Typography><Typography variant="caption" color="text.secondary">{risk.risk_id} · {reportStatusLabel(risk.status)}</Typography></TableCell><TableCell><Chip size="small" label={risk.severity.toUpperCase()} color={reportRiskColor[risk.severity]} variant="outlined" /></TableCell><TableCell>{risk.likelihood.toUpperCase()} / {risk.impact.toUpperCase()}</TableCell><TableCell sx={{ minWidth: 340 }}><Typography variant="caption" display="block">{risk.evidence}</Typography><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Mitigation: {risk.mitigation}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>;
 }
 
+function RuntimeScreenPreview({ screen }: { screen: DiscoveredScreen }) {
+  const [imageUrl, setImageUrl] = useState("");
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    if (!screen.screenshot_asset_id) { setImageUrl(""); return () => { active = false; }; }
+    uploadsApi.download(screen.screenshot_asset_id).then((response) => {
+      if (!active) return;
+      objectUrl = URL.createObjectURL(response.data);
+      setImageUrl(objectUrl);
+    }).catch(() => { if (active) setImageUrl(""); });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [screen.screenshot_asset_id]);
+  return <Card variant="outlined" sx={{ height: "100%" }}><CardContent>
+    <Box sx={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "action.hover", borderRadius: 2, overflow: "hidden" }}>
+      {imageUrl ? <Box component="img" src={imageUrl} alt={screen.screen_id} sx={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <Typography variant="caption" color="text.secondary">Screenshot evidence pending</Typography>}
+    </Box>
+    <Typography variant="subtitle2" fontWeight={800} sx={{ mt: 1 }}>{screen.screen_id}</Typography>
+    <Typography variant="caption" color="text.secondary" display="block">{screen.package_name || "Package pending"}{screen.activity_name ? " · " + screen.activity_name : ""}</Typography>
+    <Stack direction="row" spacing={.75} sx={{ mt: 1 }}><Chip size="small" label={screen.controls.length + " controls"} variant="outlined" />{screen.page_source_asset_id && <Chip size="small" label="UI hierarchy saved" color="success" variant="outlined" />}</Stack>
+  </CardContent></Card>;
+}
+
 export default function AutopilotPage() {
   const navigate = useNavigate();
   const { selectedProjectId } = useSelectedProject();
@@ -275,6 +319,10 @@ export default function AutopilotPage() {
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [automation, setAutomation] = useState<AutomationBundle | null>(null);
   const [suite, setSuite] = useState<SuiteResult | null>(null);
+  const [setup, setSetup] = useState<SetupProfile | null>(null);
+  const [setupDraft, setSetupDraft] = useState<SetupProfile>(emptySetup());
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [provider, setProvider] = useState<"browserstack" | "appium">("browserstack");
   const [busy, setBusy] = useState(false);
@@ -435,17 +483,19 @@ export default function AutopilotPage() {
 
   useEffect(() => {
     let active = true;
-    if (!analysis?.job_id) { setDiscovery(null); setAutomation(null); setSuite(null); setReport(null); return; }
+    if (!analysis?.job_id) { setDiscovery(null); setAutomation(null); setSuite(null); setSetup(null); setReport(null); return; }
     Promise.allSettled([
       apiClient.get<Discovery | null>(`/autopilot/${analysis.job_id}/discovery`, { timeout: 15000 }),
       apiClient.get<AutomationBundle>(`/autopilot/${analysis.job_id}/automation`, { timeout: 15000 }),
       apiClient.get<SuiteResult | null>(`/autopilot/${analysis.job_id}/suite`, { timeout: 15000 }),
+      apiClient.get<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", { timeout: 15000 }),
       apiClient.get<AuditReport>(`/autopilot/${analysis.job_id}/report`, { timeout: 20000 }),
-    ]).then(([discoveryResult, automationResult, suiteResult, reportResult]) => {
+    ]).then(([discoveryResult, automationResult, suiteResult, setupResult, reportResult]) => {
       if (!active) return;
       setDiscovery(discoveryResult.status === "fulfilled" ? discoveryResult.value.data : null);
       setAutomation(automationResult.status === "fulfilled" ? automationResult.value.data : null);
       setSuite(suiteResult.status === "fulfilled" ? suiteResult.value.data : null);
+      setSetup(setupResult.status === "fulfilled" ? setupResult.value.data : emptySetup(analysis.job_id));
       setReport(reportResult.status === "fulfilled" ? reportResult.value.data : null);
     });
     return () => { active = false; };
@@ -477,7 +527,7 @@ export default function AutopilotPage() {
   const selectedStoredApk = useMemo(() => storedApks.find((asset) => asset.id === selectedUploadId) ?? null, [storedApks, selectedUploadId]);
   const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen: screen.screen_id, control }))) ?? [], [discovery]);
 
-  const resetResult = () => { setAnalysis(null); setReport(null); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setArtifactAvailable(true); setError(""); };
+  const resetResult = () => { setAnalysis(null); setReport(null); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setSetup(null); setSetupOpen(false); setArtifactAvailable(true); setError(""); };
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected); if (selected) setSelectedUploadId(""); resetResult();
@@ -548,6 +598,37 @@ export default function AutopilotPage() {
     no_reset: false,
     auto_grant_permissions: autoGrantPermissions,
   });
+  const openSetup = () => {
+    if (!analysis) return;
+    setSetupDraft(setup ? { ...setup, approved_test_ids: [...setup.approved_test_ids], provided_fields: [...setup.provided_fields], missing_fields: [...setup.missing_fields] } : emptySetup(analysis.job_id));
+    setSetupOpen(true);
+  };
+  const saveSetup = async () => {
+    if (!analysis) return;
+    setSetupBusy(true); setError("");
+    try {
+      const payload = {
+        credential_reference: setupDraft.credential_reference,
+        account_role: setupDraft.account_role,
+        environment_name: setupDraft.environment_name,
+        environment_url: setupDraft.environment_url,
+        test_data_reference: setupDraft.test_data_reference,
+        reset_hook_reference: setupDraft.reset_hook_reference,
+        acceptance_criteria_reference: setupDraft.acceptance_criteria_reference,
+        api_oracle_reference: setupDraft.api_oracle_reference,
+        navigation_notes: setupDraft.navigation_notes,
+        safe_authentication_approved: setupDraft.safe_authentication_approved,
+        approved_test_ids: setupDraft.approved_test_ids,
+      };
+      const response = await apiClient.put<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", payload, { timeout: 20000 });
+      setSetup(response.data);
+      setSetupOpen(false);
+      await refreshAutomation(analysis.job_id);
+    } catch (err) { setError(readableError(err, "Test setup could not be saved")); }
+    finally { setSetupBusy(false); }
+  };
+  const updateSetup = (field: keyof SetupProfile, value: string | boolean) => setSetupDraft((current) => ({ ...current, [field]: value }));
+
   const runDiscovery = async () => {
     if (!analysis) return;
     setDiscoveryBusy(true); setError("");
@@ -828,7 +909,7 @@ export default function AutopilotPage() {
       <Card variant="outlined"><CardContent>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Map screens and semantic controls from the running Android app. Payments, transfers, delete, submit, confirm and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : "Run discovery"}</Button></Stack></Stack>
         {browserStackUnavailable && provider === "browserstack" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
-        {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Screen</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.slice(0, 150).map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen}-${control.control_id}`} hover><TableCell>{screen}</TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+        {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.screens.length > 0 && <Grid container spacing={1.5} sx={{ mt: .5 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Screen</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.slice(0, 150).map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen}-${control.control_id}`} hover><TableCell>{screen}</TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent>
@@ -853,7 +934,17 @@ export default function AutopilotPage() {
             </Button>
           </Stack>
         </Stack>
-        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · full plan buckets are listed above</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 80).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.dependency || test.readiness_reason || "—"}</Typography></TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
+        <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
+            <Box><Typography variant="subtitle2" fontWeight={800}>Resolve test dependencies</Typography><Typography variant="caption" color="text.secondary">Add non-secret credential, role, data, reset and acceptance references. Passwords, tokens and OTPs are never stored here.</Typography></Box>
+            <Button size="small" variant="outlined" onClick={openSetup}>{setup?.provided_fields.length ? "Update inputs" : "Provide inputs"}</Button>
+          </Stack>
+          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
+            <Chip size="small" label={(setup?.provided_fields.length || 0) + " setup items provided"} color={setup?.provided_fields.length ? "success" : "default"} variant="outlined" />
+            {(automation?.setup_missing_fields || []).slice(0, 6).map((field) => <Chip key={field} size="small" label={"Pending: " + field} color="warning" variant="outlined" />)}
+          </Stack>
+        </Box>
+        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · full plan buckets are listed above</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 80).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
         {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe subset: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / result</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || "Evidence captured"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
@@ -862,10 +953,29 @@ export default function AutopilotPage() {
       {noExecutionProvider && <Alert severity="warning" sx={{ mt: 2 }}>No hosted execution provider is configured. Configure BrowserStack credentials or enter a reachable HTTPS Appium endpoint before running.</Alert>}
       {browserStackUnavailable && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose Custom / local Appium and enter a reachable endpoint.</Alert>}
       {provider === "appium" && providerStatus?.custom_appium_reason && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus.custom_appium_reason}</Alert>}
-      <Grid container spacing={2} sx={{ mt: .5 }}><Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution target</InputLabel><Select labelId="autopilot-provider-label" label="Execution target" value={provider} onChange={(event) => setProvider(event.target.value as "browserstack" | "appium")}><MenuItem value="browserstack" disabled={providerStatus !== null && !providerStatus.browserstack_configured}>BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid><Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid><Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid><Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>{provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} helperText="Hosted runs require a reachable HTTPS endpoint; leave blank only when the backend has one configured." /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}<Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions for this smoke" /><Typography variant="caption" color="text.secondary" display="block">Enabled by default so unattended smoke runs do not stall on Android permission dialogs. Permission grant/deny behavior remains covered by generated permission tests.</Typography></Grid></Grid>{execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}{execution && (execution.screenshot_asset_id || execution.page_source_asset_id) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Evidence is retained in the project Upload Repository for this run.</Typography>}{executionHistory.length > 0 && <Box sx={{ mt: 2 }}><Typography variant="subtitle2" fontWeight={800}>Previous smoke runs</Typography><Stack spacing={1} sx={{ mt: 1 }}>{executionHistory.map((item) => <Paper key={item.execution_id} variant="outlined" sx={{ p: 1.25 }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between"><Box><Typography variant="body2" fontWeight={700}>{item.status.toUpperCase()} · {item.request.provider} · {item.request.device_name}</Typography><Typography variant="caption" color="text.secondary">{new Date(item.created_at).toLocaleString()} · {item.duration_seconds}s</Typography></Box><Button size="small" variant="outlined" disabled={smokeBusy} onClick={() => rerunSmoke(item.execution_id)}>Rerun</Button></Stack></Paper>)}</Stack></Box>}</CardContent></Card>
+      <Grid container spacing={2} sx={{ mt: .5 }}><Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution target</InputLabel><Select labelId="autopilot-provider-label" label="Execution target" value={provider} onChange={(event) => setProvider(event.target.value as "browserstack" | "appium")}><MenuItem value="browserstack" disabled={providerStatus !== null && !providerStatus.browserstack_configured}>BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid><Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid><Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid><Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>{provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} helperText="Hosted runs require a reachable HTTPS endpoint; leave blank only when the backend has one configured." /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}<Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions for this smoke" /><Typography variant="caption" color="text.secondary" display="block">Enabled by default so unattended smoke runs do not stall on Android permission dialogs. Permission grant/deny behavior remains covered by generated permission tests.</Typography></Grid></Grid>{execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}{execution && (execution.screenshot_asset_id || execution.page_source_asset_id) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Evidence is retained with this run and is available in Test Reports.</Typography>}{executionHistory.length > 0 && <Box sx={{ mt: 2 }}><Typography variant="subtitle2" fontWeight={800}>Previous smoke runs</Typography><Stack spacing={1} sx={{ mt: 1 }}>{executionHistory.map((item) => <Paper key={item.execution_id} variant="outlined" sx={{ p: 1.25 }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between"><Box><Typography variant="body2" fontWeight={700}>{item.status.toUpperCase()} · {item.request.provider} · {item.request.device_name}</Typography><Typography variant="caption" color="text.secondary">{new Date(item.created_at).toLocaleString()} · {item.duration_seconds}s</Typography></Box><Button size="small" variant="outlined" disabled={smokeBusy} onClick={() => rerunSmoke(item.execution_id)}>Rerun</Button></Stack></Paper>)}</Stack></Box>}</CardContent></Card>
 
       {analysis.release_risks.length > 0 && <Alert severity="info"><b>Initial release risks:</b> {analysis.release_risks.join(" • ")}</Alert>}
     </>}
+
+    <Dialog open={setupOpen} onClose={() => !setupBusy && setSetupOpen(false)} fullWidth maxWidth="md">
+      <DialogTitle>Resolve Autopilot test dependencies</DialogTitle>
+      <DialogContent>
+        <Alert severity="info" sx={{ mb: 2 }}>Enter references to approved non-production resources. Do not paste passwords, access tokens or OTPs; keep secrets in the configured vault/provider.</Alert>
+        <Grid container spacing={2}>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Credential set reference" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/investnation-uat" /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Test account role" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Environment name" value={setupDraft.environment_name} onChange={(event) => updateSetup("environment_name", event.target.value)} placeholder="UAT" /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Environment URL / identifier" value={setupDraft.environment_url} onChange={(event) => updateSetup("environment_url", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Synthetic test-data reference" value={setupDraft.test_data_reference} onChange={(event) => updateSetup("test_data_reference", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Reset / cleanup reference" value={setupDraft.reset_hook_reference} onChange={(event) => updateSetup("reset_hook_reference", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Acceptance-criteria reference" value={setupDraft.acceptance_criteria_reference} onChange={(event) => updateSetup("acceptance_criteria_reference", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="API / oracle reference" value={setupDraft.api_oracle_reference} onChange={(event) => updateSetup("api_oracle_reference", event.target.value)} /></Grid>
+          <Grid item xs={12}><TextField fullWidth multiline minRows={3} label="Safe navigation and data notes" value={setupDraft.navigation_notes} onChange={(event) => updateSetup("navigation_notes", event.target.value)} helperText="Describe seeded users, permitted paths and expected reset behavior. Never include secret values." /></Grid>
+          <Grid item xs={12}><FormControlLabel control={<Switch checked={setupDraft.safe_authentication_approved} onChange={(event) => updateSetup("safe_authentication_approved", event.target.checked)} />} label="Approve safe non-transactional authentication in this UAT environment" /></Grid>
+        </Grid>
+      </DialogContent>
+      <DialogActions><Button onClick={() => setSetupOpen(false)} disabled={setupBusy}>Cancel</Button><Button variant="contained" onClick={saveSetup} disabled={setupBusy}>{setupBusy ? "Saving…" : "Save and recheck readiness"}</Button></DialogActions>
+    </Dialog>
   </Stack>;
 }
-

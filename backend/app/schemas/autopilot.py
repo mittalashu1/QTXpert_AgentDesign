@@ -204,6 +204,31 @@ class AutopilotProviderStatus(BaseModel):
     recommended_provider: Literal["browserstack", "appium"] = "appium"
 
 
+class AutopilotSetupUpdateRequest(BaseModel):
+    """Non-secret references used to resolve deferred Autopilot tests."""
+
+    credential_reference: str = Field(default="", max_length=300)
+    account_role: str = Field(default="", max_length=160)
+    environment_name: str = Field(default="", max_length=160)
+    environment_url: str = Field(default="", max_length=1000)
+    test_data_reference: str = Field(default="", max_length=500)
+    reset_hook_reference: str = Field(default="", max_length=500)
+    acceptance_criteria_reference: str = Field(default="", max_length=500)
+    api_oracle_reference: str = Field(default="", max_length=500)
+    navigation_notes: str = Field(default="", max_length=4000)
+    safe_authentication_approved: bool = False
+    approved_test_ids: List[str] = Field(default_factory=list, max_length=100)
+
+
+class AutopilotSetupProfile(AutopilotSetupUpdateRequest):
+    """Durable setup references; passwords and tokens are intentionally excluded."""
+
+    job_id: str
+    updated_at: Optional[str] = None
+    provided_fields: List[str] = Field(default_factory=list)
+    missing_fields: List[str] = Field(default_factory=list)
+
+
 class QTXIRStep(BaseModel):
     action: Literal[
         "launch_app",
@@ -258,6 +283,8 @@ class AutopilotAutomationBundle(BaseModel):
     discovery_required_count: int = 0
     approval_required_count: int = 0
     bucket_counts: Dict[str, int] = Field(default_factory=dict)
+    setup_provided_count: int = 0
+    setup_missing_fields: List[str] = Field(default_factory=list)
     tests: List[QTXTestIR] = Field(default_factory=list)
 
 
@@ -346,6 +373,8 @@ class DiscoveredScreen(BaseModel):
     activity_name: Optional[str] = None
     screenshot_path: Optional[str] = None
     page_source_path: Optional[str] = None
+    screenshot_asset_id: Optional[UUID] = None
+    page_source_asset_id: Optional[UUID] = None
     controls: List[DiscoveredControl] = Field(default_factory=list)
 
 
@@ -418,4 +447,3 @@ class AutopilotSuiteResult(BaseModel):
     bucket_counts: Dict[str, int] = Field(default_factory=dict)
     error: Optional[str] = None
     tests: List[AutopilotSuiteTestResult] = Field(default_factory=list)
-

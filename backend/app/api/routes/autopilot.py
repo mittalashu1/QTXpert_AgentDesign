@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Optional
 from uuid import UUID, uuid4
@@ -34,6 +34,8 @@ from app.schemas.autopilot import (
     AutopilotJobStatus,
     AutopilotProviderStatus,
     AutopilotProfileOption,
+    AutopilotSetupProfile,
+    AutopilotSetupUpdateRequest,
     AutopilotTestAuditReport,
     AutopilotSuiteRequest,
     AutopilotSuiteResult,
@@ -205,6 +207,41 @@ def _record_discovery(record: Optional[AutopilotJob]):
         return AutopilotDiscoveryResult.model_validate(record.discovery)
     except Exception:
         return None
+
+
+def _setup_profile(job_id: str, value: Optional[dict]) -> AutopilotSetupProfile:
+    """Normalize stored non-secret setup references and expose completion metadata."""
+    raw = dict(value or {})
+    raw["job_id"] = job_id
+    raw.setdefault("updated_at", None)
+    reference_fields = (
+        "credential_reference",
+        "account_role",
+        "environment_name",
+        "environment_url",
+        "test_data_reference",
+        "reset_hook_reference",
+        "acceptance_criteria_reference",
+        "api_oracle_reference",
+        "navigation_notes",
+    )
+    provided = [name for name in reference_fields if str(raw.get(name) or "").strip()]
+    if raw.get("safe_authentication_approved"):
+        provided.append("safe_authentication_approved")
+    if raw.get("approved_test_ids"):
+        provided.append("approved_test_ids")
+    raw["provided_fields"] = provided
+    raw.setdefault("missing_fields", [])
+    return AutopilotSetupProfile.model_validate(raw)
+
+
+def _record_setup(record: Optional[AutopilotJob], job_id: str) -> AutopilotSetupProfile:
+    if record is None:
+        return _setup_profile(job_id, None)
+    try:
+        return _setup_profile(job_id, record.setup_profile)
+    except Exception:
+        return _setup_profile(job_id, None)
 
 
 async def _start_analysis_from_asset(
@@ -842,7 +879,65 @@ async def get_autopilot_automation(
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
     record = await _safe_job_record(db, job_id, user.id)
-    return AutopilotIRCompiler().compile_bundle(analysis, _record_discovery(record))
+    return AutopilotIRCompiler().compile_bundle(
+        analysis,
+        _record_discovery(record),
+        _record_setup(record, job_id),
+    )
+
+
+@router.get("/{job_id}/setup", response_model=AutopilotSetupProfile)
+async def get_autopilot_setup(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Return only non-secret references used to resolve deferred tests."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    return _record_setup(await _safe_job_record(db, job_id, user.id), job_id)
+
+
+@router.put("/{job_id}/setup", response_model=AutopilotSetupProfile)
+async def update_autopilot_setup(
+    job_id: str,
+    payload: AutopilotSetupUpdateRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Persist dependency references without accepting passwords, tokens or OTPs."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    credential_reference = payload.credential_reference.strip()
+    lowered = credential_reference.lower()
+    if any(marker in lowered for marker in ("password=", "token=", "secret=", "bearer ")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enter a vault/credential reference only; passwords and tokens are not stored here.",
+        )
+    record = await _safe_job_record(db, job_id, user.id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Autopilot setup storage is temporarily unavailable.",
+        )
+    stored = payload.model_dump()
+    stored["credential_reference"] = credential_reference
+    stored["updated_at"] = datetime.now(timezone.utc).isoformat()
+    profile = _setup_profile(job_id, stored)
+    try:
+        record.setup_profile = profile.model_dump(mode="json")
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("Autopilot setup persistence failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Autopilot setup could not be saved; retry after storage is available.",
+        ) from exc
+    return profile
 
 
 @router.post("/{job_id}/discover", response_model=AutopilotDiscoveryResult)
@@ -859,6 +954,30 @@ async def run_autopilot_discovery(
     await _ensure_local_artifact(db, service, job_id, user)
     result = await AutopilotDiscoveryService(settings, service).run(job_id, payload)
     record = await _safe_job_record(db, job_id, user.id)
+    if record is not None and result.screens:
+        repository_asset_id = record.repository_asset_id
+        for screen in result.screens:
+            screen.screenshot_asset_id = await _persist_evidence_asset(
+                db,
+                user,
+                record,
+                settings,
+                screen.screenshot_path,
+                filename=f"discovery-{job_id[:8]}-{screen.screen_id}.png",
+                content_type="image/png",
+                repository_asset_id=repository_asset_id,
+            )
+            screen.page_source_asset_id = await _persist_evidence_asset(
+                db,
+                user,
+                record,
+                settings,
+                screen.page_source_path,
+                filename=f"discovery-{job_id[:8]}-{screen.screen_id}.xml",
+                content_type="application/xml",
+                repository_asset_id=repository_asset_id,
+            )
+        record = await _safe_job_record(db, job_id, user.id)
     if record is not None:
         try:
             record.discovery = result.model_dump(mode="json")
@@ -895,7 +1014,12 @@ async def execute_autopilot_suite(
     await _require_owned_job(service, job_id, user)
     await _ensure_local_artifact(db, service, job_id, user)
     record = await _safe_job_record(db, job_id, user.id)
-    result = await AutopilotSuiteService(settings, service).run(job_id, payload, _record_discovery(record))
+    result = await AutopilotSuiteService(settings, service).run(
+        job_id,
+        payload,
+        _record_discovery(record),
+        _record_setup(record, job_id),
+    )
     if record is not None:
         try:
             record.suite_execution = result.model_dump(mode="json")
@@ -1089,4 +1213,3 @@ async def rerun_autopilot_smoke(
         job_id=job_id,
         request=request,
     )
-

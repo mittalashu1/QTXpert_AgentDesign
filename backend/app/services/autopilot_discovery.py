@@ -26,6 +26,7 @@ from app.schemas.autopilot import (
     DiscoveryLocator,
 )
 from app.services.autopilot import AutopilotPrototypeService
+from app.services.appium_compat import safe_app_identity, safe_page_source, safe_quit
 
 
 _BLOCKED_TERMS = {
@@ -203,6 +204,8 @@ class AutopilotDiscoveryService:
                     appium_url,
                     app_reference,
                     request,
+                    analysis.package_name,
+                    analysis.main_activity,
                     browserstack_options,
                     self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
                     self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
@@ -250,6 +253,8 @@ class AutopilotDiscoveryService:
         appium_url: str,
         app_reference: str,
         request: AutopilotDiscoveryRequest,
+        package_hint: Optional[str],
+        activity_hint: Optional[str],
         browserstack_options: Dict[str, Any] | None,
         install_timeout_ms: int,
         server_launch_timeout_ms: int,
@@ -291,10 +296,16 @@ class AutopilotDiscoveryService:
 
         def capture() -> tuple[DiscoveredScreen, bool]:
             index = len(screens) + 1
-            page_source = driver.page_source or ""
+            page_source = safe_page_source(driver)
             controls = self.parse_controls(page_source)
-            package_name = getattr(driver, "current_package", None)
-            activity_name = getattr(driver, "current_activity", None)
+            identity = safe_app_identity(
+                driver,
+                page_source=page_source,
+                package_hint=package_hint,
+                activity_hint=activity_hint,
+            )
+            package_name = identity["package"]
+            activity_name = identity["activity"]
             fp = self.fingerprint(package_name, activity_name, controls)
             duplicate = fp in seen_fingerprints
             screen_id = seen_fingerprints.get(fp) or f"screen-{index:03d}"
@@ -391,4 +402,4 @@ class AutopilotDiscoveryService:
                 "warnings": warnings,
             }
         finally:
-            driver.quit()
+            safe_quit(driver)

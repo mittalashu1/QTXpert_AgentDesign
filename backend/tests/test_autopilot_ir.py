@@ -1,6 +1,7 @@
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
+    AutopilotSetupProfile,
     AutopilotTest,
     DiscoveredControl,
     DiscoveredScreen,
@@ -242,3 +243,43 @@ def test_blocked_control_cannot_be_promoted_to_tap():
     assert generated.readiness == "discovery_required"
     assert generated.promoted_by_discovery is False
     assert "No high-confidence safe control" in (generated.readiness_reason or "")
+
+
+def test_setup_references_resolve_data_gate_before_discovery_promotion():
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AI-020",
+            suite="Authenticated navigation",
+            title="Open authenticated help",
+            priority="high",
+            objective="Validate a safe signed-in navigation path",
+            steps=["Open Help", "Verify Support"],
+            expected=["Support is visible"],
+            source="ai",
+            requires_auth=True,
+            requires_test_data=True,
+        )
+    ])
+
+    pending = AutopilotIRCompiler().compile_bundle(analysis, _discovery())
+    assert pending.tests[0].readiness == "discovery_required"
+    assert "credential reference" in (pending.tests[0].readiness_reason or "")
+    assert "credential reference" in pending.setup_missing_fields
+
+    setup = AutopilotSetupProfile(
+        job_id=analysis.job_id,
+        credential_reference="qtxpert://credentials/investnation-uat",
+        account_role="Retail investor",
+        environment_name="UAT",
+        test_data_reference="dataset://investnation/synthetic-investor-01",
+        reset_hook_reference="hook://investnation/reset-investor-01",
+        safe_authentication_approved=True,
+        provided_fields=[
+            "credential_reference", "account_role", "environment_name",
+            "test_data_reference", "reset_hook_reference", "safe_authentication_approved",
+        ],
+    )
+    ready = AutopilotIRCompiler().compile_bundle(analysis, _discovery(), setup)
+    assert ready.tests[0].readiness == "executable"
+    assert ready.tests[0].promoted_by_discovery is True
+    assert ready.setup_missing_fields == []

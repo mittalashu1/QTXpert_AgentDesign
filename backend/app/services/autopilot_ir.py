@@ -17,6 +17,7 @@ from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotAutomationBundle,
     AutopilotDiscoveryResult,
+    AutopilotSetupProfile,
     AutopilotTest,
     DiscoveredControl,
     DiscoveredScreen,
@@ -47,11 +48,17 @@ class AutopilotIRCompiler:
         self,
         analysis: AutopilotAnalysis,
         discovery: Optional[AutopilotDiscoveryResult] = None,
+        setup: Optional[AutopilotSetupProfile] = None,
     ) -> AutopilotAutomationBundle:
-        compiled = [self.compile_test(test, analysis, discovery) for test in analysis.tests]
+        compiled = [self.compile_test(test, analysis, discovery, setup) for test in analysis.tests]
         bucket_counts: dict[str, int] = {}
         for test in compiled:
             bucket_counts[test.bucket] = bucket_counts.get(test.bucket, 0) + 1
+        setup_missing = sorted({
+            field
+            for test in analysis.tests
+            for field in self._missing_setup(test, setup)
+        })
         return AutopilotAutomationBundle(
             job_id=analysis.job_id,
             generated_at=datetime.now(timezone.utc).isoformat(),
@@ -61,6 +68,8 @@ class AutopilotIRCompiler:
             discovery_required_count=sum(test.readiness == "discovery_required" for test in compiled),
             approval_required_count=sum(test.readiness == "approval_required" for test in compiled),
             bucket_counts=bucket_counts,
+            setup_provided_count=len(setup.provided_fields) if setup else 0,
+            setup_missing_fields=setup_missing,
             tests=compiled,
         )
 
@@ -69,24 +78,24 @@ class AutopilotIRCompiler:
         test: AutopilotTest,
         analysis: AutopilotAnalysis,
         discovery: Optional[AutopilotDiscoveryResult] = None,
+        setup: Optional[AutopilotSetupProfile] = None,
     ) -> QTXTestIR:
         promoted = False
         readiness_reason: Optional[str] = None
         resolved_steps: Optional[list[QTXIRStep]] = None
 
+        missing_setup = self._missing_setup(test, setup)
         if test.destructive:
             readiness = "approval_required"
-            readiness_reason = "The test is marked destructive and requires explicit customer approval."
-        elif test.requires_auth or test.requires_test_data:
+            if setup and test.id in setup.approved_test_ids:
+                readiness_reason = (
+                    "Approval is recorded, but financial/destructive actions remain restricted to a supervised run."
+                )
+            else:
+                readiness_reason = "The test is marked destructive and requires explicit customer approval."
+        elif missing_setup:
             readiness = "discovery_required"
-            dependencies = []
-            if test.requires_auth:
-                dependencies.append("a secure non-production credential reference")
-            if test.requires_test_data:
-                dependencies.append("approved synthetic test data/reset hooks")
-            readiness_reason = test.dependency or (
-                "Authenticated execution requires " + " and ".join(dependencies) + "."
-            )
+            readiness_reason = "Provide setup: " + "; ".join(missing_setup) + "."
         elif test.id in self.EXECUTABLE_IDS:
             readiness = "executable"
             readiness_reason = "Deterministic platform-level Autopilot check."
@@ -120,6 +129,30 @@ class AutopilotIRCompiler:
         )
         generated.appium_python = self._appium_script(test, analysis, generated)
         return generated
+
+    @staticmethod
+    def _missing_setup(
+        test: AutopilotTest,
+        setup: Optional[AutopilotSetupProfile],
+    ) -> list[str]:
+        missing: list[str] = []
+        if test.requires_auth:
+            if not setup or not setup.credential_reference.strip():
+                missing.append("credential reference")
+            if not setup or not setup.account_role.strip():
+                missing.append("test account role")
+            if not setup or not setup.safe_authentication_approved:
+                missing.append("safe authentication approval")
+        if test.requires_test_data:
+            if not setup or not setup.test_data_reference.strip():
+                missing.append("synthetic test-data reference")
+            if not setup or not setup.reset_hook_reference.strip():
+                missing.append("reset/cleanup reference")
+        if test.bucket == "uat" and (not setup or not setup.acceptance_criteria_reference.strip()):
+            missing.append("signed-off acceptance criteria reference")
+        if test.bucket == "integration" and (not setup or not setup.api_oracle_reference.strip()):
+            missing.append("API/oracle reference")
+        return missing
 
     def _ir_steps(self, test: AutopilotTest) -> list[QTXIRStep]:
         if test.id == "QT-AUTO-SMOKE-001":
@@ -331,15 +364,17 @@ class AutopilotIRCompiler:
                     """QTX {test.id}: {test.title}."""
                     from pathlib import Path
                     import time
+                    from app.services.appium_compat import safe_app_identity, safe_page_source
 
                     evidence_dir = Path(evidence_dir)
                     evidence_dir.mkdir(parents=True, exist_ok=True)
                     time.sleep(3)
-                    package = driver.current_package
-                    activity = getattr(driver, "current_activity", None)
+                    page_source = safe_page_source(driver)
+                    identity = safe_app_identity(driver, page_source=page_source, package_hint={package_hint!r})
+                    package = identity["package"]
+                    activity = identity["activity"]
                     assert package, "Application did not reach a foreground package"
                     driver.get_screenshot_as_file(str(evidence_dir / "{test.id.lower()}.png"))
-                    page_source = driver.page_source or ""
                     (evidence_dir / "{test.id.lower()}.xml").write_text(page_source, encoding="utf-8")
                     assert page_source.strip(), "No readable Android UI hierarchy was returned"
                     return {{"package": package, "activity": activity, "page_source_chars": len(page_source)}}
@@ -353,18 +388,21 @@ class AutopilotIRCompiler:
                     """QTX {test.id}: {test.title}."""
                     from pathlib import Path
                     import time
+                    from app.services.appium_compat import safe_app_identity, safe_page_source
 
                     evidence_dir = Path(evidence_dir)
                     evidence_dir.mkdir(parents=True, exist_ok=True)
-                    package = driver.current_package or {package_hint!r}
+                    identity = safe_app_identity(driver, page_source=safe_page_source(driver), package_hint={package_hint!r})
+                    package = identity["package"]
                     assert package, "Unable to determine application package"
                     driver.background_app(2)
                     time.sleep(1)
                     driver.activate_app(package)
                     time.sleep(2)
-                    assert driver.current_package == package, "Application did not recover to foreground"
+                    restored = safe_app_identity(driver, page_source=safe_page_source(driver))
+                    assert restored["package"] == package, "Application did not recover to foreground"
                     driver.get_screenshot_as_file(str(evidence_dir / "{test.id.lower()}.png"))
-                    return {{"package": driver.current_package, "activity": getattr(driver, "current_activity", None)}}
+                    return {{"package": restored["package"], "activity": restored["activity"]}}
                 '''
             ).strip()
 
@@ -394,6 +432,7 @@ class AutopilotIRCompiler:
                 "    from pathlib import Path",
                 "    import time",
                 "    from appium.webdriver.common.appiumby import AppiumBy",
+                "    from app.services.appium_compat import safe_app_identity, safe_page_source",
                 "",
                 "    evidence_dir = Path(evidence_dir)",
                 "    evidence_dir.mkdir(parents=True, exist_ok=True)",
@@ -418,7 +457,10 @@ class AutopilotIRCompiler:
                         "    xml = driver.page_source or ''",
                         f"    (evidence_dir / '{test.id.lower()}.xml').write_text(xml, encoding='utf-8')",
                     ])
-            lines.append("    return {'package': driver.current_package, 'activity': getattr(driver, 'current_activity', None)}")
+            lines.extend([
+                "    identity = safe_app_identity(driver, page_source=safe_page_source(driver))",
+                "    return {'package': identity['package'], 'activity': identity['activity']}",
+            ])
             return "\n".join(lines)
 
         reason = (
