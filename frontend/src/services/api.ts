@@ -17,6 +17,8 @@ import {
   DocumentFinding,
   DocumentFindingStatus,
   DocumentProfile,
+  ExecutionProvider,
+  ExecutionTargetKind,
 } from "@/types/domain";
 
 const activeProjectId = () => localStorage.getItem("qtxpert-selected-project") || undefined;
@@ -46,9 +48,18 @@ export const executionsApi = {
   create: (payload: {
     project_id: string;
     name: string;
-    base_url: string;
+    base_url?: string;
     browser: "chromium" | "firefox" | "webkit";
     test_case_ids: string[];
+    target_kind?: ExecutionTargetKind;
+    provider?: ExecutionProvider;
+    app_asset_id?: string;
+    device_name?: string;
+    platform_version?: string;
+    appium_url?: string;
+    appium_app?: string;
+    no_reset?: boolean;
+    auto_grant_permissions?: boolean;
   }) => apiClient.post<ExecutionRun>("/executions", payload),
   get: (runId: string) => apiClient.get<ExecutionRun>(`/executions/${runId}`),
   createDefect: (resultId: string, payload: { title: string; severity: string; description: string }) =>
@@ -69,9 +80,33 @@ export const executionPlansApi = {
     planId: string,
     cases: Array<{ id: string; selected: boolean; execution_mode: "automated" | "manual" }>,
   ) => apiClient.patch<ExecutionPlan>(`/execution-plans/${planId}/cases`, { cases }),
-  preflight: (planId: string, baseUrl: string) =>
-    apiClient.post<ExecutionPlan>(`/execution-plans/${planId}/preflight`, { base_url: baseUrl }),
-  execute: (planId: string, payload: { base_url: string; name?: string; browser?: "chromium" }) =>
+  preflight: (planId: string, payload: {
+    target_kind: ExecutionTargetKind;
+    provider: ExecutionProvider;
+    base_url?: string;
+    app_asset_id?: string;
+    device_name?: string;
+    platform_version?: string;
+    appium_url?: string;
+    appium_app?: string;
+    no_reset?: boolean;
+    auto_grant_permissions?: boolean;
+  }) =>
+    apiClient.post<ExecutionPlan>(`/execution-plans/${planId}/preflight`, payload),
+  execute: (planId: string, payload: {
+    target_kind: ExecutionTargetKind;
+    provider: ExecutionProvider;
+    base_url?: string;
+    app_asset_id?: string;
+    device_name?: string;
+    platform_version?: string;
+    appium_url?: string;
+    appium_app?: string;
+    no_reset?: boolean;
+    auto_grant_permissions?: boolean;
+    name?: string;
+    browser?: "chromium";
+  }) =>
     apiClient.post<ExecutionRun>(`/execution-plans/${planId}/execute`, payload),
   rerun: (planId: string, sourceExecutionId: string, name?: string) =>
     apiClient.post<ExecutionRun>(`/execution-plans/${planId}/rerun`, {
