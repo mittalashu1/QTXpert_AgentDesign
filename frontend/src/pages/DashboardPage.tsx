@@ -36,7 +36,7 @@ import { Link as RouterLink } from "react-router-dom";
 import { dashboardApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
-import type { DashboardSummary, ExecutionRun } from "@/types/domain";
+import type { ExecutionRun } from "@/types/domain";
 
 type MetricKey =
   | "requirements"
