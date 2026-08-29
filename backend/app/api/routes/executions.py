@@ -849,14 +849,45 @@ async def dashboard(project_id: UUID, db: Annotated[AsyncSession, Depends(get_db
     test_cases = await db.scalar(select(func.count(TestCase.id)).join(GenerationRun).where(GenerationRun.project_id == project_id)) or 0
     automation = await db.scalar(select(func.count(TestCase.id)).join(GenerationRun).where(GenerationRun.project_id == project_id, TestCase.is_automation_candidate.is_(True))) or 0
     run_count = await db.scalar(select(func.count(ExecutionRun.id)).where(ExecutionRun.project_id == project_id)) or 0
-    passed = await db.scalar(select(func.coalesce(func.sum(ExecutionRun.passed_tests), 0)).where(ExecutionRun.project_id == project_id)) or 0
-    failed = await db.scalar(select(func.coalesce(func.sum(ExecutionRun.failed_tests), 0)).where(ExecutionRun.project_id == project_id)) or 0
+    status_rows = (await db.execute(
+        select(ExecutionResult.status, func.count(ExecutionResult.id))
+        .join(ExecutionRun, ExecutionResult.execution_run_id == ExecutionRun.id)
+        .where(ExecutionRun.project_id == project_id)
+        .group_by(ExecutionResult.status)
+    )).all()
+    result_counts = {
+        getattr(result_status, "value", str(result_status)): int(count)
+        for result_status, count in status_rows
+    }
+    total_execution_tests = sum(result_counts.values())
+    passed = result_counts.get(ResultStatus.PASSED.value, 0)
+    failed = result_counts.get(ResultStatus.FAILED.value, 0)
+    blocked = result_counts.get(ResultStatus.BLOCKED.value, 0)
+    skipped = result_counts.get(ResultStatus.SKIPPED.value, 0)
+    pending = result_counts.get(ResultStatus.PENDING.value, 0)
+    executed = passed + failed
     open_defects = await db.scalar(select(func.count(Defect.id)).join(ExecutionResult).join(ExecutionRun).where(ExecutionRun.project_id == project_id, Defect.status.in_([DefectStatus.OPEN, DefectStatus.IN_PROGRESS]))) or 0
     recent = (await db.scalars(select(ExecutionRun).options(
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.test_case),
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.defects),
     ).where(ExecutionRun.project_id == project_id).order_by(ExecutionRun.created_at.desc()).limit(5))).unique().all()
-    denominator = int(passed) + int(failed)
-    return DashboardSummary(requirements=requirements, test_cases=test_cases, execution_runs=run_count, pass_rate=round(int(passed) * 100 / denominator, 1) if denominator else 0, open_defects=open_defects, automation_candidates=automation, recent_runs=recent)
-
-
+    # Use every result row as the denominator.  This keeps blocked, pending,
+    # and skipped tests visible instead of reporting 100% when only one test
+    # from a larger execution set has passed.
+    pass_rate = round(passed * 100 / total_execution_tests, 1) if total_execution_tests else 0
+    return DashboardSummary(
+        requirements=requirements,
+        test_cases=test_cases,
+        execution_runs=run_count,
+        pass_rate=pass_rate,
+        open_defects=open_defects,
+        automation_candidates=automation,
+        recent_runs=recent,
+        total_execution_tests=total_execution_tests,
+        executed_tests=executed,
+        passed_tests=passed,
+        failed_tests=failed,
+        blocked_tests=blocked,
+        skipped_tests=skipped,
+        pending_tests=pending,
+    )
