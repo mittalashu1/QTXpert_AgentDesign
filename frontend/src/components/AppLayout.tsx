@@ -37,7 +37,7 @@ export default function AppLayout() {
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [testDataOpen, setTestDataOpen] = useState(location.pathname.startsWith("/test-data"));
   const canViewCosts = user?.role === "admin" && user.email.trim().toLowerCase() === COST_ADMIN_EMAIL;
-  const designRunFocused = location.pathname === "/design" && new URLSearchParams(location.search).has("run");
+  const designRunFocused = location.pathname === "/design" && Boolean(new URLSearchParams(location.search).get("run"));
 
   useEffect(() => {
     if (location.pathname.startsWith("/test-data")) setTestDataOpen(true);
