@@ -58,6 +58,13 @@ function sourceRunTitle(run: { title?: string | null; requirement_summary: strin
   return compactTitle(run.title || run.requirement_summary || `${run.generation_profile} test set`);
 }
 
+function mobileAssetExtension(asset: UploadedAsset) {
+  const declared = (asset.extension || "").trim().toLowerCase();
+  if (declared) return declared;
+  const fromFilename = asset.filename.split(".").pop()?.trim().toLowerCase();
+  return fromFilename || (asset.category || "").trim().toLowerCase();
+}
+
 function readinessColor(readiness: string): "success" | "error" | "warning" | "info" | "default" {
   if (readiness === "ready") return "success";
   if (readiness === "blocked") return "error";
@@ -150,7 +157,7 @@ export default function TestExecutionPage() {
   const currentCases = useMemo(() => currentPlan?.cases ?? [], [currentPlan]);
   const availableMobileAssets = useMemo(
     () => (mobileAssets.data ?? []).filter((asset) =>
-      (targetKind === "android" ? asset.extension.toLowerCase() === "apk" : targetKind === "ios" ? asset.extension.toLowerCase() === "ipa" : false)
+      (targetKind === "android" ? mobileAssetExtension(asset) === "apk" : targetKind === "ios" ? mobileAssetExtension(asset) === "ipa" : false)
       && !["autopilot_evidence", "execution_evidence"].includes(asset.category),
     ),
     [mobileAssets.data, targetKind],
@@ -200,7 +207,7 @@ export default function TestExecutionPage() {
     }
     setProvider((value) => value === "playwright" ? "browserstack" : value);
     const selected = (mobileAssets.data ?? []).find((asset) => asset.id === appAssetId);
-    if (selected && selected.extension.toLowerCase() !== (targetKind === "android" ? "apk" : "ipa")) {
+    if (selected && mobileAssetExtension(selected) !== (targetKind === "android" ? "apk" : "ipa")) {
       setAppAssetId("");
     }
     setPreflightSignature("");
