@@ -317,6 +317,28 @@ def _mobile_capabilities(
     return options, capabilities
 
 
+def _mobile_session_metadata(driver: object) -> dict[str, str | None]:
+    """Read optional app metadata without issuing vendor-specific commands.
+
+    BrowserStack's Appium endpoint does not expose ``mobile: getCurrentPackage``
+    (which is what Appium Python's ``current_package`` property invokes).  The
+    property therefore turns an otherwise healthy session into a failed run.
+    Capabilities are negotiated during session creation and are safe to read
+    locally across BrowserStack, hosted Appium, and local Appium providers.
+    """
+    capabilities = getattr(driver, "capabilities", None)
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+    return {
+        "current_package": (
+            capabilities.get("appium:appPackage")
+            or capabilities.get("appPackage")
+            or capabilities.get("appPackageName")
+        ),
+        "current_activity": capabilities.get("appium:appActivity") or capabilities.get("appActivity"),
+    }
+
+
 def _execute_mobile_sync(
     appium_url: str,
     app_reference: str,
@@ -358,8 +380,7 @@ def _execute_mobile_sync(
         driver.get_screenshot_as_file(str(screenshot_path))
         page_source = driver.page_source or ""
         source_path.write_text(page_source, encoding="utf-8")
-        current_package = getattr(driver, "current_package", None)
-        current_activity = getattr(driver, "current_activity", None)
+        session_metadata = _mobile_session_metadata(driver)
         results: list[dict] = []
         locator_map = {
             "accessibility_id": AppiumBy.ACCESSIBILITY_ID,
@@ -392,8 +413,7 @@ def _execute_mobile_sync(
                             raise AssertionError(f"Expected mobile UI text {value!r} was not present")
                     elif action == "assert-visible":
                         driver.find_element(locator_map[strategy or "accessibility_id"], value or "")
-                evidence["current_package"] = getattr(driver, "current_package", None)
-                evidence["current_activity"] = getattr(driver, "current_activity", None)
+                evidence.update(session_metadata)
             except ValueError as exc:
                 status_value = "blocked"
                 error = str(exc)
@@ -411,8 +431,7 @@ def _execute_mobile_sync(
             )
         return {
             "results": results,
-            "current_package": current_package,
-            "current_activity": current_activity,
+            **session_metadata,
             "screenshot_path": str(screenshot_path) if screenshot_path.exists() else None,
             "page_source_path": str(source_path) if source_path.exists() else None,
         }
