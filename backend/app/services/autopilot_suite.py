@@ -23,7 +23,13 @@ from app.schemas.autopilot import (
     QTXTestIR,
 )
 from app.services.autopilot import AutopilotPrototypeService
-from app.services.appium_compat import expected_package_state, safe_app_identity, safe_page_source, safe_quit
+from app.services.appium_compat import (
+    expected_package_state,
+    safe_app_identity,
+    safe_background_application,
+    safe_page_source,
+    safe_quit,
+)
 from app.services.autopilot_ir import AutopilotIRCompiler
 
 
@@ -360,7 +366,7 @@ class AutopilotSuiteService:
                 if not source.strip():
                     raise AssertionError("No readable Android UI hierarchy was returned")
             elif step.action == "background_app":
-                driver.background_app(2)
+                safe_background_application(driver, 2)
                 time.sleep(0.5)
             elif step.action == "restore_app":
                 if not package:
@@ -416,3 +422,4 @@ class AutopilotSuiteService:
     @staticmethod
     def _safe_name(value: str) -> str:
         return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")[:100]
+

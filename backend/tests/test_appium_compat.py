@@ -1,6 +1,7 @@
 from app.services.appium_compat import (
     expected_package_state,
     safe_app_identity,
+    safe_background_application,
     safe_page_source,
     safe_quit,
 )
@@ -71,3 +72,21 @@ def test_evidence_and_cleanup_are_best_effort():
     driver = BrokenDriver()
     assert safe_page_source(driver) == ""
     safe_quit(driver)
+
+
+def test_background_falls_back_to_supported_home_key(monkeypatch):
+    class Driver:
+        calls = []
+
+        def background_app(self, _seconds):
+            raise RuntimeError('Unknown mobile command "backgroundApp"')
+
+        def press_keycode(self, keycode):
+            self.calls.append(keycode)
+
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
+    driver = Driver()
+
+    assert safe_background_application(driver, 2) == "press_keycode_home"
+    assert driver.calls == [3]
+

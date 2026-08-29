@@ -8,6 +8,7 @@ helpers derive identity from negotiated capabilities and the UI hierarchy only.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Mapping, Optional
 
 
@@ -91,9 +92,34 @@ def safe_quit(driver: Any) -> None:
         pass
 
 
+def safe_background_application(driver: Any, seconds: float = 2.0) -> str:
+    """Background Android without depending on the optional ``backgroundApp`` extension.
+
+    BrowserStack's current UiAutomator2 endpoint rejects that extension.  The
+    standard Android key-code endpoint is supported by both BrowserStack and
+    local Appium, so preserve the native method where available and fall back
+    only for the provider-specific unknown-command error.
+    """
+    try:
+        driver.background_app(seconds)
+        return "background_app"
+    except Exception as exc:
+        message = str(exc).lower()
+        if "unknown mobile command" not in message or "backgroundapp" not in message:
+            raise
+
+    # Android KEYCODE_HOME.  This avoids provider-specific ``mobile: shell``
+    # commands, which BrowserStack intentionally disables on hosted devices.
+    driver.press_keycode(3)
+    mechanism = "press_keycode_home"
+    time.sleep(max(0.0, seconds))
+    return mechanism
+
+
 def _first(values: Mapping[str, Any], *keys: str) -> Optional[str]:
     for key in keys:
         value = values.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+

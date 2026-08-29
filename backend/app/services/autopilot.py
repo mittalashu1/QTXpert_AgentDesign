@@ -630,196 +630,42 @@ class AutopilotPrototypeService:
         return result
 
     def _build_deterministic_tests(self, meta: Dict[str, Any]) -> List[AutopilotTest]:
-        """Build a complete, evidence-aware mobile coverage plan.
-
-        The plan is intentionally broader than the immediately executable safe
-        subset. Every bucket is represented even when runtime discovery,
-        credentials, test data, a device matrix or an approved load target is
-        still missing. This prevents an APK-only run from silently omitting
-        functional and UAT coverage.
-        """
         tests: list[AutopilotTest] = [
             AutopilotTest(
                 id="QT-AUTO-SMOKE-001",
-                suite="Installation",
-                bucket="installation",
+                suite="Smoke",
                 title="Install and cold-launch application",
                 priority="critical",
                 objective="Verify the uploaded build installs and reaches a stable foreground UI without an immediate crash.",
                 steps=["Install uploaded APK on clean Android device", "Cold-launch the application", "Wait for first stable foreground screen", "Capture screenshot, UI hierarchy and device state"],
                 expected=["Installation succeeds", "Application becomes foreground process", "No immediate fatal crash is detected", "A readable UI hierarchy or rendered screen is available"],
-                evidence_required=["Install result", "Foreground package/activity", "Screenshot", "UI hierarchy"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-INSTALL-002",
-                suite="Installation",
-                bucket="installation",
-                title="Upgrade and data-preservation check",
-                priority="high",
-                objective="Verify an approved upgrade path preserves supported data and migrates cleanly.",
-                steps=["Install the approved previous build", "Seed non-production test data", "Install the uploaded build over the previous build", "Launch and verify migrated state"],
-                expected=["Upgrade completes without data loss", "Migration errors are surfaced safely", "The app reaches a usable state after upgrade"],
-                autonomous=False,
-                requires_test_data=True,
-                dependency="An approved previous APK, seeded non-production data and a reset/cleanup hook are required.",
-                evidence_required=["Before/after data snapshot", "Upgrade logs", "Post-upgrade screenshot"],
             ),
             AutopilotTest(
                 id="QT-AUTO-SMOKE-002",
-                suite="Resilience",
-                bucket="resilience",
+                suite="Smoke",
                 title="Background and foreground recovery",
                 priority="high",
                 objective="Verify the app survives a basic lifecycle interruption.",
                 steps=["Launch application", "Send application to background", "Wait briefly", "Restore application to foreground"],
                 expected=["Application remains responsive", "No unexpected logout or crash occurs unless explicitly designed"],
-                evidence_required=["Pre/post lifecycle state", "Screenshot"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-PAGE-001",
-                suite="Page-level",
-                bucket="page_level",
-                title="Screen inventory and navigation coverage",
-                priority="high",
-                objective="Discover every reachable screen and verify forward, back, tab, deep-link and empty-state navigation.",
-                steps=["Build a runtime screen graph from the entry point", "Traverse each safe navigation control", "Verify back and return-to-home behavior", "Record unreachable or duplicate screens"],
-                expected=["All approved screens are reachable or documented as intentionally gated", "Back/navigation state is consistent", "No dead-end or unexpected-crash route is observed"],
-                autonomous=False,
-                dependency="Runtime screen discovery and an approved navigation map are required.",
-                evidence_required=["Screen graph", "Transition list", "Per-screen screenshot/UI hierarchy"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-FUNC-001",
-                suite="Functional",
-                bucket="functional",
-                title="Authenticated end-to-end functional journey",
-                priority="critical",
-                objective="Execute the primary user journey from sign-in through the core business outcome and verify persisted state.",
-                steps=["Start from a clean application state", "Sign in with an approved non-production test account", "Complete the primary product journey", "Verify success state and persisted result", "Sign out and confirm session termination"],
-                expected=["Authentication succeeds for the approved role", "Each business step validates its acceptance criteria", "State persists correctly across relaunch", "Sign-out removes protected access"],
-                autonomous=False,
-                requires_auth=True,
-                requires_test_data=True,
-                dependency="A secure non-production credential reference, role permissions, seeded test data, environment URL and reset hook are required.",
-                evidence_required=["Step screenshots", "API/correlation IDs", "Backend/oracle assertion", "Session audit trail"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-FUNC-002",
-                suite="Functional",
-                bucket="functional",
-                title="Validation, negative and recovery paths",
-                priority="high",
-                objective="Verify field validation, business-rule boundaries, error messages, retry behavior and safe recovery across core forms.",
-                steps=["Exercise required-field and format validation", "Exercise boundary and invalid business values", "Interrupt a safe request and retry", "Verify errors do not corrupt user state"],
-                expected=["Invalid input is rejected with actionable feedback", "Boundary rules match the approved specification", "Retry/recovery is deterministic", "No sensitive value is disclosed in UI or logs"],
-                autonomous=False,
-                requires_auth=True,
-                requires_test_data=True,
-                dependency="Approved acceptance criteria, representative synthetic data and backend error/oracle access are required.",
-                evidence_required=["Validation screenshots", "Request/response correlation", "Error-log redaction evidence"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-UAT-001",
-                suite="UAT",
-                bucket="uat",
-                title="UAT acceptance of critical business journeys",
-                priority="critical",
-                objective="Validate release-critical journeys from a named business role against signed-off acceptance criteria.",
-                steps=["Load the approved UAT persona and data set", "Execute each release-critical acceptance journey", "Record expected and observed outcomes", "Obtain business-owner disposition for exceptions"],
-                expected=["Every UAT criterion has pass/fail evidence", "Role entitlements are correct", "Exceptions have an owner and approved disposition"],
-                autonomous=False,
-                requires_auth=True,
-                requires_test_data=True,
-                dependency="Signed-off UAT criteria, named business owner, non-production credentials and synthetic fixtures are required.",
-                evidence_required=["Acceptance-criteria mapping", "Persona/role evidence", "Business-owner sign-off"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-UI-001",
-                suite="UI",
-                bucket="ui",
-                title="Page-level UI visual and interaction baseline",
-                priority="high",
-                objective="Check every discovered page for layout, text, orientation, touch-target and visual-regression defects.",
-                steps=["Capture each discovered page at supported viewport sizes", "Check clipping, overlap, truncation and contrast", "Check touch targets and keyboard behavior", "Compare approved screenshots where available"],
-                expected=["No critical content is clipped or overlapped", "Interactive controls have usable touch targets and labels", "Layout is stable across supported orientations and sizes"],
-                autonomous=False,
-                dependency="Runtime screen discovery, supported viewport matrix and approved visual baselines are required.",
-                evidence_required=["Per-page screenshots", "Viewport/device metadata", "Visual diff results"],
             ),
             AutopilotTest(
                 id="QT-AUTO-UX-001",
                 suite="Accessibility",
-                bucket="accessibility",
                 title="Initial-screen accessibility and semantic control scan",
                 priority="medium",
                 objective="Identify missing labels, inaccessible controls and obvious semantic UI defects on discovered entry screens.",
                 steps=["Capture UI hierarchy", "Enumerate interactive controls", "Check labels/content descriptions and enabled states"],
                 expected=["Critical interactive controls are discoverable and semantically labelled"],
-                evidence_required=["UI hierarchy", "Accessibility findings"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-INTEGRATION-001",
-                suite="Integration",
-                bucket="integration",
-                title="Backend API and third-party integration contracts",
-                priority="high",
-                objective="Verify authentication, core APIs, third-party hand-offs, notifications and consistent error/correlation handling.",
-                steps=["Exercise approved API-backed journeys", "Verify request authentication and schema contracts", "Simulate dependency timeout/error responses", "Verify idempotency and recovery"],
-                expected=["Contracts match the approved specification", "Failures are handled without state corruption", "Correlation IDs link app and backend evidence"],
-                autonomous=False,
-                requires_test_data=True,
-                dependency="Reachable QA/UAT services, API specifications, sandbox/stub endpoints and correlation-log access are required.",
-                evidence_required=["API request/response evidence", "Correlation IDs", "Stub/third-party results"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-PERF-001",
-                suite="Performance",
-                bucket="performance",
-                title="Startup, responsiveness and resource footprint",
-                priority="high",
-                objective="Measure startup, screen transitions, memory, CPU, battery and network behavior against approved budgets.",
-                steps=["Measure cold and warm startup", "Measure key screen transition latency", "Collect memory/CPU/network telemetry", "Repeat on the supported device matrix"],
-                expected=["Measurements meet approved budgets", "No sustained memory growth or ANR is observed", "Network usage is bounded and resilient"],
-                autonomous=False,
-                dependency="Real-device telemetry, approved performance budgets and an instrumentation-capable build are required.",
-                evidence_required=["Startup timings", "Resource telemetry", "ANR/crash evidence"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-COMPAT-001",
-                suite="Compatibility",
-                bucket="compatibility",
-                title="Supported Android/iOS device and OS matrix",
-                priority="high",
-                objective="Run the approved release smoke and critical journeys across supported device, OS, viewport and locale combinations.",
-                steps=["Install the release build on each approved device/OS combination", "Run the release smoke and critical journeys", "Check orientation, permissions, keyboard and system back behavior"],
-                expected=["Critical journeys behave consistently across the supported matrix", "Platform-specific deviations are documented and approved"],
-                autonomous=False,
-                dependency="An approved Android/iOS device and OS matrix plus provider capacity are required.",
-                evidence_required=["Device/OS matrix", "Per-device results", "Screenshots and logs"],
             ),
             AutopilotTest(
                 id="QT-AUTO-SEC-001",
                 suite="Security",
-                bucket="security",
                 title="Application package security posture baseline",
                 priority="high",
                 objective="Baseline manifest exposure, requested permissions and debug posture before deeper dynamic security testing.",
                 steps=["Inspect Android manifest", "Inventory permissions, exported components and debug posture", "Flag high-risk configuration for review"],
                 expected=["No unexplained high-risk package configuration remains unreviewed"],
-                evidence_required=["Manifest inventory", "Security review disposition"],
-            ),
-            AutopilotTest(
-                id="QT-AUTO-REG-001",
-                suite="Regression",
-                bucket="regression",
-                title="Repeatable release regression pack",
-                priority="medium",
-                objective="Re-run the approved baseline after each APK or context change and compare outcomes with the last conclusive run.",
-                steps=["Load the selected baseline suite", "Run unchanged critical journeys", "Compare results and evidence with the previous run", "Flag changed behavior for triage"],
-                expected=["Baseline results are comparable", "New failures are attributable to a change or environment difference", "Previous evidence remains linked to its APK SHA-256"],
-                autonomous=False,
-                dependency="A prior conclusive run, versioned suite and durable evidence history are required.",
-                evidence_required=["Baseline/run diff", "APK hashes", "Linked evidence history"],
             ),
         ]
         if "android.permission.INTERNET" in meta.get("permissions", []):
@@ -827,16 +673,11 @@ class AutopilotPrototypeService:
                 AutopilotTest(
                     id="QT-AUTO-NET-001",
                     suite="Resilience",
-                    bucket="resilience",
                     title="Network loss and recovery behavior",
                     priority="high",
                     objective="Verify graceful behavior when connectivity is interrupted and restored.",
                     steps=["Launch app online", "Interrupt connectivity at a safe non-transactional state", "Observe error handling", "Restore connectivity"],
                     expected=["User receives controlled feedback", "App does not crash", "App recovers without corrupting state"],
-                    autonomous=False,
-                    requires_test_data=True,
-                    dependency="A controllable non-production network profile and a safe reset point are required.",
-                    evidence_required=["Network profile", "Error/recovery screenshots", "App/backend logs"],
                 )
             )
         for permission, (label, objective) in _DANGEROUS_PERMISSION_HINTS.items():
@@ -846,15 +687,11 @@ class AutopilotPrototypeService:
                     AutopilotTest(
                         id=f"QT-AUTO-PERM-{slug}",
                         suite="Permissions",
-                        bucket="permissions",
                         title=f"{label} permission grant and denial",
                         priority="medium",
                         objective=objective,
                         steps=[f"Navigate to a non-destructive feature requiring {label.lower()} access", "Deny permission", "Verify controlled fallback", "Grant permission and retry"],
                         expected=["Denial is handled without crash", "Permission rationale is understandable when required", "Feature recovers after permission is granted"],
-                        autonomous=False,
-                        dependency=f"Runtime permission dialog access and a safe feature path requiring {label.lower()} are required.",
-                        evidence_required=["Permission dialog/result", "Fallback screenshot"],
                     )
                 )
         if meta.get("debuggable") is True:
@@ -862,14 +699,11 @@ class AutopilotPrototypeService:
                 AutopilotTest(
                     id="QT-AUTO-SEC-DEBUG",
                     suite="Security",
-                    bucket="security",
                     title="Debuggable production-build finding",
                     priority="high",
                     objective="Confirm whether android:debuggable=true is intentional for this environment.",
                     steps=["Inspect application debug flag", "Compare with declared test environment"],
                     expected=["Production/release builds are not debuggable unless an approved exception exists"],
-                    dependency="Release-environment declaration or approved exception is required.",
-                    evidence_required=["Manifest flag", "Release build declaration"],
                 )
             )
         return tests
@@ -899,13 +733,8 @@ class AutopilotPrototypeService:
                         "Return strict JSON with keys: app_summary (string), inferred_domain (string), "
                         "critical_journeys (array of short strings), clarification_questions (max 6 array), "
                         "release_risks (array), tests (array). Each test must contain title, suite, priority, "
-                        "bucket, objective, steps, expected, destructive, requires_auth, requires_test_data, "
-                        "dependency and evidence_required. bucket must be one of installation, page_level, functional, "
-                        "uat, ui, accessibility, integration, performance, security, compatibility, resilience, "
-                        "permissions or regression. Include functional, UAT, page-level and UI coverage when the "
-                        "application has user journeys, but label missing credentials, test data, locators or oracles "
-                        "as dependencies. Prefer high-value mobile tests that can be derived from the artifact. "
-                        "Never assume credentials or real transaction permission and never claim a test was executed."
+                        "objective, steps, expected, destructive. Prefer high-value mobile tests that can be "
+                        "derived from the artifact. Never assume credentials or real transaction permission."
                     ),
                 ),
                 LLMMessage(role="user", content=json.dumps(prompt, ensure_ascii=False)),
@@ -919,39 +748,6 @@ class AutopilotPrototypeService:
                 priority = str(raw.get("priority", "medium")).lower()
                 if priority not in {"critical", "high", "medium", "low"}:
                     priority = "medium"
-                bucket_aliases = {
-                    "page": "page_level",
-                    "page-level": "page_level",
-                    "ui/ux": "ui",
-                    "ui_accessibility": "ui",
-                    "api": "integration",
-                    "api_integration": "integration",
-                    "non_functional": "performance",
-                    "nfr": "performance",
-                }
-                raw_bucket = str(raw.get("bucket") or raw.get("test_type") or "functional").strip().lower()
-                bucket = bucket_aliases.get(raw_bucket, raw_bucket.replace("-", "_").replace(" ", "_"))
-                valid_buckets = {
-                    "installation", "page_level", "functional", "uat", "ui", "accessibility",
-                    "integration", "performance", "security", "compatibility", "resilience",
-                    "permissions", "regression",
-                }
-                if bucket not in valid_buckets:
-                    bucket = "functional"
-                steps = [str(x)[:500] for x in raw.get("steps", [])[:12]]
-                expected = [str(x)[:500] for x in raw.get("expected", [])[:8]]
-                destructive = bool(raw.get("destructive", False))
-                requires_auth = bool(raw.get("requires_auth", False)) or any(
-                    re.search(r"\b(?:sign|log)\s*in|authenticate|login|otp|passcode\b", step, re.I)
-                    for step in steps
-                )
-                requires_test_data = bool(raw.get("requires_test_data", False)) or any(
-                    re.search(r"\b(?:enter|type|fill|submit|create|update|verify)\b", step, re.I)
-                    for step in steps
-                )
-                dependency = str(raw.get("dependency") or "").strip()[:500] or None
-                if not dependency and (requires_auth or requires_test_data):
-                    dependency = "Secure non-production credentials, approved test data and a deterministic oracle are required."
                 parsed_tests.append(
                     AutopilotTest(
                         id=f"QT-AI-{index:03d}",
@@ -959,16 +755,11 @@ class AutopilotPrototypeService:
                         title=str(raw["title"])[:240],
                         priority=priority,
                         objective=str(raw.get("objective") or raw["title"])[:700],
-                        steps=steps,
-                        expected=expected,
-                        autonomous=not destructive,
-                        destructive=destructive,
+                        steps=[str(x)[:500] for x in raw.get("steps", [])[:12]],
+                        expected=[str(x)[:500] for x in raw.get("expected", [])[:8]],
+                        autonomous=not bool(raw.get("destructive", False)),
+                        destructive=bool(raw.get("destructive", False)),
                         source="ai",
-                        bucket=bucket,
-                        requires_auth=requires_auth,
-                        requires_test_data=requires_test_data,
-                        dependency=dependency,
-                        evidence_required=[str(x)[:500] for x in raw.get("evidence_required", [])[:8]],
                     )
                 )
             return {
@@ -1114,9 +905,11 @@ class AutopilotPrototypeService:
     def resolve_appium_url(self, request: AutopilotExecutionRequest) -> str:
         """Resolve and validate a custom Appium endpoint before opening a session.
 
-        Hosted Render containers cannot reach a customer's laptop at
-        127.0.0.1:4723. Keep that convenience only for local development and
-        fail with an actionable message everywhere else.
+        The previous fallback to ``127.0.0.1:4723`` made every hosted Render
+        run fail with a low-level connection error because that address points
+        at the Render container, not the customer's laptop.  Keep that
+        convenience only for the local development server; hosted runs must
+        provide an explicit reachable endpoint (or use BrowserStack).
         """
         configured = (self.settings.AUTOPILOT_CUSTOM_APPIUM_URL or "").strip()
         supplied = (request.appium_url or "").strip()
@@ -1180,8 +973,8 @@ class AutopilotPrototypeService:
             else:
                 # Hosted custom Appium must be explicitly configured/reachable.
                 # BrowserStack uses its own hub URL and must not go through this
-                # resolver, which intentionally fails closed when no custom
-                # endpoint is configured.
+                # resolver (which intentionally rejects an unconfigured hosted
+                # custom endpoint).
                 appium_url = self.resolve_appium_url(request)
 
             result = await asyncio.wait_for(
@@ -1277,12 +1070,8 @@ class AutopilotPrototypeService:
                 page_source=page_source,
                 package_hint=expected_package,
             )
-            current_package = identity["package"]
-            current_activity = identity["activity"]
-            try:
-                orientation = getattr(driver, "orientation", None)
-            except Exception:
-                orientation = None
+            current_package = identity.get("package")
+            current_activity = identity.get("activity")
             AutopilotPrototypeService._validate_runtime_state(
                 page_source,
                 current_package,
@@ -1292,8 +1081,7 @@ class AutopilotPrototypeService:
                 "session_id": driver.session_id,
                 "current_package": current_package,
                 "current_activity": current_activity,
-                "identity_source": identity["identity_source"],
-                "orientation": orientation,
+                "orientation": getattr(driver, "orientation", None),
                 "page_source_chars": source_path.stat().st_size if source_path.exists() else 0,
                 "expected_package": expected_package,
             }
@@ -1352,10 +1140,11 @@ class AutopilotPrototypeService:
                 "browserstack app upload failed (403)",
                 "uploaded apk artifact is unavailable",
                 "uploaded apk artifact",
-            "custom appium is not configured",
-            "custom appium endpoint",
-            "hosted autopilot cannot reach",
+                "custom appium is not configured",
+                "custom appium endpoint",
+                "hosted autopilot cannot reach",
                 "unauthorized",
                 "authentication",
             )
         )
+

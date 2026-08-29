@@ -364,7 +364,7 @@ class AutopilotIRCompiler:
                     """QTX {test.id}: {test.title}."""
                     from pathlib import Path
                     import time
-                    from app.services.appium_compat import safe_app_identity, safe_page_source
+                    from app.services.appium_compat import safe_app_identity, safe_background_application, safe_page_source
 
                     evidence_dir = Path(evidence_dir)
                     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -395,7 +395,7 @@ class AutopilotIRCompiler:
                     identity = safe_app_identity(driver, page_source=safe_page_source(driver), package_hint={package_hint!r})
                     package = identity["package"]
                     assert package, "Unable to determine application package"
-                    driver.background_app(2)
+                    safe_background_application(driver, 2)
                     time.sleep(1)
                     driver.activate_app(package)
                     time.sleep(2)
@@ -485,3 +485,4 @@ class AutopilotIRCompiler:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in test_id)
         safe = "_".join(part for part in safe.split("_") if part)
         return f"test_{safe}"
+

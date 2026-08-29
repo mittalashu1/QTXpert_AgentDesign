@@ -574,6 +574,10 @@ export default function AutopilotPage() {
   };
   const analyze = async () => {
     if ((!file && !selectedUploadId) || !selectedProjectId) { setError("Select a project and APK before starting Autopilot."); return; }
+    // Do not carry the previous completed progress into a new run. The old
+    // value made a fresh analysis render as “complete · 100%” while the
+    // background job was still being queued/read.
+    setAnalysisProgress(3); setAnalysisStage("queued");
     setBusy(true); setError(""); setContextNotice(""); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setReport(null);
     try {
       let response;
@@ -691,6 +695,7 @@ export default function AutopilotPage() {
 
   const rerunAnalysis = async () => {
     if (!analysis || !selectedProjectId) return;
+    setAnalysisProgress(3); setAnalysisStage("queued");
     setBusy(true); setError(""); setExecution(null); setExecutionHistory([]); setReport(null);
     try {
       const response = await apiClient.post<AnalysisJob>(
@@ -768,7 +773,7 @@ export default function AutopilotPage() {
           </Stack>
         </Grid>
       </Grid>
-      {busy && <Box sx={{ mt: 2 }}><Box sx={{ height: 4, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}><Box sx={{ height: "100%", width: `${Math.max(3, analysisProgress)}%`, bgcolor: "primary.main", transition: "width .4s ease" }} /></Box><Typography variant="caption" color="text.secondary">{analysisStage.replaceAll("_", " ")} · {analysisProgress}%</Typography></Box>}
+    {busy && <Box sx={{ mt: 2 }}><Box sx={{ height: 4, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}><Box sx={{ height: "100%", width: `${Math.min(99, Math.max(3, analysisProgress))}%`, bgcolor: "primary.main", transition: "width .4s ease" }} /></Box><Typography variant="caption" color="text.secondary">{analysisStage === "complete" ? "finalizing" : analysisStage.replaceAll("_", " ")} · {Math.min(99, Math.max(3, analysisProgress))}%</Typography></Box>}
     </Paper>
 
     {!analysis && <Card variant="outlined" sx={{ borderRadius: 3 }}><CardContent>
@@ -979,3 +984,4 @@ export default function AutopilotPage() {
     </Dialog>
   </Stack>;
 }
+
