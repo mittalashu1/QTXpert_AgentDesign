@@ -24,6 +24,7 @@ from app.schemas.autopilot import (
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
+    ProviderLifecycleUnavailable,
     expected_package_state,
     safe_app_identity,
     safe_background_application,
@@ -303,6 +304,16 @@ class AutopilotSuiteService:
                     evidence = self._execute_test(driver, test, evidence_dir, package)
                     status = "passed"
                     error = None
+                    dependency = test.dependency
+                except ProviderLifecycleUnavailable as exc:
+                    evidence = safe_app_identity(
+                        driver,
+                        page_source=safe_page_source(driver),
+                        package_hint=package,
+                    )
+                    status = "blocked"
+                    error = str(exc)[:1200]
+                    dependency = str(exc)[:1200]
                 except Exception as exc:
                     evidence = safe_app_identity(
                         driver,
@@ -311,6 +322,7 @@ class AutopilotSuiteService:
                     )
                     status = "failed"
                     error = f"{type(exc).__name__}: {exc}"[:1200]
+                    dependency = test.dependency
                     try:
                         driver.get_screenshot_as_file(str(evidence_dir / "failure.png"))
                     except Exception:
@@ -322,7 +334,7 @@ class AutopilotSuiteService:
                         status=status,
                         bucket=test.bucket,
                         readiness=test.readiness,
-                        dependency=test.dependency,
+                        dependency=dependency,
                         duration_seconds=round(time.perf_counter() - test_started, 2),
                         error=error,
                         evidence=evidence,

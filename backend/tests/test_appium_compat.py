@@ -1,4 +1,5 @@
 from app.services.appium_compat import (
+    ProviderLifecycleUnavailable,
     expected_package_state,
     safe_app_identity,
     safe_background_application,
@@ -74,21 +75,47 @@ def test_evidence_and_cleanup_are_best_effort():
     safe_quit(driver)
 
 
-def test_background_falls_back_to_provider_supported_restart(monkeypatch):
+def test_background_falls_back_to_provider_supported_shell(monkeypatch):
     class Driver:
         calls = []
 
         def background_app(self, _seconds):
             raise RuntimeError('Unknown mobile command "backgroundApp"')
 
-        def terminate_app(self, package):
-            self.calls.append(package)
+        def execute_script(self, command, arguments):
+            self.calls.append((command, arguments))
 
     monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
     driver = Driver()
 
-    assert safe_background_application(driver, 2, package="com.qtx.demo") == "terminate_app_fallback"
-    assert driver.calls == ["com.qtx.demo"]
+    assert safe_background_application(driver, 2, package="com.qtx.demo") == "mobile_shell_home"
+    assert driver.calls == [
+        (
+            "mobile: shell",
+            {
+                "command": "input",
+                "args": ["keyevent", "3"],
+                "includeStderr": True,
+                "timeout": 5000,
+            },
+        )
+    ]
+
+
+def test_background_reports_provider_capability_block():
+    class Driver:
+        def background_app(self, _seconds):
+            raise RuntimeError('Unknown mobile command "backgroundApp"')
+
+        def execute_script(self, _command, _arguments):
+            raise RuntimeError("mobile shell is disabled")
+
+    try:
+        safe_background_application(Driver(), 2, package="com.qtx.demo")
+    except ProviderLifecycleUnavailable as exc:
+        assert "custom/local Appium" in str(exc)
+    else:  # pragma: no cover - assertion documents the required contract
+        raise AssertionError("provider capability block was not raised")
 
 
 def test_background_preserves_native_local_appium_path(monkeypatch):

@@ -15,6 +15,10 @@ from typing import Any, Mapping, Optional
 _PACKAGE_RE = re.compile(r'\bpackage="([^"]+)"')
 
 
+class ProviderLifecycleUnavailable(RuntimeError):
+    """The connected device cloud cannot perform a lifecycle-only check safely."""
+
+
 def safe_page_source(driver: Any) -> str:
     """Return the current hierarchy without allowing evidence lookup to fail a run."""
     try:
@@ -98,13 +102,14 @@ def safe_background_application(
     *,
     package: Optional[str] = None,
 ) -> str:
-    """Background Android without depending on the optional ``backgroundApp`` extension.
+    """Background Android using the strongest lifecycle control the provider exposes.
 
-    BrowserStack's current UiAutomator2 endpoint rejects both ``backgroundApp``
-    and ``pressKey``. Preserve the native method for local Appium; on that
-    provider-specific error, exercise a stronger terminate/relaunch lifecycle
-    using the standard application endpoint that BrowserStack supports. The
-    caller performs the foreground restore and records the returned mechanism.
+    Local Appium supports ``background_app`` directly. BrowserStack's current
+    UiAutomator2 endpoint can reject ``backgroundApp``, ``pressKey`` and
+    ``terminateApp`` while advertising ``mobile: shell``. In that case an Android
+    HOME key event backgrounds the app without mutating its state; the caller then
+    restores the package. If the provider also denies shell, return an actionable
+    capability block instead of leaking an UnknownMethodException as a test failure.
     """
     try:
         driver.background_app(seconds)
@@ -114,14 +119,23 @@ def safe_background_application(
         if "unknown mobile command" not in message or "backgroundapp" not in message:
             raise
 
-    if not package:
-        raise RuntimeError(
-            "This provider does not expose backgroundApp and no application package was available for the lifecycle fallback"
+    try:
+        driver.execute_script(
+            "mobile: shell",
+            {
+                "command": "input",
+                "args": ["keyevent", "3"],
+                "includeStderr": True,
+                "timeout": 5000,
+            },
         )
-    driver.terminate_app(package)
-    mechanism = "terminate_app_fallback"
-    time.sleep(max(0.0, seconds))
-    return mechanism
+        time.sleep(max(0.0, seconds))
+        return "mobile_shell_home"
+    except Exception as exc:
+        raise ProviderLifecycleUnavailable(
+            "Background/foreground lifecycle control is unavailable on this device provider. "
+            "Run this resilience check with custom/local Appium or enable the provider's mobile shell capability."
+        ) from exc
 
 
 def _first(values: Mapping[str, Any], *keys: str) -> Optional[str]:
