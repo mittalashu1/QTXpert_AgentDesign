@@ -326,7 +326,7 @@ export default function DashboardPage() {
               const value = metricValues[key];
               const tone = key === "open_defects" && Number(value) > 0 ? "error.main" : key === "pass_rate" ? "success.main" : "primary.main";
               const metricHelper = key === "pass_rate" && data
-                ? `${data.passed_tests} passed · `${data.executed_tests} executed of `${data.total_execution_tests} total tests`
+                ? `${data.passed_tests} passed · ${data.executed_tests} executed of ${data.total_execution_tests} total tests`
                 : helper;
               return (
                 <Grid key={key} size={{ xs: 12, sm: 6, lg: 4 }}>
