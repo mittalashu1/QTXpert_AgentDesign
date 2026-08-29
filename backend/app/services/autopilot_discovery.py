@@ -179,7 +179,6 @@ class AutopilotDiscoveryService:
             raise RuntimeError("Uploaded APK artifact is unavailable for runtime discovery")
 
         app_reference = request.appium_app or str(apk_path)
-        appium_url = self.prototype.resolve_appium_url(request)
         browserstack_options: Dict[str, Any] | None = None
         if request.provider == "browserstack":
             app_reference = await self.prototype._browserstack_app_url(job_id, apk_path, analysis.sha256)
@@ -193,6 +192,13 @@ class AutopilotDiscoveryService:
                 "debug": True,
                 "networkLogs": True,
             }
+        else:
+            # A BrowserStack run uses its configured hub and must not pass
+            # through custom-Appium validation. Resolving the custom endpoint
+            # before this branch made valid BrowserStack discovery requests
+            # fail whenever a hosted custom Appium URL was intentionally
+            # absent.
+            appium_url = self.prototype.resolve_appium_url(request)
 
         started = datetime.now(timezone.utc)
         perf = time.perf_counter()
@@ -403,3 +409,4 @@ class AutopilotDiscoveryService:
             }
         finally:
             safe_quit(driver)
+

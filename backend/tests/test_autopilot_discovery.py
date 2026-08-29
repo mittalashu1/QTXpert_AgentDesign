@@ -1,5 +1,6 @@
 import pytest
 from pydantic import ValidationError
+from types import SimpleNamespace
 
 from app.schemas.autopilot import AutopilotDiscoveryRequest
 from app.services.autopilot_discovery import AutopilotDiscoveryService
@@ -56,3 +57,57 @@ def test_discovery_request_is_bounded():
     request = AutopilotDiscoveryRequest(observe_only=True, max_screens=1, max_actions=0)
     assert request.observe_only is True
     assert request.max_actions == 0
+
+
+@pytest.mark.asyncio
+async def test_browserstack_discovery_does_not_resolve_custom_appium(tmp_path, monkeypatch):
+    apk_path = tmp_path / "app.apk"
+    apk_path.write_bytes(b"apk")
+
+    class Prototype:
+        async def load_job(self, _job_id):
+            return {"apk_path": str(apk_path), "filename": "app.apk"}
+
+        async def load_analysis(self, _job_id):
+            return SimpleNamespace(
+                sha256="abc", app_name="Demo", package_name="com.qtx.demo", main_activity=".MainActivity"
+            )
+
+        async def _browserstack_app_url(self, _job_id, _apk_path, _sha256):
+            return "bs://demo"
+
+        def resolve_appium_url(self, _request):
+            raise AssertionError("BrowserStack discovery must not resolve custom Appium")
+
+        @staticmethod
+        def _looks_like_connector_problem(_exc):
+            return False
+
+    settings = SimpleNamespace(
+        BROWSERSTACK_HUB_URL="https://hub.browserstack.com/wd/hub",
+        BROWSERSTACK_USERNAME="user",
+        BROWSERSTACK_ACCESS_KEY="key",
+        BROWSERSTACK_PROJECT_NAME="QTXpert",
+        AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS=30,
+        AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS=30,
+        AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS=30,
+        AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS=30,
+    )
+    service = AutopilotDiscoveryService(settings, Prototype())
+    captured = {}
+
+    def fake_run(*args):
+        captured.update(url=args[1], app=args[2], options=args[6])
+        return {
+            "screens": [], "transitions": [], "actions_attempted": 0,
+            "stop_reason": "Observed initial screen", "warnings": [],
+        }
+
+    monkeypatch.setattr(service, "_run_sync", fake_run)
+    result = await service.run("job-1", AutopilotDiscoveryRequest(provider="browserstack"))
+
+    assert result.status == "partial"
+    assert captured["url"] == settings.BROWSERSTACK_HUB_URL
+    assert captured["app"] == "bs://demo"
+    assert captured["options"]["userName"] == "user"
+
