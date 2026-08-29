@@ -37,6 +37,7 @@ export default function AppLayout() {
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [testDataOpen, setTestDataOpen] = useState(location.pathname.startsWith("/test-data"));
   const canViewCosts = user?.role === "admin" && user.email.trim().toLowerCase() === COST_ADMIN_EMAIL;
+  const designRunFocused = location.pathname === "/design" && new URLSearchParams(location.search).has("run");
 
   useEffect(() => {
     if (location.pathname.startsWith("/test-data")) setTestDataOpen(true);
@@ -56,7 +57,7 @@ export default function AppLayout() {
     <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
       <AppBar position="fixed" elevation={0} sx={{ zIndex: (theme) => theme.zIndex.drawer + 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "background.paper", color: "text.primary" }}>
         <Toolbar sx={{ gap: 3 }}>
-          <Typography variant="h6" sx={{ fontWeight: 800, minWidth: drawerWidth - 40 }}>QTXpert<Box component="span" sx={{ color: "primary.main" }}>AI</Box></Typography>
+          <Typography variant="h6" sx={{ fontWeight: 800, minWidth: designRunFocused ? 40 : drawerWidth - 40 }}>QTXpert<Box component="span" sx={{ color: "primary.main" }}>AI</Box></Typography>
           <Box sx={{ flex: 1, maxWidth: 440 }}><ProjectSelector topLevel /></Box>
           <Tooltip title={mode === "dark" ? "Use light theme" : "Use dark theme"}><IconButton onClick={toggleMode}>{mode === "dark" ? <LightModeOutlinedIcon /> : <DarkModeOutlinedIcon />}</IconButton></Tooltip>
           <IconButton onClick={(event) => setAnchorEl(event.currentTarget)}><Avatar sx={{ width: 34, height: 34, bgcolor: "primary.main", fontSize: 14 }}>{user?.full_name?.charAt(0).toUpperCase() ?? "U"}</Avatar></IconButton>
@@ -68,7 +69,7 @@ export default function AppLayout() {
           </Menu>
         </Toolbar>
       </AppBar>
-      <Drawer variant="permanent" sx={{ width: drawerWidth, flexShrink: 0, "& .MuiDrawer-paper": { width: drawerWidth, boxSizing: "border-box", borderRightColor: "divider", bgcolor: "background.paper" } }}>
+      {!designRunFocused && <Drawer variant="permanent" sx={{ width: drawerWidth, flexShrink: 0, "& .MuiDrawer-paper": { width: drawerWidth, boxSizing: "border-box", borderRightColor: "divider", bgcolor: "background.paper" } }}>
         <Toolbar />
         <Box sx={{ px: 1.5, py: 2 }}>
           <Typography variant="caption" color="text.secondary" sx={{ px: 1.5, fontWeight: 700, letterSpacing: ".12em" }}>QUALITY WORKSPACE</Typography>
@@ -103,8 +104,8 @@ export default function AppLayout() {
             </>}
           </List>
         </Box>
-      </Drawer>
-      <Box component="main" sx={{ ml: `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
+      </Drawer>}
+      <Box component="main" sx={{ ml: designRunFocused ? 0 : `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
     </Box>
   );
 }
