@@ -182,7 +182,7 @@ class AutopilotPrototypeService:
                     LLMMessage(
                         role="system",
                         content=(
-                            "You are a senior fintech QA and compliance-context editor for a website or mobile app. "
+                            "You are a senior QA and domain-compliance context editor for a website or mobile app. "
                             "Return strict JSON with one key, context, containing a concise (under 1,800 "
                             "characters) but complete "
                             "test context for an autonomous QA agent. Preserve facts supplied by the user, "
@@ -677,6 +677,7 @@ class AutopilotPrototypeService:
 
     async def analyze(self, job_id: str) -> AutopilotAnalysis:
         job = await self.load_job(job_id)
+        context_text = str(job.get("context") or "").strip()
         target_kind = str(job.get("target_kind") or ("ios" if str(job.get("filename", "")).lower().endswith(".ipa") else "android"))
         if target_kind == "web":
             metadata = await self._analyze_web(str(job.get("target_url") or ""))
@@ -686,7 +687,8 @@ class AutopilotPrototypeService:
             metadata = await asyncio.to_thread(self._analyze_apk_sync, Path(job["apk_path"]))
         await self.update_job(job_id, status="analyzing", stage="designing_tests", progress=65)
         deterministic_tests = self._build_deterministic_tests(metadata)
-        enrichment = await self._enrich_with_ai(metadata, job.get("context", ""))
+        enrichment = await self._enrich_with_ai(metadata, context_text)
+        ai_enrichment_used = bool(enrichment.pop("_ai_used", False))
         await self.update_job(job_id, status="analyzing", stage="finalizing", progress=90)
 
         tests = deterministic_tests + enrichment.get("tests", [])
@@ -720,7 +722,7 @@ class AutopilotPrototypeService:
             size_bytes=metadata.get("size_bytes", 0),
             sha256=metadata["sha256"],
             debuggable=metadata.get("debuggable"),
-            inferred_domain=enrichment.get("inferred_domain") or self._infer_domain(metadata, job.get("context", "")),
+            inferred_domain=enrichment.get("inferred_domain") or self._infer_domain(metadata, context_text),
             app_summary=enrichment.get("app_summary") or self._fallback_summary(metadata),
             critical_journeys=enrichment.get("critical_journeys") or self._fallback_journeys(metadata),
             clarification_questions=enrichment.get("clarification_questions") or self._fallback_questions(metadata),
@@ -728,6 +730,20 @@ class AutopilotPrototypeService:
             release_risks=enrichment.get("release_risks") or self._fallback_risks(metadata),
             warnings=metadata.get("warnings", []),
             capabilities=self._capabilities(metadata),
+            context_considered=bool(context_text),
+            ai_enrichment_used=ai_enrichment_used,
+            analysis_basis=[
+                "Observed target metadata and bounded runtime/HTML evidence",
+                (
+                    "Selected profile and user-supplied context used as analysis scope"
+                    if context_text
+                    else "No user context supplied; profile scope was unavailable"
+                ),
+                "Deterministic coverage and safety rules",
+                "LLM enrichment applied to context-aware journeys and test design"
+                if ai_enrichment_used
+                else "LLM enrichment unavailable; deterministic fallback retained the selected scope",
+            ],
         )
         await asyncio.to_thread(self._metadata_path(job_id).write_text, analysis.model_dump_json(indent=2), "utf-8")
         await self._persist_job(job, analysis=analysis.model_dump(mode="json"))
@@ -1251,12 +1267,19 @@ class AutopilotPrototypeService:
                     "debuggable": meta.get("debuggable"),
                 },
                 "user_context": context[:8000],
+                "context_role": (
+                    "Treat user_context as a first-class testing scope. Derive relevant journeys, controls, "
+                    "risks and clarification questions from it, while labeling its claims as user-supplied "
+                    "until target or runtime evidence confirms them."
+                ),
             }
             messages = [
                 LLMMessage(
                     role="system",
                     content=(
                         "You are the QTXpert Autonomous QA Architect for a website or mobile application. Infer only what the evidence supports. "
+                        "Treat the supplied user context as a first-class scope input: context-mentioned journeys and controls "
+                        "must influence the generated plan or clarification questions, but context claims are not observed evidence. "
                         "Return strict JSON with keys: app_summary (string), inferred_domain (string), "
                         "critical_journeys (array of short strings), clarification_questions (max 6 array), "
                         "release_risks (array), tests (array). Each test must contain title, suite, priority, "
@@ -1309,6 +1332,7 @@ class AutopilotPrototypeService:
                     )
                 )
             return {
+                "_ai_used": True,
                 "app_summary": str(data.get("app_summary") or "")[:1200],
                 "inferred_domain": str(data.get("inferred_domain") or "")[:200],
                 "critical_journeys": self._string_list(data.get("critical_journeys"), 12),
@@ -1316,8 +1340,11 @@ class AutopilotPrototypeService:
                 "release_risks": self._string_list(data.get("release_risks"), 12),
                 "tests": parsed_tests,
             }
-        except Exception:
-            return {}
+        except Exception as exc:
+            # The deterministic plan remains valid when an LLM is unavailable;
+            # keep the reason in server logs without exposing it to the user.
+            logger.info("Autopilot AI enrichment unavailable: %s", exc)
+            return {"_ai_used": False}
 
     @staticmethod
     def _classify_test_bucket(suite: str, semantic_text: str):

@@ -305,8 +305,9 @@ def test_capabilities_follow_manifest_permissions(tmp_path):
 def test_default_context_is_fintech_and_guardrail_focused():
     assert "CBUAE" in DEFAULT_AUTOPILOT_CONTEXT
     assert "SCA" in DEFAULT_AUTOPILOT_CONTEXT
-    assert "Investnation" in DEFAULT_AUTOPILOT_CONTEXT
-    assert "Do not invent" in DEFAULT_AUTOPILOT_CONTEXT
+    assert "Application: [TO CONFIRM]" in DEFAULT_AUTOPILOT_CONTEXT
+    assert "Investnation" not in DEFAULT_AUTOPILOT_CONTEXT
+    assert "remain pending" in DEFAULT_AUTOPILOT_CONTEXT
 
 
 def test_profile_catalog_renders_a_dynamic_brief():
@@ -317,7 +318,47 @@ def test_profile_catalog_renders_a_dynamic_brief():
     assert "payments_cards" in ids
     assert "Profile category: UAE Digital Banking & Wealth" in DEFAULT_AUTOPILOT_CONTEXT
     assert "CBUAE/SCA" in profile_context(DEFAULT_AUTOPILOT_PROFILE_ID)
+    assert "Investnation" not in profile_context(DEFAULT_AUTOPILOT_PROFILE_ID)
     assert "wallet" in profile_context("payments_cards").lower()
+
+
+def test_profile_context_uses_only_explicit_application_identity():
+    assert "Application: [TO CONFIRM]" in profile_context(DEFAULT_AUTOPILOT_PROFILE_ID)
+    assert "Investnation by Finance House" in profile_context(
+        DEFAULT_AUTOPILOT_PROFILE_ID,
+        application_name="Investnation by Finance House",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ai_enrichment_receives_selected_context_as_a_first_class_scope(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    captured = {}
+
+    class FakeProvider:
+        async def complete(self, messages, **_kwargs):
+            captured["messages"] = messages
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                content=(
+                    '{"app_summary":"Context-aware summary",'
+                    '"inferred_domain":"Banking / Financial Services",'
+                    '"critical_journeys":["UAE PASS onboarding"],'
+                    '"clarification_questions":[],"release_risks":[],"tests":[]}'
+                )
+            )
+
+    monkeypatch.setattr("app.services.autopilot.get_llm_provider", lambda: FakeProvider())
+    result = await service._enrich_with_ai(
+        {"platform": "android", "permissions": [], "activities": []},
+        "Profile category: UAE Digital Banking & Wealth\nPrioritise UAE PASS onboarding and CBUAE audit logging.",
+    )
+
+    assert result["_ai_used"] is True
+    assert "UAE PASS onboarding" in captured["messages"][1].content
+    assert "first-class testing scope" in captured["messages"][1].content
+    assert "context claims are not observed evidence" in captured["messages"][0].content
 
 
 def test_report_never_claims_runtime_pass_rate_without_execution():
@@ -339,7 +380,7 @@ def test_report_never_claims_runtime_pass_rate_without_execution():
     assert report.metrics.defect_count is None
     assert report.last_run_at is None
     assert report.risk_matrix == []
-    assert report.application_overview.name == "Investnation by Finance House"
+    assert report.application_overview.name == "Investnation"
     assert all(check.status == "pending" for check in report.compliance_verification)
     assert all(check.dependency for check in report.compliance_verification)
 

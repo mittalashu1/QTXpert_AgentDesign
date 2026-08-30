@@ -76,6 +76,11 @@ class AutopilotAnalysis(BaseModel):
     release_risks: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     capabilities: Dict[str, bool] = Field(default_factory=dict)
+    # Provenance is explicit so the UI/report can distinguish target evidence,
+    # the selected business context and optional LLM enrichment.
+    context_considered: Optional[bool] = None
+    ai_enrichment_used: Optional[bool] = None
+    analysis_basis: List[str] = Field(default_factory=list)
 
 
 ReportCheckStatus = Literal["pass", "fail", "warning", "pending", "not_assessed"]

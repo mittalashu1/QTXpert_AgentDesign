@@ -1,4 +1,4 @@
-"""Profile-driven business context for the autonomous mobile QA agent.
+"""Profile-driven business context for the autonomous QA agent.
 
 The UI shows a short context so a user can understand what will be tested at a
 glance. The selected profile is also sent to the API, which keeps direct API
@@ -18,14 +18,15 @@ _PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {
         "id": "uae_fintech",
         "name": "UAE Digital Banking & Wealth",
-        "description": "UAE fintech QA, investment journeys and CBUAE/SCA evidence.",
+        "description": "UAE banking and wealth QA, regulated journeys and CBUAE/SCA evidence.",
         "brief_context": (
-            "Act as a Fintech QA Lead and Compliance Auditor for Investnation by Finance House. "
-            "Scope UAE PASS, digital KYC, risk profiling, Saver/Flex/Growth portfolios and the "
-            "Investnation Credit Card (up to 90% against invested funds). Apply CBUAE/SCA audit, "
-            "security and data-residency checks on {platform}. Use non-production data only; keep "
-            "payments, transfers, OTP and destructive actions approval-gated. Produce an evidence-led "
-            "executive Test and Audit Report. Do not invent metrics, defects or compliance evidence."
+            "Act as a UAE Digital Banking and Wealth QA Lead and Compliance Auditor for the {platform} "
+            "application. Validate applicable onboarding/eKYC, UAE PASS, authentication, risk profiling, "
+            "accounts, portfolios, cards, payments and customer journeys. Assess CBUAE/SCA-aligned "
+            "controls, auditability, security, resilience, performance and data residency. Use only "
+            "non-production data; keep money movement, OTP and destructive actions approval-gated. "
+            "Produce an evidence-led executive Test and Audit Report. Unknown features, metrics, defects "
+            "and compliance claims remain pending until observed or evidenced."
         ),
     },
     {
@@ -33,11 +34,11 @@ _PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "name": "Payments & Cards",
         "description": "Wallets, cards, checkout, transaction integrity and fraud controls.",
         "brief_context": (
-            "Act as a Payments QA Lead. Validate the {platform} app's wallet, card, checkout, "
-            "authentication, ledger consistency, refunds, limits and fraud/abuse controls. Keep "
-            "money movement, OTP and irreversible actions approval-gated; use non-production data. "
-            "Capture device, API, audit-log and transaction evidence for an executive release report. "
-            "Do not invent metrics, defects or security/compliance evidence."
+            "Act as a Payments QA Lead for the {platform} application. Validate wallet and card lifecycle, "
+            "checkout, authentication, ledger/settlement consistency, refunds, limits, fraud and abuse "
+            "controls. Use non-production data and keep money movement, OTP and irreversible actions "
+            "approval-gated. Capture device, API, audit-log and transaction evidence for an executive "
+            "release report. Unknown metrics, defects and security/compliance claims remain pending."
         ),
     },
     {
@@ -45,11 +46,11 @@ _PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "name": "Healthcare & Regulated Data",
         "description": "Patient journeys, privacy, consent, access control and regulated data handling.",
         "brief_context": (
-            "Act as a Healthcare QA and Privacy Auditor for the {platform} app. Validate identity, "
+            "Act as a Healthcare QA and Privacy Auditor for the {platform} application. Validate identity, "
             "consent, patient/provider journeys, sensitive-data handling, access control, audit trails "
-            "and retention/deletion safeguards. Use synthetic data only and keep clinical, payment and "
-            "destructive actions approval-gated. Produce an evidence-led release report; do not invent "
-            "metrics, defects, privacy or regulatory evidence."
+            "and retention/deletion safeguards. Use synthetic data only; keep clinical, payment and "
+            "destructive actions approval-gated. Produce an evidence-led release report. Unknown metrics, "
+            "defects, privacy and regulatory claims remain pending until evidenced."
         ),
     },
     {
@@ -57,23 +58,23 @@ _PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "name": "E-commerce & Marketplace",
         "description": "Catalog, search, cart, checkout, orders, delivery and refunds.",
         "brief_context": (
-            "Act as an E-commerce QA Lead for the {platform} app. Validate catalog/search, account, "
-            "cart, checkout, payment hand-off, order state, delivery, returns and refunds across "
-            "supported devices. Use non-production products and payment data; keep purchases, refunds "
-            "and destructive actions approval-gated. Report only observed evidence and mark missing "
-            "metrics, defects and compliance controls as pending validation."
+            "Act as an E-commerce QA Lead for the {platform} application. Validate catalog/search, account, "
+            "cart, checkout, payment hand-off, order state, delivery, returns and refunds across the "
+            "approved device matrix. Use non-production products and payment data; keep purchases, refunds "
+            "and destructive actions approval-gated. Report observed evidence only and mark missing metrics, "
+            "defects and compliance controls as pending validation."
         ),
     },
     {
         "id": "general_mobile",
         "name": "General Mobile Application",
-        "description": "A neutral profile for apps without a specialised industry scope.",
+        "description": "A neutral profile for applications without a specialised industry scope.",
         "brief_context": (
-            "Act as a Senior Mobile QA Lead for the {platform} application. Discover critical user "
-            "journeys, permissions, navigation, resilience, accessibility and security guardrails. "
+            "Act as a Senior QA Lead for the {platform} application. Discover critical user journeys, "
+            "navigation, permissions, resilience, accessibility, integrations and security guardrails. "
             "Use non-production data; keep authentication, payments and destructive actions approval-gated. "
-            "Create an evidence-led executive release report and do not invent metrics, defects or "
-            "compliance evidence."
+            "Create an evidence-led executive release report. Unknown metrics, defects and compliance "
+            "claims remain pending until supported by evidence."
         ),
     },
     {
@@ -82,9 +83,10 @@ _PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "description": "Start with a short neutral brief and tailor it in the context editor.",
         "brief_context": (
             "Act as a Senior QA Lead for the {platform} application. Focus on the product's critical "
-            "journeys, risk controls, security, performance and release evidence. Use non-production "
-            "data and keep irreversible actions approval-gated. Add product-specific details below; "
-            "do not invent metrics, defects or compliance evidence."
+            "journeys, risk controls, integrations, security, performance and release evidence. Use "
+            "non-production data and keep authentication, money movement and irreversible actions "
+            "approval-gated. Add product-specific details below; unknown metrics, defects and compliance "
+            "claims remain pending until supported by evidence."
         ),
     },
 )
@@ -116,14 +118,10 @@ def profile_context(
     profile = get_profile(profile_id)
     platform_label = platform.strip() or "Android"
     brief = profile.brief_context.replace("{platform}", platform_label)
-    resolved_application = application_name.strip() if application_name else (
-        "Investnation by Finance House" if profile.id == DEFAULT_AUTOPILOT_PROFILE_ID else "[TO CONFIRM]"
-    )
-    if application_name:
-        # Keep the profile-specific UAE product name when no override exists,
-        # while allowing other profiles to identify the uploaded application.
-        if profile.id == DEFAULT_AUTOPILOT_PROFILE_ID:
-            brief = brief.replace("Investnation by Finance House", application_name.strip())
+    # A profile describes a testing scope, not a particular product. Keep the
+    # application unknown until an artifact/URL supplies an observed identity
+    # or the user explicitly adds one to the context.
+    resolved_application = application_name.strip() if application_name else "[TO CONFIRM]"
     return f"Profile category: {profile.name}\nApplication: {resolved_application}\n{brief}"[:2400]
 
 

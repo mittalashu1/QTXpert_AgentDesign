@@ -42,6 +42,7 @@ type Analysis = {
   debuggable?: boolean; inferred_domain: string; app_summary: string; critical_journeys: string[];
   clarification_questions: string[]; tests: TestCase[]; release_risks: string[];
   warnings: string[]; capabilities: Record<string, boolean>;
+  context_considered?: boolean; ai_enrichment_used?: boolean; analysis_basis?: string[];
 };
 type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; playwright_available?: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: Provider };
 type AnalysisJob = {
@@ -154,44 +155,47 @@ const DEFAULT_PROFILE_ID = "uae_fintech";
 const DEFAULT_PROFILE_OPTIONS: ProfileOption[] = [
   {
     id: "uae_fintech", name: "UAE Digital Banking & Wealth",
-    description: "UAE fintech QA, investment journeys and CBUAE/SCA evidence.",
-    brief_context: "Act as a Fintech QA Lead and Compliance Auditor for Investnation by Finance House. Scope UAE PASS, digital KYC, risk profiling, Saver/Flex/Growth portfolios and the Investnation Credit Card. Apply CBUAE/SCA, security and data-residency checks on Android. Use non-production data; keep payments, transfers, OTP and destructive actions approval-gated. Produce an evidence-led executive Test and Audit Report. Do not invent metrics, defects or compliance evidence.",
+    description: "UAE banking and wealth QA, regulated journeys and CBUAE/SCA evidence.",
+    brief_context: "Act as a UAE Digital Banking and Wealth QA Lead and Compliance Auditor for the Android application. Validate applicable onboarding/eKYC, UAE PASS, authentication, risk profiling, accounts, portfolios, cards, payments and customer journeys. Assess CBUAE/SCA-aligned controls, auditability, security, resilience, performance and data residency. Use only non-production data; keep money movement, OTP and destructive actions approval-gated. Produce an evidence-led executive Test and Audit Report. Unknown features, metrics, defects and compliance claims remain pending until observed or evidenced.",
   },
   {
     id: "payments_cards", name: "Payments & Cards",
     description: "Wallets, cards, checkout, transaction integrity and fraud controls.",
-    brief_context: "Act as a Payments QA Lead. Validate the Android app's wallet, card, checkout, authentication, ledger, refunds, limits and fraud controls. Keep money movement, OTP and irreversible actions approval-gated; use non-production data. Capture device, API, audit-log and transaction evidence. Do not invent metrics, defects or security/compliance evidence.",
+    brief_context: "Act as a Payments QA Lead for the Android application. Validate wallet and card lifecycle, checkout, authentication, ledger/settlement consistency, refunds, limits, fraud and abuse controls. Use non-production data and keep money movement, OTP and irreversible actions approval-gated. Capture device, API, audit-log and transaction evidence for an executive release report. Unknown metrics, defects and security/compliance claims remain pending.",
   },
   {
     id: "healthcare_regulated", name: "Healthcare & Regulated Data",
     description: "Patient journeys, privacy, consent, access control and regulated data handling.",
-    brief_context: "Act as a Healthcare QA and Privacy Auditor for the Android app. Validate identity, consent, patient/provider journeys, sensitive-data handling, access control, audit trails and retention/deletion safeguards. Use synthetic data; keep clinical, payment and destructive actions approval-gated. Produce an evidence-led release report and do not invent metrics, defects or regulatory evidence.",
+    brief_context: "Act as a Healthcare QA and Privacy Auditor for the Android application. Validate identity, consent, patient/provider journeys, sensitive-data handling, access control, audit trails and retention/deletion safeguards. Use synthetic data only; keep clinical, payment and destructive actions approval-gated. Produce an evidence-led release report. Unknown metrics, defects, privacy and regulatory claims remain pending until evidenced.",
   },
   {
     id: "ecommerce_marketplace", name: "E-commerce & Marketplace",
     description: "Catalog, search, cart, checkout, orders, delivery and refunds.",
-    brief_context: "Act as an E-commerce QA Lead for the Android app. Validate catalog/search, account, cart, checkout, payment hand-off, order state, delivery, returns and refunds. Use non-production products and payment data; keep purchases, refunds and destructive actions approval-gated. Report only observed evidence and mark missing metrics, defects and compliance controls as pending validation.",
+    brief_context: "Act as an E-commerce QA Lead for the Android application. Validate catalog/search, account, cart, checkout, payment hand-off, order state, delivery, returns and refunds across the approved device matrix. Use non-production products and payment data; keep purchases, refunds and destructive actions approval-gated. Report observed evidence only and mark missing metrics, defects and compliance controls as pending validation.",
   },
   {
     id: "general_mobile", name: "General Mobile Application",
-    description: "A neutral profile for apps without a specialised industry scope.",
-    brief_context: "Act as a Senior Mobile QA Lead for the Android application. Discover critical user journeys, permissions, navigation, resilience, accessibility and security guardrails. Use non-production data; keep authentication, payments and destructive actions approval-gated. Create an evidence-led executive release report and do not invent metrics, defects or compliance evidence.",
+    description: "A neutral profile for applications without a specialised industry scope.",
+    brief_context: "Act as a Senior QA Lead for the Android application. Discover critical user journeys, navigation, permissions, resilience, accessibility, integrations and security guardrails. Use non-production data; keep authentication, payments and destructive actions approval-gated. Create an evidence-led executive release report. Unknown metrics, defects and compliance claims remain pending until supported by evidence.",
   },
   {
     id: "custom", name: "Custom profile",
     description: "Start with a short neutral brief and tailor it in the context editor.",
-    brief_context: "Act as a Senior QA Lead for the Android application. Focus on critical journeys, risk controls, security, performance and release evidence. Use non-production data and keep irreversible actions approval-gated. Add product-specific details below; do not invent metrics, defects or compliance evidence.",
+    brief_context: "Act as a Senior QA Lead for the Android application. Focus on critical journeys, risk controls, integrations, security, performance and release evidence. Use non-production data and keep authentication, money movement and irreversible actions approval-gated. Add product-specific details below; unknown metrics, defects and compliance claims remain pending until supported by evidence.",
   },
 ];
-function contextForProfile(profile: ProfileOption) {
-  const application = profile.id === DEFAULT_PROFILE_ID ? "Investnation by Finance House" : "[TO CONFIRM]";
-  return `Profile category: ${profile.name}\nApplication: ${application}\n${profile.brief_context}`;
+function contextForProfile(profile: ProfileOption, applicationName?: string | null, target: TargetKind = "android") {
+  const application = applicationName?.trim() || "[TO CONFIRM]";
+  const label = target === "ios" ? "iOS" : target === "web" ? "Web" : "Android";
+  const brief = profile.brief_context
+    .replace(/\{platform\}/gi, label)
+    .replace(/Android/gi, label)
+    .replace(/mobile application/gi, `${label} application`)
+    .replace(/APK/gi, target === "ios" ? "IPA" : target === "web" ? "website" : "APK");
+  return `Profile category: ${profile.name}\nApplication: ${application}\n${brief}`;
 }
-function contextForTarget(profile: ProfileOption, target: TargetKind) {
-  const base = contextForProfile(profile);
-  if (target === "android") return base;
-  const label = target === "ios" ? "iOS" : "web";
-  return base.replace(/Android/gi, label).replace(/mobile application/gi, `${label} application`).replace(/APK/gi, target === "ios" ? "IPA" : "website");
+function contextForTarget(profile: ProfileOption, target: TargetKind, applicationName?: string | null) {
+  return contextForProfile(profile, applicationName, target);
 }
 
 function profileIdFromContext(value: string, profiles: ProfileOption[]) {
@@ -549,6 +553,10 @@ export default function AutopilotPage() {
     [automation, suiteBucket],
   );
   const selectedStoredApk = useMemo(() => storedApks.find((asset) => asset.id === selectedUploadId) ?? null, [storedApks, selectedUploadId]);
+  const selectedApplicationName = analysis?.app_name
+    || selectedStoredApk?.filename?.replace(/\.(apk|ipa)$/i, "")
+    || file?.name?.replace(/\.(apk|ipa)$/i, "")
+    || null;
   const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen: screen.screen_id, control }))) ?? [], [discovery]);
 
   const resetResult = () => { setAnalysis(null); setReport(null); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setSetup(null); setSetupOpen(false); setArtifactAvailable(true); setError(""); };
@@ -557,8 +565,10 @@ export default function AutopilotPage() {
     setFile(selected);
     if (selected) {
       setSelectedUploadId("");
-      setTargetKind(/\.ipa$/i.test(selected.name) ? "ios" : "android");
+      const nextTarget = /\.ipa$/i.test(selected.name) ? "ios" : "android";
+      setTargetKind(nextTarget);
       setTargetUrl("");
+      if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected.name.replace(/\.(apk|ipa)$/i, "")));
     }
     resetResult();
   };
@@ -569,7 +579,7 @@ export default function AutopilotPage() {
     // an assessment of the newly selected scope.
     resetResult();
     setProfileId(nextProfile.id);
-    setContext(contextForTarget(nextProfile, targetKind));
+    setContext(contextForTarget(nextProfile, targetKind, selectedApplicationName));
     setContextSource("default");
     setContextNotice(`${nextProfile.name} brief applied. You can edit it before starting the run.`);
     setError("");
@@ -577,7 +587,7 @@ export default function AutopilotPage() {
   const generateContext = async (mode: "default" | "generate" | "improve") => {
     if (mode === "default") {
       resetResult();
-      setContext(contextForTarget(selectedProfile, targetKind));
+      setContext(contextForTarget(selectedProfile, targetKind, selectedApplicationName));
       setContextSource("default");
       setContextNotice(`${selectedProfile.name} brief applied. Review it before running.`);
       return;
@@ -588,7 +598,7 @@ export default function AutopilotPage() {
         mode,
         profile_id: profileId,
         current_context: context,
-        application_name: analysis?.app_name || selectedStoredApk?.filename?.replace(/\.apk$/i, "") || null,
+        application_name: analysis?.app_name || selectedStoredApk?.filename?.replace(/\.(apk|ipa)$/i, "") || null,
         package_name: analysis?.package_name || null,
         platform: targetKind === "web" ? "Web" : targetKind === "ios" ? "iOS" : "Android",
         focus: "UAE fintech release readiness, functional QA and CBUAE/SCA audit evidence",
@@ -760,6 +770,16 @@ export default function AutopilotPage() {
   const noExecutionProvider = activeTargetKind !== "web" && providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
   const executionUnavailable = providerStatusPending || browserStackUnavailable || customAppiumUnavailable || !artifactAvailable;
   const reportPending = report?.recommendation === "PENDING";
+  const contextBadge = analysis?.context_considered === true
+    ? { label: "Profile context considered", color: "success" as const }
+    : analysis?.context_considered === false
+      ? { label: "Context not supplied", color: "warning" as const }
+      : { label: "Context provenance unavailable", color: "default" as const };
+  const aiBadge = analysis?.ai_enrichment_used === true
+    ? { label: "AI enrichment used", color: "primary" as const }
+    : analysis?.ai_enrichment_used === false
+      ? { label: "Deterministic fallback", color: "default" as const }
+      : { label: "AI provenance unavailable", color: "default" as const };
 
   return <Stack spacing={3}>
     <Box>
@@ -796,10 +816,10 @@ export default function AutopilotPage() {
           <FormControl fullWidth size="small" disabled={busy || contextBusy}>
             <InputLabel id="autopilot-target-label">Application target</InputLabel>
             <Select labelId="autopilot-target-label" label="Application target" value={targetKind} onChange={(event) => {
-              const next = event.target.value as TargetKind;
-              setTargetKind(next);
-              setFile(null); setSelectedUploadId(""); resetResult();
-              if (contextSource === "default") setContext(contextForTarget(selectedProfile, next));
+               const next = event.target.value as TargetKind;
+               setTargetKind(next);
+               setFile(null); setSelectedUploadId(""); resetResult();
+              if (contextSource === "default") setContext(contextForTarget(selectedProfile, next, next === "web" ? null : selectedApplicationName));
               if (next === "web") setProvider("playwright");
               else if (provider === "playwright") setProvider(providerStatus?.browserstack_configured ? "browserstack" : "appium");
             }}>
@@ -813,7 +833,7 @@ export default function AutopilotPage() {
       </Grid>
       <Grid container spacing={3}>
         <Grid item xs={12} md={5}><Stack spacing={2}>
-          {targetKind !== "web" && <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">Stored mobile build</InputLabel><Select labelId="stored-apk-label" label="Stored mobile build" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { const value = event.target.value; const selected = storedApks.find((asset) => asset.id === value); setSelectedUploadId(value); if (value) { setFile(null); setTargetKind(selected?.extension === "ipa" ? "ios" : "android"); } if (!analysis) resetResult(); else setError(""); }}>
+          {targetKind !== "web" && <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">Stored mobile build</InputLabel><Select labelId="stored-apk-label" label="Stored mobile build" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { const value = event.target.value; const selected = storedApks.find((asset) => asset.id === value); setSelectedUploadId(value); if (value) { setFile(null); const nextTarget = selected?.extension === "ipa" ? "ios" : "android"; setTargetKind(nextTarget); if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected?.filename?.replace(/\.(apk|ipa)$/i, ""))); } if (!analysis) resetResult(); else setError(""); }}>
             <MenuItem value="">Upload a new APK/IPA</MenuItem>{storedApks.map((asset) => <MenuItem key={asset.id} value={asset.id}>{asset.filename} · {formatBytes(asset.size_bytes)} · {new Date(asset.created_at).toLocaleDateString()}</MenuItem>)}
            </Select></FormControl>}
           {targetKind !== "web" && (selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 2.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1.2} alignItems="center"><FolderOutlinedIcon color="primary" /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored {selectedStoredApk.extension.toUpperCase()} · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: 1 }} onClick={() => navigate("/test-data/uploads")}>Open repository</Button></Box>
@@ -910,8 +930,8 @@ export default function AutopilotPage() {
       {analysis.warnings.length > 0 && <Alert severity="warning">{analysis.warnings.join(" ")}</Alert>}
       <Grid container spacing={2}>{[["Generated tests", stats.tests], ["Coverage buckets", stats.buckets], ["Autonomous-safe", stats.autonomous], ["Critical / high", stats.critical]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Card variant="outlined"><CardContent><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h4" fontWeight={800}>{value}</Typography></CardContent></Card></Grid>)}</Grid>
 
-      <Grid container spacing={3}>
-        <Grid item xs={12} lg={8}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><AccountTreeOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Application intelligence</Typography></Stack><Typography sx={{ mt: 1.5 }}>{analysis.app_summary}</Typography><Divider sx={{ my: 2 }} /><Grid container spacing={2}><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Application</Typography><Typography fontWeight={700}>{analysis.app_name || "Unknown"}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Domain</Typography><Typography fontWeight={700}>{analysis.inferred_domain}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Version</Typography><Typography fontWeight={700}>{analysis.version_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Package</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.package_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Main activity</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.main_activity || "—"}</Typography></Grid></Grid></CardContent></Card></Grid>
+       <Grid container spacing={3}>
+         <Grid item xs={12} lg={8}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><AccountTreeOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Application intelligence</Typography></Stack><Typography sx={{ mt: 1.5 }}>{analysis.app_summary}</Typography><Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1.5 }}><Chip size="small" label={contextBadge.label} color={contextBadge.color} variant="outlined" /><Chip size="small" label={aiBadge.label} color={aiBadge.color} variant="outlined" /></Stack>{analysis.analysis_basis && analysis.analysis_basis.length > 0 && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Basis: {analysis.analysis_basis.join(" · ")}</Typography>}<Divider sx={{ my: 2 }} /><Grid container spacing={2}><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Application</Typography><Typography fontWeight={700}>{analysis.app_name || "Unknown"}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Domain</Typography><Typography fontWeight={700}>{analysis.inferred_domain}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Version</Typography><Typography fontWeight={700}>{analysis.version_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Package</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.package_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Main activity</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.main_activity || "—"}</Typography></Grid></Grid></CardContent></Card></Grid>
         <Grid item xs={12} lg={4}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><SecurityOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Guardrails</Typography></Stack><Stack spacing={1} sx={{ mt: 1.5 }}><Chip label="Safe discovery: enabled" color="success" variant="outlined" /><Chip label="Transactions / destructive actions: blocked" color="warning" variant="outlined" /><Chip label={`Debuggable: ${analysis.debuggable === true ? "YES" : analysis.debuggable === false ? "No" : "Unknown"}`} variant="outlined" /></Stack></CardContent></Card></Grid>
       </Grid>
 
