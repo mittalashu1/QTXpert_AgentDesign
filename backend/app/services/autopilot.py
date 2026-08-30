@@ -25,8 +25,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
-from uuid import uuid4
-from urllib.parse import urljoin, urlparse
+from uuid import UUID, uuid4
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 from sqlalchemy import select
@@ -46,7 +46,7 @@ from app.schemas.autopilot import (
     AutopilotTest,
 )
 from app.services.appium_compat import safe_app_identity, safe_page_source, safe_quit
-from app.services.autopilot_context import default_context, get_profile
+from app.services.autopilot_context import default_context, get_profile, sanitize_target_url
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -58,6 +58,45 @@ def _is_uuid(value: object) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+def normalize_surface_identity(
+    target_kind: str,
+    *,
+    target_url: str | None = None,
+    artifact_sha256: str | None = None,
+    filename: str | None = None,
+) -> str:
+    """Return a deterministic, non-secret identity for an Autopilot target.
+
+    A website is identified by its normalized URL; a mobile build is identified
+    by its content hash so renaming an APK/IPA cannot mix its evidence with a
+    different binary. The filename is only a legacy fallback for jobs created
+    before hashes were available.
+    """
+    kind = (target_kind or "android").strip().lower()
+    if kind == "web":
+        parsed = urlparse((target_url or "").strip())
+        if parsed.scheme and parsed.hostname:
+            host = parsed.hostname.lower().rstrip(".")
+            port = parsed.port
+            default_port = (parsed.scheme == "https" and port == 443) or (parsed.scheme == "http" and port == 80)
+            netloc = host if not port or default_port else f"{host}:{port}"
+            path = parsed.path.rstrip("/") or "/"
+            # Query strings can carry invite codes, tokens or session state;
+            # the surface identity intentionally scopes to the safe origin/path.
+            return f"{parsed.scheme.lower()}://{netloc}{path}"[:500]
+        return (target_url or "").strip().rstrip("/")[:500] or "website:[TO_CONFIRM]"
+    digest = (artifact_sha256 or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest):
+        return f"sha256:{digest}"
+    return f"filename:{Path(filename or 'application').name.lower()}"[:500]
+
+
+def build_surface_key(profile_id: str | None, target_kind: str, identity: str) -> str:
+    """Hash the profile + target identity for compact DB indexing."""
+    raw = "|".join(((profile_id or "uae_fintech").strip().lower(), (target_kind or "android").strip().lower(), identity.strip()))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 # APK parsers can briefly use hundreds of MiB for resource tables. Render's
 # low-cost instance has a small memory envelope, so serialize the expensive
@@ -157,6 +196,109 @@ class AutopilotPrototypeService:
                 raise ValueError("Website target hostname could not be resolved.") from exc
         return raw.rstrip("/") or raw
 
+    @staticmethod
+    def _redact_context(value: str) -> str:
+        """Remove obvious secret assignments before a context reaches an LLM/UI."""
+        sensitive = re.compile(
+            r"(?im)(?P<key>[\"']?\b(password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key)\b[\"']?)\s*(?P<sep>[:=])\s*(?P<value>[\"'][^\"']*[\"']|[^,;\s}\]]+)"
+        )
+        redacted = sensitive.sub(lambda match: f"{match.group('key')}{match.group('sep')}[REDACTED]", value)
+        query_secret = re.compile(
+            r"(?i)([?&](?:password|passcode|token|secret|otp|api[_-]?key|access[_-]?key)=)[^&#\s]+"
+        )
+        return query_secret.sub(r"\1[REDACTED]", redacted)
+
+    @staticmethod
+    def _ensure_context_identity(generated: str, baseline: str) -> str:
+        """Keep the selected profile/target/build identity in AI-written text."""
+        generated = generated.strip()
+        baseline_lines = baseline.splitlines()
+        required = ("Profile category:", "Application:", "Target:", "Target URL:")
+        prefix = [
+            line for line in baseline_lines
+            if any(line.casefold().startswith(label.casefold()) for label in required)
+            and not re.search(rf"^{re.escape(line.split(':', 1)[0])}\s*:", generated, re.IGNORECASE | re.MULTILINE)
+        ]
+        return "\n".join(prefix + [generated]) if prefix else generated
+
+    async def _inspect_context_target(self, request: AutopilotContextRequest) -> tuple[dict[str, Any], list[str]]:
+        """Fetch a tiny, read-only public snapshot for AI context enrichment.
+
+        This is deliberately separate from full Autopilot analysis: it follows
+        at most two validated redirects, reads at most 128 KiB and extracts only
+        public metadata. It never submits forms, executes scripts or forwards
+        credentials, which keeps the "Improve with AI" button safe by default.
+        """
+        if (request.platform or "").strip().lower() != "web" or not request.target_url:
+            return {}, []
+        warnings: list[str] = []
+        try:
+            url = self.validate_web_url(
+                request.target_url,
+                allow_private=self.settings.APP_ENV == "local",
+            )
+            timeout = httpx.Timeout(8.0, connect=4.0)
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=timeout,
+                headers={"User-Agent": "QTXpert-Autopilot/1.0 (safe context metadata)"},
+            ) as client:
+                request_url = url
+                status_code = 0
+                response_headers: httpx.Headers = httpx.Headers()
+                response_encoding = "utf-8"
+                body_bytes = b""
+                for _ in range(3):
+                    async with client.stream("GET", request_url) as response:
+                        status_code = response.status_code
+                        response_headers = response.headers
+                        response_encoding = response.encoding or "utf-8"
+                        if status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("location")
+                        else:
+                            location = None
+                            chunks: list[bytes] = []
+                            remaining = 128 * 1024
+                            async for chunk in response.aiter_bytes():
+                                if remaining <= 0:
+                                    break
+                                piece = chunk[:remaining]
+                                if piece:
+                                    chunks.append(piece)
+                                    remaining -= len(piece)
+                            body_bytes = b"".join(chunks)
+                    if status_code not in {301, 302, 303, 307, 308} or not location:
+                        break
+                    request_url = self.validate_web_url(
+                        urljoin(request_url, location),
+                        allow_private=self.settings.APP_ENV == "local",
+                    )
+                if not status_code:
+                    raise RuntimeError("No HTTP response")
+            body = body_bytes.decode(response_encoding, errors="replace")
+            title = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+            description = re.search(
+                r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\'](.*?)["\']',
+                body,
+                re.IGNORECASE | re.DOTALL,
+            )
+            headings = re.findall(r"<h[1-3][^>]*>(.*?)</h[1-3]>", body, re.IGNORECASE | re.DOTALL)
+            strip_tags = lambda value: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value)).strip()
+            snapshot = {
+                "url": urlunparse((urlparse(request_url).scheme, urlparse(request_url).netloc, urlparse(request_url).path, "", "", ""))[:500],
+                "status_code": status_code,
+                "content_type": response_headers.get("content-type", "")[:120],
+                "title": self._redact_context(strip_tags(title.group(1))[:240]) if title else None,
+                "description": self._redact_context(strip_tags(description.group(1))[:500]) if description else None,
+                "headings": [self._redact_context(strip_tags(item)[:160]) for item in headings[:12]],
+            }
+            if status_code >= 400:
+                warnings.append(f"Website returned HTTP {status_code}; keep business conclusions pending.")
+            return snapshot, warnings
+        except Exception as exc:
+            warnings.append(f"Public website metadata was unavailable: {type(exc).__name__}.")
+            return {}, warnings
+
     async def generate_context(self, request: AutopilotContextRequest) -> AutopilotContextResponse:
         """Generate a safe business profile, with a deterministic fallback.
 
@@ -166,15 +308,29 @@ class AutopilotPrototypeService:
         metrics, credentials or compliance evidence.
         """
         profile = get_profile(request.profile_id)
-        baseline = default_context(request.application_name, request.platform, profile.id)
+        baseline = default_context(
+            request.application_name or request.build_name,
+            request.platform,
+            profile.id,
+            target_url=request.target_url,
+            build_name=request.build_name,
+        )
         if request.mode == "default":
             return AutopilotContextResponse(context=baseline, source="default", profile_id=profile.id)
 
         current = request.current_context.strip()
+        observed_target, target_warnings = await self._inspect_context_target(request)
+        safe_target_url = sanitize_target_url(request.target_url)
         prompt = {
             "application_name": request.application_name,
             "package_name": request.package_name,
             "platform": request.platform,
+            "target_url": safe_target_url,
+            "build_name": request.build_name,
+            "observed_target_metadata": observed_target,
+            "caller_observations": self._redact_context(
+                json.dumps(request.observed_metadata, ensure_ascii=False)
+            )[:3000],
             "focus": request.focus,
             "profile_id": profile.id,
             "profile_name": profile.name,
@@ -197,8 +353,8 @@ class AutopilotPrototypeService:
                             "use [TO CONFIRM] for unknowns, and never invent metrics, defects, credentials, "
                             "penetration-test results, regulatory approvals or data-residency evidence. "
                             "Keep payments, transfers, OTP and destructive actions approval-gated. Include "
-                            "application overview, critical journeys, environment/device scope, test data and "
-                            "compliance/reporting expectations."
+                            "application overview, target audience, core features, critical journeys, "
+                            "environment/device scope, test data and compliance/reporting expectations."
                         ),
                     ),
                     LLMMessage(role="user", content=json.dumps(prompt, ensure_ascii=False)),
@@ -208,24 +364,28 @@ class AutopilotPrototypeService:
                 response_format_json=True,
             )
             data = json.loads(response.content)
-            generated = str(data.get("context") or "").strip()
+            generated = self._redact_context(str(data.get("context") or "").strip())
             if generated:
-                if not generated.lower().startswith("profile category:"):
-                    generated = f"Profile category: {profile.name}\n{generated}"
-                return AutopilotContextResponse(context=generated[:2400], source="ai", profile_id=profile.id)
+                generated = self._ensure_context_identity(generated, baseline)
+                return AutopilotContextResponse(
+                    context=generated[:2400],
+                    source="ai",
+                    profile_id=profile.id,
+                    warning=" ".join(target_warnings) if target_warnings else None,
+                )
         except Exception as exc:  # pragma: no cover - provider availability is environment-specific
             logger.info("Autopilot context AI generation unavailable: %s", exc)
 
         # For an "improve" request keep the user's text rather than silently
         # replacing it. For a blank request return the ready-to-use profile.
-        fallback = current or baseline
+        fallback = self._redact_context(current or baseline)
         if current and not current.lower().startswith("profile category:"):
-            fallback = f"Profile category: {profile.name}\n{current}"
+            fallback = f"Profile category: {profile.name}\n{self._redact_context(current)}"
         return AutopilotContextResponse(
             context=fallback[:2400],
             source="fallback",
             profile_id=profile.id,
-            warning="AI context generation was unavailable; a safe deterministic profile was applied.",
+            warning=" ".join(target_warnings + ["AI context generation was unavailable; a safe deterministic profile was applied."]),
         )
 
     @property
@@ -271,6 +431,10 @@ class AutopilotPrototypeService:
                 record.project_id = uuid.UUID(str(job["project_id"])) if job.get("project_id") else record.project_id
                 record.target_kind = str(job.get("target_kind", getattr(record, "target_kind", "android")))
                 record.target_url = job.get("target_url")
+                record.profile_id = str(job.get("profile_id", getattr(record, "profile_id", "uae_fintech")) or "uae_fintech")[:80]
+                record.surface_key = str(job.get("surface_key", getattr(record, "surface_key", "")) or "")[:64]
+                record.surface_identity = str(job.get("surface_identity", getattr(record, "surface_identity", "")) or "")[:500]
+                record.surface_version = int(job.get("surface_version", getattr(record, "surface_version", 1)) or 1)
                 repository_asset_id = job.get("repository_asset_id")
                 record.repository_asset_id = (
                     uuid.UUID(str(repository_asset_id)) if repository_asset_id else None
@@ -307,12 +471,14 @@ class AutopilotPrototypeService:
                     "job_id": record.job_id,
                     "owner_id": str(record.owner_id),
                     "project_id": str(record.project_id) if record.project_id else None,
-                    "repository_asset_id": str(record.repository_asset_id)
-                    if record.repository_asset_id
-                    else None,
                     "filename": record.filename,
                     "target_kind": record.target_kind or "android",
                     "target_url": record.target_url,
+                    "profile_id": getattr(record, "profile_id", None) or "uae_fintech",
+                    "surface_key": getattr(record, "surface_key", None) or "",
+                    "surface_identity": getattr(record, "surface_identity", None) or "",
+                    "surface_version": int(getattr(record, "surface_version", None) or 1),
+                    "repository_asset_id": str(record.repository_asset_id) if record.repository_asset_id else None,
                     "context": record.context or "",
                     "document_asset_ids": list(getattr(record, "document_asset_ids", None) or []),
                     "apk_path": record.apk_path,
@@ -338,7 +504,10 @@ class AutopilotPrototypeService:
             async with AsyncSessionLocal() as session:
                 record = await session.scalar(
                     select(AutopilotJob)
-                    .where(AutopilotJob.owner_id == uuid.UUID(str(owner_id)))
+                    .where(
+                        AutopilotJob.owner_id == uuid.UUID(str(owner_id)),
+                        AutopilotJob.status != "superseded",
+                    )
                     .order_by(AutopilotJob.created_at.desc())
                     .limit(1)
                 )
@@ -417,6 +586,10 @@ class AutopilotPrototypeService:
         target_kind: str | None = None,
         project_id: str | None = None,
         document_asset_ids: list[str] | None = None,
+        profile_id: str = "uae_fintech",
+        surface_key: str = "",
+        surface_identity: str = "",
+        surface_version: int = 1,
     ) -> tuple[str, Path]:
         job_id = str(uuid4())
         job_dir = self._job_dir(job_id)
@@ -432,6 +605,10 @@ class AutopilotPrototypeService:
             "filename": safe_name,
             "target_kind": kind,
             "target_url": None,
+            "profile_id": profile_id,
+            "surface_key": surface_key,
+            "surface_identity": surface_identity,
+            "surface_version": surface_version,
             "context": context[:8000],
             "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -456,6 +633,10 @@ class AutopilotPrototypeService:
         target_kind: str | None = None,
         project_id: str | None = None,
         document_asset_ids: list[str] | None = None,
+        profile_id: str = "uae_fintech",
+        surface_key: str = "",
+        surface_identity: str = "",
+        surface_version: int = 1,
     ) -> tuple[str, Path]:
         """Persist an UploadFile incrementally instead of duplicating it in memory.
 
@@ -490,6 +671,10 @@ class AutopilotPrototypeService:
                 "filename": safe_name,
                 "target_kind": kind,
                 "target_url": None,
+                "profile_id": profile_id,
+                "surface_key": surface_key,
+                "surface_identity": surface_identity,
+                "surface_version": surface_version,
                 "context": context[:8000],
                 "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -520,6 +705,10 @@ class AutopilotPrototypeService:
         *,
         project_id: str | None = None,
         document_asset_ids: list[str] | None = None,
+        profile_id: str = "uae_fintech",
+        surface_key: str = "",
+        surface_identity: str = "",
+        surface_version: int = 1,
     ) -> str:
         """Create a durable URL job without copying website data to storage."""
         url = self.validate_web_url(target_url, allow_private=self.settings.APP_ENV == "local")
@@ -535,6 +724,10 @@ class AutopilotPrototypeService:
             "filename": filename,
             "target_kind": "web",
             "target_url": url,
+            "profile_id": profile_id,
+            "surface_key": surface_key,
+            "surface_identity": surface_identity,
+            "surface_version": surface_version,
             "context": context[:8000],
             "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -563,7 +756,7 @@ class AutopilotPrototypeService:
         job = await self.load_job(job_id)
         target_kind = str(job.get("target_kind") or ("ios" if str(job.get("filename", "")).lower().endswith(".ipa") else "android"))
         analysis = None
-        if job.get("status") == "analyzed":
+        if job.get("status") in {"analyzed", "superseded"}:
             try:
                 analysis = await self.load_analysis(job_id)
             except FileNotFoundError:
@@ -600,6 +793,11 @@ class AutopilotPrototypeService:
             status=job.get("status", "uploaded"),
             target_kind=target_kind,
             target_url=job.get("target_url"),
+            profile_id=str(job.get("profile_id") or "uae_fintech"),
+            surface_key=str(job.get("surface_key") or ""),
+            surface_identity=str(job.get("surface_identity") or ""),
+            surface_version=int(job.get("surface_version") or 1),
+            repository_asset_id=UUID(str(job["repository_asset_id"])) if job.get("repository_asset_id") and _is_uuid(job.get("repository_asset_id")) else None,
             stage=job.get("stage", "queued"),
             progress=int(job.get("progress", 0)),
             created_at=job["created_at"],
@@ -623,6 +821,40 @@ class AutopilotPrototypeService:
             return None
         return await self.get_job_status(job_id)
 
+    async def list_local_jobs(self, owner_id: str, project_id: str | None = None) -> list[Dict[str, Any]]:
+        """Read local job manifests for degraded-mode history and duplicate checks."""
+        def read_all() -> list[Dict[str, Any]]:
+            jobs: list[Dict[str, Any]] = []
+            try:
+                entries = list(self.root.iterdir())
+            except OSError:
+                return jobs
+            for job_dir in entries:
+                if not job_dir.is_dir() or job_dir.name.startswith("_"):
+                    continue
+                try:
+                    job = json.loads((job_dir / "job.json").read_text("utf-8"))
+                except (OSError, ValueError):
+                    continue
+                # Older manifests did not persist a surface identity. Read
+                # only the analysis digest needed to reconstruct one; do not
+                # load the full test plan into the history response.
+                if not job.get("surface_identity"):
+                    try:
+                        analysis = json.loads((job_dir / "analysis.json").read_text("utf-8"))
+                        if isinstance(analysis, dict) and analysis.get("sha256"):
+                            job["_analysis_sha256"] = str(analysis["sha256"])
+                    except (OSError, ValueError):
+                        pass
+                if str(job.get("owner_id")) != str(owner_id):
+                    continue
+                if project_id and str(job.get("project_id") or "") != str(project_id):
+                    continue
+                jobs.append(job)
+            jobs.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+            return jobs
+        return await asyncio.to_thread(read_all)
+
     def _latest_job_id_sync(self, owner_id: str) -> str | None:
         latest: tuple[str, str] | None = None
         try:
@@ -636,7 +868,7 @@ class AutopilotPrototypeService:
                 job = json.loads((job_dir / "job.json").read_text("utf-8"))
             except (OSError, ValueError):
                 continue
-            if str(job.get("owner_id")) != owner_id or not job.get("job_id"):
+            if str(job.get("owner_id")) != owner_id or not job.get("job_id") or job.get("status") == "superseded":
                 continue
             created_at = str(job.get("created_at", ""))
             if latest is None or created_at > latest[0]:

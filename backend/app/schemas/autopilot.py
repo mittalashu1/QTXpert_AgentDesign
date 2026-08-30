@@ -107,6 +107,9 @@ class AutopilotContextRequest(BaseModel):
     application_name: Optional[str] = Field(default=None, max_length=200)
     package_name: Optional[str] = Field(default=None, max_length=300)
     platform: str = Field(default="Android", max_length=80)
+    target_url: Optional[str] = Field(default=None, max_length=2048)
+    build_name: Optional[str] = Field(default=None, max_length=500)
+    observed_metadata: Dict[str, Any] = Field(default_factory=dict)
     focus: Optional[str] = Field(default=None, max_length=500)
 
 
@@ -193,15 +196,42 @@ class AutopilotJobSummary(BaseModel):
     app_name: Optional[str] = None
     target_kind: AutopilotTargetKind = "android"
     target_url: Optional[str] = None
+    profile_id: str = "uae_fintech"
+    surface_key: str = ""
+    surface_identity: str = ""
+    surface_version: int = 1
+    repository_asset_id: Optional[UUID] = None
     created_at: str
+
+
+class AutopilotSurface(BaseModel):
+    """A versioned profile/target/build scope shown as an Autopilot tab."""
+
+    surface_key: str
+    surface_identity: str
+    profile_id: str = "uae_fintech"
+    target_kind: AutopilotTargetKind = "android"
+    target_url: Optional[str] = None
+    filename: str = ""
+    latest_job_id: str
+    latest_status: str
+    version_count: int = 1
+    latest_created_at: str
+    latest_updated_at: str
+    is_current: bool = True
 
 
 class AutopilotJobStatus(BaseModel):
     job_id: str
     filename: str
-    status: Literal["uploaded", "analyzing", "analyzed", "failed"]
+    status: Literal["uploaded", "analyzing", "analyzed", "failed", "superseded"]
     target_kind: AutopilotTargetKind = "android"
     target_url: Optional[str] = None
+    profile_id: str = "uae_fintech"
+    surface_key: str = ""
+    surface_identity: str = ""
+    surface_version: int = 1
+    repository_asset_id: Optional[UUID] = None
     stage: str = "queued"
     progress: int = Field(default=0, ge=0, le=100)
     created_at: str
@@ -358,6 +388,7 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     target_url: Optional[str] = Field(default=None, max_length=2048)
     context: Optional[str] = Field(default=None, max_length=8000)
     profile_id: str = Field(default="uae_fintech", max_length=80)
+    surface_action: Literal["ask", "new", "override"] = "new"
     document_asset_ids: Optional[List[UUID]] = Field(default=None, max_length=20)
 
 

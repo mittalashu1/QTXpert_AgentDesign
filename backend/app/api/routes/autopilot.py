@@ -1,5 +1,6 @@
 """Authenticated API endpoints for the unified Autopilot target runner."""
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -10,7 +11,7 @@ from typing import Annotated, Optional
 from uuid import UUID, uuid4
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +37,7 @@ from app.schemas.autopilot import (
     AutopilotJobStatus,
     AutopilotProviderStatus,
     AutopilotProfileOption,
+    AutopilotSurface,
     AutopilotSetupProfile,
     AutopilotSetupUpdateRequest,
     AutopilotTestAuditReport,
@@ -47,10 +49,13 @@ from app.services.autopilot import (
     AutopilotPrototypeService,
     AutopilotUploadInvalid,
     AutopilotUploadTooLarge,
+    _is_uuid,
+    build_surface_key,
+    normalize_surface_identity,
 )
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_web import AutopilotWebService
-from app.services.autopilot_context import default_context, list_profiles
+from app.services.autopilot_context import default_context, get_profile, list_profiles
 from app.services.autopilot_ir import AutopilotIRCompiler
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
@@ -58,6 +63,7 @@ from app.services.document_processor import UnsupportedDocumentTypeError, extrac
 from app.services.upload_repository import (
     UploadRepositoryInvalid,
     UploadRepositoryService,
+    UploadRepositoryStorageUnavailable,
     UploadRepositoryTooLarge,
 )
 
@@ -69,10 +75,25 @@ def _service(settings: Settings) -> AutopilotPrototypeService:
     return AutopilotPrototypeService(settings)
 
 
-def _effective_context(value: Optional[str], profile_id: str = "uae_fintech") -> str:
+def _effective_context(
+    value: Optional[str],
+    profile_id: str = "uae_fintech",
+    *,
+    target_kind: str = "android",
+    target_url: str | None = None,
+    application_name: str | None = None,
+) -> str:
     """Ensure every entry point uses a safe context, including direct API clients."""
     cleaned = (value or "").strip()
-    return cleaned[:8000] if cleaned else default_context(profile_id=profile_id)
+    if cleaned:
+        return cleaned[:8000]
+    platform = "Web" if target_kind == "web" else "iOS" if target_kind == "ios" else "Android"
+    return default_context(
+        application_name=application_name,
+        platform=platform,
+        profile_id=profile_id,
+        target_url=target_url,
+    )
 
 
 def _parse_document_asset_ids(value: object) -> list[UUID]:
@@ -168,8 +189,22 @@ async def _document_context(
     return document_asset_ids, "\n\n".join(excerpts)
 
 
-def _context_with_documents(base_context: Optional[str], profile_id: str, document_excerpt: str) -> str:
-    context = _effective_context(base_context, profile_id)
+def _context_with_documents(
+    base_context: Optional[str],
+    profile_id: str,
+    document_excerpt: str,
+    *,
+    target_kind: str = "android",
+    target_url: str | None = None,
+    application_name: str | None = None,
+) -> str:
+    context = _effective_context(
+        base_context,
+        profile_id,
+        target_kind=target_kind,
+        target_url=target_url,
+        application_name=application_name,
+    )
     if not document_excerpt:
         return context
     prefix = f"{context[:6000]}\n\nSelected repository documentation:\n"
@@ -179,6 +214,226 @@ def _context_with_documents(base_context: Optional[str], profile_id: str, docume
 def _context_without_documents(value: Optional[str]) -> str:
     """Recover the editable user/profile brief from a stored effective context."""
     return (value or "").split("\n\nSelected repository documentation:", 1)[0].strip()
+
+
+def _canonical_profile_id(profile_id: str | None) -> str:
+    return get_profile(profile_id).id
+
+
+def _profile_id_from_legacy_context(value: object, fallback: str | None = None) -> str:
+    """Recover a profile for jobs created before surface columns existed."""
+    text = str(value or "")
+    marker = re.search(r"^Profile category:\s*(.+)$", text, re.IGNORECASE | re.MULTILINE)
+    if marker:
+        requested = marker.group(1).strip().casefold()
+        for profile in list_profiles():
+            if profile.name.casefold() == requested:
+                return profile.id
+    return _canonical_profile_id(fallback)
+
+
+def _record_surface_key(record: AutopilotJob) -> tuple[str, str, str, str]:
+    """Return profile, target kind, identity and key for old or new rows."""
+    target_kind = str(getattr(record, "target_kind", None) or "android").lower()
+    if target_kind not in {"android", "ios", "web"}:
+        target_kind = "android"
+    profile_id = _profile_id_from_legacy_context(
+        getattr(record, "context", None), getattr(record, "profile_id", None)
+    )
+    identity = str(getattr(record, "surface_identity", None) or "")
+    if not identity:
+        analysis = getattr(record, "analysis", None) or {}
+        identity = normalize_surface_identity(
+            target_kind,
+            target_url=getattr(record, "target_url", None),
+            artifact_sha256=analysis.get("sha256") if isinstance(analysis, dict) else None,
+            filename=getattr(record, "filename", None),
+        )
+    key = str(getattr(record, "surface_key", None) or build_surface_key(profile_id, target_kind, identity))
+    return profile_id, target_kind, identity, key
+
+
+def _local_surface_key(job: dict) -> tuple[str, str, str, str]:
+    """Return the same surface identity for a filesystem-only legacy job."""
+    target_kind = str(job.get("target_kind") or "android").lower()
+    if target_kind not in {"android", "ios", "web"}:
+        target_kind = "android"
+    profile_id = _profile_id_from_legacy_context(job.get("context"), job.get("profile_id"))
+    identity = str(job.get("surface_identity") or "")
+    if not identity:
+        analysis = job.get("analysis") or {}
+        identity = normalize_surface_identity(
+            target_kind,
+            target_url=job.get("target_url"),
+            artifact_sha256=(analysis.get("sha256") if isinstance(analysis, dict) else None) or job.get("_analysis_sha256"),
+            filename=job.get("filename"),
+        )
+    key = str(job.get("surface_key") or build_surface_key(profile_id, target_kind, identity))
+    return profile_id, target_kind, identity, key
+
+
+def _surface_details(
+    profile_id: str | None,
+    target_kind: str,
+    *,
+    target_url: str | None = None,
+    artifact_sha256: str | None = None,
+    filename: str | None = None,
+) -> tuple[str, str, str]:
+    """Return canonical profile, human-readable identity and indexed key."""
+    canonical_profile = _canonical_profile_id(profile_id)
+    identity = normalize_surface_identity(
+        target_kind,
+        target_url=target_url,
+        artifact_sha256=artifact_sha256,
+        filename=filename,
+    )
+    return canonical_profile, identity, build_surface_key(canonical_profile, target_kind, identity)
+
+
+async def _upload_sha256(upload: UploadFile, max_bytes: int = 0) -> str:
+    """Hash an uploaded binary in bounded chunks and rewind it for persistence."""
+    hasher = hashlib.sha256()
+    await upload.seek(0)
+    total = 0
+    while chunk := await upload.read(1024 * 1024):
+        total += len(chunk)
+        if max_bytes and total > max_bytes:
+            await upload.seek(0)
+            raise AutopilotUploadTooLarge(f"APK exceeds the {max_bytes // (1024 * 1024)}MB Autopilot prototype limit")
+        hasher.update(chunk)
+    await upload.seek(0)
+    return hasher.hexdigest()
+
+
+def _sha256_path(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+async def _surface_matches(
+    *,
+    db: AsyncSession,
+    service: AutopilotPrototypeService,
+    user: User,
+    project_id: Optional[UUID],
+    surface_key: str,
+) -> tuple[list[AutopilotJob], list[dict]]:
+    """Find active versions in Postgres, falling back to local manifests."""
+    records: list[AutopilotJob] = []
+    try:
+        query = select(AutopilotJob).where(
+            AutopilotJob.owner_id == user.id,
+            or_(AutopilotJob.surface_key == surface_key, AutopilotJob.surface_key == ""),
+            AutopilotJob.status != "superseded",
+        )
+        if project_id is not None:
+            query = query.outerjoin(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
+                or_(AutopilotJob.project_id == project_id, UploadedAsset.project_id == project_id)
+            )
+        candidates = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()))).all())
+        records = [record for record in candidates if _record_surface_key(record)[3] == surface_key]
+    except Exception as exc:  # pragma: no cover - exercised by degraded storage
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.info("Autopilot surface lookup fell back to local manifests: %s", exc)
+    if records:
+        return records, []
+    local = await service.list_local_jobs(str(user.id), str(project_id) if project_id else None)
+    return [], [
+        job for job in local
+        if _local_surface_key(job)[3] == surface_key and job.get("status") != "superseded"
+    ]
+
+
+async def _guard_surface(
+    *,
+    db: AsyncSession,
+    service: AutopilotPrototypeService,
+    user: User,
+    project_id: Optional[UUID],
+    profile_id: str,
+    target_kind: str,
+    target_url: str | None,
+    artifact_sha256: str | None,
+    filename: str | None,
+    surface_action: str,
+) -> tuple[str, str, str, int]:
+    """Require an explicit choice when a profile/target/build already exists."""
+    canonical_profile, identity, key = _surface_details(
+        profile_id,
+        target_kind,
+        target_url=target_url,
+        artifact_sha256=artifact_sha256,
+        filename=filename,
+    )
+    db_records, local_jobs = await _surface_matches(
+        db=db, service=service, user=user, project_id=project_id, surface_key=key
+    )
+    match_count = len(db_records) + len(local_jobs)
+    next_version = 1
+    if db_records:
+        next_version = max(int(getattr(record, "surface_version", 1) or 1) for record in db_records) + 1
+    elif local_jobs:
+        next_version = max(int(job.get("surface_version") or 1) for job in local_jobs) + 1
+    if match_count and surface_action not in {"new", "override"}:
+        latest = db_records[0] if db_records else local_jobs[0]
+        latest_job_id = latest.job_id if db_records else str(latest.get("job_id"))
+        latest_created = latest.created_at.isoformat() if db_records else str(latest.get("created_at", ""))
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "duplicate_surface",
+                "message": "This profile, target and build already have an Autopilot result.",
+                "surface_key": key,
+                "surface_identity": identity,
+                "existing_job_id": latest_job_id,
+                "existing_created_at": latest_created,
+                "actions": ["new", "override"],
+            },
+        )
+    if match_count and surface_action == "override":
+        try:
+            for record in db_records:
+                record.status = "superseded"
+                record.stage = "superseded"
+                record.error = "Superseded by a newer run for the same Autopilot surface."
+            if db_records:
+                await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The previous Autopilot result could not be superseded; retry after storage recovers.",
+            ) from exc
+        # Keep the same state in the local manifest when this instance still
+        # has one. ``load_job`` prefers that manifest for fast polling.
+        for record in db_records:
+            try:
+                await service.update_job(
+                    str(record.job_id),
+                    status="superseded",
+                    stage="superseded",
+                    error="Superseded by a newer run for the same Autopilot surface.",
+                )
+            except (FileNotFoundError, ValueError):
+                pass
+        for job in local_jobs:
+            try:
+                await service.update_job(
+                    str(job["job_id"]),
+                    status="superseded",
+                    stage="superseded",
+                    error="Superseded by a newer run for the same Autopilot surface.",
+                )
+            except Exception:
+                logger.info("Could not mark local Autopilot job superseded: %s", job.get("job_id"))
+    return canonical_profile, identity, key, next_version
 
 
 async def _active_project(
@@ -367,6 +622,10 @@ async def _start_analysis_from_asset(
     profile_id: str = "uae_fintech",
     project_id: Optional[UUID] = None,
     document_asset_ids: Optional[list[UUID]] = None,
+    canonical_profile_id: str = "uae_fintech",
+    surface_key: str = "",
+    surface_identity: str = "",
+    surface_version: int = 1,
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
 
@@ -383,11 +642,20 @@ async def _start_analysis_from_asset(
             asset.filename,
             reader,
             str(user.id),
-            context=_effective_context(context, profile_id),
+            context=_effective_context(
+                context,
+                profile_id,
+                target_kind="ios" if asset.extension == "ipa" else "android",
+                application_name=asset.filename.rsplit(".", 1)[0],
+            ),
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
             target_kind="ios" if asset.extension == "ipa" else "android",
             project_id=str(project_id or asset.project_id) if (project_id or asset.project_id) else None,
             document_asset_ids=[str(value) for value in (document_asset_ids or [])],
+            profile_id=canonical_profile_id,
+            surface_key=surface_key,
+            surface_identity=surface_identity,
+            surface_version=surface_version,
         )
     finally:
         await reader.close()
@@ -410,6 +678,10 @@ async def _start_analysis_from_local_path(
     profile_id: str = "uae_fintech",
     project_id: Optional[UUID] = None,
     document_asset_ids: Optional[list[UUID]] = None,
+    canonical_profile_id: str = "uae_fintech",
+    surface_key: str = "",
+    surface_identity: str = "",
+    surface_version: int = 1,
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -424,11 +696,20 @@ async def _start_analysis_from_local_path(
             filename,
             reader,
             str(user.id),
-            context=_effective_context(context, profile_id),
+            context=_effective_context(
+                context,
+                profile_id,
+                target_kind="ios" if filename.lower().endswith(".ipa") else "android",
+                application_name=Path(filename).stem,
+            ),
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
             target_kind="ios" if filename.lower().endswith(".ipa") else "android",
             project_id=str(project_id) if project_id else None,
             document_asset_ids=[str(value) for value in (document_asset_ids or [])],
+            profile_id=canonical_profile_id,
+            surface_key=surface_key,
+            surface_identity=surface_identity,
+            surface_version=surface_version,
         )
     finally:
         await reader.close()
@@ -733,6 +1014,86 @@ async def get_autopilot_profiles(
     return list_profiles()
 
 
+@router.get("/surfaces", response_model=list[AutopilotSurface])
+async def get_autopilot_surfaces(
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
+):
+    """List isolated profile/target/build workspaces for the active project."""
+    service = _service(settings)
+    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    records: list[AutopilotJob] = []
+    try:
+        query = select(AutopilotJob).where(
+            AutopilotJob.owner_id == user.id,
+            AutopilotJob.status != "superseded",
+        )
+        if project_id is not None:
+            query = query.outerjoin(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
+                or_(AutopilotJob.project_id == project_id, UploadedAsset.project_id == project_id)
+            )
+        records = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()))).all())
+    except Exception as exc:  # pragma: no cover - exercised by degraded storage
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.info("Autopilot surface list fell back to local manifests: %s", exc)
+
+    rows: list[dict] = []
+    if records:
+        for record in records:
+            profile_id, target_kind, identity, key = _record_surface_key(record)
+            rows.append({
+                "surface_key": key,
+                "surface_identity": identity,
+                "profile_id": profile_id,
+                "target_kind": target_kind,
+                "target_url": record.target_url,
+                "filename": record.filename,
+                "latest_job_id": record.job_id,
+                "latest_status": record.status,
+                "latest_created_at": record.created_at.isoformat(),
+                "latest_updated_at": record.updated_at.isoformat(),
+                "_version": int(getattr(record, "surface_version", None) or 1),
+            })
+    else:
+        for job in await service.list_local_jobs(str(user.id), str(project_id) if project_id else None):
+            if job.get("status") == "superseded":
+                continue
+            profile_id, target_kind, identity, key = _local_surface_key(job)
+            rows.append({
+                "surface_key": key,
+                "surface_identity": identity,
+                "profile_id": profile_id,
+                "target_kind": target_kind,
+                "target_url": job.get("target_url"),
+                "filename": job.get("filename", ""),
+                "latest_job_id": str(job.get("job_id")),
+                "latest_status": job.get("status", "uploaded"),
+                "latest_created_at": str(job.get("created_at", "")),
+                "latest_updated_at": str(job.get("updated_at", job.get("created_at", ""))),
+                "_version": int(job.get("surface_version") or 1),
+            })
+
+    grouped: dict[str, dict] = {}
+    for row in rows:
+        key = row["surface_key"]
+        current = grouped.get(key)
+        if current is None:
+            grouped[key] = row
+        else:
+            current["_version"] = max(current["_version"], row["_version"])
+    result: list[AutopilotSurface] = []
+    for row in grouped.values():
+        version_count = row.pop("_version", 1)
+        result.append(AutopilotSurface(version_count=version_count, is_current=row["latest_status"] != "superseded", **row))
+    result.sort(key=lambda item: item.latest_updated_at, reverse=True)
+    return result
+
+
 @router.post("/analyze", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
 async def analyze_autopilot_target(
     background_tasks: BackgroundTasks,
@@ -743,26 +1104,60 @@ async def analyze_autopilot_target(
     context: str = Form(default=""),
     profile_id: str = Form(default="uae_fintech"),
     target_url: str = Form(default=""),
+    surface_action: str = Form(default="ask"),
     document_asset_ids: str = Form(default=""),
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Analyze a website URL, Android APK or iOS IPA as one Autopilot job."""
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     service = _service(settings)
+    if surface_action not in {"ask", "new", "override"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="surface_action must be ask, new or override")
+    profile_id = _canonical_profile_id(profile_id)
     selected_document_ids = _parse_document_asset_ids(document_asset_ids)
     selected_document_ids, document_excerpt = await _document_context(
         db, user, project_id, selected_document_ids, settings
     )
-    analysis_context = _context_with_documents(context, profile_id, document_excerpt)
     normalized_url = target_url.strip()
+    inferred_kind = "web" if normalized_url else (
+        "ios" if file is not None and str(file.filename or "").lower().endswith(".ipa") else "android"
+    )
+    analysis_context = _context_with_documents(
+        context,
+        profile_id,
+        document_excerpt,
+        target_kind=inferred_kind,
+        target_url=normalized_url or None,
+        application_name=Path(file.filename).stem if file is not None and file.filename else None,
+    )
     if normalized_url:
         try:
+            normalized_url = service.validate_web_url(
+                normalized_url,
+                allow_private=settings.APP_ENV == "local",
+            )
+            profile_id, surface_identity, surface_key, surface_version = await _guard_surface(
+                db=db,
+                service=service,
+                user=user,
+                project_id=project_id,
+                profile_id=profile_id,
+                target_kind="web",
+                target_url=normalized_url,
+                artifact_sha256=None,
+                filename=None,
+                surface_action=surface_action,
+            )
             job_id = await service.save_web_target(
                 normalized_url,
                 str(user.id),
                 context=analysis_context,
                 project_id=str(project_id) if project_id else None,
                 document_asset_ids=[str(value) for value in selected_document_ids],
+                profile_id=profile_id,
+                surface_key=surface_key,
+                surface_identity=surface_identity,
+                surface_version=surface_version,
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -786,6 +1181,22 @@ async def analyze_autopilot_target(
     target_kind = "ios" if extension == ".ipa" else "android"
     max_bytes = settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024
     try:
+        artifact_sha256 = await _upload_sha256(file, max_bytes=max_bytes)
+    except AutopilotUploadTooLarge as exc:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+    profile_id, surface_identity, surface_key, surface_version = await _guard_surface(
+        db=db,
+        service=service,
+        user=user,
+        project_id=project_id,
+        profile_id=profile_id,
+        target_kind=target_kind,
+        target_url=None,
+        artifact_sha256=artifact_sha256,
+        filename=filename,
+        surface_action=surface_action,
+    )
+    try:
         job_id, apk_path = await service.save_upload_stream(
             filename,
             file,
@@ -795,6 +1206,10 @@ async def analyze_autopilot_target(
             target_kind=target_kind,
             project_id=str(project_id) if project_id else None,
             document_asset_ids=[str(value) for value in selected_document_ids],
+            profile_id=profile_id,
+            surface_key=surface_key,
+            surface_identity=surface_identity,
+            surface_version=surface_version,
         )
     except AutopilotUploadTooLarge as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
@@ -880,6 +1295,18 @@ async def analyze_existing_mobile_app(
         ) from exc
     if asset is None or asset.extension not in {"apk", "ipa"} or (project_id is not None and asset.project_id != project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK/IPA not found in this project")
+    canonical_profile, surface_identity, surface_key, surface_version = await _guard_surface(
+        db=db,
+        service=_service(settings),
+        user=user,
+        project_id=project_id,
+        profile_id=payload.profile_id,
+        target_kind="ios" if asset.extension == "ipa" else "android",
+        target_url=None,
+        artifact_sha256=asset.sha256,
+        filename=asset.filename,
+        surface_action=payload.surface_action,
+    )
     selected_document_ids = payload.document_asset_ids or []
     selected_document_ids, document_excerpt = await _document_context(
         db, user, project_id, selected_document_ids, settings
@@ -890,10 +1317,20 @@ async def analyze_existing_mobile_app(
         settings=settings,
         user=user,
         asset=asset,
-        context=_context_with_documents(payload.context, payload.profile_id, document_excerpt),
-        profile_id=payload.profile_id,
+        context=_context_with_documents(
+            payload.context,
+            canonical_profile,
+            document_excerpt,
+            target_kind="ios" if asset.extension == "ipa" else "android",
+            application_name=asset.filename.rsplit(".", 1)[0],
+        ),
+        profile_id=canonical_profile,
         project_id=project_id,
         document_asset_ids=selected_document_ids,
+        canonical_profile_id=canonical_profile,
+        surface_key=surface_key,
+        surface_identity=surface_identity,
+        surface_version=surface_version,
     )
 
 
@@ -912,6 +1349,8 @@ async def rerun_autopilot_analysis(
     original = await _require_owned_job(service, job_id, user)
     original_record = await _safe_job_record(db, job_id, user.id)
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    effective_project_id = project_id or (UUID(str(original["project_id"])) if original.get("project_id") and _is_uuid(original.get("project_id")) else None)
+    canonical_profile_id = _canonical_profile_id(payload.profile_id)
     original_target_kind = str(original.get("target_kind") or "android")
     original_document_ids: list[UUID] = []
     for value in original.get("document_asset_ids", []) or []:
@@ -924,37 +1363,75 @@ async def rerun_autopilot_analysis(
     if payload.document_asset_ids is None:
         selected_document_ids = original_document_ids
         selected_document_ids, document_excerpt = await _document_context(
-            db, user, project_id, selected_document_ids, settings
+            db, user, effective_project_id, selected_document_ids, settings
         )
         rerun_context = _context_with_documents(
             payload.context if payload.context is not None else _context_without_documents(str(original.get("context", ""))),
-            payload.profile_id,
+            canonical_profile_id,
             document_excerpt,
+            target_kind=original_target_kind,
+            target_url=original.get("target_url"),
+            application_name=Path(str(original.get("filename", ""))).stem or None,
         )
     else:
         selected_document_ids, document_excerpt = await _document_context(
-            db, user, project_id, payload.document_asset_ids, settings
+            db, user, effective_project_id, payload.document_asset_ids, settings
         )
         rerun_context = _context_with_documents(
             payload.context if payload.context is not None else str(original.get("context", "")),
-            payload.profile_id,
+            canonical_profile_id,
             document_excerpt,
+            target_kind=original_target_kind,
+            target_url=original.get("target_url"),
+            application_name=Path(str(original.get("filename", ""))).stem or None,
         )
     if original_target_kind == "web" and payload.upload_id is None:
         target_url = payload.target_url or str(original.get("target_url") or "")
         try:
+            target_url = service.validate_web_url(target_url, allow_private=settings.APP_ENV == "local")
+            canonical_profile_id, surface_identity, surface_key, surface_version = await _guard_surface(
+                db=db,
+                service=service,
+                user=user,
+                project_id=effective_project_id,
+                profile_id=canonical_profile_id,
+                target_kind="web",
+                target_url=target_url,
+                artifact_sha256=None,
+                filename=None,
+                surface_action=payload.surface_action,
+            )
             new_job_id = await service.save_web_target(
                 target_url,
                 str(user.id),
                 context=rerun_context,
-                project_id=str(project_id) if project_id else str(original.get("project_id") or "") or None,
+                project_id=str(effective_project_id) if effective_project_id else None,
                 document_asset_ids=[str(value) for value in selected_document_ids],
+                profile_id=canonical_profile_id,
+                surface_key=surface_key,
+                surface_identity=surface_identity,
+                surface_version=surface_version,
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         background_tasks.add_task(service.analyze_safely, new_job_id)
         return await service.get_job_status(new_job_id)
     if settings.AUTOPILOT_DEGRADED_MODE_ENABLED and payload.upload_id is None:
+        local_sha = str((original.get("analysis") or {}).get("sha256") or "")
+        if not local_sha and Path(str(original.get("apk_path", ""))).is_file():
+            local_sha = await asyncio.to_thread(_sha256_path, Path(str(original.get("apk_path"))))
+        canonical_profile_id, surface_identity, surface_key, surface_version = await _guard_surface(
+            db=db,
+            service=service,
+            user=user,
+            project_id=effective_project_id,
+            profile_id=canonical_profile_id,
+            target_kind=original_target_kind,
+            target_url=None,
+            artifact_sha256=local_sha,
+            filename=Path(str(original.get("filename", "application.apk"))).name,
+            surface_action=payload.surface_action,
+        )
         return await _start_analysis_from_local_path(
             background_tasks=background_tasks,
             settings=settings,
@@ -962,9 +1439,13 @@ async def rerun_autopilot_analysis(
             source_path=Path(str(original.get("apk_path", ""))),
             filename=Path(str(original.get("filename", "application.apk"))).name,
             context=rerun_context,
-            profile_id=payload.profile_id,
-            project_id=project_id,
+            profile_id=canonical_profile_id,
+            project_id=effective_project_id,
             document_asset_ids=selected_document_ids,
+            canonical_profile_id=canonical_profile_id,
+            surface_key=surface_key,
+            surface_identity=surface_identity,
+            surface_version=surface_version,
         )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
@@ -985,8 +1466,20 @@ async def rerun_autopilot_analysis(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Stored APK reuse is temporarily unavailable; restore database access and retry.",
         ) from exc
-    if asset is None or (project_id is not None and asset.project_id != project_id):
+    if asset is None or (effective_project_id is not None and asset.project_id != effective_project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK not found in this project")
+    canonical_profile_id, surface_identity, surface_key, surface_version = await _guard_surface(
+        db=db,
+        service=service,
+        user=user,
+        project_id=effective_project_id,
+        profile_id=canonical_profile_id,
+        target_kind="ios" if asset.extension == "ipa" else "android",
+        target_url=None,
+        artifact_sha256=asset.sha256,
+        filename=asset.filename,
+        surface_action=payload.surface_action,
+    )
     return await _start_analysis_from_asset(
         background_tasks=background_tasks,
         db=db,
@@ -994,9 +1487,13 @@ async def rerun_autopilot_analysis(
         user=user,
         asset=asset,
         context=rerun_context,
-        profile_id=payload.profile_id,
-        project_id=project_id,
+        profile_id=canonical_profile_id,
+        project_id=effective_project_id,
         document_asset_ids=selected_document_ids,
+        canonical_profile_id=canonical_profile_id,
+        surface_key=surface_key,
+        surface_identity=surface_identity,
+        surface_version=surface_version,
     )
 
 
@@ -1007,17 +1504,29 @@ async def get_latest_autopilot_job(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
+    surface_key: Optional[str] = Query(default=None, max_length=64),
 ):
     """Restore the latest Autopilot result for the active project."""
     service = _service(settings)
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
-    query = select(AutopilotJob).where(AutopilotJob.owner_id == user.id)
+    query = select(AutopilotJob).where(
+        AutopilotJob.owner_id == user.id,
+        AutopilotJob.status != "superseded",
+    )
+    if surface_key:
+        # Include legacy rows whose surface key was added by migration 0019;
+        # their profile/target identity is reconstructed below.
+        query = query.where(or_(AutopilotJob.surface_key == surface_key, AutopilotJob.surface_key == ""))
     if project_id is not None:
         query = query.outerjoin(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
             or_(AutopilotJob.project_id == project_id, UploadedAsset.project_id == project_id)
         )
     try:
-        record = await db.scalar(query.order_by(AutopilotJob.created_at.desc()).limit(1))
+        candidates = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()))).all())
+        record = next(
+            (item for item in candidates if not surface_key or _record_surface_key(item)[3] == surface_key),
+            None,
+        )
     except Exception as exc:  # pragma: no cover - exercised by an unavailable provider
         try:
             await db.rollback()
@@ -1029,10 +1538,22 @@ async def get_latest_autopilot_job(
                 detail="Autopilot history is temporarily unavailable; check the database plan/quota and retry.",
             ) from exc
         logger.warning("Autopilot latest-job durable read skipped in degraded mode: %s", exc)
+        if surface_key:
+            local_jobs = [
+                item for item in await service.list_local_jobs(str(user.id), str(project_id) if project_id else None)
+                if _local_surface_key(item)[3] == surface_key and item.get("status") != "superseded"
+            ]
+            return await service.get_job_status(str(local_jobs[0]["job_id"])) if local_jobs else None
         return await service.get_latest_job_status(str(user.id))
     if record is None:
         # The filesystem fallback is owner-wide and therefore only safe when no
         # project context exists (legacy/local clients).
+        if surface_key:
+            local_jobs = [
+                item for item in await service.list_local_jobs(str(user.id), str(project_id) if project_id else None)
+                if _local_surface_key(item)[3] == surface_key and item.get("status") != "superseded"
+            ]
+            return await service.get_job_status(str(local_jobs[0]["job_id"])) if local_jobs else None
         return await service.get_latest_job_status(str(user.id)) if project_id is None else None
 
     job = await _require_owned_job(service, record.job_id, user)

@@ -8,11 +8,44 @@ clients and reruns consistent with the profile selected in the browser.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 from app.schemas.autopilot import AutopilotProfileOption
 
 
 DEFAULT_AUTOPILOT_PROFILE_ID = "uae_fintech"
+
+
+def sanitize_target_url(value: str | None) -> str | None:
+    """Return an HTTP(S) host/path without credentials or URL state.
+
+    Context text is shown in the browser and is also sent to the language
+    model. Keep invite codes, query parameters, fragments and embedded basic
+    auth out of both locations while retaining enough identity for a useful
+    website brief.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    # Embedded credentials are intentionally discarded rather than echoed.
+    # The analysis endpoint still rejects credential-bearing URLs; this helper
+    # is also used while constructing an error-safe preview before validation.
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname.lower().rstrip(".")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    default_port = (parsed.scheme.lower() == "https" and port == 443) or (
+        parsed.scheme.lower() == "http" and port == 80
+    )
+    netloc = host if not port or default_port else f"{host}:{port}"
+    path = parsed.path or "/"
+    return urlunparse((parsed.scheme.lower(), netloc, path, "", "", ""))[:500]
 
 _PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {
@@ -112,6 +145,9 @@ def profile_context(
     profile_id: str | None = DEFAULT_AUTOPILOT_PROFILE_ID,
     application_name: str | None = None,
     platform: str = "Android",
+    *,
+    target_url: str | None = None,
+    build_name: str | None = None,
 ) -> str:
     """Render the concise context associated with a selected profile."""
 
@@ -121,8 +157,10 @@ def profile_context(
     # A profile describes a testing scope, not a particular product. Keep the
     # application unknown until an artifact/URL supplies an observed identity
     # or the user explicitly adds one to the context.
-    resolved_application = application_name.strip() if application_name else "[TO CONFIRM]"
-    return f"Profile category: {profile.name}\nApplication: {resolved_application}\n{brief}"[:2400]
+    resolved_application = (application_name or build_name or "").strip() or "[TO CONFIRM]"
+    safe_target_url = sanitize_target_url(target_url) if platform_label.lower() == "web" else None
+    target_url_line = f"Target URL: {safe_target_url}\n" if safe_target_url else ""
+    return f"Profile category: {profile.name}\nApplication: {resolved_application}\nTarget: {platform_label}\n{target_url_line}{brief}"[:2400]
 
 
 # Backwards-compatible name used by existing API clients and tests.
@@ -133,8 +171,17 @@ def default_context(
     application_name: str | None = None,
     platform: str = "Android",
     profile_id: str | None = DEFAULT_AUTOPILOT_PROFILE_ID,
+    *,
+    target_url: str | None = None,
+    build_name: str | None = None,
 ) -> str:
     """Return a concise, profile-driven context with optional substitutions."""
 
-    return profile_context(profile_id, application_name=application_name, platform=platform)
+    return profile_context(
+        profile_id,
+        application_name=application_name,
+        platform=platform,
+        target_url=target_url,
+        build_name=build_name,
+    )
 

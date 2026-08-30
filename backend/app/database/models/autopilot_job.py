@@ -44,6 +44,12 @@ class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     target_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="android", server_default="android")
     target_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
+    # Stable scope identity prevents results for different profiles, platforms,
+    # URLs or binary builds from being treated as one report.
+    profile_id: Mapped[str] = mapped_column(String(80), nullable=False, default="uae_fintech", server_default="uae_fintech")
+    surface_key: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default="", index=True)
+    surface_identity: Mapped[str] = mapped_column(String(500), nullable=False, default="", server_default="")
+    surface_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     document_asset_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     apk_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)

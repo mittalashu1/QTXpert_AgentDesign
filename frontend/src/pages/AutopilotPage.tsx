@@ -48,8 +48,8 @@ type Analysis = {
 };
 type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; playwright_available?: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: Provider };
 type AnalysisJob = {
-  job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed";
-  target_kind?: TargetKind; target_url?: string | null; stage: string; progress: number; context?: string; document_asset_ids?: string[]; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
+  job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed" | "superseded";
+  target_kind?: TargetKind; target_url?: string | null; profile_id?: string; surface_key?: string; surface_identity?: string; surface_version?: number; repository_asset_id?: string | null; stage: string; progress: number; context?: string; document_asset_ids?: string[]; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
 };
 type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
 type ReportCheck = {
@@ -136,6 +136,11 @@ type ProfileOption = {
   id: string; name: string; description: string; brief_context: string;
 };
 type ContextResponse = { context: string; source: "default" | "ai" | "fallback"; profile_id?: string; warning?: string | null };
+type SurfaceTab = {
+  surface_key: string; surface_identity: string; profile_id: string; target_kind: TargetKind;
+  target_url?: string | null; filename: string; latest_job_id: string; latest_status: string;
+  version_count: number; latest_created_at: string; latest_updated_at: string; is_current: boolean;
+};
 type SetupProfile = {
   job_id: string; credential_reference: string; account_role: string; environment_name: string;
   environment_url: string; test_data_reference: string; reset_hook_reference: string;
@@ -158,35 +163,35 @@ const DEFAULT_PROFILE_OPTIONS: ProfileOption[] = [
   {
     id: "uae_fintech", name: "UAE Digital Banking & Wealth",
     description: "UAE banking and wealth QA, regulated journeys and CBUAE/SCA evidence.",
-    brief_context: "Act as a UAE Digital Banking and Wealth QA Lead and Compliance Auditor for the Android application. Validate applicable onboarding/eKYC, UAE PASS, authentication, risk profiling, accounts, portfolios, cards, payments and customer journeys. Assess CBUAE/SCA-aligned controls, auditability, security, resilience, performance and data residency. Use only non-production data; keep money movement, OTP and destructive actions approval-gated. Produce an evidence-led executive Test and Audit Report. Unknown features, metrics, defects and compliance claims remain pending until observed or evidenced.",
+    brief_context: "Act as a UAE Digital Banking and Wealth QA Lead and Compliance Auditor for the {platform} product. Validate applicable onboarding/eKYC, UAE PASS, authentication, risk profiling, accounts, portfolios, cards, payments and customer journeys. Assess CBUAE/SCA-aligned controls, auditability, security, resilience, performance and data residency. Use only non-production data; keep money movement, OTP and destructive actions approval-gated. Produce an evidence-led executive Test and Audit Report. Unknown features, metrics, defects and compliance claims remain pending until observed or evidenced.",
   },
   {
     id: "payments_cards", name: "Payments & Cards",
     description: "Wallets, cards, checkout, transaction integrity and fraud controls.",
-    brief_context: "Act as a Payments QA Lead for the Android application. Validate wallet and card lifecycle, checkout, authentication, ledger/settlement consistency, refunds, limits, fraud and abuse controls. Use non-production data and keep money movement, OTP and irreversible actions approval-gated. Capture device, API, audit-log and transaction evidence for an executive release report. Unknown metrics, defects and security/compliance claims remain pending.",
+    brief_context: "Act as a Payments QA Lead for the {platform} product. Validate wallet and card lifecycle, checkout, authentication, ledger/settlement consistency, refunds, limits, fraud and abuse controls. Use non-production data and keep money movement, OTP and irreversible actions approval-gated. Capture device, API, audit-log and transaction evidence for an executive release report. Unknown metrics, defects and security/compliance claims remain pending.",
   },
   {
     id: "healthcare_regulated", name: "Healthcare & Regulated Data",
     description: "Patient journeys, privacy, consent, access control and regulated data handling.",
-    brief_context: "Act as a Healthcare QA and Privacy Auditor for the Android application. Validate identity, consent, patient/provider journeys, sensitive-data handling, access control, audit trails and retention/deletion safeguards. Use synthetic data only; keep clinical, payment and destructive actions approval-gated. Produce an evidence-led release report. Unknown metrics, defects, privacy and regulatory claims remain pending until evidenced.",
+    brief_context: "Act as a Healthcare QA and Privacy Auditor for the {platform} product. Validate identity, consent, patient/provider journeys, sensitive-data handling, access control, audit trails and retention/deletion safeguards. Use synthetic data only; keep clinical, payment and destructive actions approval-gated. Produce an evidence-led release report. Unknown metrics, defects, privacy and regulatory claims remain pending until evidenced.",
   },
   {
     id: "ecommerce_marketplace", name: "E-commerce & Marketplace",
     description: "Catalog, search, cart, checkout, orders, delivery and refunds.",
-    brief_context: "Act as an E-commerce QA Lead for the Android application. Validate catalog/search, account, cart, checkout, payment hand-off, order state, delivery, returns and refunds across the approved device matrix. Use non-production products and payment data; keep purchases, refunds and destructive actions approval-gated. Report observed evidence only and mark missing metrics, defects and compliance controls as pending validation.",
+    brief_context: "Act as an E-commerce QA Lead for the {platform} product. Validate catalog/search, account, cart, checkout, payment hand-off, order state, delivery, returns and refunds across the approved device matrix. Use non-production products and payment data; keep purchases, refunds and destructive actions approval-gated. Report observed evidence only and mark missing metrics, defects and compliance controls as pending validation.",
   },
   {
     id: "general_mobile", name: "General Mobile Application",
     description: "A neutral profile for applications without a specialised industry scope.",
-    brief_context: "Act as a Senior QA Lead for the Android application. Discover critical user journeys, navigation, permissions, resilience, accessibility, integrations and security guardrails. Use non-production data; keep authentication, payments and destructive actions approval-gated. Create an evidence-led executive release report. Unknown metrics, defects and compliance claims remain pending until supported by evidence.",
+    brief_context: "Act as a Senior QA Lead for the {platform} product. Discover critical user journeys, navigation, permissions, resilience, accessibility, integrations and security guardrails. Use non-production data; keep authentication, payments and destructive actions approval-gated. Create an evidence-led executive release report. Unknown metrics, defects and compliance claims remain pending until supported by evidence.",
   },
   {
     id: "custom", name: "Custom profile",
     description: "Start with a short neutral brief and tailor it in the context editor.",
-    brief_context: "Act as a Senior QA Lead for the Android application. Focus on critical journeys, risk controls, integrations, security, performance and release evidence. Use non-production data and keep authentication, money movement and irreversible actions approval-gated. Add product-specific details below; unknown metrics, defects and compliance claims remain pending until supported by evidence.",
+    brief_context: "Act as a Senior QA Lead for the {platform} product. Focus on critical journeys, risk controls, integrations, security, performance and release evidence. Use non-production data and keep authentication, money movement and irreversible actions approval-gated. Add product-specific details below; unknown metrics, defects and compliance claims remain pending until supported by evidence.",
   },
 ];
-function contextForProfile(profile: ProfileOption, applicationName?: string | null, target: TargetKind = "android") {
+function contextForProfile(profile: ProfileOption, applicationName?: string | null, target: TargetKind = "android", targetUrl?: string | null) {
   const application = applicationName?.trim() || "[TO CONFIRM]";
   const label = target === "ios" ? "iOS" : target === "web" ? "Web" : "Android";
   const brief = profile.brief_context
@@ -194,10 +199,20 @@ function contextForProfile(profile: ProfileOption, applicationName?: string | nu
     .replace(/Android/gi, label)
     .replace(/mobile application/gi, `${label} application`)
     .replace(/APK/gi, target === "ios" ? "IPA" : target === "web" ? "website" : "APK");
-  return `Profile category: ${profile.name}\nApplication: ${application}\n${brief}`;
+  let safeTargetUrl = "";
+  if (target === "web" && targetUrl?.trim()) {
+    try {
+      const parsed = new URL(targetUrl.trim());
+      safeTargetUrl = `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      safeTargetUrl = targetUrl.trim().split(/[?#]/, 1)[0];
+    }
+  }
+  const targetUrlLine = target === "web" ? `\nTarget URL: ${safeTargetUrl || "[TO CONFIRM]"}` : "";
+  return `Profile category: ${profile.name}\nApplication: ${application}\nTarget: ${label}${targetUrlLine}\n${brief}`;
 }
-function contextForTarget(profile: ProfileOption, target: TargetKind, applicationName?: string | null) {
-  return contextForProfile(profile, applicationName, target);
+function contextForTarget(profile: ProfileOption, target: TargetKind, applicationName?: string | null, targetUrl?: string | null) {
+  return contextForProfile(profile, applicationName, target, targetUrl);
 }
 
 function profileIdFromContext(value: string, profiles: ProfileOption[]) {
@@ -274,9 +289,26 @@ function isLoopbackAppiumUrl(value: string) {
 function readableError(error: unknown, fallback: string) {
   const candidate = error as { response?: { data?: { detail?: unknown } }; message?: unknown };
   if (typeof candidate?.response?.data?.detail === "string") return candidate.response.data.detail;
+  if (candidate?.response?.data?.detail && typeof candidate.response.data.detail === "object") {
+    const detail = candidate.response.data.detail as { message?: unknown };
+    if (typeof detail.message === "string") return detail.message;
+  }
   if (error instanceof Error && error.message) return error.message;
   if (typeof candidate?.message === "string") return candidate.message;
   return fallback;
+}
+
+function duplicateSurfaceDetails(error: unknown) {
+  const candidate = error as { response?: { status?: number; data?: { detail?: unknown } } };
+  const detail = candidate?.response?.data?.detail;
+  if (candidate?.response?.status !== 409 || !detail || typeof detail !== "object") return null;
+  const value = detail as { code?: unknown; message?: unknown; existing_job_id?: unknown; existing_created_at?: unknown };
+  if (value.code !== "duplicate_surface") return null;
+  return {
+    message: typeof value.message === "string" ? value.message : "This profile, target and build already have a result.",
+    existingJobId: typeof value.existing_job_id === "string" ? value.existing_job_id : "",
+    createdAt: typeof value.existing_created_at === "string" ? value.existing_created_at : "",
+  };
 }
 
 function contextForEditor(value: string) {
@@ -354,6 +386,10 @@ export default function AutopilotPage() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [surfaceTabs, setSurfaceTabs] = useState<SurfaceTab[]>([]);
+  const [surfaceLoading, setSurfaceLoading] = useState(false);
+  const [activeSurfaceKey, setActiveSurfaceKey] = useState("");
+  const [duplicatePrompt, setDuplicatePrompt] = useState<{ message: string; existingJobId: string; createdAt: string } | null>(null);
   const [provider, setProvider] = useState<Provider>("browserstack");
   const [busy, setBusy] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
@@ -399,6 +435,18 @@ export default function AutopilotPage() {
     }
     catch { setStoredApks([]); }
     finally { setRepositoryLoading(false); }
+  }, []);
+
+  const refreshSurfaces = useCallback(async (projectId: string) => {
+    if (!projectId) { setSurfaceTabs([]); return; }
+    setSurfaceLoading(true);
+    try {
+      const response = await apiClient.get<SurfaceTab[]>("/autopilot/surfaces", { timeout: 15000 });
+      setSurfaceTabs(response.data);
+      if (response.data[0]) setActiveSurfaceKey((current) => current || response.data[0].surface_key);
+    } catch {
+      setSurfaceTabs([]);
+    } finally { setSurfaceLoading(false); }
   }, []);
 
   const refreshAutomation = useCallback(async (jobId: string) => {
@@ -449,16 +497,23 @@ export default function AutopilotPage() {
     }).catch(() => setProviderStatus(null));
   }, []);
   useEffect(() => { void refreshStoredApks(selectedProjectId); }, [refreshStoredApks, selectedProjectId]);
+  useEffect(() => {
+    setActiveSurfaceKey("");
+    void refreshSurfaces(selectedProjectId);
+  }, [refreshSurfaces, selectedProjectId]);
   useEffect(() => { setSelectedDocumentAssetIds([]); }, [selectedProjectId]);
 
   const applyJob = useCallback((job: AnalysisJob) => {
     setAnalysisProgress(job.progress); setAnalysisStage(job.stage);
     if (job.target_kind) setTargetKind(job.target_kind);
     if (job.target_url !== undefined) setTargetUrl(job.target_url || "");
+    if (job.profile_id) setProfileId(job.profile_id);
+    if (job.surface_key) setActiveSurfaceKey(job.surface_key);
+    if (job.repository_asset_id) setSelectedUploadId(job.repository_asset_id);
     if (job.context !== undefined && job.context.trim()) {
       const editableContext = contextForEditor(job.context);
       setContext(editableContext);
-      setProfileId(profileIdFromContext(editableContext, profiles));
+      if (!job.profile_id) setProfileId(profileIdFromContext(editableContext, profiles));
       setContextSource("custom");
     }
     if (job.document_asset_ids) setSelectedDocumentAssetIds(job.document_asset_ids);
@@ -505,6 +560,7 @@ export default function AutopilotPage() {
     const restore = async () => {
       if (!selectedProjectId) return;
       try {
+        await refreshSurfaces(selectedProjectId);
         const job = (await apiClient.get<AnalysisJob | null>("/autopilot/jobs/latest", { timeout: 15000 })).data;
         if (!active || !job) return;
         applyJob(job);
@@ -522,7 +578,7 @@ export default function AutopilotPage() {
     };
     void restore();
     return () => { active = false; };
-  }, [selectedProjectId, applyJob, pollAnalysis]);
+  }, [selectedProjectId, applyJob, pollAnalysis, refreshSurfaces]);
 
   useEffect(() => {
     let active = true;
@@ -568,9 +624,9 @@ export default function AutopilotPage() {
     [automation, suiteBucket],
   );
   const selectedStoredApk = useMemo(() => storedApks.find((asset) => asset.id === selectedUploadId) ?? null, [storedApks, selectedUploadId]);
-  const selectedApplicationName = analysis?.app_name
-    || selectedStoredApk?.filename?.replace(/\.(apk|ipa)$/i, "")
+  const selectedApplicationName = selectedStoredApk?.filename?.replace(/\.(apk|ipa)$/i, "")
     || file?.name?.replace(/\.(apk|ipa)$/i, "")
+    || analysis?.app_name
     || null;
   const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen: screen.screen_id, control }))) ?? [], [discovery]);
 
@@ -594,7 +650,7 @@ export default function AutopilotPage() {
     // an assessment of the newly selected scope.
     resetResult();
     setProfileId(nextProfile.id);
-    setContext(contextForTarget(nextProfile, targetKind, selectedApplicationName));
+    setContext(contextForTarget(nextProfile, targetKind, selectedApplicationName, targetUrl));
     setContextSource("default");
     setContextNotice(`${nextProfile.name} brief applied. You can edit it before starting the run.`);
     setError("");
@@ -602,7 +658,7 @@ export default function AutopilotPage() {
   const generateContext = async (mode: "default" | "generate" | "improve") => {
     if (mode === "default") {
       resetResult();
-      setContext(contextForTarget(selectedProfile, targetKind, selectedApplicationName));
+      setContext(contextForTarget(selectedProfile, targetKind, selectedApplicationName, targetUrl));
       setContextSource("default");
       setContextNotice(`${selectedProfile.name} brief applied. Review it before running.`);
       return;
@@ -613,9 +669,27 @@ export default function AutopilotPage() {
         mode,
         profile_id: profileId,
         current_context: context,
-        application_name: analysis?.app_name || selectedStoredApk?.filename?.replace(/\.(apk|ipa)$/i, "") || null,
+        application_name: selectedApplicationName,
         package_name: analysis?.package_name || null,
         platform: targetKind === "web" ? "Web" : targetKind === "ios" ? "iOS" : "Android",
+        target_url: targetKind === "web" ? targetUrl.trim() || null : null,
+        build_name: selectedStoredApk?.filename || file?.name || null,
+        observed_metadata: {
+          ...(selectedStoredApk ? {
+            filename: selectedStoredApk.filename,
+            size_bytes: selectedStoredApk.size_bytes,
+            sha256: selectedStoredApk.sha256,
+            extension: selectedStoredApk.extension,
+          } : {}),
+          ...(analysis ? {
+            observed_app_name: analysis.app_name,
+            observed_package_name: analysis.package_name,
+            observed_summary: analysis.app_summary,
+            permissions: analysis.permissions.slice(0, 80),
+            activities: analysis.activities.slice(0, 80),
+            critical_journeys: analysis.critical_journeys.slice(0, 20),
+          } : {}),
+        },
         focus: `${selectedProfile.name} release readiness, functional QA and evidence-led reporting`,
       }, { timeout: 90000 });
       resetResult();
@@ -627,7 +701,7 @@ export default function AutopilotPage() {
       setError(readableError(err, "Context generation failed"));
     } finally { setContextBusy(false); }
   };
-  const analyze = async () => {
+  const analyze = async (surfaceAction: "ask" | "new" | "override" = "ask") => {
     const isWebsite = targetKind === "web";
     if ((!isWebsite && !file && !selectedUploadId) || (isWebsite && !targetUrl.trim()) || !selectedProjectId) {
       setError(isWebsite ? "Enter a website URL before starting Autopilot." : "Select a project and APK/IPA before starting Autopilot.");
@@ -641,19 +715,39 @@ export default function AutopilotPage() {
     try {
       let response;
       if (selectedUploadId && !isWebsite) {
-        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId, document_asset_ids: selectedDocumentAssetIds }, { timeout: 300000 });
+        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId, surface_action: surfaceAction, document_asset_ids: selectedDocumentAssetIds }, { timeout: 300000 });
       } else {
         const form = new FormData();
         if (isWebsite) form.append("target_url", targetUrl.trim());
         else form.append("file", file as File);
         form.append("context", context); form.append("profile_id", profileId);
+        form.append("surface_action", surfaceAction);
         form.append("document_asset_ids", JSON.stringify(selectedDocumentAssetIds));
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
         if (!isWebsite) await refreshStoredApks(selectedProjectId);
       }
-      applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id);
-    } catch (err) { setError(readableError(err, "Autopilot analysis failed")); }
+      applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshSurfaces(selectedProjectId);
+    } catch (err) {
+      const duplicate = duplicateSurfaceDetails(err);
+      if (duplicate && surfaceAction === "ask") {
+        setDuplicatePrompt(duplicate);
+      } else {
+        setError(readableError(err, "Autopilot analysis failed"));
+      }
+    }
     finally { setBusy(false); }
+  };
+
+  const selectSurface = async (surface: SurfaceTab) => {
+    if (busy || !selectedProjectId || surface.latest_job_id === analysis?.job_id) return;
+    setBusy(true); setError(""); resetResult(); setActiveSurfaceKey(surface.surface_key);
+    try {
+      const job = (await apiClient.get<AnalysisJob>(`/autopilot/jobs/${surface.latest_job_id}`, { timeout: 20000 })).data;
+      applyJob(job);
+      if (job.status === "uploaded" || job.status === "analyzing") await pollAnalysis(job.job_id);
+    } catch (err) {
+      setError(readableError(err, "Unable to open this Autopilot surface"));
+    } finally { setBusy(false); }
   };
 
   const executionPayload = () => ({
@@ -765,7 +859,7 @@ export default function AutopilotPage() {
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
-        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, document_asset_ids: selectedDocumentAssetIds },
+        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, surface_action: "new", target_url: targetKind === "web" ? targetUrl.trim() || undefined : undefined, document_asset_ids: selectedDocumentAssetIds },
         { timeout: 300000 },
       );
       // Keep the last completed analysis visible while the replacement job
@@ -774,6 +868,7 @@ export default function AutopilotPage() {
       applyJob(response.data);
       await pollAnalysis(response.data.job_id);
       await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id);
+      await refreshSurfaces(selectedProjectId);
     } catch (err) { setError(readableError(err, "Autopilot rerun failed")); }
     finally { setBusy(false); }
   };
@@ -799,16 +894,36 @@ export default function AutopilotPage() {
 
   return <Stack spacing={3}>
     <Box>
-      <Stack direction="row" spacing={1.5} alignItems="center"><AutoAwesomeIcon color="primary" /><Typography variant="h4" fontWeight={800}>QTXpert Autopilot</Typography><Chip size="small" label={targetKind.toUpperCase()} color="primary" variant="outlined" /></Stack>
-      <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>Connect a website URL, Android APK or iOS IPA, understand its surface, safely discover runtime UI, resolve setup dependencies and execute evidence-backed checks.</Typography>
+      <Stack direction="row" spacing={1.5} alignItems="center"><AutoAwesomeIcon color="primary" /><Typography variant="h4" fontWeight={800}>Autopilot</Typography></Stack>
+      <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>Inspect a web, Android or iOS target, generate complete coverage, discover safe journeys and report only evidence-backed outcomes.</Typography>
     </Box>
+
+    {surfaceTabs.length > 0 && <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 3 }}>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
+        <Box><Typography variant="subtitle2" fontWeight={800}>Test surfaces</Typography><Typography variant="caption" color="text.secondary">Each profile + target + build/URL keeps its own analysis and report.</Typography></Box>
+        {surfaceLoading && <CircularProgress size={16} />}
+      </Stack>
+      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
+        {surfaceTabs.map((surface) => {
+          const profileName = profiles.find((profile) => profile.id === surface.profile_id)?.name || surface.profile_id;
+          const targetLabel = surface.target_kind === "web" ? "Web" : surface.target_kind === "ios" ? "iOS" : "Android";
+          // The API intentionally returns a query/fragment-free identity for
+          // web targets. Use it in the tab label so invite codes, tokens and
+          // other URL state can never be echoed into the UI.
+          const identity = surface.target_kind === "web" ? (surface.surface_identity || "Website") : surface.filename;
+          return <Button key={surface.surface_key} size="small" variant={activeSurfaceKey === surface.surface_key ? "contained" : "outlined"} onClick={() => void selectSurface(surface)} disabled={busy} sx={{ maxWidth: 330, justifyContent: "flex-start", textTransform: "none", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }} title={`${profileName} · ${targetLabel} · ${identity}`}>
+            {profileName} · {targetLabel} · {identity}{surface.version_count > 1 ? ` · v${surface.version_count}` : ""}
+          </Button>;
+        })}
+      </Stack>
+    </Paper>}
 
     <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
       <Box sx={{ mb: 2.5 }}>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} justifyContent="space-between">
           <Box>
-            <Typography variant="overline" color="primary" fontWeight={800} letterSpacing={1}>1 · Choose a test profile</Typography>
-            <Typography variant="body2" color="text.secondary">The profile controls the brief context, generated journeys and report controls.</Typography>
+            <Typography variant="overline" color="primary" fontWeight={800} letterSpacing={1}>1 · Scope</Typography>
+            <Typography variant="body2" color="text.secondary">Choose a domain profile; Autopilot uses it to focus coverage and reporting.</Typography>
           </Box>
           <Chip size="small" label={`Profile: ${selectedProfile.name}`} color="primary" variant="outlined" />
         </Stack>
@@ -823,49 +938,49 @@ export default function AutopilotPage() {
           </Grid>
           <Grid item xs={12} md={7}>
             <Typography variant="body2" color="text.secondary">{selectedProfile.description}</Typography>
-            <Typography variant="caption" color="text.secondary">Changing the profile replaces the brief; you can refine it below.</Typography>
+            <Typography variant="caption" color="text.secondary">The brief updates automatically and remains editable.</Typography>
           </Grid>
         </Grid>
       </Box>
       <Grid container spacing={2} sx={{ mb: 2 }}>
         <Grid item xs={12} md={4}>
           <FormControl fullWidth size="small" disabled={busy || contextBusy}>
-            <InputLabel id="autopilot-target-label">Application target</InputLabel>
-            <Select labelId="autopilot-target-label" label="Application target" value={targetKind} onChange={(event) => {
+            <InputLabel id="autopilot-target-label">Target type</InputLabel>
+            <Select labelId="autopilot-target-label" label="Target type" value={targetKind} onChange={(event) => {
                const next = event.target.value as TargetKind;
                setTargetKind(next);
                setFile(null); setSelectedUploadId(""); resetResult();
-              if (contextSource === "default") setContext(contextForTarget(selectedProfile, next, next === "web" ? null : selectedApplicationName));
+              if (contextSource === "default") setContext(contextForTarget(selectedProfile, next, null, next === "web" ? targetUrl : null));
               if (next === "web") setProvider("playwright");
               else if (provider === "playwright") setProvider(providerStatus?.browserstack_configured ? "browserstack" : "appium");
             }}>
-              <MenuItem value="web">Website URL</MenuItem>
-              <MenuItem value="android">Android APK</MenuItem>
-              <MenuItem value="ios">iOS IPA</MenuItem>
+              <MenuItem value="web">Web</MenuItem>
+              <MenuItem value="android">Android</MenuItem>
+              <MenuItem value="ios">iOS</MenuItem>
             </Select>
           </FormControl>
         </Grid>
-        {targetKind === "web" && <Grid item xs={12} md={8}><TextField fullWidth size="small" label="Website URL" placeholder="https://qa.example.com" value={targetUrl} disabled={busy} onChange={(event) => { setTargetUrl(event.target.value); resetResult(); }} helperText="Use a reachable non-production URL. Authentication is supplied through approved setup references." /></Grid>}
+        {targetKind === "web" && <Grid item xs={12} md={8}><TextField fullWidth size="small" label="Website URL" placeholder="https://qa.example.com" value={targetUrl} disabled={busy} onChange={(event) => { setTargetUrl(event.target.value); if (contextSource === "default") setContext(contextForTarget(selectedProfile, "web", null, event.target.value)); resetResult(); }} helperText="Use a reachable non-production URL; credentials stay in approved setup references." /></Grid>}
       </Grid>
       <Grid container spacing={3}>
         <Grid item xs={12} md={5}><Stack spacing={2}>
-          {targetKind !== "web" && <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">Stored mobile build</InputLabel><Select labelId="stored-apk-label" label="Stored mobile build" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { const value = event.target.value; const selected = storedApks.find((asset) => asset.id === value); setSelectedUploadId(value); if (value) { setFile(null); const nextTarget = selected?.extension === "ipa" ? "ios" : "android"; setTargetKind(nextTarget); if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected?.filename?.replace(/\.(apk|ipa)$/i, ""))); } if (!analysis) resetResult(); else setError(""); }}>
-            <MenuItem value="">Upload a new APK/IPA</MenuItem>{storedApks.map((asset) => <MenuItem key={asset.id} value={asset.id}>{asset.filename} · {formatBytes(asset.size_bytes)} · {new Date(asset.created_at).toLocaleDateString()}</MenuItem>)}
+          {targetKind !== "web" && <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">Stored build</InputLabel><Select labelId="stored-apk-label" label="Stored build" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { const value = event.target.value; const selected = storedApks.find((asset) => asset.id === value); setSelectedUploadId(value); if (value) { setFile(null); const nextTarget = selected?.extension === "ipa" ? "ios" : "android"; setTargetKind(nextTarget); if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected?.filename?.replace(/\.(apk|ipa)$/i, ""))); } if (!analysis) resetResult(); else setError(""); }}>
+            <MenuItem value="">Upload a new build</MenuItem>{storedApks.map((asset) => <MenuItem key={asset.id} value={asset.id} sx={{ maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{asset.filename} · {formatBytes(asset.size_bytes)} · {new Date(asset.created_at).toLocaleDateString()}</MenuItem>)}
            </Select></FormControl>}
           {targetKind !== "web" && (selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 2.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1.2} alignItems="center"><FolderOutlinedIcon color="primary" /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored {selectedStoredApk.extension.toUpperCase()} · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: 1 }} onClick={() => navigate("/test-data/documents")}>Open repository</Button></Box>
-          : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || (targetKind === "ios" ? "Choose an iOS IPA" : "Choose an Android APK")}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>{targetKind === "ios" ? "Choose IPA" : "Choose APK"}<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
+          : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || `Choose a ${targetKind === "ios" ? "iOS IPA" : "Android APK"}`}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>Choose build<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
-          <TextField fullWidth multiline minRows={5} maxRows={9} inputProps={{ maxLength: 2400 }} label="Brief context" placeholder="Select a profile above, or add a short product-specific context." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText="This brief is sent to the analysis prompt and report. Never paste production passwords, tokens or OTPs." />
+          <TextField fullWidth multiline minRows={5} maxRows={9} inputProps={{ maxLength: 2400 }} label="Brief context" placeholder="Select a profile or add a short product-specific scope." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText="Used to scope analysis and reporting. Never paste passwords, tokens or OTPs." />
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
             <Button size="small" variant="outlined" onClick={() => void generateContext("default")} disabled={contextBusy}>Reset to profile brief</Button>
             <Button size="small" variant="outlined" onClick={() => void generateContext(context.trim() ? "improve" : "generate")} disabled={contextBusy} startIcon={contextBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon />}>{contextBusy ? "Writing context…" : context.trim() ? "Improve with AI" : "Generate with AI"}</Button>
             <Chip size="small" label={`Context: ${contextSource}`} color={contextSource === "ai" ? "primary" : "default"} variant="outlined" />
           </Stack>
           {contextNotice && <Alert severity="info" sx={{ mt: 1.5 }}>{contextNotice}</Alert>}
-          <Alert severity="info" sx={{ mt: 1.5 }}>Autopilot reasons over the selected target and this context. The report labels user-supplied statements separately from observed execution evidence; missing metrics remain pending validation.</Alert>
+          <Alert severity="info" sx={{ mt: 1.5 }}>The selected target and brief guide coverage. Claims stay separate from observed evidence; missing metrics remain pending.</Alert>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
-            <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || !selectedProjectId} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{busy ? "Learning target…" : selectedStoredApk ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}` : "Start Autopilot analysis"}</Button>
+            <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || !selectedProjectId} onClick={() => void analyze()} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{busy ? "Inspecting target…" : selectedStoredApk ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}` : "Start analysis"}</Button>
             {analysis && <Button disabled={busy || !selectedProjectId} onClick={rerunAnalysis} variant="outlined" size="large">Rerun this analysis</Button>}
           </Stack>
         </Grid>
@@ -885,8 +1000,8 @@ export default function AutopilotPage() {
 
     {!analysis && <Card variant="outlined" sx={{ borderRadius: 3 }}><CardContent>
       <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
-        <Box><Typography variant="h6" fontWeight={800}>What Autopilot will deliver</Typography><Typography variant="body2" color="text.secondary">These areas stay pending until a conclusive run supplies evidence.</Typography></Box>
-        <Chip size="small" label="PENDING — run not started" color="info" variant="outlined" />
+        <Box><Typography variant="h6" fontWeight={800}>Run outputs</Typography><Typography variant="body2" color="text.secondary">Results appear here as evidence is collected.</Typography></Box>
+        <Chip size="small" label="PENDING · not started" color="info" variant="outlined" />
       </Stack>
       <Grid container spacing={1.25} sx={{ mt: 1 }}>
         {[
@@ -967,8 +1082,7 @@ export default function AutopilotPage() {
           <Box>
             <Typography variant="h6" fontWeight={800}>Complete test coverage plan</Typography>
             <Typography variant="body2" color="text.secondary">
-              Autopilot always designs the full app plan. Functional, UAT, page-level, UI, installation, integration,
-              performance, security, compatibility and regression cases remain pending until their required evidence exists.
+              Full coverage is designed up front; each bucket becomes conclusive only when its evidence is available.
             </Typography>
           </Box>
         </Stack>
@@ -1072,7 +1186,7 @@ export default function AutopilotPage() {
         {activeTargetKind !== "web" && <Grid item xs={12} md={2}><TextField fullWidth size="small" label={`${activeTargetKind === "ios" ? "iOS" : "Android"} version`} value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid>}
         <Grid item xs={12} md={activeTargetKind === "web" ? 8 : 4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>
         {activeTargetKind !== "web" && provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} helperText="Hosted runs require a reachable HTTPS endpoint; leave blank only when the backend has one configured." /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}
-        {activeTargetKind !== "web" && <Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions for this smoke" /><Typography variant="caption" color="text.secondary" display="block">Enabled by default so unattended smoke runs do not stall on Android permission dialogs. Permission grant/deny behavior remains covered by generated permission tests.</Typography></Grid>}
+        {activeTargetKind !== "web" && <Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions" /><Typography variant="caption" color="text.secondary" display="block">Prevents unattended runs from stalling on platform permission dialogs; grant/deny behavior remains covered by generated tests.</Typography></Grid>}
       </Grid>
       {execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}
       {execution && (execution.screenshot_asset_id || execution.page_source_asset_id) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Evidence is retained with this run and is available in Test Reports.</Typography>}
@@ -1082,12 +1196,26 @@ export default function AutopilotPage() {
       {analysis.release_risks.length > 0 && <Alert severity="info"><b>Initial release risks:</b> {analysis.release_risks.join(" • ")}</Alert>}
     </>}
 
+    <Dialog open={Boolean(duplicatePrompt)} onClose={() => !busy && setDuplicatePrompt(null)} fullWidth maxWidth="sm">
+      <DialogTitle>Existing Autopilot surface</DialogTitle>
+      <DialogContent>
+        <Alert severity="info" sx={{ mb: 2 }}>{duplicatePrompt?.message}</Alert>
+        {duplicatePrompt?.createdAt && <Typography variant="body2" color="text.secondary">Previous result: {new Date(duplicatePrompt.createdAt).toLocaleString()}</Typography>}
+        <Typography variant="body2" sx={{ mt: 1 }}>Create a new version to keep the previous evidence, or override the previous version and make this run current.</Typography>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setDuplicatePrompt(null)} disabled={busy}>Cancel</Button>
+        <Button variant="outlined" onClick={() => { setDuplicatePrompt(null); void analyze("new"); }} disabled={busy}>Keep previous · new version</Button>
+        <Button variant="contained" color="warning" onClick={() => { setDuplicatePrompt(null); void analyze("override"); }} disabled={busy}>Override previous</Button>
+      </DialogActions>
+    </Dialog>
+
     <Dialog open={setupOpen} onClose={() => !setupBusy && setSetupOpen(false)} fullWidth maxWidth="md">
       <DialogTitle>Resolve Autopilot test dependencies</DialogTitle>
       <DialogContent>
         <Alert severity="info" sx={{ mb: 2 }}>Enter references to approved non-production resources. Do not paste passwords, access tokens or OTPs; keep secrets in the configured vault/provider.</Alert>
         <Grid container spacing={2}>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Credential set reference" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/investnation-uat" /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Credential set reference" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Test account role" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Environment name" value={setupDraft.environment_name} onChange={(event) => updateSetup("environment_name", event.target.value)} placeholder="UAT" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Environment URL / identifier" value={setupDraft.environment_url} onChange={(event) => updateSetup("environment_url", event.target.value)} /></Grid>

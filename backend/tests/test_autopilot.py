@@ -4,7 +4,12 @@ import pytest
 
 from app.config import Settings
 from app.schemas.autopilot import AutopilotAnalysis, AutopilotExecutionRequest
-from app.services.autopilot import AutopilotPrototypeService, AutopilotUploadTooLarge
+from app.services.autopilot import (
+    AutopilotPrototypeService,
+    AutopilotUploadTooLarge,
+    build_surface_key,
+    normalize_surface_identity,
+)
 from app.services.autopilot_context import (
     DEFAULT_AUTOPILOT_CONTEXT,
     DEFAULT_AUTOPILOT_PROFILE_ID,
@@ -328,6 +333,45 @@ def test_profile_context_uses_only_explicit_application_identity():
         DEFAULT_AUTOPILOT_PROFILE_ID,
         application_name="Investnation by Finance House",
     )
+
+
+def test_profile_context_sanitizes_website_state_and_credentials():
+    context = profile_context(
+        DEFAULT_AUTOPILOT_PROFILE_ID,
+        platform="Web",
+        target_url="https://user:secret@example.com/uat?invite=token#fragment",
+    )
+
+    assert "secret" not in context
+    assert "invite" not in context
+    assert "Target URL: https://example.com/uat" in context
+
+
+def test_surface_identity_is_stable_and_secret_free():
+    identity = normalize_surface_identity(
+        "web",
+        target_url="https://example.com/uat?session=secret#fragment",
+    )
+
+    assert identity == "https://example.com/uat"
+    assert "secret" not in identity
+    assert build_surface_key("uae_fintech", "web", identity) != build_surface_key("payments_cards", "web", identity)
+
+
+def test_ai_context_keeps_selected_surface_identity():
+    baseline = profile_context(
+        DEFAULT_AUTOPILOT_PROFILE_ID,
+        application_name="release-2026.08.apk",
+        platform="Android",
+    )
+    enriched = AutopilotPrototypeService._ensure_context_identity(
+        "Target audience: UAE retail investors.\nCore features: onboarding and portfolios.",
+        baseline,
+    )
+
+    assert "Profile category: UAE Digital Banking & Wealth" in enriched
+    assert "Application: release-2026.08.apk" in enriched
+    assert "Target: Android" in enriched
 
 
 @pytest.mark.asyncio
