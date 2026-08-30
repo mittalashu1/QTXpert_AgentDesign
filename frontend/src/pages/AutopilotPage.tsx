@@ -601,7 +601,7 @@ export default function AutopilotPage() {
         application_name: analysis?.app_name || selectedStoredApk?.filename?.replace(/\.(apk|ipa)$/i, "") || null,
         package_name: analysis?.package_name || null,
         platform: targetKind === "web" ? "Web" : targetKind === "ios" ? "iOS" : "Android",
-        focus: "UAE fintech release readiness, functional QA and CBUAE/SCA audit evidence",
+        focus: `${selectedProfile.name} release readiness, functional QA and evidence-led reporting`,
       }, { timeout: 90000 });
       resetResult();
       setContext(response.data.context);
