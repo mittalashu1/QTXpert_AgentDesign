@@ -60,6 +60,9 @@ class AutopilotSuiteService:
     ) -> AutopilotSuiteResult:
         job = await self.prototype.load_job(job_id)
         analysis = await self.prototype.load_analysis(job_id)
+        target_kind = str(job.get("target_kind") or analysis.target_kind or "android")
+        if request.target_kind != target_kind:
+            request = request.model_copy(update={"target_kind": target_kind})
         bundle = AutopilotIRCompiler().compile_bundle(analysis, discovery, setup)
 
         requested_ids = set(request.test_ids)
@@ -85,6 +88,8 @@ class AutopilotSuiteService:
             return AutopilotSuiteResult(
                 job_id=job_id,
                 status="blocked",
+                target_kind=target_kind,
+                target_url=job.get("target_url"),
                 provider=request.provider,
                 started_at=started.isoformat(),
                 finished_at=finished.isoformat(),
@@ -98,6 +103,8 @@ class AutopilotSuiteService:
             return AutopilotSuiteResult(
                 job_id=job_id,
                 status="blocked",
+                target_kind=target_kind,
+                target_url=job.get("target_url"),
                 provider=request.provider,
                 started_at=started.isoformat(),
                 finished_at=finished.isoformat(),
@@ -170,6 +177,8 @@ class AutopilotSuiteService:
             return AutopilotSuiteResult(
                 job_id=job_id,
                 status="blocked" if blocked else "failed",
+                target_kind=target_kind,
+                target_url=job.get("target_url"),
                 provider=request.provider,
                 started_at=started.isoformat(),
                 finished_at=finished.isoformat(),
@@ -206,6 +215,8 @@ class AutopilotSuiteService:
         return AutopilotSuiteResult(
             job_id=job_id,
             status=overall,
+            target_kind=target_kind,
+            target_url=job.get("target_url"),
             provider=request.provider,
             started_at=started.isoformat(),
             finished_at=finished.isoformat(),
@@ -262,22 +273,35 @@ class AutopilotSuiteService:
         adb_exec_timeout_ms: int,
     ) -> list[AutopilotSuiteTestResult]:
         from appium import webdriver
-        from appium.options.android import UiAutomator2Options
 
+        is_ios = request.target_kind == "ios"
         capabilities: Dict[str, Any] = {
-            "platformName": "Android",
-            "appium:automationName": "UiAutomator2",
+            "platformName": "iOS" if is_ios else "Android",
+            "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
             "appium:deviceName": request.device_name,
             "appium:app": app_reference,
             "appium:noReset": request.no_reset,
-            "appium:autoGrantPermissions": request.auto_grant_permissions,
             "appium:newCommandTimeout": 240,
-            "appium:androidInstallTimeout": install_timeout_ms,
-            "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
-            "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
-            "appium:adbExecTimeout": adb_exec_timeout_ms,
-            "appium:appWaitDuration": adb_exec_timeout_ms,
         }
+        if is_ios:
+            capabilities.update(
+                {
+                    "appium:wdaLaunchTimeout": server_launch_timeout_ms,
+                    "appium:wdaConnectionTimeout": adb_exec_timeout_ms,
+                    "appium:useNewWDA": False,
+                }
+            )
+        else:
+            capabilities.update(
+                {
+                    "appium:autoGrantPermissions": request.auto_grant_permissions,
+                    "appium:androidInstallTimeout": install_timeout_ms,
+                    "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
+                    "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
+                    "appium:adbExecTimeout": adb_exec_timeout_ms,
+                    "appium:appWaitDuration": adb_exec_timeout_ms,
+                }
+            )
         if request.platform_version:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
@@ -285,7 +309,15 @@ class AutopilotSuiteService:
 
         evidence_root = self.prototype._job_dir(job_id) / "evidence" / "suite"
         evidence_root.mkdir(parents=True, exist_ok=True)
-        driver = webdriver.Remote(appium_url, options=UiAutomator2Options().load_capabilities(capabilities))
+        if is_ios:
+            from appium.options.ios import XCUITestOptions
+
+            options = XCUITestOptions().load_capabilities(capabilities)
+        else:
+            from appium.options.android import UiAutomator2Options
+
+            options = UiAutomator2Options().load_capabilities(capabilities)
+        driver = webdriver.Remote(appium_url, options=options)
         results: list[AutopilotSuiteTestResult] = []
         try:
             time.sleep(2)
@@ -301,7 +333,7 @@ class AutopilotSuiteService:
                 evidence_dir.mkdir(parents=True, exist_ok=True)
                 try:
                     self._reset_to_application(driver, package)
-                    evidence = self._execute_test(driver, test, evidence_dir, package)
+                    evidence = self._execute_test(driver, test, evidence_dir, package, request.target_kind)
                     status = "passed"
                     error = None
                     dependency = test.dependency
@@ -359,7 +391,14 @@ class AutopilotSuiteService:
             if expected_package_state(driver, package) is not True:
                 raise
 
-    def _execute_test(self, driver, test: QTXTestIR, evidence_dir: Path, package: str | None) -> Dict[str, Any]:
+    def _execute_test(
+        self,
+        driver,
+        test: QTXTestIR,
+        evidence_dir: Path,
+        package: str | None,
+        target_kind: str = "android",
+    ) -> Dict[str, Any]:
         from appium.webdriver.common.appiumby import AppiumBy
 
         locator_map = {
@@ -379,7 +418,16 @@ class AutopilotSuiteService:
                 if not source.strip():
                     raise AssertionError("No readable Android UI hierarchy was returned")
             elif step.action == "background_app":
-                mechanism = safe_background_application(driver, 2, package=package)
+                if target_kind == "ios":
+                    try:
+                        driver.background_app(2)
+                        mechanism = "background_app"
+                    except Exception as exc:
+                        raise ProviderLifecycleUnavailable(
+                            "iOS background/foreground lifecycle control is unavailable on this device provider."
+                        ) from exc
+                else:
+                    mechanism = safe_background_application(driver, 2, package=package)
                 time.sleep(0.5)
             elif step.action == "restore_app":
                 if not package:
@@ -438,4 +486,3 @@ class AutopilotSuiteService:
     @staticmethod
     def _safe_name(value: str) -> str:
         return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")[:100]
-

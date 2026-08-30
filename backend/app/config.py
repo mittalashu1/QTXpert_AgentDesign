@@ -212,6 +212,16 @@ class Settings(BaseSettings):
     AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
     AUTOPILOT_SUITE_TIMEOUT_SECONDS: int = Field(default=900, ge=60, le=3600)
     AUTOPILOT_BROWSERSTACK_UPLOAD_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
+    # Androguard can allocate a very large resource table for some release
+    # APKs. Above this size Autopilot deliberately uses bounded ZIP metadata
+    # inspection so a small Render instance cannot be taken down by a parser
+    # timeout. The binary remains available for BrowserStack/Appium execution.
+    AUTOPILOT_DEEP_PARSE_MAX_MB: int = Field(default=64, ge=1, le=512)
+    AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS: int = Field(default=300, ge=30, le=1800)
+    # Website exploration is intentionally bounded until an approved
+    # non-production credential reference and test data are supplied.
+    AUTOPILOT_WEB_MAX_PAGES: int = Field(default=12, ge=1, le=50)
+    AUTOPILOT_WEB_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=180)
     # Optional reachable Appium endpoint for hosted deployments. A hosted
     # Render service cannot reach a customer's laptop at 127.0.0.1; keep this
     # unset unless Appium is exposed through an authenticated TLS tunnel or a

@@ -25,6 +25,8 @@ type TestBucket =
   | "installation" | "page_level" | "functional" | "uat" | "ui" | "accessibility"
   | "integration" | "performance" | "security" | "compatibility" | "resilience"
   | "permissions" | "regression";
+type TargetKind = "android" | "ios" | "web";
+type Provider = "browserstack" | "appium" | "playwright";
 type TestCase = {
   id: string; suite: string; title: string; priority: "critical" | "high" | "medium" | "low";
   objective: string; steps: string[]; expected: string[]; autonomous: boolean;
@@ -33,7 +35,7 @@ type TestCase = {
   evidence_required?: string[];
 };
 type Analysis = {
-  job_id: string; filename: string; status: string; app_name?: string; package_name?: string;
+  job_id: string; filename: string; status: string; platform?: TargetKind; target_kind?: TargetKind; target_url?: string | null; app_name?: string; package_name?: string;
   version_name?: string; version_code?: string; min_sdk?: string; target_sdk?: string;
   main_activity?: string; activities: string[]; services: string[]; receivers: string[];
   permissions: string[]; file_count: number; size_bytes: number; sha256: string;
@@ -41,10 +43,10 @@ type Analysis = {
   clarification_questions: string[]; tests: TestCase[]; release_risks: string[];
   warnings: string[]; capabilities: Record<string, boolean>;
 };
-type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: "browserstack" | "appium" };
+type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; playwright_available?: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: Provider };
 type AnalysisJob = {
   job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed";
-  stage: string; progress: number; context?: string; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
+  target_kind?: TargetKind; target_url?: string | null; stage: string; progress: number; context?: string; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
 };
 type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
 type ReportCheck = {
@@ -74,16 +76,16 @@ type AuditReport = {
 };
 type Execution = {
   execution_id?: string; job_id?: string; device_name?: string; started_at?: string; finished_at?: string;
-  status: "passed" | "failed" | "blocked"; provider: "browserstack" | "appium";
+  status: "passed" | "failed" | "blocked"; target_kind?: TargetKind; target_url?: string | null; provider: Provider;
   duration_seconds: number; current_package?: string; current_activity?: string;
   screenshot_asset_id?: string; page_source_asset_id?: string; error?: string; evidence: Record<string, unknown>;
 };
 type ExecutionRequest = {
-  provider: "browserstack" | "appium"; appium_url?: string | null; device_name: string;
+  target_kind?: TargetKind; target_url?: string | null; provider: Provider; appium_url?: string | null; device_name: string;
   platform_version?: string | null; appium_app?: string | null; no_reset: boolean; auto_grant_permissions: boolean;
 };
 type ExecutionRecord = Execution & { execution_id: string; job_id: string; created_at: string; request: ExecutionRequest };
-type Locator = { strategy: "accessibility_id" | "id" | "xpath"; value: string; confidence: number };
+type Locator = { strategy: "accessibility_id" | "id" | "xpath" | "css"; value: string; confidence: number };
 type DiscoveredControl = {
   control_id: string; semantic_label: string; class_name: string; text: string;
   content_description: string; resource_id: string; bounds: string; clickable: boolean;
@@ -92,12 +94,13 @@ type DiscoveredControl = {
 };
 type DiscoveredScreen = {
   screen_id: string; fingerprint: string; package_name?: string; activity_name?: string;
+  url?: string | null; title?: string | null;
   screenshot_path?: string; page_source_path?: string; screenshot_asset_id?: string | null;
   page_source_asset_id?: string | null; controls: DiscoveredControl[];
 };
 type Discovery = {
   job_id: string; status: "completed" | "partial" | "blocked" | "failed";
-  provider: "browserstack" | "appium"; duration_seconds: number; device_name: string;
+  target_kind?: TargetKind; target_url?: string | null; provider: Provider; duration_seconds: number; device_name: string;
   observe_only: boolean; screen_count: number; control_count: number; safe_control_count: number;
   blocked_control_count: number; actions_attempted: number; stop_reason: string;
   screens: DiscoveredScreen[]; warnings: string[]; error?: string | null;
@@ -121,7 +124,7 @@ type SuiteTestResult = {
 };
 type SuiteResult = {
   job_id: string; status: "passed" | "failed" | "partial" | "blocked";
-  provider: "browserstack" | "appium"; duration_seconds: number; selected_count: number;
+  target_kind?: TargetKind; target_url?: string | null; provider: Provider; duration_seconds: number; selected_count: number;
   executed_count: number; deferred_count?: number; passed_count: number; failed_count: number; skipped_count: number;
   promoted_count: number; bucket_counts?: Record<string, number>; error?: string | null; tests: SuiteTestResult[];
 };
@@ -183,6 +186,12 @@ const DEFAULT_PROFILE_OPTIONS: ProfileOption[] = [
 function contextForProfile(profile: ProfileOption) {
   const application = profile.id === DEFAULT_PROFILE_ID ? "Investnation by Finance House" : "[TO CONFIRM]";
   return `Profile category: ${profile.name}\nApplication: ${application}\n${profile.brief_context}`;
+}
+function contextForTarget(profile: ProfileOption, target: TargetKind) {
+  const base = contextForProfile(profile);
+  if (target === "android") return base;
+  const label = target === "ios" ? "iOS" : "web";
+  return base.replace(/Android/gi, label).replace(/mobile application/gi, `${label} application`).replace(/APK/gi, target === "ios" ? "IPA" : "website");
 }
 
 function profileIdFromContext(value: string, profiles: ProfileOption[]) {
@@ -264,6 +273,10 @@ function readableError(error: unknown, fallback: string) {
   return fallback;
 }
 
+class TerminalAutopilotJobError extends Error {
+  readonly terminal = true;
+}
+
 function ReportChecksTable({ checks }: { checks: ReportCheck[] }) {
   return <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Control area</TableCell><TableCell>Status</TableCell><TableCell>Evidence-led assessment</TableCell><TableCell>Next action</TableCell></TableRow></TableHead><TableBody>{checks.map((check) => { const pending = check.status === "pending"; return <TableRow key={check.key} hover><TableCell sx={{ minWidth: 210 }}><Typography variant="body2" fontWeight={700}>{check.title}</Typography></TableCell><TableCell><Chip size="small" label={reportStatusLabel(check.status)} color={reportStatusColor[check.status]} variant="outlined" /></TableCell><TableCell sx={{ minWidth: 300 }}><Typography variant="body2">{pending ? (check.dependency || "Execution is yet to be completed.") : check.summary}</Typography>{!pending && check.evidence.map((item) => <Typography key={item} variant="caption" color="text.secondary" display="block">• {item}</Typography>)}</TableCell><TableCell sx={{ minWidth: 280 }}><Typography variant="caption" color="text.secondary">{pending ? "Pending" : check.recommendation || "—"}</Typography></TableCell></TableRow>; })}</TableBody></Table></TableContainer>;
 }
@@ -293,8 +306,8 @@ function RuntimeScreenPreview({ screen }: { screen: DiscoveredScreen }) {
     <Box sx={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "action.hover", borderRadius: 2, overflow: "hidden" }}>
       {imageUrl ? <Box component="img" src={imageUrl} alt={screen.screen_id} sx={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <Typography variant="caption" color="text.secondary">Screenshot evidence pending</Typography>}
     </Box>
-    <Typography variant="subtitle2" fontWeight={800} sx={{ mt: 1 }}>{screen.screen_id}</Typography>
-    <Typography variant="caption" color="text.secondary" display="block">{screen.package_name || "Package pending"}{screen.activity_name ? " · " + screen.activity_name : ""}</Typography>
+    <Typography variant="subtitle2" fontWeight={800} sx={{ mt: 1 }}>{screen.title || screen.screen_id}</Typography>
+    <Typography variant="caption" color="text.secondary" display="block">{screen.url || screen.package_name || "Target identity pending"}{screen.activity_name ? " · " + screen.activity_name : ""}</Typography>
     <Stack direction="row" spacing={.75} sx={{ mt: 1 }}><Chip size="small" label={screen.controls.length + " controls"} variant="outlined" />{screen.page_source_asset_id && <Chip size="small" label="UI hierarchy saved" color="success" variant="outlined" />}</Stack>
   </CardContent></Card>;
 }
@@ -305,6 +318,8 @@ export default function AutopilotPage() {
   const [file, setFile] = useState<File | null>(null);
   const [storedApks, setStoredApks] = useState<UploadedAsset[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState("");
+  const [targetKind, setTargetKind] = useState<TargetKind>("android");
+  const [targetUrl, setTargetUrl] = useState("");
   const [repositoryLoading, setRepositoryLoading] = useState(false);
   const [profiles, setProfiles] = useState<ProfileOption[]>(DEFAULT_PROFILE_OPTIONS);
   const [profileId, setProfileId] = useState(DEFAULT_PROFILE_ID);
@@ -324,7 +339,7 @@ export default function AutopilotPage() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
-  const [provider, setProvider] = useState<"browserstack" | "appium">("browserstack");
+  const [provider, setProvider] = useState<Provider>("browserstack");
   const [busy, setBusy] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisStage, setAnalysisStage] = useState("");
@@ -360,7 +375,13 @@ export default function AutopilotPage() {
   const refreshStoredApks = useCallback(async (projectId: string) => {
     if (!projectId) { setStoredApks([]); return; }
     setRepositoryLoading(true);
-    try { setStoredApks((await uploadsApi.list({ category: "apk", project_id: projectId })).data); }
+    try {
+      const [apkResult, ipaResult] = await Promise.all([
+        uploadsApi.list({ category: "apk", project_id: projectId }),
+        uploadsApi.list({ category: "ipa", project_id: projectId }),
+      ]);
+      setStoredApks([...apkResult.data, ...ipaResult.data].sort((left, right) => right.created_at.localeCompare(left.created_at)));
+    }
     catch { setStoredApks([]); }
     finally { setRepositoryLoading(false); }
   }, []);
@@ -416,6 +437,8 @@ export default function AutopilotPage() {
 
   const applyJob = useCallback((job: AnalysisJob) => {
     setAnalysisProgress(job.progress); setAnalysisStage(job.stage);
+    if (job.target_kind) setTargetKind(job.target_kind);
+    if (job.target_url !== undefined) setTargetUrl(job.target_url || "");
     if (job.context !== undefined && job.context.trim()) {
       setContext(job.context);
       setProfileId(profileIdFromContext(job.context, profiles));
@@ -441,9 +464,10 @@ export default function AutopilotPage() {
         // reachable again. A failed job still sets its own actionable error.
         setError("");
         applyJob(job);
-        if (job.status === "failed") throw new Error(job.error || "Autopilot analysis failed");
+        if (job.status === "failed") throw new TerminalAutopilotJobError(job.error || "Autopilot analysis failed");
         if (job.status === "analyzed" && job.analysis) return job.analysis;
       } catch (err) {
+        if (err instanceof TerminalAutopilotJobError) throw err;
         const status = (err as { response?: { status?: number } })?.response?.status;
         const retryable = !status || status === 408 || status === 425 || status === 429 || status >= 500;
         if (!retryable) throw err;
@@ -530,7 +554,13 @@ export default function AutopilotPage() {
   const resetResult = () => { setAnalysis(null); setReport(null); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setSetup(null); setSetupOpen(false); setArtifactAvailable(true); setError(""); };
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = event.target.files?.[0] ?? null;
-    setFile(selected); if (selected) setSelectedUploadId(""); resetResult();
+    setFile(selected);
+    if (selected) {
+      setSelectedUploadId("");
+      setTargetKind(/\.ipa$/i.test(selected.name) ? "ios" : "android");
+      setTargetUrl("");
+    }
+    resetResult();
   };
   const selectProfile = (nextProfileId: string) => {
     const nextProfile = profiles.find((profile) => profile.id === nextProfileId) ?? DEFAULT_PROFILE_OPTIONS[0];
@@ -539,7 +569,7 @@ export default function AutopilotPage() {
     // an assessment of the newly selected scope.
     resetResult();
     setProfileId(nextProfile.id);
-    setContext(contextForProfile(nextProfile));
+    setContext(contextForTarget(nextProfile, targetKind));
     setContextSource("default");
     setContextNotice(`${nextProfile.name} brief applied. You can edit it before starting the run.`);
     setError("");
@@ -547,7 +577,7 @@ export default function AutopilotPage() {
   const generateContext = async (mode: "default" | "generate" | "improve") => {
     if (mode === "default") {
       resetResult();
-      setContext(contextForProfile(selectedProfile));
+      setContext(contextForTarget(selectedProfile, targetKind));
       setContextSource("default");
       setContextNotice(`${selectedProfile.name} brief applied. Review it before running.`);
       return;
@@ -560,7 +590,7 @@ export default function AutopilotPage() {
         current_context: context,
         application_name: analysis?.app_name || selectedStoredApk?.filename?.replace(/\.apk$/i, "") || null,
         package_name: analysis?.package_name || null,
-        platform: "Android",
+        platform: targetKind === "web" ? "Web" : targetKind === "ios" ? "iOS" : "Android",
         focus: "UAE fintech release readiness, functional QA and CBUAE/SCA audit evidence",
       }, { timeout: 90000 });
       resetResult();
@@ -573,7 +603,11 @@ export default function AutopilotPage() {
     } finally { setContextBusy(false); }
   };
   const analyze = async () => {
-    if ((!file && !selectedUploadId) || !selectedProjectId) { setError("Select a project and APK before starting Autopilot."); return; }
+    const isWebsite = targetKind === "web";
+    if ((!isWebsite && !file && !selectedUploadId) || (isWebsite && !targetUrl.trim()) || !selectedProjectId) {
+      setError(isWebsite ? "Enter a website URL before starting Autopilot." : "Select a project and APK/IPA before starting Autopilot.");
+      return;
+    }
     // Do not carry the previous completed progress into a new run. The old
     // value made a fresh analysis render as “complete · 100%” while the
     // background job was still being queued/read.
@@ -581,12 +615,15 @@ export default function AutopilotPage() {
     setBusy(true); setError(""); setContextNotice(""); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setReport(null);
     try {
       let response;
-      if (selectedUploadId) {
+      if (selectedUploadId && !isWebsite) {
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId }, { timeout: 300000 });
       } else {
-        const form = new FormData(); form.append("file", file as File); form.append("context", context); form.append("profile_id", profileId);
+        const form = new FormData();
+        if (isWebsite) form.append("target_url", targetUrl.trim());
+        else form.append("file", file as File);
+        form.append("context", context); form.append("profile_id", profileId);
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
-        await refreshStoredApks(selectedProjectId);
+        if (!isWebsite) await refreshStoredApks(selectedProjectId);
       }
       applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id);
     } catch (err) { setError(readableError(err, "Autopilot analysis failed")); }
@@ -594,7 +631,9 @@ export default function AutopilotPage() {
   };
 
   const executionPayload = () => ({
-    provider,
+    target_kind: analysis?.target_kind || targetKind,
+    target_url: analysis?.target_url || (targetKind === "web" ? targetUrl.trim() : null),
+    provider: (analysis?.target_kind || targetKind) === "web" ? "playwright" : provider,
     appium_url: provider === "appium" ? appiumUrl : null,
     device_name: deviceName,
     platform_version: platformVersion || null,
@@ -713,17 +752,19 @@ export default function AutopilotPage() {
     finally { setBusy(false); }
   };
 
-  const browserStackUnavailable = provider === "browserstack" && providerStatus !== null && !providerStatus.browserstack_configured;
-  const customAppiumUnavailable = provider === "appium" && providerStatus !== null && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
-  const providerStatusPending = providerStatus === null;
-  const noExecutionProvider = providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
+  const activeTargetKind = analysis?.target_kind || targetKind;
+  const activeProvider: Provider = activeTargetKind === "web" ? "playwright" : provider;
+  const browserStackUnavailable = activeProvider === "browserstack" && providerStatus !== null && !providerStatus.browserstack_configured;
+  const customAppiumUnavailable = activeProvider === "appium" && providerStatus !== null && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
+  const providerStatusPending = activeTargetKind !== "web" && providerStatus === null;
+  const noExecutionProvider = activeTargetKind !== "web" && providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
   const executionUnavailable = providerStatusPending || browserStackUnavailable || customAppiumUnavailable || !artifactAvailable;
   const reportPending = report?.recommendation === "PENDING";
 
   return <Stack spacing={3}>
     <Box>
-      <Stack direction="row" spacing={1.5} alignItems="center"><AutoAwesomeIcon color="primary" /><Typography variant="h4" fontWeight={800}>QTXpert Autopilot</Typography><Chip size="small" label="ANDROID" color="primary" variant="outlined" /></Stack>
-      <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>Upload or reuse an APK, understand the application, safely discover its runtime UI, resolve semantic automation and execute evidence-backed checks.</Typography>
+      <Stack direction="row" spacing={1.5} alignItems="center"><AutoAwesomeIcon color="primary" /><Typography variant="h4" fontWeight={800}>QTXpert Autopilot</Typography><Chip size="small" label={targetKind.toUpperCase()} color="primary" variant="outlined" /></Stack>
+      <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>Connect a website URL, Android APK or iOS IPA, understand its surface, safely discover runtime UI, resolve setup dependencies and execute evidence-backed checks.</Typography>
     </Box>
 
     <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
@@ -750,13 +791,33 @@ export default function AutopilotPage() {
           </Grid>
         </Grid>
       </Box>
+      <Grid container spacing={2} sx={{ mb: 2 }}>
+        <Grid item xs={12} md={4}>
+          <FormControl fullWidth size="small" disabled={busy || contextBusy}>
+            <InputLabel id="autopilot-target-label">Application target</InputLabel>
+            <Select labelId="autopilot-target-label" label="Application target" value={targetKind} onChange={(event) => {
+              const next = event.target.value as TargetKind;
+              setTargetKind(next);
+              setFile(null); setSelectedUploadId(""); resetResult();
+              if (contextSource === "default") setContext(contextForTarget(selectedProfile, next));
+              if (next === "web") setProvider("playwright");
+              else if (provider === "playwright") setProvider(providerStatus?.browserstack_configured ? "browserstack" : "appium");
+            }}>
+              <MenuItem value="web">Website URL</MenuItem>
+              <MenuItem value="android">Android APK</MenuItem>
+              <MenuItem value="ios">iOS IPA</MenuItem>
+            </Select>
+          </FormControl>
+        </Grid>
+        {targetKind === "web" && <Grid item xs={12} md={8}><TextField fullWidth size="small" label="Website URL" placeholder="https://qa.example.com" value={targetUrl} disabled={busy} onChange={(event) => { setTargetUrl(event.target.value); resetResult(); }} helperText="Use a reachable non-production URL. Authentication is supplied through approved setup references." /></Grid>}
+      </Grid>
       <Grid container spacing={3}>
         <Grid item xs={12} md={5}><Stack spacing={2}>
-          <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">APK source</InputLabel><Select labelId="stored-apk-label" label="APK source" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { setSelectedUploadId(event.target.value); if (event.target.value) setFile(null); if (!analysis) resetResult(); else setError(""); }}>
-            <MenuItem value="">Upload a new APK</MenuItem>{storedApks.map((asset) => <MenuItem key={asset.id} value={asset.id}>{asset.filename} · {formatBytes(asset.size_bytes)} · {new Date(asset.created_at).toLocaleDateString()}</MenuItem>)}
-          </Select></FormControl>
-          {selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 2.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1.2} alignItems="center"><FolderOutlinedIcon color="primary" /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored APK · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: 1 }} onClick={() => navigate("/test-data/uploads")}>Open repository</Button></Box>
-          : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || "Choose an Android APK"}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>Choose APK<input hidden type="file" accept=".apk,application/vnd.android.package-archive" onChange={onFile} /></Button></Box></Box>}
+          {targetKind !== "web" && <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">Stored mobile build</InputLabel><Select labelId="stored-apk-label" label="Stored mobile build" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { const value = event.target.value; const selected = storedApks.find((asset) => asset.id === value); setSelectedUploadId(value); if (value) { setFile(null); setTargetKind(selected?.extension === "ipa" ? "ios" : "android"); } if (!analysis) resetResult(); else setError(""); }}>
+            <MenuItem value="">Upload a new APK/IPA</MenuItem>{storedApks.map((asset) => <MenuItem key={asset.id} value={asset.id}>{asset.filename} · {formatBytes(asset.size_bytes)} · {new Date(asset.created_at).toLocaleDateString()}</MenuItem>)}
+           </Select></FormControl>}
+          {targetKind !== "web" && (selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 2.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1.2} alignItems="center"><FolderOutlinedIcon color="primary" /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored {selectedStoredApk.extension.toUpperCase()} · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: 1 }} onClick={() => navigate("/test-data/uploads")}>Open repository</Button></Box>
+          : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || (targetKind === "ios" ? "Choose an iOS IPA" : "Choose an Android APK")}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>{targetKind === "ios" ? "Choose IPA" : "Choose APK"}<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
           <TextField fullWidth multiline minRows={5} maxRows={9} inputProps={{ maxLength: 2400 }} label="Brief context" placeholder="Select a profile above, or add a short product-specific context." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText="This brief is sent to the analysis prompt and report. Never paste production passwords, tokens or OTPs." />
@@ -766,9 +827,9 @@ export default function AutopilotPage() {
             <Chip size="small" label={`Context: ${contextSource}`} color={contextSource === "ai" ? "primary" : "default"} variant="outlined" />
           </Stack>
           {contextNotice && <Alert severity="info" sx={{ mt: 1.5 }}>{contextNotice}</Alert>}
-          <Alert severity="info" sx={{ mt: 1.5 }}>Autopilot reasons over the APK and this context. The report labels user-supplied statements separately from observed execution evidence; missing metrics remain pending validation.</Alert>
+          <Alert severity="info" sx={{ mt: 1.5 }}>Autopilot reasons over the selected target and this context. The report labels user-supplied statements separately from observed execution evidence; missing metrics remain pending validation.</Alert>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
-            <Button disabled={(!file && !selectedUploadId) || busy || !selectedProjectId} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{busy ? "Learning application…" : selectedStoredApk ? "Analyze stored APK" : "Start Autopilot analysis"}</Button>
+            <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || !selectedProjectId} onClick={analyze} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{busy ? "Learning target…" : selectedStoredApk ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}` : "Start Autopilot analysis"}</Button>
             {analysis && <Button disabled={busy || !selectedProjectId} onClick={rerunAnalysis} variant="outlined" size="large">Rerun this analysis</Button>}
           </Stack>
         </Grid>
@@ -912,8 +973,8 @@ export default function AutopilotPage() {
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent>
-        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>Map screens and semantic controls from the running Android app. Payments, transfers, delete, submit, confirm and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : "Run discovery"}</Button></Stack></Stack>
-        {browserStackUnavailable && provider === "browserstack" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
+        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, delete, submit, confirm and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : "Run discovery"}</Button></Stack></Stack>
+        {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
         {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.screens.length > 0 && <Grid container spacing={1.5} sx={{ mt: .5 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Screen</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.slice(0, 150).map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen}-${control.control_id}`} hover><TableCell>{screen}</TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
@@ -955,10 +1016,22 @@ export default function AutopilotPage() {
 
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>
       {providerStatusPending && <Alert severity="info" sx={{ mt: 2 }}>Checking execution providers…</Alert>}
-      {noExecutionProvider && <Alert severity="warning" sx={{ mt: 2 }}>No hosted execution provider is configured. Configure BrowserStack credentials or enter a reachable HTTPS Appium endpoint before running.</Alert>}
-      {browserStackUnavailable && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose Custom / local Appium and enter a reachable endpoint.</Alert>}
-      {provider === "appium" && providerStatus?.custom_appium_reason && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus.custom_appium_reason}</Alert>}
-      <Grid container spacing={2} sx={{ mt: .5 }}><Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution target</InputLabel><Select labelId="autopilot-provider-label" label="Execution target" value={provider} onChange={(event) => setProvider(event.target.value as "browserstack" | "appium")}><MenuItem value="browserstack" disabled={providerStatus !== null && !providerStatus.browserstack_configured}>BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid><Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid><Grid item xs={12} md={2}><TextField fullWidth size="small" label="Android version" value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid><Grid item xs={12} md={4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>{provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} helperText="Hosted runs require a reachable HTTPS endpoint; leave blank only when the backend has one configured." /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}<Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions for this smoke" /><Typography variant="caption" color="text.secondary" display="block">Enabled by default so unattended smoke runs do not stall on Android permission dialogs. Permission grant/deny behavior remains covered by generated permission tests.</Typography></Grid></Grid>{execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}{execution && (execution.screenshot_asset_id || execution.page_source_asset_id) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Evidence is retained with this run and is available in Test Reports.</Typography>}{executionHistory.length > 0 && <Box sx={{ mt: 2 }}><Typography variant="subtitle2" fontWeight={800}>Previous smoke runs</Typography><Stack spacing={1} sx={{ mt: 1 }}>{executionHistory.map((item) => <Paper key={item.execution_id} variant="outlined" sx={{ p: 1.25 }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between"><Box><Typography variant="body2" fontWeight={700}>{item.status.toUpperCase()} · {item.request.provider} · {item.request.device_name}</Typography><Typography variant="caption" color="text.secondary">{new Date(item.created_at).toLocaleString()} · {item.duration_seconds}s</Typography></Box><Button size="small" variant="outlined" disabled={smokeBusy} onClick={() => rerunSmoke(item.execution_id)}>Rerun</Button></Stack></Paper>)}</Stack></Box>}</CardContent></Card>
+      {activeTargetKind === "web" && <Alert severity="info" sx={{ mt: 2 }}>Website execution uses bounded, read-only Playwright checks. Authenticated, transactional and destructive journeys remain pending until approved setup is supplied.</Alert>}
+      {noExecutionProvider && <Alert severity="warning" sx={{ mt: 2 }}>No hosted mobile execution provider is configured. Configure BrowserStack credentials or enter a reachable HTTPS Appium endpoint before running.</Alert>}
+      {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose Custom / local Appium and enter a reachable endpoint.</Alert>}
+      {activeProvider === "appium" && providerStatus?.custom_appium_reason && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus.custom_appium_reason}</Alert>}
+      <Grid container spacing={2} sx={{ mt: .5 }}>
+        {activeTargetKind === "web" ? <Grid item xs={12} md={4}><TextField fullWidth size="small" label="Website target" value={analysis?.target_url || targetUrl} InputProps={{ readOnly: true }} /></Grid> : <Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution provider</InputLabel><Select labelId="autopilot-provider-label" label="Execution provider" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><MenuItem value="browserstack" disabled={providerStatus !== null && !providerStatus.browserstack_configured}>BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid>}
+        {activeTargetKind !== "web" && <Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid>}
+        {activeTargetKind !== "web" && <Grid item xs={12} md={2}><TextField fullWidth size="small" label={`${activeTargetKind === "ios" ? "iOS" : "Android"} version`} value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid>}
+        <Grid item xs={12} md={activeTargetKind === "web" ? 8 : 4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>
+        {activeTargetKind !== "web" && provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} helperText="Hosted runs require a reachable HTTPS endpoint; leave blank only when the backend has one configured." /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}
+        {activeTargetKind !== "web" && <Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions for this smoke" /><Typography variant="caption" color="text.secondary" display="block">Enabled by default so unattended smoke runs do not stall on Android permission dialogs. Permission grant/deny behavior remains covered by generated permission tests.</Typography></Grid>}
+      </Grid>
+      {execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}
+      {execution && (execution.screenshot_asset_id || execution.page_source_asset_id) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Evidence is retained with this run and is available in Test Reports.</Typography>}
+      {executionHistory.length > 0 && <Box sx={{ mt: 2 }}><Typography variant="subtitle2" fontWeight={800}>Previous smoke runs</Typography><Stack spacing={1} sx={{ mt: 1 }}>{executionHistory.map((item) => <Paper key={item.execution_id} variant="outlined" sx={{ p: 1.25 }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between"><Box><Typography variant="body2" fontWeight={700}>{item.status.toUpperCase()} · {item.request.provider} · {item.request.device_name}</Typography><Typography variant="caption" color="text.secondary">{new Date(item.created_at).toLocaleString()} · {item.duration_seconds}s</Typography></Box><Button size="small" variant="outlined" disabled={smokeBusy} onClick={() => rerunSmoke(item.execution_id)}>Rerun</Button></Stack></Paper>)}</Stack></Box>}
+      </CardContent></Card>
 
       {analysis.release_risks.length > 0 && <Alert severity="info"><b>Initial release risks:</b> {analysis.release_risks.join(" • ")}</Alert>}
     </>}
@@ -984,4 +1057,3 @@ export default function AutopilotPage() {
     </Dialog>
   </Stack>;
 }
-

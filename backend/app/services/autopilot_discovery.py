@@ -1,4 +1,4 @@
-"""Safe Android runtime discovery for QTXpert Autopilot.
+"""Safe mobile and web runtime discovery for QTXpert Autopilot.
 
 The discovery agent intentionally uses a conservative navigation policy. It
 captures screen state, semantic controls and deterministic locator candidates,
@@ -41,7 +41,13 @@ _SAFE_NAVIGATION_TERMS = {
     "login", "log in", "sign in", "register", "sign up", "forgot password",
     "forgot username", "privacy", "terms", "language", "profile",
 }
-_INPUT_CLASSES = {"android.widget.EditText", "android.widget.AutoCompleteTextView"}
+_INPUT_CLASSES = {
+    "android.widget.EditText",
+    "android.widget.AutoCompleteTextView",
+    "XCUIElementTypeTextField",
+    "XCUIElementTypeSecureTextField",
+    "XCUIElementTypeTextView",
+}
 _ACTIONABLE_CLASSES = {
     "android.widget.Button", "android.widget.ImageButton", "android.widget.TextView",
     "android.view.View", "android.widget.CheckedTextView", "android.widget.Switch",
@@ -59,10 +65,10 @@ class AutopilotDiscoveryService:
 
     @classmethod
     def _semantic_label(cls, attrs: Dict[str, str]) -> str:
-        for key in ("content-desc", "text", "resource-id"):
+        for key in ("content-desc", "text", "label", "name", "resource-id", "identifier"):
             value = (attrs.get(key) or "").strip()
             if value:
-                if key == "resource-id":
+                if key in {"resource-id", "identifier"}:
                     value = value.rsplit("/", 1)[-1].replace("_", " ").replace("-", " ")
                 return re.sub(r"\s+", " ", value).strip()[:160]
         class_name = (attrs.get("class") or "control").rsplit(".", 1)[-1]
@@ -71,7 +77,7 @@ class AutopilotDiscoveryService:
     @classmethod
     def _risk(cls, label: str, attrs: Dict[str, str]) -> tuple[str, Optional[str]]:
         haystack = " ".join(
-            [label, attrs.get("text", ""), attrs.get("content-desc", ""), attrs.get("resource-id", "")]
+            [label, attrs.get("text", ""), attrs.get("label", ""), attrs.get("name", ""), attrs.get("content-desc", ""), attrs.get("resource-id", ""), attrs.get("identifier", "")]
         ).lower().replace("_", " ").replace("-", " ")
         for term in _BLOCKED_TERMS:
             if term in haystack:
@@ -86,9 +92,12 @@ class AutopilotDiscoveryService:
         locators: list[DiscoveryLocator] = []
         content_desc = (attrs.get("content-desc") or "").strip()
         resource_id = (attrs.get("resource-id") or "").strip()
-        text = (attrs.get("text") or "").strip()
+        ios_accessibility = (attrs.get("identifier") or attrs.get("name") or attrs.get("label") or "").strip()
+        text = (attrs.get("text") or attrs.get("label") or "").strip()
         if content_desc:
             locators.append(DiscoveryLocator(strategy="accessibility_id", value=content_desc[:500], confidence=0.99))
+        elif ios_accessibility:
+            locators.append(DiscoveryLocator(strategy="accessibility_id", value=ios_accessibility[:500], confidence=0.96))
         if resource_id:
             locators.append(DiscoveryLocator(strategy="id", value=resource_id[:500], confidence=0.97))
         if text and len(text) <= 120:
@@ -109,9 +118,17 @@ class AutopilotDiscoveryService:
         for index, node in enumerate(root.iter()):
             attrs = {str(k): str(v) for k, v in node.attrib.items()}
             class_name = attrs.get("class", "")
-            clickable = attrs.get("clickable", "false").lower() == "true"
-            enabled = attrs.get("enabled", "true").lower() != "false"
-            input_capable = class_name in _INPUT_CLASSES
+            ios_node = class_name.startswith("XCUIElementType") or "label" in attrs or "identifier" in attrs
+            ios_actionable = class_name in {
+                "XCUIElementTypeButton", "XCUIElementTypeCell", "XCUIElementTypeLink",
+                "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeSearchField",
+                "XCUIElementTypeSwitch", "XCUIElementTypeTab", "XCUIElementTypeImage",
+            }
+            clickable = attrs.get("clickable", "false").lower() == "true" or (ios_node and ios_actionable)
+            enabled = attrs.get("enabled", "true").lower() not in {"false", "0"}
+            input_capable = class_name in _INPUT_CLASSES or class_name in {
+                "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeSearchField",
+            }
             actionable = clickable or input_capable or class_name in _ACTIONABLE_CLASSES
             if not actionable:
                 continue
@@ -174,6 +191,12 @@ class AutopilotDiscoveryService:
     async def run(self, job_id: str, request: AutopilotDiscoveryRequest) -> AutopilotDiscoveryResult:
         job = await self.prototype.load_job(job_id)
         analysis = await self.prototype.load_analysis(job_id)
+        target_kind = str(job.get("target_kind") or getattr(analysis, "target_kind", None) or "android")
+        if request.target_kind != target_kind:
+            # Direct API clients and older saved requests may still carry the
+            # Android-shaped default. The durable job is the source of truth so
+            # an IPA always gets XCUITest capabilities.
+            request = request.model_copy(update={"target_kind": target_kind})
         apk_path = Path(job.get("apk_path") or "")
         if not apk_path.is_file() and not request.appium_app:
             raise RuntimeError("Uploaded APK artifact is unavailable for runtime discovery")
@@ -235,6 +258,8 @@ class AutopilotDiscoveryService:
         return AutopilotDiscoveryResult(
             job_id=job_id,
             status=status,
+            target_kind=target_kind,
+            target_url=job.get("target_url"),
             provider=request.provider,
             started_at=started.isoformat(),
             finished_at=finished.isoformat(),
@@ -267,23 +292,36 @@ class AutopilotDiscoveryService:
         adb_exec_timeout_ms: int,
     ) -> Dict[str, Any]:
         from appium import webdriver
-        from appium.options.android import UiAutomator2Options
         from appium.webdriver.common.appiumby import AppiumBy
 
+        is_ios = request.target_kind == "ios"
         capabilities: Dict[str, Any] = {
-            "platformName": "Android",
-            "appium:automationName": "UiAutomator2",
+            "platformName": "iOS" if is_ios else "Android",
+            "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
             "appium:deviceName": request.device_name,
             "appium:app": app_reference,
             "appium:noReset": request.no_reset,
-            "appium:autoGrantPermissions": request.auto_grant_permissions,
             "appium:newCommandTimeout": 180,
-            "appium:androidInstallTimeout": install_timeout_ms,
-            "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
-            "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
-            "appium:adbExecTimeout": adb_exec_timeout_ms,
-            "appium:appWaitDuration": adb_exec_timeout_ms,
         }
+        if is_ios:
+            capabilities.update(
+                {
+                    "appium:wdaLaunchTimeout": server_launch_timeout_ms,
+                    "appium:wdaConnectionTimeout": adb_exec_timeout_ms,
+                    "appium:useNewWDA": False,
+                }
+            )
+        else:
+            capabilities.update(
+                {
+                    "appium:autoGrantPermissions": request.auto_grant_permissions,
+                    "appium:androidInstallTimeout": install_timeout_ms,
+                    "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
+                    "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
+                    "appium:adbExecTimeout": adb_exec_timeout_ms,
+                    "appium:appWaitDuration": adb_exec_timeout_ms,
+                }
+            )
         if request.platform_version:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
@@ -291,7 +329,15 @@ class AutopilotDiscoveryService:
 
         evidence_dir = self.prototype._job_dir(job_id) / "evidence" / "discovery"
         evidence_dir.mkdir(parents=True, exist_ok=True)
-        driver = webdriver.Remote(appium_url, options=UiAutomator2Options().load_capabilities(capabilities))
+        if is_ios:
+            from appium.options.ios import XCUITestOptions
+
+            options = XCUITestOptions().load_capabilities(capabilities)
+        else:
+            from appium.options.android import UiAutomator2Options
+
+            options = UiAutomator2Options().load_capabilities(capabilities)
+        driver = webdriver.Remote(appium_url, options=options)
         screens: list[DiscoveredScreen] = []
         transitions: list[DiscoveredTransition] = []
         seen_fingerprints: dict[str, str] = {}
@@ -409,4 +455,3 @@ class AutopilotDiscoveryService:
             }
         finally:
             safe_quit(driver)
-

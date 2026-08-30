@@ -1,26 +1,32 @@
-"""Android-first autonomous mobile QA prototype service.
+"""Autonomous QA service for websites, Android APKs and iOS IPAs.
 
 The prototype separates deterministic binary/runtime analysis from LLM enrichment.
 If the configured LLM is unavailable, QTXpert still returns a useful test plan.
 Real-device smoke execution can use BrowserStack App Automate when credentials are
-configured, while a generic Appium endpoint remains available for local/private labs.
+configured, while a generic Appium endpoint remains available for local/private labs;
+web targets use a bounded Playwright adapter.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import html.parser
+import ipaddress
 import json
 import logging
+import plistlib
 import re
 import shutil
+import socket
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from uuid import uuid4
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from sqlalchemy import select
@@ -53,6 +59,41 @@ _MISSING = object()
 _ANALYSIS_SLOT = threading.BoundedSemaphore(1)
 
 
+class _WebSurfaceParser(html.parser.HTMLParser):
+    """Small, dependency-free parser for bounded website reconnaissance."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title_parts: list[str] = []
+        self.links: list[dict[str, str]] = []
+        self.forms = 0
+        self.inputs = 0
+        self.buttons = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): (value or "") for key, value in attrs}
+        tag = tag.lower()
+        if tag == "title":
+            self._in_title = True
+        elif tag == "a" and values.get("href"):
+            self.links.append({"href": values["href"][:2048], "text": values.get("aria-label") or values.get("title") or ""})
+        elif tag == "form":
+            self.forms += 1
+        elif tag in {"input", "select", "textarea"}:
+            self.inputs += 1
+        elif tag in {"button", "summary"}:
+            self.buttons += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and data.strip():
+            self.title_parts.append(data.strip())
+
+
 class AutopilotUploadTooLarge(ValueError):
     """Raised when an Autopilot upload exceeds the configured byte limit."""
 
@@ -78,6 +119,35 @@ class AutopilotPrototypeService:
         self.root = Path(settings.AUTOPILOT_STORAGE_PATH).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self._persistence_disabled_until = 0.0
+
+    @staticmethod
+    def validate_web_url(value: str, *, allow_private: bool = False) -> str:
+        """Normalize a URL and reject credential-bearing/unsafe targets.
+
+        Autopilot fetches a user-supplied URL from a hosted worker, so embedded
+        credentials and private-network destinations are rejected. Localhost
+        remains available for local development and tests only.
+        """
+        raw = (value or "").strip()
+        parsed = urlparse(raw)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Website target must be a valid HTTP(S) URL.")
+        if parsed.username or parsed.password:
+            raise ValueError("Do not embed website credentials in the URL; use the secure setup reference.")
+        hostname = parsed.hostname.lower().rstrip(".")
+        if not allow_private and hostname in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Hosted Autopilot cannot access localhost; use a reachable HTTPS environment URL.")
+        if not allow_private:
+            try:
+                addresses = {
+                    ipaddress.ip_address(item[4][0])
+                    for item in socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+                }
+                if any(address.is_private or address.is_loopback or address.is_link_local or address.is_reserved for address in addresses):
+                    raise ValueError("Private-network website targets are disabled for hosted Autopilot.")
+            except socket.gaierror as exc:
+                raise ValueError("Website target hostname could not be resolved.") from exc
+        return raw.rstrip("/") or raw
 
     async def generate_context(self, request: AutopilotContextRequest) -> AutopilotContextResponse:
         """Generate a safe business profile, with a deterministic fallback.
@@ -112,10 +182,10 @@ class AutopilotPrototypeService:
                     LLMMessage(
                         role="system",
                         content=(
-                            "You are a senior fintech QA and compliance-context editor. "
+                            "You are a senior fintech QA and compliance-context editor for a website or mobile app. "
                             "Return strict JSON with one key, context, containing a concise (under 1,800 "
                             "characters) but complete "
-                            "test context for an autonomous mobile QA agent. Preserve facts supplied by the user, "
+                            "test context for an autonomous QA agent. Preserve facts supplied by the user, "
                             "use [TO CONFIRM] for unknowns, and never invent metrics, defects, credentials, "
                             "penetration-test results, regulatory approvals or data-residency evidence. "
                             "Keep payments, transfers, OTP and destructive actions approval-gated. Include "
@@ -184,11 +254,15 @@ class AutopilotPrototypeService:
                         job_id=str(job["job_id"]),
                         owner_id=owner_id,
                         filename=str(job.get("filename", "application.apk")),
+                        project_id=uuid.UUID(str(job["project_id"])) if job.get("project_id") else None,
                         created_at=created_at,
                     )
                     session.add(record)
                 record.filename = str(job.get("filename", record.filename))
                 record.owner_id = owner_id
+                record.project_id = uuid.UUID(str(job["project_id"])) if job.get("project_id") else record.project_id
+                record.target_kind = str(job.get("target_kind", getattr(record, "target_kind", "android")))
+                record.target_url = job.get("target_url")
                 repository_asset_id = job.get("repository_asset_id")
                 record.repository_asset_id = (
                     uuid.UUID(str(repository_asset_id)) if repository_asset_id else None
@@ -222,10 +296,13 @@ class AutopilotPrototypeService:
                 result: Dict[str, Any] = {
                     "job_id": record.job_id,
                     "owner_id": str(record.owner_id),
+                    "project_id": str(record.project_id) if record.project_id else None,
                     "repository_asset_id": str(record.repository_asset_id)
                     if record.repository_asset_id
                     else None,
                     "filename": record.filename,
+                    "target_kind": record.target_kind or "android",
+                    "target_url": record.target_url,
                     "context": record.context or "",
                     "apk_path": record.apk_path,
                     "status": record.status,
@@ -319,20 +396,33 @@ class AutopilotPrototypeService:
 
         return await asyncio.to_thread(read_all)
 
-    async def save_upload(self, filename: str, data: bytes, owner_id: str, context: str = "") -> tuple[str, Path]:
+    async def save_upload(
+        self,
+        filename: str,
+        data: bytes,
+        owner_id: str,
+        context: str = "",
+        *,
+        target_kind: str | None = None,
+        project_id: str | None = None,
+    ) -> tuple[str, Path]:
         job_id = str(uuid4())
         job_dir = self._job_dir(job_id)
         job_dir.mkdir(parents=True, exist_ok=False)
         safe_name = Path(filename).name or "application.apk"
-        apk_path = job_dir / safe_name
-        await asyncio.to_thread(apk_path.write_bytes, data)
+        artifact_path = job_dir / safe_name
+        await asyncio.to_thread(artifact_path.write_bytes, data)
+        kind = target_kind or ("ios" if safe_name.lower().endswith(".ipa") else "android")
         seed = {
             "job_id": job_id,
             "owner_id": owner_id,
+            "project_id": project_id,
             "filename": safe_name,
+            "target_kind": kind,
+            "target_url": None,
             "context": context[:8000],
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "apk_path": str(apk_path),
+            "apk_path": str(artifact_path),
             "status": "uploaded",
             "stage": "queued",
             "progress": 5,
@@ -340,7 +430,7 @@ class AutopilotPrototypeService:
         }
         await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
         await self._persist_job(seed)
-        return job_id, apk_path
+        return job_id, artifact_path
 
     async def save_upload_stream(
         self,
@@ -349,6 +439,9 @@ class AutopilotPrototypeService:
         owner_id: str,
         context: str = "",
         max_bytes: int = 0,
+        *,
+        target_kind: str | None = None,
+        project_id: str | None = None,
     ) -> tuple[str, Path]:
         """Persist an UploadFile incrementally instead of duplicating it in memory.
 
@@ -360,11 +453,12 @@ class AutopilotPrototypeService:
         job_dir = self._job_dir(job_id)
         job_dir.mkdir(parents=True, exist_ok=False)
         safe_name = Path(filename).name or "application.apk"
-        apk_path = job_dir / safe_name
+        artifact_path = job_dir / safe_name
+        kind = target_kind or ("ios" if safe_name.lower().endswith(".ipa") else "android")
         total = 0
         handle = None
         try:
-            handle = await asyncio.to_thread(apk_path.open, "wb")
+            handle = await asyncio.to_thread(artifact_path.open, "wb")
             while chunk := await upload.read(1024 * 1024):
                 total += len(chunk)
                 if max_bytes and total > max_bytes:
@@ -378,10 +472,13 @@ class AutopilotPrototypeService:
             seed = {
                 "job_id": job_id,
                 "owner_id": owner_id,
+                "project_id": project_id,
                 "filename": safe_name,
+                "target_kind": kind,
+                "target_url": None,
                 "context": context[:8000],
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "apk_path": str(apk_path),
+                "apk_path": str(artifact_path),
                 "status": "uploaded",
                 "stage": "queued",
                 "progress": 5,
@@ -389,7 +486,7 @@ class AutopilotPrototypeService:
             }
             await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
             await self._persist_job(seed)
-            return job_id, apk_path
+            return job_id, artifact_path
         except Exception:
             if handle is not None:
                 await asyncio.to_thread(handle.close)
@@ -399,6 +496,39 @@ class AutopilotPrototypeService:
         finally:
             if handle is not None:
                 await asyncio.to_thread(handle.close)
+
+    async def save_web_target(
+        self,
+        target_url: str,
+        owner_id: str,
+        context: str = "",
+        *,
+        project_id: str | None = None,
+    ) -> str:
+        """Create a durable URL job without copying website data to storage."""
+        url = self.validate_web_url(target_url, allow_private=self.settings.APP_ENV == "local")
+        job_id = str(uuid4())
+        job_dir = self._job_dir(job_id)
+        job_dir.mkdir(parents=True, exist_ok=False)
+        parsed = urlparse(url)
+        filename = (parsed.hostname or "website")[:240]
+        seed = {
+            "job_id": job_id,
+            "owner_id": owner_id,
+            "project_id": project_id,
+            "filename": filename,
+            "target_kind": "web",
+            "target_url": url,
+            "context": context[:8000],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "uploaded",
+            "stage": "queued",
+            "progress": 5,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
+        await self._persist_job(seed)
+        return job_id
 
     async def update_job(self, job_id: str, **changes: Any) -> Dict[str, Any]:
         path = self._job_dir(job_id) / "job.json"
@@ -414,6 +544,7 @@ class AutopilotPrototypeService:
 
     async def get_job_status(self, job_id: str) -> AutopilotJobStatus:
         job = await self.load_job(job_id)
+        target_kind = str(job.get("target_kind") or ("ios" if str(job.get("filename", "")).lower().endswith(".ipa") else "android"))
         analysis = None
         if job.get("status") == "analyzed":
             try:
@@ -425,13 +556,18 @@ class AutopilotPrototypeService:
             # A Render deploy replaces the container filesystem. Do not leave a
             # durable in-flight job polling forever when its APK is gone.
             apk_path = job.get("apk_path")
-            if not apk_path or not Path(apk_path).is_file():
+            target_available = bool(job.get("target_url")) if target_kind == "web" else bool(apk_path and Path(apk_path).is_file())
+            if not target_available:
                 await self.update_job(
                     job_id,
                     status="failed",
                     stage="failed",
                     progress=100,
-                    error="The uploaded APK is no longer available after a service restart. Please upload it again.",
+                    error=(
+                        "The website target is no longer available after a service restart. Please submit the URL again."
+                        if target_kind == "web"
+                        else "The uploaded mobile artifact is no longer available after a service restart. Please upload it again."
+                    ),
                 )
                 job = await self.load_job(job_id)
         artifact_path = job.get("apk_path")
@@ -439,12 +575,14 @@ class AutopilotPrototypeService:
             job_id=job_id,
             filename=job["filename"],
             status=job.get("status", "uploaded"),
+            target_kind=target_kind,
+            target_url=job.get("target_url"),
             stage=job.get("stage", "queued"),
             progress=int(job.get("progress", 0)),
             created_at=job["created_at"],
             updated_at=job.get("updated_at", job["created_at"]),
             context=str(job.get("context", "")),
-            artifact_available=bool(artifact_path and Path(artifact_path).is_file()),
+            artifact_available=(bool(job.get("target_url")) if target_kind == "web" else bool(artifact_path and Path(artifact_path).is_file())),
             error=job.get("error"),
             analysis=analysis,
         )
@@ -483,12 +621,29 @@ class AutopilotPrototypeService:
 
     async def analyze_safely(self, job_id: str) -> None:
         started = time.perf_counter()
-        await asyncio.to_thread(_ANALYSIS_SLOT.acquire)
+        acquired = False
         try:
-            await self.update_job(job_id, status="analyzing", stage="reading_apk", progress=15, error=None)
-            await asyncio.wait_for(self.analyze(job_id), timeout=900)
+            await asyncio.to_thread(_ANALYSIS_SLOT.acquire)
+            acquired = True
+            job = await self.load_job(job_id)
+            target_kind = str(job.get("target_kind") or "android")
+            await self.update_job(
+                job_id,
+                status="analyzing",
+                stage="fetching_website" if target_kind == "web" else "reading_mobile_artifact",
+                progress=15,
+                error=None,
+            )
+            await asyncio.wait_for(self.analyze(job_id), timeout=self.settings.AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS)
             await self.update_job(job_id, status="analyzed", stage="complete", progress=100)
             logger.info("Autopilot analysis completed job_id=%s duration_seconds=%.2f", job_id, time.perf_counter() - started)
+        except asyncio.TimeoutError:
+            message = (
+                f"Autopilot analysis exceeded {self.settings.AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS}s. "
+                "The job was stopped safely; retry with a bounded website target or a smaller/deep-parse-safe artifact."
+            )
+            logger.error("Autopilot analysis timed out job_id=%s after %.2fs", job_id, time.perf_counter() - started)
+            await self.update_job(job_id, status="failed", stage="failed", progress=100, error=message)
         except Exception as exc:
             logger.exception("Autopilot analysis failed job_id=%s", job_id)
             await self.update_job(
@@ -499,7 +654,8 @@ class AutopilotPrototypeService:
                 error=f"{type(exc).__name__}: {exc}"[:1000],
             )
         finally:
-            _ANALYSIS_SLOT.release()
+            if acquired:
+                _ANALYSIS_SLOT.release()
 
     async def load_job(self, job_id: str) -> Dict[str, Any]:
         path = self._job_dir(job_id) / "job.json"
@@ -521,8 +677,13 @@ class AutopilotPrototypeService:
 
     async def analyze(self, job_id: str) -> AutopilotAnalysis:
         job = await self.load_job(job_id)
-        apk_path = Path(job["apk_path"])
-        metadata = await asyncio.to_thread(self._analyze_apk_sync, apk_path)
+        target_kind = str(job.get("target_kind") or ("ios" if str(job.get("filename", "")).lower().endswith(".ipa") else "android"))
+        if target_kind == "web":
+            metadata = await self._analyze_web(str(job.get("target_url") or ""))
+        elif target_kind == "ios":
+            metadata = await asyncio.to_thread(self._analyze_ipa_sync, Path(job["apk_path"]))
+        else:
+            metadata = await asyncio.to_thread(self._analyze_apk_sync, Path(job["apk_path"]))
         await self.update_job(job_id, status="analyzing", stage="designing_tests", progress=65)
         deterministic_tests = self._build_deterministic_tests(metadata)
         enrichment = await self._enrich_with_ai(metadata, job.get("context", ""))
@@ -540,6 +701,9 @@ class AutopilotPrototypeService:
         analysis = AutopilotAnalysis(
             job_id=job_id,
             filename=job["filename"],
+            platform=target_kind,
+            target_kind=target_kind,
+            target_url=job.get("target_url"),
             status="analysis_partial" if metadata.get("warnings") else "analyzed",
             app_name=metadata.get("app_name"),
             package_name=metadata.get("package_name"),
@@ -569,6 +733,139 @@ class AutopilotPrototypeService:
         await self._persist_job(job, analysis=analysis.model_dump(mode="json"))
         return analysis
 
+    async def _analyze_web(self, target_url: str) -> Dict[str, Any]:
+        """Inspect a bounded public website surface without executing writes.
+
+        This first pass intentionally gathers HTTP/HTML evidence only. Login,
+        authenticated journeys and business assertions remain pending until the
+        user supplies an approved credential/data reference through Setup.
+        """
+        url = self.validate_web_url(target_url, allow_private=self.settings.APP_ENV == "local")
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        result: Dict[str, Any] = {
+            "platform": "web",
+            "sha256": digest,
+            "size_bytes": 0,
+            "warnings": [],
+            "activities": [],
+            "services": [],
+            "receivers": [],
+            "permissions": [],
+            "file_count": 0,
+            "app_name": urlparse(url).hostname or "Website",
+            "package_name": None,
+            "main_activity": None,
+            "web_url": url,
+            "web_status_code": None,
+            "web_final_url": url,
+            "web_title": None,
+            "web_link_count": 0,
+            "web_form_count": 0,
+            "web_input_count": 0,
+            "web_button_count": 0,
+            "web_links": [],
+        }
+        timeout = httpx.Timeout(float(self.settings.AUTOPILOT_WEB_TIMEOUT_SECONDS), connect=10.0)
+        try:
+            # Do not let a public open-redirect turn the reconnaissance worker
+            # into an SSRF proxy. Validate every redirect hop before following
+            # it and keep the chain deliberately short.
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=timeout,
+                headers={"User-Agent": "QTXpert-Autopilot/1.0 (safe reconnaissance)"},
+            ) as client:
+                request_url = url
+                response = None
+                for _ in range(5):
+                    response = await client.get(request_url)
+                    if response.status_code not in {301, 302, 303, 307, 308}:
+                        break
+                    location = response.headers.get("location")
+                    if not location:
+                        break
+                    request_url = self.validate_web_url(
+                        urljoin(request_url, location),
+                        allow_private=self.settings.APP_ENV == "local",
+                    )
+                if response is None:
+                    raise RuntimeError("Website returned no HTTP response")
+            result["web_status_code"] = response.status_code
+            result["web_final_url"] = request_url
+            content = response.text[:2_000_000]
+            parser = _WebSurfaceParser()
+            parser.feed(content)
+            result.update(
+                {
+                    "web_title": " ".join(parser.title_parts)[:300] or None,
+                    "web_link_count": len(parser.links),
+                    "web_form_count": parser.forms,
+                    "web_input_count": parser.inputs,
+                    "web_button_count": parser.buttons,
+                    "web_links": parser.links[: self.settings.AUTOPILOT_WEB_MAX_PAGES * 3],
+                    "size_bytes": len(response.content),
+                }
+            )
+            if response.status_code >= 400:
+                result["warnings"].append(f"Website returned HTTP {response.status_code}; functional evidence is pending.")
+            if "text/html" not in response.headers.get("content-type", "").lower():
+                result["warnings"].append("Website target did not return HTML; runtime UI discovery may be limited.")
+        except Exception as exc:
+            # Keep the job analyzable with a clear blocked dependency rather
+            # than allowing a transient target outage to become a hung job.
+            result["warnings"].append(f"Website surface fetch was partial: {type(exc).__name__}: {str(exc)[:240]}")
+        return result
+
+    def _analyze_ipa_sync(self, ipa_path: Path) -> Dict[str, Any]:
+        """Read iOS bundle metadata without unpacking the entire IPA."""
+        digest = hashlib.sha256()
+        with ipa_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        result: Dict[str, Any] = {
+            "platform": "ios",
+            "sha256": digest.hexdigest(),
+            "size_bytes": ipa_path.stat().st_size,
+            "warnings": [],
+            "activities": [],
+            "services": [],
+            "receivers": [],
+            "permissions": [],
+            "file_count": 0,
+            "app_name": None,
+            "package_name": None,
+            "version_name": None,
+            "version_code": None,
+            "min_sdk": None,
+            "target_sdk": None,
+            "main_activity": None,
+            "debuggable": None,
+        }
+        try:
+            with zipfile.ZipFile(ipa_path) as archive:
+                infos = archive.infolist()
+                result["file_count"] = len(infos)
+                plist_name = next(
+                    (info.filename for info in infos if re.match(r"Payload/[^/]+\.app/Info\.plist$", info.filename)),
+                    None,
+                )
+                if not plist_name:
+                    result["warnings"].append("IPA does not contain a standard Payload/*.app/Info.plist bundle metadata file.")
+                    return result
+                with archive.open(plist_name) as handle:
+                    plist = plistlib.load(handle)
+                result.update(
+                    {
+                        "app_name": plist.get("CFBundleDisplayName") or plist.get("CFBundleName"),
+                        "package_name": plist.get("CFBundleIdentifier"),
+                        "version_name": plist.get("CFBundleShortVersionString"),
+                        "version_code": str(plist.get("CFBundleVersion")) if plist.get("CFBundleVersion") is not None else None,
+                    }
+                )
+        except Exception as exc:
+            result["warnings"].append(f"IPA metadata parsing was partial: {type(exc).__name__}: {str(exc)[:240]}")
+        return result
+
     def _analyze_apk_sync(self, apk_path: Path) -> Dict[str, Any]:
         digest = hashlib.sha256()
         with apk_path.open("rb") as handle:
@@ -576,6 +873,7 @@ class AutopilotPrototypeService:
                 digest.update(chunk)
 
         result: Dict[str, Any] = {
+            "platform": "android",
             "sha256": digest.hexdigest(),
             "size_bytes": apk_path.stat().st_size,
             "warnings": [],
@@ -585,6 +883,18 @@ class AutopilotPrototypeService:
             "permissions": [],
             "file_count": 0,
         }
+        deep_parse_limit = self.settings.AUTOPILOT_DEEP_PARSE_MAX_MB * 1024 * 1024
+        if result["size_bytes"] > deep_parse_limit:
+            result["warnings"].append(
+                f"Deep APK parsing skipped for this {result['size_bytes'] / (1024 * 1024):.1f}MB artifact "
+                f"(limit {self.settings.AUTOPILOT_DEEP_PARSE_MAX_MB}MB) to protect the analysis worker memory budget."
+            )
+            try:
+                with zipfile.ZipFile(apk_path) as archive:
+                    result["file_count"] = len(archive.infolist())
+            except Exception as exc:
+                result["warnings"].append(f"APK ZIP inventory was unavailable: {type(exc).__name__}")
+            return result
         try:
             # Androguard 4.x uses Loguru for resource-table diagnostics. Its
             # DEBUG stream can contain tens of thousands of lines for a normal
@@ -630,6 +940,8 @@ class AutopilotPrototypeService:
         return result
 
     def _build_deterministic_tests(self, meta: Dict[str, Any]) -> List[AutopilotTest]:
+        if meta.get("platform") == "web":
+            return self._build_web_tests(meta)
         tests: list[AutopilotTest] = [
             AutopilotTest(
                 id="QT-AUTO-SMOKE-001",
@@ -822,10 +1134,111 @@ class AutopilotPrototypeService:
             )
         return tests
 
+    @staticmethod
+    def _build_web_tests(meta: Dict[str, Any]) -> List[AutopilotTest]:
+        """Create a complete, honest website coverage plan from HTML evidence."""
+        form_note = (
+            "The target exposes HTML forms; an approved non-production credential/data reference is required for authenticated journeys."
+            if meta.get("web_form_count")
+            else "No HTML forms were observed on the initial public page; authenticated journeys still require explicit setup."
+        )
+        return [
+            AutopilotTest(
+                id="QT-WEB-SMOKE-001",
+                suite="Smoke",
+                bucket="page_level",
+                title="Load website and verify first render",
+                priority="critical",
+                objective="Verify the target responds over HTTP(S) and renders a usable first page.",
+                steps=["Open the configured website URL", "Wait for DOM content", "Capture screenshot, HTML and response metadata"],
+                expected=["The target responds successfully", "A readable document is rendered", "No unhandled browser error is observed"],
+            ),
+            AutopilotTest(
+                id="QT-WEB-PAGE-001",
+                suite="Page-level",
+                bucket="page_level",
+                title="Discover same-origin pages and navigation surface",
+                priority="high",
+                objective="Build a bounded, evidence-backed map of same-origin pages reachable from the public entry point.",
+                steps=["Crawl same-origin links within the configured bound", "Capture page title, URL and interactive controls", "Record blocked or unreachable links"],
+                expected=["Each discovered page has a stable URL and captured evidence"],
+            ),
+            AutopilotTest(
+                id="QT-WEB-UI-001",
+                suite="UI",
+                bucket="ui",
+                title="Visual layout and responsive UI baseline",
+                priority="medium",
+                objective="Capture a visual baseline for the public pages at supported viewport sizes.",
+                steps=["Render the page at desktop and mobile viewports", "Capture screenshots", "Check for overflow, clipping and unreadable controls"],
+                expected=["No obvious layout breakage is observed at the approved viewports"],
+                dependency="Approved viewport matrix and visual baselines are required.",
+            ),
+            AutopilotTest(
+                id="QT-WEB-A11Y-001",
+                suite="Accessibility",
+                bucket="accessibility",
+                title="Semantic controls and accessibility baseline",
+                priority="high",
+                objective="Inventory interactive controls and identify missing accessible names or keyboard reachability.",
+                steps=["Inspect links, buttons, inputs and headings", "Check accessible names and enabled states", "Capture DOM evidence for review"],
+                expected=["Critical controls have deterministic accessible names and can be reached safely"],
+            ),
+            AutopilotTest(
+                id="QT-WEB-SEC-001",
+                suite="Security",
+                bucket="security",
+                title="HTTP security headers and transport baseline",
+                priority="high",
+                objective="Record transport and security-header posture for the target response without attempting exploitation.",
+                steps=["Inspect HTTPS redirect and response headers", "Check content-security and framing directives", "Capture headers as evidence"],
+                expected=["Transport and security-header posture is documented for review"],
+                dependency="Approved security-header policy and dynamic security assessment are required for a conclusive decision.",
+            ),
+            AutopilotTest(
+                id="QT-WEB-FUNC-001",
+                suite="Functional / UAT",
+                bucket="functional",
+                title="Authenticated end-to-end business journey",
+                priority="critical",
+                objective="Validate the release-critical user journey through authenticated, non-production pages and integrations.",
+                steps=["Authenticate with an approved non-production account", "Execute the configured business journey", "Verify UI and API/oracle outcomes", "Run approved cleanup"],
+                expected=["The journey completes with correct state and traceable evidence"],
+                requires_auth=True,
+                requires_test_data=True,
+                dependency=f"{form_note} Provide credential, role, test-data, environment and reset references.",
+                evidence_required=["journey screenshots", "API or business oracle", "cleanup result"],
+            ),
+            AutopilotTest(
+                id="QT-WEB-PERF-001",
+                suite="Performance",
+                bucket="performance",
+                title="Page responsiveness and network timing baseline",
+                priority="high",
+                objective="Measure page load and key navigation timings against approved thresholds.",
+                steps=["Capture navigation timing", "Measure key public pages", "Record errors and resource failures"],
+                expected=["Observed timing and error metrics are reported against approved thresholds"],
+                dependency="Performance thresholds, representative browsers and an approved load environment are required.",
+            ),
+            AutopilotTest(
+                id="QT-WEB-REG-001",
+                suite="Regression",
+                bucket="regression",
+                title="Repeatable public-surface regression pack",
+                priority="high",
+                objective="Re-run the discovered safe public checks and compare the current evidence with a prior run.",
+                steps=["Load the previous approved baseline", "Re-run safe page, UI and accessibility checks", "Compare evidence and flag changed outcomes"],
+                expected=["Current results are traceable to the selected baseline"],
+                dependency="A prior completed baseline run is required.",
+            ),
+        ]
+
     async def _enrich_with_ai(self, meta: Dict[str, Any], context: str) -> Dict[str, Any]:
         try:
             provider = get_llm_provider()
             prompt = {
+                "platform": meta.get("platform", "android"),
+                "target_url": meta.get("web_url"),
                 "artifact": {
                     "app_name": meta.get("app_name"),
                     "package": meta.get("package_name"),
@@ -843,11 +1256,11 @@ class AutopilotPrototypeService:
                 LLMMessage(
                     role="system",
                     content=(
-                        "You are the QTXpert Autonomous Mobile QA Architect. Infer only what the evidence supports. "
+                        "You are the QTXpert Autonomous QA Architect for a website or mobile application. Infer only what the evidence supports. "
                         "Return strict JSON with keys: app_summary (string), inferred_domain (string), "
                         "critical_journeys (array of short strings), clarification_questions (max 6 array), "
                         "release_risks (array), tests (array). Each test must contain title, suite, priority, "
-                        "objective, steps, expected, destructive. Prefer high-value mobile tests that can be "
+                        "objective, steps, expected, destructive. Prefer high-value tests that can be "
                         "derived from the artifact. Never assume credentials or real transaction permission."
                     ),
                 ),
@@ -968,13 +1381,21 @@ class AutopilotPrototypeService:
         for terms, label in rules:
             if any(term in haystack for term in terms):
                 return label
-        return "General mobile application"
+        return "General web application" if meta.get("platform") == "web" else "General mobile application"
 
     @staticmethod
     def _fallback_summary(meta: Dict[str, Any]) -> str:
-        name = meta.get("app_name") or meta.get("package_name") or "Android application"
+        if meta.get("platform") == "web":
+            name = meta.get("web_title") or meta.get("app_name") or "Website"
+            return (
+                f"QTXpert inspected the public surface of {name}. The initial target returned "
+                f"HTTP {meta.get('web_status_code') or 'unknown'} with {meta.get('web_link_count', 0)} link(s), "
+                f"{meta.get('web_form_count', 0)} form(s) and {meta.get('web_input_count', 0)} input control(s). "
+                "Authenticated and business-critical outcomes remain pending until approved test setup is provided."
+            )
+        name = meta.get("app_name") or meta.get("package_name") or ("iOS application" if meta.get("platform") == "ios" else "Android application")
         return (
-            f"QTXpert identified {name} as an Android application with "
+            f"QTXpert identified {name} as an {('iOS' if meta.get('platform') == 'ios' else 'Android')} application with "
             f"{len(meta.get('activities', []))} activities, {len(meta.get('services', []))} services and "
             f"{len(meta.get('permissions', []))} declared permissions. The first Autopilot pass will remain "
             "non-destructive until test credentials and permitted business actions are supplied."
@@ -982,6 +1403,11 @@ class AutopilotPrototypeService:
 
     @staticmethod
     def _fallback_journeys(meta: Dict[str, Any]) -> List[str]:
+        if meta.get("platform") == "web":
+            journeys = ["Public entry-page render", "Same-origin navigation surface", "Semantic control and accessibility scan"]
+            if meta.get("web_form_count"):
+                journeys.append("Authenticated form and business journey (setup required)")
+            return journeys
         journeys = ["Install and cold launch", "First-screen rendering", "Background/foreground recovery"]
         if "android.permission.INTERNET" in meta.get("permissions", []):
             journeys.append("Network-dependent user journey and recovery")
@@ -991,6 +1417,15 @@ class AutopilotPrototypeService:
 
     @staticmethod
     def _fallback_questions(meta: Dict[str, Any]) -> List[str]:
+        if meta.get("platform") == "web":
+            return [
+                "Which non-production environment and approved URL may QTXpert test?",
+                "Provide a vault/credential reference and account role for authenticated journeys.",
+                "Which business actions are prohibited or require explicit approval?",
+                "Which pages and integrations are release-critical?",
+                "Provide synthetic test data and a reset/cleanup reference.",
+                "Which browsers, viewport sizes and performance thresholds are in scope?",
+            ]
         questions = [
             "Which environment may QTXpert test (dev, QA, UAT, staging or production)?",
             "Provide non-production test credentials/roles needed to access authenticated journeys.",
@@ -1003,6 +1438,13 @@ class AutopilotPrototypeService:
 
     @staticmethod
     def _fallback_risks(meta: Dict[str, Any]) -> List[str]:
+        if meta.get("platform") == "web":
+            risks = []
+            if meta.get("web_status_code", 200) >= 400:
+                risks.append(f"Initial website request returned HTTP {meta.get('web_status_code')}; availability requires investigation.")
+            if meta.get("web_form_count"):
+                risks.append("Authenticated and form-driven journeys were discovered but not executed without approved credentials and synthetic data.")
+            return risks or ["Business rules, authenticated journeys and backend integrations require approved setup and runtime evidence."]
         risks = []
         if meta.get("debuggable") is True:
             risks.append("Application is marked debuggable; validate that this is not a production/release artifact.")
@@ -1014,6 +1456,14 @@ class AutopilotPrototypeService:
 
     @staticmethod
     def _capabilities(meta: Dict[str, Any]) -> Dict[str, bool]:
+        if meta.get("platform") == "web":
+            return {
+                "static_web_surface_analysis": True,
+                "playwright_smoke_execution": True,
+                "runtime_web_discovery": True,
+                "authenticated_journey_execution": False,
+                "ai_test_design": True,
+            }
         permissions = set(meta.get("permissions", []))
         return {
             "static_apk_analysis": True,
@@ -1056,7 +1506,7 @@ class AutopilotPrototypeService:
                         "file": (
                             apk_path.name,
                             handle,
-                            "application/vnd.android.package-archive",
+                            "application/octet-stream" if apk_path.suffix.lower() == ".ipa" else "application/vnd.android.package-archive",
                         )
                     },
                     data={"custom_id": custom_id},
@@ -1116,64 +1566,92 @@ class AutopilotPrototypeService:
     async def execute_smoke(self, job_id: str, request: AutopilotExecutionRequest) -> AutopilotExecutionResult:
         job = await self.load_job(job_id)
         analysis = await self.load_analysis(job_id)
+        job_target_kind = str(job.get("target_kind") or analysis.target_kind or "android")
+        target_kind = job_target_kind if job_target_kind != "android" and request.target_kind == "android" else request.target_kind
+        if target_kind == "web":
+            request = request.model_copy(update={
+                "target_kind": "web",
+                "provider": "playwright",
+                "target_url": request.target_url or job.get("target_url"),
+            })
+        elif request.target_kind != target_kind:
+            # A caller may reuse the Android-shaped default payload for an IPA
+            # job. Normalize it from the durable job so Appium selects XCUITest
+            # and the result remains truthful.
+            request = request.model_copy(update={"target_kind": target_kind})
         started = datetime.now(timezone.utc)
         start_perf = time.perf_counter()
         execution_id = uuid4()
         evidence_dir = self._job_dir(job_id) / "evidence" / str(execution_id)
         evidence_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = evidence_dir / "launch.png"
-        source_path = evidence_dir / "page-source.xml"
+        source_path = evidence_dir / ("page-source.html" if target_kind == "web" else "page-source.xml")
 
         try:
-            apk_path = Path(job.get("apk_path") or "")
-            if not apk_path.is_file() and not request.appium_app:
-                raise RuntimeError(
-                    "The uploaded APK artifact is unavailable after a service restart. "
-                    "Upload the APK again before running smoke execution."
+            if target_kind == "web":
+                from app.services.autopilot_web import AutopilotWebService
+
+                web_result = await AutopilotWebService(self.settings, self).smoke(job_id, request)
+                result = dict(web_result.get("evidence") or {})
+                result.update(
+                    {
+                        "provider": "playwright",
+                        "target_kind": "web",
+                        "target_url": web_result.get("target_url"),
+                        "screenshot_path": web_result.get("screenshot_path"),
+                        "page_source_path": web_result.get("page_source_path"),
+                    }
                 )
-            app_reference = request.appium_app or str(apk_path)
-            browserstack_options: Dict[str, Any] | None = None
-
-            if request.provider == "browserstack":
-                app_reference = await self._browserstack_app_url(job_id, apk_path, analysis.sha256)
-                appium_url = self.settings.BROWSERSTACK_HUB_URL
-                browserstack_options = {
-                    "userName": self.settings.BROWSERSTACK_USERNAME,
-                    "accessKey": self.settings.BROWSERSTACK_ACCESS_KEY,
-                    "projectName": self.settings.BROWSERSTACK_PROJECT_NAME,
-                    "buildName": f"Autopilot {analysis.app_name or analysis.package_name or job['filename']}",
-                    "sessionName": f"Safe Smoke {job_id[:8]}",
-                    "debug": True,
-                    "networkLogs": True,
-                }
+                execution_status = str(web_result.get("status") or "failed")
+                error = web_result.get("error")
             else:
-                # Hosted custom Appium must be explicitly configured/reachable.
-                # BrowserStack uses its own hub URL and must not go through this
-                # resolver (which intentionally rejects an unconfigured hosted
-                # custom endpoint).
-                appium_url = self.resolve_appium_url(request)
+                apk_path = Path(job.get("apk_path") or "")
+                if not apk_path.is_file() and not request.appium_app:
+                    raise RuntimeError(
+                        "The uploaded mobile artifact is unavailable after a service restart. "
+                        "Upload the APK/IPA again before running smoke execution."
+                    )
+                app_reference = request.appium_app or str(apk_path)
+                browserstack_options: Dict[str, Any] | None = None
 
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._execute_appium_sync,
-                    appium_url,
-                    app_reference,
-                    request,
-                    screenshot_path,
-                    source_path,
-                    browserstack_options,
-                    self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
-                    self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
-                    self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
-                    analysis.package_name,
-                ),
-                timeout=self.settings.AUTOPILOT_SMOKE_TIMEOUT_SECONDS,
-            )
-            result["provider"] = request.provider
-            if request.provider == "browserstack":
-                result["cloud_app_reference"] = app_reference
-            execution_status = "passed"
-            error = None
+                if request.provider == "browserstack":
+                    app_reference = await self._browserstack_app_url(job_id, apk_path, analysis.sha256)
+                    appium_url = self.settings.BROWSERSTACK_HUB_URL
+                    browserstack_options = {
+                        "userName": self.settings.BROWSERSTACK_USERNAME,
+                        "accessKey": self.settings.BROWSERSTACK_ACCESS_KEY,
+                        "projectName": self.settings.BROWSERSTACK_PROJECT_NAME,
+                        "buildName": f"Autopilot {analysis.app_name or analysis.package_name or job['filename']}",
+                        "sessionName": f"Safe Smoke {job_id[:8]}",
+                        "debug": True,
+                        "networkLogs": True,
+                    }
+                else:
+                    # Hosted custom Appium must be explicitly configured/reachable.
+                    appium_url = self.resolve_appium_url(request)
+
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._execute_appium_sync,
+                        appium_url,
+                        app_reference,
+                        request,
+                        screenshot_path,
+                        source_path,
+                        browserstack_options,
+                        self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
+                        self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
+                        self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
+                        analysis.package_name,
+                    ),
+                    timeout=self.settings.AUTOPILOT_SMOKE_TIMEOUT_SECONDS,
+                )
+                result["provider"] = request.provider
+                result["target_kind"] = target_kind
+                if request.provider == "browserstack":
+                    result["cloud_app_reference"] = app_reference
+                execution_status = "passed"
+                error = None
         except Exception as exc:
             result = {"provider": request.provider}
             execution_status = "blocked" if self._looks_like_connector_problem(exc) else "failed"
@@ -1184,6 +1662,8 @@ class AutopilotPrototypeService:
             execution_id=execution_id,
             job_id=job_id,
             status=execution_status,
+            target_kind=target_kind,
+            target_url=request.target_url or job.get("target_url"),
             provider=request.provider,
             started_at=started.isoformat(),
             finished_at=finished.isoformat(),
@@ -1213,28 +1693,47 @@ class AutopilotPrototypeService:
         expected_package: str | None = None,
     ) -> Dict[str, Any]:
         from appium import webdriver
-        from appium.options.android import UiAutomator2Options
-
+        is_ios = request.target_kind == "ios"
         capabilities: Dict[str, Any] = {
-            "platformName": "Android",
-            "appium:automationName": "UiAutomator2",
+            "platformName": "iOS" if is_ios else "Android",
+            "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
             "appium:deviceName": request.device_name,
             "appium:app": app_reference,
             "appium:noReset": request.no_reset,
-            "appium:autoGrantPermissions": request.auto_grant_permissions,
             "appium:newCommandTimeout": 120,
-            "appium:androidInstallTimeout": install_timeout_ms,
-            "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
-            "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
-            "appium:adbExecTimeout": adb_exec_timeout_ms,
-            "appium:appWaitDuration": adb_exec_timeout_ms,
         }
+        if is_ios:
+            capabilities.update(
+                {
+                    "appium:wdaLaunchTimeout": server_launch_timeout_ms,
+                    "appium:wdaConnectionTimeout": adb_exec_timeout_ms,
+                    "appium:useNewWDA": False,
+                }
+            )
+        else:
+            capabilities.update(
+                {
+                    "appium:autoGrantPermissions": request.auto_grant_permissions,
+                    "appium:androidInstallTimeout": install_timeout_ms,
+                    "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
+                    "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
+                    "appium:adbExecTimeout": adb_exec_timeout_ms,
+                    "appium:appWaitDuration": adb_exec_timeout_ms,
+                }
+            )
         if request.platform_version:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
             capabilities["bstack:options"] = browserstack_options
 
-        options = UiAutomator2Options().load_capabilities(capabilities)
+        if is_ios:
+            from appium.options.ios import XCUITestOptions
+
+            options = XCUITestOptions().load_capabilities(capabilities)
+        else:
+            from appium.options.android import UiAutomator2Options
+
+            options = UiAutomator2Options().load_capabilities(capabilities)
         driver = webdriver.Remote(appium_url, options=options)
         try:
             time.sleep(3)
@@ -1323,4 +1822,3 @@ class AutopilotPrototypeService:
                 "authentication",
             )
         )
-

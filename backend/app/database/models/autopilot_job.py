@@ -1,4 +1,4 @@
-"""Durable metadata and analysis results for mobile Autopilot jobs."""
+"""Durable metadata and analysis results for Autopilot runtime jobs."""
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -16,10 +16,11 @@ def _utcnow() -> datetime:
 
 
 class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
-    """One mobile build and its durable Autopilot state.
+    """One website or mobile target and its durable Autopilot state.
 
-    The original APK belongs to the shared Upload Repository. ``apk_path`` is
-    only a disposable local materialization used by Androguard/Appium workers.
+    Mobile binaries belong to the shared Upload Repository. ``apk_path`` is
+    retained as a backwards-compatible name for the disposable local
+    materialization used by the mobile workers; website jobs use ``target_url``.
     """
 
     __tablename__ = "autopilot_jobs"
@@ -31,6 +32,9 @@ class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     owner_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
+    project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     repository_asset_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         PGUUID(as_uuid=True),
         ForeignKey("uploaded_assets.id", ondelete="SET NULL"),
@@ -38,6 +42,8 @@ class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         index=True,
     )
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="android", server_default="android")
+    target_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
     context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     apk_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="uploaded")

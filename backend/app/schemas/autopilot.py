@@ -1,4 +1,4 @@
-"""Schemas for the Android-first QTXpert Autopilot prototype."""
+"""Schemas for the unified QTXpert Autopilot target and evidence contract."""
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
@@ -21,6 +21,8 @@ AutopilotTestBucket = Literal[
     "permissions",
     "regression",
 ]
+AutopilotTargetKind = Literal["android", "ios", "web"]
+AutopilotProvider = Literal["browserstack", "appium", "playwright"]
 
 
 class AutopilotTest(BaseModel):
@@ -47,7 +49,9 @@ class AutopilotTest(BaseModel):
 class AutopilotAnalysis(BaseModel):
     job_id: str
     filename: str
-    platform: Literal["android"] = "android"
+    platform: AutopilotTargetKind = "android"
+    target_kind: AutopilotTargetKind = "android"
+    target_url: Optional[str] = None
     status: Literal["analyzed", "analysis_partial"] = "analyzed"
     app_name: Optional[str] = None
     package_name: Optional[str] = None
@@ -179,6 +183,8 @@ class AutopilotJobSummary(BaseModel):
     status: str
     package_name: Optional[str] = None
     app_name: Optional[str] = None
+    target_kind: AutopilotTargetKind = "android"
+    target_url: Optional[str] = None
     created_at: str
 
 
@@ -186,6 +192,8 @@ class AutopilotJobStatus(BaseModel):
     job_id: str
     filename: str
     status: Literal["uploaded", "analyzing", "analyzed", "failed"]
+    target_kind: AutopilotTargetKind = "android"
+    target_url: Optional[str] = None
     stage: str = "queued"
     progress: int = Field(default=0, ge=0, le=100)
     created_at: str
@@ -199,9 +207,10 @@ class AutopilotJobStatus(BaseModel):
 class AutopilotProviderStatus(BaseModel):
     browserstack_configured: bool = False
     custom_appium_available: bool = False
+    playwright_available: bool = True
     custom_appium_reason: Optional[str] = None
     custom_appium_url: Optional[str] = None
-    recommended_provider: Literal["browserstack", "appium"] = "appium"
+    recommended_provider: AutopilotProvider = "appium"
 
 
 class AutopilotSetupUpdateRequest(BaseModel):
@@ -248,7 +257,7 @@ class QTXIRStep(BaseModel):
     value: Optional[str] = None
     safe_for_autopilot: bool = True
     screen_id: Optional[str] = None
-    locator_strategy: Optional[Literal["accessibility_id", "id", "xpath"]] = None
+    locator_strategy: Optional[Literal["accessibility_id", "id", "xpath", "css"]] = None
     locator_value: Optional[str] = None
     locator_confidence: Optional[float] = Field(default=None, ge=0, le=1)
 
@@ -289,7 +298,9 @@ class AutopilotAutomationBundle(BaseModel):
 
 
 class AutopilotExecutionRequest(BaseModel):
-    provider: Literal["browserstack", "appium"] = "browserstack"
+    target_kind: AutopilotTargetKind = "android"
+    target_url: Optional[str] = None
+    provider: AutopilotProvider = "browserstack"
     appium_url: Optional[str] = None
     device_name: str = "Google Pixel 8"
     platform_version: Optional[str] = "14.0"
@@ -299,13 +310,16 @@ class AutopilotExecutionRequest(BaseModel):
     )
     no_reset: bool = False
     auto_grant_permissions: bool = True
+    browser: Literal["chromium"] = "chromium"
 
 
 class AutopilotExecutionResult(BaseModel):
     execution_id: Optional[UUID] = None
     job_id: str
     status: Literal["passed", "failed", "blocked"]
-    provider: Literal["browserstack", "appium"]
+    target_kind: AutopilotTargetKind = "android"
+    target_url: Optional[str] = None
+    provider: AutopilotProvider
     started_at: str
     finished_at: str
     duration_seconds: float
@@ -332,6 +346,7 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     """Start another analysis using the original or a replacement APK."""
 
     upload_id: Optional[UUID] = None
+    target_url: Optional[str] = Field(default=None, max_length=2048)
     context: Optional[str] = Field(default=None, max_length=8000)
     profile_id: str = Field(default="uae_fintech", max_length=80)
 
@@ -345,7 +360,7 @@ class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
 
 
 class DiscoveryLocator(BaseModel):
-    strategy: Literal["accessibility_id", "id", "xpath"]
+    strategy: Literal["accessibility_id", "id", "xpath", "css"]
     value: str
     confidence: float = Field(ge=0, le=1)
 
@@ -371,6 +386,8 @@ class DiscoveredScreen(BaseModel):
     fingerprint: str
     package_name: Optional[str] = None
     activity_name: Optional[str] = None
+    url: Optional[str] = None
+    title: Optional[str] = None
     screenshot_path: Optional[str] = None
     page_source_path: Optional[str] = None
     screenshot_asset_id: Optional[UUID] = None
@@ -390,7 +407,9 @@ class DiscoveredTransition(BaseModel):
 class AutopilotDiscoveryResult(BaseModel):
     job_id: str
     status: Literal["completed", "partial", "blocked", "failed"]
-    provider: Literal["browserstack", "appium"]
+    target_kind: AutopilotTargetKind = "android"
+    target_url: Optional[str] = None
+    provider: AutopilotProvider
     started_at: str
     finished_at: str
     duration_seconds: float
@@ -432,7 +451,9 @@ class AutopilotSuiteTestResult(BaseModel):
 class AutopilotSuiteResult(BaseModel):
     job_id: str
     status: Literal["passed", "failed", "partial", "blocked"]
-    provider: Literal["browserstack", "appium"]
+    target_kind: AutopilotTargetKind = "android"
+    target_url: Optional[str] = None
+    provider: AutopilotProvider
     started_at: str
     finished_at: str
     duration_seconds: float

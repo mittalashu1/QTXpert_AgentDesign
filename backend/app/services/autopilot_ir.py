@@ -35,6 +35,12 @@ class AutopilotIRCompiler:
         "QT-AUTO-UX-001",
         "QT-AUTO-UI-001",
     }
+    WEB_EXECUTABLE_IDS = {
+        "QT-WEB-SMOKE-001",
+        "QT-WEB-PAGE-001",
+        "QT-WEB-A11Y-001",
+        "QT-WEB-SEC-001",
+    }
     _TAP_RE = re.compile(r"^(?:tap|click|open|navigate\s+to|go\s+to|select|choose|press)\s+(.+)$", re.I)
     _ASSERT_RE = re.compile(r"^(?:verify|check|ensure|assert|observe|validate)\s+(.+)$", re.I)
     _INPUT_RE = re.compile(r"^(?:enter|type|input|fill|provide)\b", re.I)
@@ -62,6 +68,7 @@ class AutopilotIRCompiler:
         return AutopilotAutomationBundle(
             job_id=analysis.job_id,
             generated_at=datetime.now(timezone.utc).isoformat(),
+            framework="QTX Test IR + Playwright Python" if analysis.target_kind == "web" else "QTX Test IR + Appium Python",
             discovery_used=bool(discovery and discovery.screens),
             promoted_count=sum(test.promoted_by_discovery for test in compiled),
             executable_count=sum(test.readiness == "executable" for test in compiled),
@@ -96,6 +103,9 @@ class AutopilotIRCompiler:
         elif missing_setup:
             readiness = "discovery_required"
             readiness_reason = "Provide setup: " + "; ".join(missing_setup) + "."
+        elif analysis.target_kind == "web" and test.id in self.WEB_EXECUTABLE_IDS:
+            readiness = "executable"
+            readiness_reason = "Deterministic Playwright public-surface check."
         elif test.id in self.EXECUTABLE_IDS:
             readiness = "executable"
             readiness_reason = "Deterministic platform-level Autopilot check."
@@ -155,6 +165,11 @@ class AutopilotIRCompiler:
         return missing
 
     def _ir_steps(self, test: AutopilotTest) -> list[QTXIRStep]:
+        if test.id.startswith("QT-WEB-"):
+            return [
+                QTXIRStep(action="inspect_ui", description="Inspect the rendered website DOM and interactive surface."),
+                QTXIRStep(action="capture_evidence", description="Capture website screenshot and HTML evidence."),
+            ]
         if test.id == "QT-AUTO-SMOKE-001":
             return [
                 QTXIRStep(action="launch_app", description="Create an Android automation session and launch the uploaded application."),
@@ -356,6 +371,25 @@ class AutopilotIRCompiler:
     def _appium_script(self, test: AutopilotTest, analysis: AutopilotAnalysis, generated: QTXTestIR) -> str:
         function_name = self._function_name(test.id)
         package_hint = analysis.package_name or ""
+
+        if analysis.target_kind == "web":
+            target_url = analysis.target_url or ""
+            return dedent(
+                f'''\
+                def {function_name}(browser, evidence_dir):
+                    """QTX {test.id}: {test.title}."""
+                    from pathlib import Path
+
+                    evidence_dir = Path(evidence_dir)
+                    evidence_dir.mkdir(parents=True, exist_ok=True)
+                    page = browser.new_page()
+                    response = page.goto({target_url!r}, wait_until="domcontentloaded", timeout=45000)
+                    assert response is None or response.status < 400, f"Website returned HTTP {{response.status if response else 'unknown'}}"
+                    page.screenshot(path=str(evidence_dir / "{test.id.lower()}.png"), full_page=True)
+                    (evidence_dir / "{test.id.lower()}.html").write_text(page.content(), encoding="utf-8")
+                    return {{"url": page.url, "title": page.title(), "status_code": response.status if response else None}}
+                '''
+            ).strip()
 
         if test.id == "QT-AUTO-SMOKE-001":
             return dedent(

@@ -1,4 +1,4 @@
-"""Authenticated API endpoints for the Android-first Autopilot prototype."""
+"""Authenticated API endpoints for the unified Autopilot target runner."""
 import asyncio
 import logging
 import shutil
@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user
@@ -47,6 +47,7 @@ from app.services.autopilot import (
     AutopilotUploadTooLarge,
 )
 from app.services.autopilot_discovery import AutopilotDiscoveryService
+from app.services.autopilot_web import AutopilotWebService
 from app.services.autopilot_context import default_context, list_profiles
 from app.services.autopilot_ir import AutopilotIRCompiler
 from app.services.autopilot_report import build_test_audit_report
@@ -162,6 +163,8 @@ async def _ensure_local_artifact(
     user: User,
 ) -> Path:
     job = await _require_owned_job(service, job_id, user)
+    if str(job.get("target_kind") or "android") == "web":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Website jobs do not have a mobile artifact.")
     path_value = job.get("apk_path")
     if path_value and Path(path_value).is_file():
         return Path(path_value)
@@ -172,7 +175,7 @@ async def _ensure_local_artifact(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "The original APK predates the Upload Repository and is no longer available. "
+                "The original mobile artifact predates the Upload Repository and is no longer available. "
                 "Upload it once more; future runs can reuse it from Test Data → Uploads."
             ),
         )
@@ -253,8 +256,9 @@ async def _start_analysis_from_asset(
     asset: UploadedAsset,
     context: Optional[str],
     profile_id: str = "uae_fintech",
+    project_id: Optional[UUID] = None,
 ) -> AutopilotJobStatus:
-    """Create an analysis job from a durable repository APK.
+    """Create an analysis job from a durable repository APK or IPA.
 
     The materialized file is disposable; the repository asset remains the
     source of truth and can be used again after a Render restart.
@@ -271,6 +275,8 @@ async def _start_analysis_from_asset(
             str(user.id),
             context=_effective_context(context, profile_id),
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+            target_kind="ios" if asset.extension == "ipa" else "android",
+            project_id=str(project_id or asset.project_id) if (project_id or asset.project_id) else None,
         )
     finally:
         await reader.close()
@@ -291,6 +297,7 @@ async def _start_analysis_from_local_path(
     filename: str,
     context: Optional[str],
     profile_id: str = "uae_fintech",
+    project_id: Optional[UUID] = None,
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -307,6 +314,8 @@ async def _start_analysis_from_local_path(
             str(user.id),
             context=_effective_context(context, profile_id),
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+            target_kind="ios" if filename.lower().endswith(".ipa") else "android",
+            project_id=str(project_id) if project_id else None,
         )
     finally:
         await reader.close()
@@ -409,8 +418,8 @@ async def _persist_execution(
         job_record,
         service.settings,
         result.page_source_path,
-        filename=f"page-source-{execution_id}.xml",
-        content_type="application/xml",
+        filename=f"page-source-{execution_id}.{'html' if result.target_kind == 'web' else 'xml'}",
+        content_type="text/html" if result.target_kind == "web" else "application/xml",
         repository_asset_id=repository_asset_id,
     )
     evidence = dict(result.evidence or {})
@@ -467,7 +476,11 @@ def _execution_record_from_db(row: AutopilotExecution, job_id: str) -> Autopilot
         evidence.setdefault("screenshot_asset_id", str(row.screenshot_asset_id))
     if row.page_source_asset_id:
         evidence.setdefault("page_source_asset_id", str(row.page_source_asset_id))
+    target_kind = str(evidence.get("target_kind") or "android")
+    target_url = evidence.get("target_url")
     request = AutopilotExecutionRequest(
+        target_kind=target_kind,
+        target_url=str(target_url) if target_url else None,
         provider=row.provider,
         appium_url=row.appium_url,
         device_name=row.device_name,
@@ -480,6 +493,8 @@ def _execution_record_from_db(row: AutopilotExecution, job_id: str) -> Autopilot
         execution_id=row.id,
         job_id=job_id,
         status=row.status,
+        target_kind=target_kind,
+        target_url=str(target_url) if target_url else None,
         provider=row.provider,
         started_at=row.started_at.isoformat(),
         finished_at=row.finished_at.isoformat(),
@@ -525,7 +540,18 @@ async def _execute_and_persist(
     job_id: str,
     request: AutopilotExecutionRequest,
 ) -> AutopilotExecutionResult:
-    await _ensure_local_artifact(db, service, job_id, user)
+    job = await _require_owned_job(service, job_id, user)
+    target_kind = str(job.get("target_kind") or "android")
+    if target_kind == "web":
+        request = request.model_copy(update={
+            "target_kind": "web",
+            "provider": "playwright",
+            "target_url": request.target_url or job.get("target_url"),
+        })
+    else:
+        if request.target_kind != target_kind:
+            request = request.model_copy(update={"target_kind": target_kind})
+        await _ensure_local_artifact(db, service, job_id, user)
     result = await service.execute_smoke(job_id, request)
     record = await _safe_job_record(db, job_id, user.id)
     if record is not None:
@@ -567,6 +593,7 @@ async def get_autopilot_providers(
     return AutopilotProviderStatus(
         browserstack_configured=configured,
         custom_appium_available=custom_available,
+        playwright_available=True,
         custom_appium_reason=reason,
         custom_appium_url=configured_appium_url,
         recommended_provider="browserstack" if configured else "appium",
@@ -594,26 +621,49 @@ async def get_autopilot_profiles(
 
 
 @router.post("/analyze", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
-async def analyze_mobile_app(
+async def analyze_autopilot_target(
     background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
     context: str = Form(default=""),
     profile_id: str = Form(default="uae_fintech"),
+    target_url: str = Form(default=""),
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
-    """Upload an APK into the active project's repository, then analyze it."""
+    """Analyze a website URL, Android APK or iOS IPA as one Autopilot job."""
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
-    filename = Path(file.filename or "application.apk").name
-    if not filename.lower().endswith(".apk"):
+    service = _service(settings)
+    normalized_url = target_url.strip()
+    if normalized_url:
+        try:
+            job_id = await service.save_web_target(
+                normalized_url,
+                str(user.id),
+                context=_effective_context(context, profile_id),
+                project_id=str(project_id) if project_id else None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        background_tasks.add_task(service.analyze_safely, job_id)
+        result = await service.get_job_status(job_id)
+        return await _mark_repository_available(db, result, user.id)
+
+    if file is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The current prototype supports Android APK files. IPA support is the next platform milestone.",
+            detail="Provide a website URL or upload an Android APK/iOS IPA before starting Autopilot.",
         )
 
-    service = _service(settings)
+    filename = Path(file.filename or "application.apk").name
+    extension = Path(filename).suffix.lower()
+    if extension not in {".apk", ".ipa"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Autopilot accepts Android .apk and iOS .ipa files, or a website URL.",
+        )
+    target_kind = "ios" if extension == ".ipa" else "android"
     max_bytes = settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024
     try:
         job_id, apk_path = await service.save_upload_stream(
@@ -622,6 +672,8 @@ async def analyze_mobile_app(
             str(user.id),
             context=_effective_context(context, profile_id),
             max_bytes=max_bytes,
+            target_kind=target_kind,
+            project_id=str(project_id) if project_id else None,
         )
     except AutopilotUploadTooLarge as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
@@ -645,10 +697,10 @@ async def analyze_mobile_app(
                 apk_path,
                 user.id,
                 filename=filename,
-                content_type=file.content_type or "application/vnd.android.package-archive",
+                content_type=file.content_type or ("application/octet-stream" if target_kind == "ios" else "application/vnd.android.package-archive"),
                 project_id=project_id,
                 source_module="autopilot",
-                category="apk",
+                category=extension.lstrip(".") or "apk",
                 max_bytes=max_bytes,
                 minimum_bytes=1024,
                 settings=settings,
@@ -672,7 +724,7 @@ async def analyze_mobile_app(
             raise HTTPException(
                 status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
                 detail=(
-                    "The APK upload was received but could not be saved to the Upload Repository. "
+                    "The mobile upload was received but could not be saved to the Upload Repository. "
                     "Increase repository/database capacity or configure object storage, then retry."
                 ),
             ) from exc
@@ -692,7 +744,7 @@ async def analyze_existing_mobile_app(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
-    """Start a new Android analysis from an APK in the active project."""
+    """Start a new mobile analysis from an APK or IPA in the active project."""
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     try:
         asset = await UploadRepositoryService.get_owned(db, payload.upload_id, user.id)
@@ -705,8 +757,8 @@ async def analyze_existing_mobile_app(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Stored APK reuse is temporarily unavailable; upload the APK file again or restore database access.",
         ) from exc
-    if asset is None or asset.extension != "apk" or (project_id is not None and asset.project_id != project_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK not found in this project")
+    if asset is None or asset.extension not in {"apk", "ipa"} or (project_id is not None and asset.project_id != project_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK/IPA not found in this project")
     return await _start_analysis_from_asset(
         background_tasks=background_tasks,
         db=db,
@@ -715,6 +767,7 @@ async def analyze_existing_mobile_app(
         asset=asset,
         context=payload.context,
         profile_id=payload.profile_id,
+        project_id=project_id,
     )
 
 
@@ -733,6 +786,23 @@ async def rerun_autopilot_analysis(
     original = await _require_owned_job(service, job_id, user)
     original_record = await _safe_job_record(db, job_id, user.id)
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    original_target_kind = str(original.get("target_kind") or "android")
+    if original_target_kind == "web" and payload.upload_id is None:
+        target_url = payload.target_url or str(original.get("target_url") or "")
+        try:
+            new_job_id = await service.save_web_target(
+                target_url,
+                str(user.id),
+                context=_effective_context(
+                    payload.context if payload.context is not None else str(original.get("context", "")),
+                    payload.profile_id,
+                ),
+                project_id=str(project_id) if project_id else str(original.get("project_id") or "") or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        background_tasks.add_task(service.analyze_safely, new_job_id)
+        return await service.get_job_status(new_job_id)
     if settings.AUTOPILOT_DEGRADED_MODE_ENABLED and payload.upload_id is None:
         return await _start_analysis_from_local_path(
             background_tasks=background_tasks,
@@ -742,6 +812,7 @@ async def rerun_autopilot_analysis(
             filename=Path(str(original.get("filename", "application.apk"))).name,
             context=payload.context if payload.context is not None else str(original.get("context", "")),
             profile_id=payload.profile_id,
+            project_id=project_id,
         )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
@@ -773,6 +844,7 @@ async def rerun_autopilot_analysis(
         asset=asset,
         context=context,
         profile_id=payload.profile_id,
+        project_id=project_id,
     )
 
 
@@ -789,8 +861,8 @@ async def get_latest_autopilot_job(
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     query = select(AutopilotJob).where(AutopilotJob.owner_id == user.id)
     if project_id is not None:
-        query = query.join(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
-            UploadedAsset.project_id == project_id
+        query = query.outerjoin(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
+            or_(AutopilotJob.project_id == project_id, UploadedAsset.project_id == project_id)
         )
     try:
         record = await db.scalar(query.order_by(AutopilotJob.created_at.desc()).limit(1))
@@ -815,6 +887,7 @@ async def get_latest_autopilot_job(
     local_path = job.get("apk_path")
     if (
         record.status in {"uploaded", "analyzing"}
+        and record.target_kind != "web"
         and record.repository_asset_id is not None
         and (not local_path or not Path(local_path).is_file())
     ):
@@ -839,6 +912,7 @@ async def get_autopilot_job_status(
     record = await _safe_job_record(db, job_id, user.id)
     if (
         job.get("status") in {"uploaded", "analyzing"}
+        and str(job.get("target_kind") or "android") != "web"
         and record is not None
         and record.repository_asset_id is not None
         and (not local_path or not Path(local_path).is_file())
@@ -950,9 +1024,25 @@ async def run_autopilot_discovery(
 ):
     """Perform bounded safe navigation and persist the discovered app map."""
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
-    await _ensure_local_artifact(db, service, job_id, user)
-    result = await AutopilotDiscoveryService(settings, service).run(job_id, payload)
+    job = await _require_owned_job(service, job_id, user)
+    target_kind = str(job.get("target_kind") or "android")
+    if target_kind == "web":
+        web_request = payload.model_copy(update={
+            "target_kind": "web",
+            "provider": "playwright",
+            "target_url": payload.target_url or job.get("target_url"),
+        })
+        result = await AutopilotWebService(settings, service).discover(job_id, web_request)
+    else:
+        await _ensure_local_artifact(db, service, job_id, user)
+        if target_kind == "ios" and payload.provider == "appium" and not payload.appium_app:
+            # A hosted Appium endpoint cannot see a Render-local IPA path. The
+            # BrowserStack adapter materializes the repository asset itself;
+            # custom remote labs must provide their own reachable app reference.
+            record = await _safe_job_record(db, job_id, user.id)
+            if settings.APP_ENV != "local" and record is not None and record.repository_asset_id and not payload.appium_app:
+                raise HTTPException(status_code=400, detail="Hosted custom Appium requires a remote IPA reference for iOS discovery.")
+        result = await AutopilotDiscoveryService(settings, service).run(job_id, payload)
     record = await _safe_job_record(db, job_id, user.id)
     if record is not None and result.screens:
         repository_asset_id = record.repository_asset_id
@@ -973,8 +1063,8 @@ async def run_autopilot_discovery(
                 record,
                 settings,
                 screen.page_source_path,
-                filename=f"discovery-{job_id[:8]}-{screen.screen_id}.xml",
-                content_type="application/xml",
+                filename=f"discovery-{job_id[:8]}-{screen.screen_id}.{'html' if result.target_kind == 'web' else 'xml'}",
+                content_type="text/html" if result.target_kind == "web" else "application/xml",
                 repository_asset_id=repository_asset_id,
             )
         record = await _safe_job_record(db, job_id, user.id)
@@ -1011,15 +1101,63 @@ async def execute_autopilot_suite(
 ):
     """Execute only QTX IR cases proven safe and deterministic."""
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
-    await _ensure_local_artifact(db, service, job_id, user)
+    job = await _require_owned_job(service, job_id, user)
     record = await _safe_job_record(db, job_id, user.id)
-    result = await AutopilotSuiteService(settings, service).run(
-        job_id,
-        payload,
-        _record_discovery(record),
-        _record_setup(record, job_id),
-    )
+    if str(job.get("target_kind") or "android") == "web":
+        analysis = await service.load_analysis(job_id)
+        setup = _record_setup(record, job_id)
+        discovery = _record_discovery(record)
+        bundle = AutopilotIRCompiler().compile_bundle(analysis, discovery, setup)
+        requested_ids = set(payload.test_ids)
+        requested_buckets = set(payload.buckets)
+        selected = [
+            item for item in bundle.tests
+            if (not requested_ids or item.test_id in requested_ids)
+            and (not requested_buckets or item.bucket in requested_buckets)
+        ][: payload.max_tests]
+        candidates = [item for item in selected if item.readiness == "executable" and item.steps]
+        deferred = [item for item in selected if item not in candidates]
+        if not candidates:
+            now = datetime.now(timezone.utc).isoformat()
+            result = AutopilotSuiteResult(
+                job_id=job_id,
+                target_kind="web",
+                target_url=job.get("target_url"),
+                provider="playwright",
+                status="blocked",
+                started_at=now,
+                finished_at=now,
+                duration_seconds=0,
+                device_name="Chromium (headless)",
+                selected_count=len(selected),
+                deferred_count=len(deferred),
+                skipped_count=len(deferred),
+                bucket_counts={item.bucket: sum(candidate.bucket == item.bucket for candidate in selected) for item in selected},
+                error="No safe deterministic website checks are available; deferred cases list their dependencies.",
+                tests=AutopilotSuiteService._deferred_results(deferred) if payload.include_deferred else [],
+            )
+        else:
+            web_request = payload.model_copy(update={
+                "target_kind": "web",
+                "provider": "playwright",
+                "target_url": payload.target_url or job.get("target_url"),
+            })
+            result = await AutopilotWebService(settings, service).safe_suite(job_id, web_request, candidates)
+            deferred_results = AutopilotSuiteService._deferred_results(deferred) if payload.include_deferred else []
+            result = result.model_copy(update={
+                "selected_count": len(selected),
+                "deferred_count": len(deferred),
+                "skipped_count": result.skipped_count + len(deferred_results),
+                "tests": result.tests + deferred_results,
+            })
+    else:
+        await _ensure_local_artifact(db, service, job_id, user)
+        result = await AutopilotSuiteService(settings, service).run(
+            job_id,
+            payload,
+            _record_discovery(record),
+            _record_setup(record, job_id),
+        )
     if record is not None:
         try:
             record.suite_execution = result.model_dump(mode="json")

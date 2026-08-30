@@ -150,7 +150,9 @@ def _application_overview(analysis: AutopilotAnalysis, context: str) -> Autopilo
         if _contains(context, *terms):
             features.append(label)
     publisher = "Finance House" if _contains(context, "finance house") else "Not specified"
-    observed_name = analysis.app_name or _context_application_name(context) or "Android application"
+    platform = str(analysis.target_kind or analysis.platform or "android")
+    platform_label = {"android": "Android", "ios": "iOS", "web": "Web"}.get(platform, platform.title())
+    observed_name = analysis.app_name or _context_application_name(context) or f"{platform_label} application"
     # Keep the APK-observed name while making the executive-facing label
     # unambiguous when the supplied context identifies the publisher. This is
     # a label composition only; package/version remain evidence from the APK.
@@ -160,8 +162,8 @@ def _application_overview(analysis: AutopilotAnalysis, context: str) -> Autopilo
     return AutopilotApplicationOverview(
         name=display_name,
         publisher=publisher,
-        platform="Android",
-        package_name=analysis.package_name or "Not identified",
+        platform=platform_label,
+        package_name=analysis.package_name or (analysis.target_url or "Not identified"),
         version=analysis.version_name or analysis.version_code or "Not identified",
         target_market="UAE residents and investors" if _contains(context, "uae") else "Not specified",
         regulatory_bodies=regulators or ["Not specified"],
@@ -230,18 +232,28 @@ def _nonfunctional_checks(analysis: AutopilotAnalysis, discovery: Optional[Autop
             for key, title, dependency in pending_controls
         ]
 
-    security_status = "fail" if analysis.debuggable is True else "pending"
+    platform = str(analysis.target_kind or analysis.platform or "android")
+    platform_label = {"android": "Android", "ios": "iOS", "web": "Web"}.get(platform, platform.title())
+    artifact_label = "APK manifest" if platform == "android" else "IPA metadata" if platform == "ios" else "website surface"
+    security_status = "fail" if platform == "android" and analysis.debuggable is True else "pending"
     security_summary = (
         "The APK is marked debuggable; this is a release blocker unless an approved exception exists."
         if analysis.debuggable is True
-        else "Manifest permissions and debug posture were inventoried; dynamic penetration and encryption verification are not proven by APK analysis."
+        else f"{artifact_label} was inventoried; dynamic penetration, encryption and secret-storage verification are not proven by static analysis."
+    )
+    footprint_evidence = (
+        [f"Android manifest inventory: {len(analysis.permissions)} permissions, {len(analysis.activities)} activities"]
+        if platform == "android"
+        else [f"{platform_label} package metadata and static artifact inventory"]
+        if platform == "ios"
+        else ["HTTP/HTML website surface inventory"]
     )
     return [
         AutopilotReportCheck(
             key="performance",
             title="Performance and peak concurrency",
             status="pending",
-            summary="APK analysis and a mobile smoke run do not measure concurrency, gateway latency or sustained performance.",
+            summary=f"{artifact_label} analysis and a safe run do not measure concurrency, gateway latency or sustained performance.",
             dependency="Approved load/performance execution is required.",
             evidence=["No load-test result is attached to this Autopilot job"],
             recommendation="Run an approved load profile and capture p95/p99 latency, error rate and payment-gateway timings.",
@@ -250,9 +262,9 @@ def _nonfunctional_checks(analysis: AutopilotAnalysis, discovery: Optional[Autop
             key="mobile_footprint",
             title="Mobile footprint and device compatibility",
             status="pending" if not discovery else "warning",
-            summary="Static package metadata is available; memory, battery, startup and iOS/cross-device coverage require runtime measurements.",
+            summary=f"Static {artifact_label.lower()} metadata is available; memory, battery, startup and cross-device coverage require runtime measurements.",
             dependency="Real-device matrix evidence is required." if not discovery else None,
-            evidence=[f"Android manifest inventory: {len(analysis.permissions)} permissions, {len(analysis.activities)} activities"]
+            evidence=footprint_evidence
             + ([f"Runtime discovery captured {discovery.screen_count} screen(s)"] if discovery else []),
             recommendation="Execute the release matrix on supported iOS/Android real devices and capture resource telemetry.",
         ),
@@ -262,7 +274,7 @@ def _nonfunctional_checks(analysis: AutopilotAnalysis, discovery: Optional[Autop
             status=security_status,
             summary=security_summary,
             dependency="Dynamic security evidence is required." if security_status == "pending" else None,
-            evidence=["Static APK manifest inspection"] + (["Debuggable flag is true"] if analysis.debuggable is True else []),
+            evidence=[f"Static {artifact_label} inspection"] + (["Debuggable flag is true"] if analysis.debuggable is True else []),
             recommendation="Run approved dynamic security testing and verify TLS, key storage, logging redaction and least-privilege permissions.",
         ),
     ]
@@ -470,11 +482,17 @@ def build_test_audit_report(
             "Supply non-production credentials, representative data and explicit approval boundaries for authenticated or financial journeys.",
             "Attach backend/API, performance, security and compliance evidence before the release decision is changed to GO.",
         ]
-        evidence = [
-            f"Static APK analysis: SHA-256 {analysis.sha256}",
-            f"Manifest inventory: {len(analysis.permissions)} permission(s), {len(analysis.activities)} activity(ies), {len(analysis.services)} service(s)",
-            metrics.evidence_state,
-        ]
+        platform = str(analysis.target_kind or analysis.platform or "android")
+        if platform == "android":
+            static_evidence = [
+                f"Static APK analysis: SHA-256 {analysis.sha256}",
+                f"Manifest inventory: {len(analysis.permissions)} permission(s), {len(analysis.activities)} activity(ies), {len(analysis.services)} service(s)",
+            ]
+        elif platform == "ios":
+            static_evidence = [f"Static IPA analysis: SHA-256 {analysis.sha256}", f"IPA archive inventory: {analysis.file_count} file(s)"]
+        else:
+            static_evidence = [f"Website target analysis: {analysis.target_url or 'URL not recorded'}", f"HTML surface inventory: {analysis.file_count} resource(s)"]
+        evidence = [*static_evidence, metrics.evidence_state]
 
     return AutopilotTestAuditReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
