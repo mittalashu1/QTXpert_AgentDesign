@@ -20,6 +20,7 @@ import ArrowBackOutlinedIcon from "@mui/icons-material/ArrowBackOutlined";
 import MoreVertOutlinedIcon from "@mui/icons-material/MoreVertOutlined";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import RefreshOutlinedIcon from "@mui/icons-material/RefreshOutlined";
+import Grid from "@mui/material/Grid2";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { requirementsApi, testCasesApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
@@ -136,6 +137,11 @@ function runTitle(run: RunRailEntry) {
 
 function runCaseCount(run: RunRailEntry) {
   return "test_case_count" in run ? run.test_case_count : run.test_cases?.length ?? 0;
+}
+
+function testCaseTypeLabel(value: string) {
+  const normalized = value.replace(/[_-]+/g, " ").trim();
+  return normalized ? normalized.replace(/\b\w/g, (character) => character.toUpperCase()) : "Functional";
 }
 
 function inputHeading(source: InputSource, files: File[], sourceUrl: string, prompt: string) {
@@ -325,6 +331,9 @@ export default function GenerateTestCasesPage() {
   const [renamingRunId, setRenamingRunId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [caseSearch, setCaseSearch] = useState("");
+  const [caseTypeFilter, setCaseTypeFilter] = useState("all");
+  const [expandedCaseGroups, setExpandedCaseGroups] = useState<Record<string, boolean>>({});
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const source = SOURCES.find((item) => item.id === selectedSource) ?? SOURCES[1];
   useEffect(() => {
@@ -563,6 +572,33 @@ export default function GenerateTestCasesPage() {
     setDraftCases((current) => current.map((item, idx) => idx === index ? next : item));
   };
 
+  const testTypeOptions = useMemo(
+    () => [...new Set(draftCases.map((testCase) => testCase.test_type || "functional"))].sort(),
+    [draftCases],
+  );
+  const filteredDraftCases = useMemo(() => {
+    const search = caseSearch.trim().toLowerCase();
+    return draftCases
+      .map((testCase, index) => ({ testCase, index }))
+      .filter(({ testCase }) => {
+        const matchesType = caseTypeFilter === "all" || (testCase.test_type || "functional") === caseTypeFilter;
+        const matchesSearch = !search || `${testCase.test_case_key} ${testCase.scenario} ${testCase.objective} ${testCase.test_type}`.toLowerCase().includes(search);
+        return matchesType && matchesSearch;
+      });
+  }, [caseSearch, caseTypeFilter, draftCases]);
+  const draftCaseGroups = useMemo(() => {
+    const groups = new Map<string, Array<{ testCase: TestCase; index: number }>>();
+    filteredDraftCases.forEach((item) => {
+      const key = item.testCase.test_type || "functional";
+      const current = groups.get(key) ?? [];
+      current.push(item);
+      groups.set(key, current);
+    });
+    return [...groups.entries()];
+  }, [filteredDraftCases]);
+  const automationCandidateCount = draftCases.filter((testCase) => testCase.is_automation_candidate).length;
+  const highRiskCount = draftCases.filter((testCase) => testCase.risk_level === "high" || ["critical", "blocker"].includes(testCase.severity)).length;
+
   const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={2} alignItems="flex-start"><RunRail runs={allRuns} activeId={run?.id} openingId={openingRunId} renamingId={renamingRunId} onSelect={openRun} onRename={renameRun} onDelete={deleteRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
 
   if (run) return workspace(<Stack spacing={2}>
@@ -570,8 +606,21 @@ export default function GenerateTestCasesPage() {
     {isActive && <LinearProgress variant="determinate" value={PROGRESS[run.status] ?? 10} />}
     {isActive && <Alert severity="info">{draftCases.length ? `${draftCases.length} real test cases are ready to review below. Additional coverage is still generating.` : "Analyzing your inputs. The first completed test-case batch will appear here automatically."}</Alert>}
     {run.error_message && <Alert severity={run.status === "failed" ? "error" : "warning"}>{run.error_message}</Alert>}
-    {(run.status === "completed" || localPreview) && <Card><CardContent><Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h6">Review and improve</Typography><Typography variant="body2" color="text.secondary">Every field is editable. Changes stay in this saved suite.</Typography></Box><Stack direction="row" spacing={1}>{["excel", "csv", "json"].map((format) => <Button key={format} size="small" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => exportMutation.mutate(format)} disabled={exportMutation.isPending}>{format === "excel" ? "Excel" : format.toUpperCase()}</Button>)}</Stack></Stack></CardContent></Card>}
-    <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "repeat(2, minmax(0, 1fr))", lg: "repeat(3, minmax(0, 1fr))", xl: "repeat(4, minmax(0, 1fr))" }, gap: 1.25, maxHeight: { lg: "calc(100vh - 300px)" }, overflowY: { lg: "auto" }, pr: { lg: 1 }, alignItems: "start" }}>{draftCases.map((testCase, index) => <EditableCase key={testCase.id || index} testCase={testCase} onChange={(next) => updateCase(index, next)} />)}</Box>{!isActive && !draftCases.length && run.status !== "failed" && <Alert severity="info">The provider returned no test cases. Edit the inputs and run again.</Alert>}{message && <Alert severity="success" onClose={() => setMessage(null)}>{message}</Alert>}{error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
+    {(run.status === "completed" || localPreview) && <>
+      <Card variant="outlined"><CardContent><Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h6">Review and improve</Typography><Typography variant="body2" color="text.secondary">Every field is editable. Grouped sections make the suite easy to scan before you save it.</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>{["excel", "csv", "json"].map((format) => <Button key={format} size="small" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => exportMutation.mutate(format)} disabled={exportMutation.isPending}>{format === "excel" ? "Excel" : format.toUpperCase()}</Button>)}</Stack></Stack></CardContent></Card>
+      <Grid container spacing={1.25}>
+        {[["Total cases", draftCases.length, "Generated scenarios"], ["Automation candidates", automationCandidateCount, "Ready for execution review"], ["High-risk cases", highRiskCount, "Critical or blocker severity"], ["Coverage groups", testTypeOptions.length, "Functional areas represented"]].map(([label, value, helper]) => <Grid key={String(label)} size={{ xs: 6, sm: 3 }}><Card variant="outlined" sx={{ height: "100%" }}><CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h5" sx={{ fontWeight: 800, mt: 0.35 }}>{value}</Typography><Typography variant="caption" color="text.secondary">{helper}</Typography></CardContent></Card></Grid>)}
+      </Grid>
+      <Card variant="outlined"><CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1.25} alignItems={{ sm: "center" }}><TextField size="small" label="Search cases" value={caseSearch} onChange={(event) => setCaseSearch(event.target.value)} placeholder="Key, scenario or objective" sx={{ minWidth: { sm: 260 } }} /><FormControl size="small" sx={{ minWidth: { sm: 190 } }}><InputLabel id="design-case-type-filter">Coverage group</InputLabel><Select labelId="design-case-type-filter" label="Coverage group" value={caseTypeFilter} onChange={(event) => setCaseTypeFilter(event.target.value)}><MenuItem value="all">All groups</MenuItem>{testTypeOptions.map((type) => <MenuItem key={type} value={type}>{testCaseTypeLabel(type)}</MenuItem>)}</Select></FormControl><Chip size="small" variant="outlined" label={`${filteredDraftCases.length} of ${draftCases.length} visible`} /><Box sx={{ flex: 1 }} /><Typography variant="caption" color="text.secondary">Expand a group to edit its cases.</Typography></Stack></CardContent></Card>
+      <Stack spacing={1.25} sx={{ maxHeight: { lg: "calc(100vh - 430px)" }, overflowY: { lg: "auto" }, pr: { lg: 1 } }}>
+        {draftCaseGroups.map(([group, items]) => <Accordion key={group} expanded={expandedCaseGroups[group] ?? true} onChange={(_, expanded) => setExpandedCaseGroups((current) => ({ ...current, [group]: expanded }))} disableGutters variant="outlined" sx={{ borderRadius: 2, "&:before": { display: "none" } }}>
+          <AccordionSummary expandIcon={<ExpandMoreOutlinedIcon />} sx={{ px: 1.5, minHeight: 52, "& .MuiAccordionSummary-content": { my: 0.8 } }}><Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}><Typography sx={{ fontWeight: 800 }}>{testCaseTypeLabel(group)}</Typography><Chip size="small" label={`${items.length} ${items.length === 1 ? "case" : "cases"}`} /></Stack></AccordionSummary>
+          <AccordionDetails sx={{ p: 1.25, pt: 0.25 }}><Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "repeat(2, minmax(0, 1fr))", xl: "repeat(3, minmax(0, 1fr))" }, gap: 1.1, alignItems: "start" }}>{items.map(({ testCase, index }) => <EditableCase key={testCase.id || index} testCase={testCase} onChange={(next) => updateCase(index, next)} />)}</Box></AccordionDetails>
+        </Accordion>)}
+        {!draftCaseGroups.length && <Alert severity="info">No test cases match the current search or coverage group.</Alert>}
+      </Stack>
+    </>}
+    {!isActive && !draftCases.length && run.status !== "failed" && <Alert severity="info">The provider returned no test cases. Edit the inputs and run again.</Alert>}{message && <Alert severity="success" onClose={() => setMessage(null)}>{message}</Alert>}{error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
   </Stack>);
 
   return workspace(<Stack spacing={3}>

@@ -31,11 +31,12 @@ import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import RuleOutlinedIcon from "@mui/icons-material/RuleOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import OpenInNewOutlinedIcon from "@mui/icons-material/OpenInNewOutlined";
+import SearchOutlinedIcon from "@mui/icons-material/SearchOutlined";
 import { AxiosError } from "axios";
 import { executionPlansApi, executionsApi, testCasesApi, uploadsApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
-import type { ExecutionPlan, ExecutionPlanCase, ExecutionProvider, ExecutionTargetKind, UploadedAsset } from "@/types/domain";
+import type { ExecutionPlan, ExecutionPlanCase, ExecutionProvider, ExecutionRun, ExecutionTargetKind, UploadedAsset } from "@/types/domain";
 
 const STEPS = ["Import from Test Design", "Select cases", "Preflight and run", "Review evidence"];
 
@@ -80,6 +81,16 @@ function runStatusColor(status: string): "success" | "error" | "warning" | "info
   return "info";
 }
 
+function executionTargetLabel(run: ExecutionRun) {
+  if (run.target_kind === "android") return `Android · ${run.device_name || "device"}${run.platform_version ? ` · ${run.platform_version}` : ""}`;
+  if (run.target_kind === "ios") return `iOS · ${run.device_name || "device"}${run.platform_version ? ` · ${run.platform_version}` : ""}`;
+  return `Web · ${run.base_url || "target unavailable"}`;
+}
+
+function executionRunDate(run: ExecutionRun) {
+  return new Date(run.completed_at || run.started_at || run.created_at).toLocaleString();
+}
+
 export default function TestExecutionPage() {
   const { selectedProjectId } = useSelectedProject();
   const navigate = useNavigate();
@@ -102,6 +113,8 @@ export default function TestExecutionPage() {
   const [preflightSignature, setPreflightSignature] = useState("");
   const [caseFilter, setCaseFilter] = useState("all");
   const [caseSearch, setCaseSearch] = useState("");
+  const [runSearch, setRunSearch] = useState("");
+  const [runFilter, setRunFilter] = useState("all");
   const [selection, setSelection] = useState<Record<string, boolean>>({});
   const [modes, setModes] = useState<Record<string, "automated" | "manual">>({});
   const [selectionDirty, setSelectionDirty] = useState(false);
@@ -288,8 +301,28 @@ export default function TestExecutionPage() {
     });
   }, [caseFilter, caseSearch, currentCases, selection]);
 
+  const caseGroups = useMemo(() => {
+    const groups = new Map<string, ExecutionPlanCase[]>();
+    filteredCases.forEach((item) => {
+      const key = item.test_type || "functional";
+      const current = groups.get(key) ?? [];
+      current.push(item);
+      groups.set(key, current);
+    });
+    return [...groups.entries()];
+  }, [filteredCases]);
+
+  const filteredExecutionRuns = useMemo(() => {
+    const search = runSearch.trim().toLowerCase();
+    return [...(runs.data ?? [])]
+      .filter((run) => runFilter === "all" || run.status === runFilter)
+      .filter((run) => !search || `${run.name} ${executionTargetLabel(run)} ${run.provider}`.toLowerCase().includes(search))
+      .sort((left, right) => new Date(right.completed_at || right.created_at).getTime() - new Date(left.completed_at || left.created_at).getTime());
+  }, [runFilter, runSearch, runs.data]);
+
   const selectedAutomated = currentCases.filter((item) => selection[item.id] && (modes[item.id] ?? item.execution_mode) === "automated");
   const readyCount = currentPlan?.ready_cases ?? 0;
+  const needsAttentionCount = currentPlan ? Math.max(0, currentPlan.total_cases - currentPlan.ready_cases) : 0;
   const canExecute = Boolean(
     currentPlan
     && selectedAutomated.length > 0
@@ -422,37 +455,45 @@ export default function TestExecutionPage() {
                   {saveSelection.isPending ? "Saving…" : "Save selection"}
                 </Button>
               </Stack>
+              <Grid container spacing={1.25} sx={{ mb: 2 }}>
+                {[["Imported", currentPlan.total_cases, "Cases in this snapshot"], ["Selected", currentPlan.selected_cases, "Included in this plan"], ["Ready", currentPlan.ready_cases, "Eligible for automation"], ["Needs attention", needsAttentionCount, "Discovery, data or approval"]].map(([label, value, helper]) => <Grid key={String(label)} size={{ xs: 6, sm: 3 }}><Box sx={{ p: 1.2, borderRadius: 2, bgcolor: "action.hover", height: "100%" }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" sx={{ fontWeight: 800 }}>{value}</Typography><Typography variant="caption" color="text.secondary">{helper}</Typography></Box></Grid>)}
+              </Grid>
               {saveSelection.isError && <Alert severity="error" sx={{ mb: 2 }}>{apiErrorMessage(saveSelection.error, "The case selection could not be saved.")}</Alert>}
               {selectionDirty && <Alert severity="info" sx={{ mb: 2 }}>You have unsaved case changes. Save the selection before running preflight.</Alert>}
-              <Stack spacing={1}>
-                {filteredCases.map((item: ExecutionPlanCase) => {
-                  const selected = Boolean(selection[item.id]);
-                  const mode = modes[item.id] ?? item.execution_mode;
-                  return <Box key={item.id} sx={{ border: "1px solid", borderColor: selected ? "primary.main" : "divider", borderRadius: 2, p: 1.25, bgcolor: selected ? "action.selected" : "background.paper" }}>
-                    <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} alignItems={{ md: "center" }}>
-                      <Checkbox checked={selected} onChange={(event) => { setSelection((previous) => ({ ...previous, [item.id]: event.target.checked })); setSelectionDirty(true); }} inputProps={{ "aria-label": `Select ${item.test_case_key}` }} />
-                      <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-                          <Typography fontWeight={800}>{item.test_case_key}</Typography>
-                          <Chip size="small" label={item.test_type.replace(/_/g, " ")} />
-                          <Chip size="small" label={`Risk: ${item.risk_level}`} color={item.risk_level === "high" ? "error" : "default"} variant="outlined" />
-                          {item.is_automation_candidate && <Chip size="small" label="Design candidate" color="primary" variant="outlined" />}
+              <Stack spacing={1.25}>
+                {caseGroups.map(([group, items]) => <Box key={group}>
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.75 }}><Typography variant="subtitle2" sx={{ fontWeight: 800, textTransform: "capitalize" }}>{group.replace(/[_-]/g, " ")}</Typography><Chip size="small" label={`${items.length} ${items.length === 1 ? "case" : "cases"}`} /></Stack>
+                  <Stack spacing={0.8}>
+                    {items.map((item: ExecutionPlanCase) => {
+                      const selected = Boolean(selection[item.id]);
+                      const mode = modes[item.id] ?? item.execution_mode;
+                      return <Box key={item.id} sx={{ border: "1px solid", borderColor: selected ? "primary.main" : "divider", borderRadius: 2, p: 1.1, bgcolor: selected ? "action.selected" : "background.paper" }}>
+                        <Stack direction={{ xs: "column", md: "row" }} spacing={1.25} alignItems={{ md: "center" }}>
+                          <Checkbox checked={selected} onChange={(event) => { setSelection((previous) => ({ ...previous, [item.id]: event.target.checked })); setSelectionDirty(true); }} inputProps={{ "aria-label": `Select ${item.test_case_key}` }} />
+                          <Box sx={{ flex: 1, minWidth: 0 }}>
+                            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                              <Typography fontWeight={800}>{item.test_case_key}</Typography>
+                              <Chip size="small" label={item.test_type.replace(/_/g, " ")} />
+                              <Chip size="small" label={`Risk: ${item.risk_level}`} color={item.risk_level === "high" ? "error" : "default"} variant="outlined" />
+                              {item.is_automation_candidate && <Chip size="small" label="Design candidate" color="primary" variant="outlined" />}
+                            </Stack>
+                            <Typography variant="body2" sx={{ mt: 0.25 }}>{item.scenario}</Typography>
+                            {item.blocker_reason && <Typography variant="caption" color="error.main">{item.blocker_reason}</Typography>}
+                          </Box>
+                          {selected && <FormControl size="small" sx={{ minWidth: 145 }}>
+                            <InputLabel id={`mode-${item.id}`}>Mode</InputLabel>
+                            <Select labelId={`mode-${item.id}`} label="Mode" value={mode} onChange={(event) => { setModes((previous) => ({ ...previous, [item.id]: event.target.value as "automated" | "manual" })); setSelectionDirty(true); }}>
+                              <MenuItem value="automated">Automated</MenuItem>
+                              <MenuItem value="manual">Manual review</MenuItem>
+                            </Select>
+                          </FormControl>}
+                          <Chip size="small" label={selected ? item.readiness : "not selected"} color={selected ? readinessColor(item.readiness) : "default"} variant="outlined" />
                         </Stack>
-                        <Typography variant="body2" sx={{ mt: 0.25 }}>{item.scenario}</Typography>
-                        {item.blocker_reason && <Typography variant="caption" color="error.main">{item.blocker_reason}</Typography>}
-                      </Box>
-                      {selected && <FormControl size="small" sx={{ minWidth: 145 }}>
-                        <InputLabel id={`mode-${item.id}`}>Mode</InputLabel>
-                        <Select labelId={`mode-${item.id}`} label="Mode" value={mode} onChange={(event) => { setModes((previous) => ({ ...previous, [item.id]: event.target.value as "automated" | "manual" })); setSelectionDirty(true); }}>
-                          <MenuItem value="automated">Automated</MenuItem>
-                          <MenuItem value="manual">Manual review</MenuItem>
-                        </Select>
-                      </FormControl>}
-                      <Chip size="small" label={selected ? item.readiness : "not selected"} color={selected ? readinessColor(item.readiness) : "default"} variant="outlined" />
-                    </Stack>
-                  </Box>;
-                })}
-                {!filteredCases.length && <Alert severity="info">No imported cases match this filter.</Alert>}
+                      </Box>;
+                    })}
+                  </Stack>
+                </Box>)}
+                {!caseGroups.length && <Alert severity="info">No imported cases match this filter.</Alert>}
               </Stack>
             </CardContent>
           </Card>
@@ -543,16 +584,42 @@ export default function TestExecutionPage() {
 
       <Card variant="outlined">
         <CardContent>
-          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={2}>
+          <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ md: "center" }} spacing={2} sx={{ mb: 1.5 }}>
             <Box>
-              <Typography variant="h6" sx={{ fontWeight: 800 }}>Results live in Test reports</Typography>
-              <Typography variant="body2" color="text.secondary">Execution history, per-case outcomes, defects and mobile evidence are report-owned. Original packages remain available in Repositories → Documents for reuse.</Typography>
+              <Typography variant="h6" sx={{ fontWeight: 800 }}>Recent execution runs</Typography>
+              <Typography variant="body2" color="text.secondary">A compact history of this project. Open any run for the full report, evidence and timeline.</Typography>
             </Box>
             <Button variant="outlined" endIcon={<OpenInNewOutlinedIcon />} onClick={() => navigate("/reports")}>Open Test reports</Button>
           </Stack>
-          {runs.isFetching && <LinearProgress sx={{ mt: 2 }} />}
-          {!runs.isLoading && planRuns.length > 0 && <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 2 }}>{planRuns.slice(0, 3).map((run) => <Chip key={run.id} label={`${run.name}: ${run.status}`} color={runStatusColor(run.status)} variant="outlined" />)}</Stack>}
-          {!runs.isLoading && !planRuns.length && <Alert severity="info" sx={{ mt: 2 }}>No execution runs for this plan yet. Select cases and run preflight first.</Alert>}
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1.5 }}>
+            <TextField size="small" value={runSearch} onChange={(event) => setRunSearch(event.target.value)} placeholder="Search runs or targets" InputProps={{ startAdornment: <SearchOutlinedIcon sx={{ mr: 0.75, color: "text.secondary" }} /> }} sx={{ minWidth: { sm: 260 } }} />
+            <FormControl size="small" sx={{ minWidth: 150 }}>
+              <InputLabel id="execution-run-filter">Status</InputLabel>
+              <Select labelId="execution-run-filter" label="Status" value={runFilter} onChange={(event) => setRunFilter(event.target.value)}>
+                <MenuItem value="all">All statuses</MenuItem>
+                <MenuItem value="running">Running</MenuItem>
+                <MenuItem value="queued">Queued</MenuItem>
+                <MenuItem value="completed">Completed</MenuItem>
+                <MenuItem value="failed">Failed</MenuItem>
+                <MenuItem value="cancelled">Cancelled</MenuItem>
+              </Select>
+            </FormControl>
+            {runs.isFetching && <LinearProgress sx={{ flex: 1, alignSelf: "center" }} />}
+          </Stack>
+          {!runs.isLoading && !filteredExecutionRuns.length && <Alert severity="info">No execution runs match the current filter.</Alert>}
+          <Stack spacing={0.8} sx={{ maxHeight: 300, overflowY: "auto" }}>
+            {filteredExecutionRuns.map((run) => <Box key={run.id} onClick={() => navigate(`/reports?run=${run.id}`)} sx={{ p: 1.1, border: "1px solid", borderColor: "divider", borderRadius: 2, cursor: "pointer", transition: "border-color .15s, background-color .15s", "&:hover": { borderColor: "primary.main", bgcolor: "action.hover" } }}>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}>
+                <Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="body2" fontWeight={800} noWrap>{run.name}</Typography><Typography variant="caption" color="text.secondary" noWrap>{executionTargetLabel(run)} · {run.provider}</Typography></Box>
+                <Chip size="small" label={run.status} color={runStatusColor(run.status)} />
+                <Typography variant="caption" sx={{ whiteSpace: "nowrap" }}>{run.passed_tests}/{run.total_tests} passed</Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: "nowrap" }}>{executionRunDate(run)}</Typography>
+                <Button size="small" onClick={(event) => { event.stopPropagation(); navigate(`/reports?run=${run.id}`); }}>View</Button>
+              </Stack>
+            </Box>)}
+          </Stack>
+          {runs.isLoading && <LinearProgress sx={{ mt: 1.5 }} />}
+          {!runs.isLoading && !filteredExecutionRuns.length && planRuns.length === 0 && <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>Runs will appear here after a successful preflight and execution.</Typography>}
         </CardContent>
       </Card>
     </Box>
