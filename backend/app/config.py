@@ -228,6 +228,18 @@ class Settings(BaseSettings):
     # private network endpoint.
     AUTOPILOT_CUSTOM_APPIUM_URL: Optional[str] = None
 
+    # ------------------------------------------------------------------ #
+    # Generated data retention
+    # ------------------------------------------------------------------ #
+    # Destructive retention is opt-in.  The admin preview/cleanup endpoint
+    # and one-shot maintenance script use these values; production startup
+    # cleanup remains disabled until an administrator enables it deliberately.
+    DATA_RETENTION_ENABLED: bool = False
+    DATA_RETENTION_DAYS: int = Field(default=7, ge=1, le=3650)
+    DATA_RETENTION_KEEP_LATEST: int = Field(default=3, ge=0, le=100)
+    DATA_RETENTION_INCLUDE_EPHEMERAL_ASSETS: bool = True
+    DATA_RETENTION_RUN_ON_STARTUP: bool = False
+
     BROWSERSTACK_USERNAME: Optional[str] = None
     BROWSERSTACK_ACCESS_KEY: Optional[str] = None
     BROWSERSTACK_HUB_URL: str = "https://hub-cloud.browserstack.com/wd/hub"

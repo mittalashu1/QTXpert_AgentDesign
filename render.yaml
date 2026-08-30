@@ -62,6 +62,18 @@ services:
       - key: AUTOPILOT_RECOVERY_ENABLED
         # Web instances must not replay large APK jobs during a deploy.
         value: "false"
+      - key: DATA_RETENTION_ENABLED
+        # Cleanup is admin-confirmed; keep automatic deletion disabled until
+        # the Neon backup/restore policy has been reviewed.
+        value: "false"
+      - key: DATA_RETENTION_DAYS
+        value: "7"
+      - key: DATA_RETENTION_KEEP_LATEST
+        value: "3"
+      - key: DATA_RETENTION_INCLUDE_EPHEMERAL_ASSETS
+        value: "true"
+      - key: DATA_RETENTION_RUN_ON_STARTUP
+        value: "false"
       - key: LLM_PROVIDER
         value: router
       - key: LLM_ROUTER_LOW_COST

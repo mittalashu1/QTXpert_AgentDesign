@@ -16,12 +16,15 @@ from app.api.routes import (
     export,
     health,
     requirements,
+    retention,
     settings,
     test_cases,
     uploads,
     usage,
 )
 from app.config import get_settings
+from app.database.session import AsyncSessionLocal
+from app.services.data_retention import cleanup_generated_data
 from app.services.autopilot_recovery import recover_interrupted_autopilot_jobs
 
 settings_obj = get_settings()
@@ -54,6 +57,7 @@ def create_app() -> FastAPI:
     prefix = settings_obj.API_V1_PREFIX
     app.include_router(auth.router, prefix=prefix)
     app.include_router(requirements.router, prefix=prefix)
+    app.include_router(retention.router, prefix=prefix)
     app.include_router(uploads.router, prefix=prefix)
     app.include_router(document_intelligence.router, prefix=prefix)
     app.include_router(test_cases.router, prefix=prefix)
@@ -77,6 +81,29 @@ def create_app() -> FastAPI:
         app.state.autopilot_recovery = asyncio.create_task(
             recover_interrupted_autopilot_jobs(settings_obj)
         )
+
+    @app.on_event("startup")
+    async def schedule_generated_data_retention() -> None:
+        # Retention is intentionally opt-in and detached from HTTP startup.
+        # The normal production path is the admin-confirmed endpoint or the
+        # one-shot script; this hook is available only for an explicitly
+        # configured single-instance deployment/cron replacement.
+        if not (
+            settings_obj.DATA_RETENTION_ENABLED
+            and settings_obj.DATA_RETENTION_RUN_ON_STARTUP
+        ):
+            logger.info("Generated-data startup retention disabled; skipping cleanup")
+            app.state.data_retention = None
+            return
+
+        async def _run_retention() -> None:
+            try:
+                async with AsyncSessionLocal() as session:
+                    await cleanup_generated_data(session, settings_obj, dry_run=False)
+            except Exception:
+                logger.exception("Generated-data startup retention failed")
+
+        app.state.data_retention = asyncio.create_task(_run_retention())
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
