@@ -123,6 +123,7 @@ export default function RequirementUploadPage() {
         const response = await uploadsApi.upload(file, {
           projectId: selectedProjectId,
           sourceModule: "document_intelligence",
+          category: "document",
         });
         uploaded.push(response.data);
       }
@@ -441,7 +442,7 @@ function OverviewTab({ run, projectAssets }: { run?: DocumentAnalysisRun | null;
 
 function DocumentsTab({ assets, run, selectedAssetIds, onToggle }: { assets: UploadedAsset[]; run?: DocumentAnalysisRun | null; selectedAssetIds: string[]; onToggle: (id: string) => void }) {
   const inventory = new Map((run?.document_inventory || []).map((item) => [item.asset_id, item]));
-  if (assets.length === 0) return <Alert severity="info">No project documents are available yet. Upload development/testing artifacts above or through Test Data → Uploads.</Alert>;
+  if (assets.length === 0) return <Alert severity="info">No project documents are available yet. Upload an artifact above or open Repositories → Documents.</Alert>;
   return (
     <TableContainer>
       <Table size="small">

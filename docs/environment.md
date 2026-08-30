@@ -70,8 +70,9 @@ still shown when a model has no configured rate.
 |---|---|---|
 | `MAX_UPLOAD_SIZE_MB` | 25 | Per-file readable document limit (BRD/export/test-data text inputs) |
 | `AUTOPILOT_MAX_UPLOAD_SIZE_MB` | 250 | Per-file APK/IPA limit shared by Autopilot and Design app-source uploads |
-| `ALLOWED_UPLOAD_EXTENSIONS` | pdf,docx,txt,md,json,csv | Accepted BRD/export formats |
-| `UPLOAD_STORAGE_PATH` | ./storage/uploads | Local scratch path (uploads are processed then discarded; nothing is persisted to disk beyond this) |
+| `ALLOWED_UPLOAD_EXTENSIONS` | pdf,docx,txt,md,json,csv,… | Accepted document, test-data, media and APK/IPA formats |
+| `UPLOAD_STORAGE_BACKEND` | postgres_chunks | Shared Upload Repository backend (`postgres_chunks` for compatibility or `object_store` for R2/S3-compatible storage) |
+| `UPLOAD_STORAGE_PATH` | ./storage/uploads | Local working path used by the repository fallback; repository metadata and bytes remain project-scoped and reusable |
 | `RATE_LIMIT_PER_MINUTE` | 60 | Per-client-IP request budget |
 
 ## Frontend (`frontend/.env`)

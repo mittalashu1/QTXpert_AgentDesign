@@ -81,6 +81,9 @@ class AutopilotAnalysis(BaseModel):
     context_considered: Optional[bool] = None
     ai_enrichment_used: Optional[bool] = None
     analysis_basis: List[str] = Field(default_factory=list)
+    # Repository documentation attached to this run. The IDs make the source
+    # of the context auditable without copying document contents into reports.
+    document_asset_ids: List[UUID] = Field(default_factory=list)
 
 
 ReportCheckStatus = Literal["pass", "fail", "warning", "pending", "not_assessed"]
@@ -204,6 +207,7 @@ class AutopilotJobStatus(BaseModel):
     created_at: str
     updated_at: str
     context: str = ""
+    document_asset_ids: List[UUID] = Field(default_factory=list)
     artifact_available: bool = True
     error: Optional[str] = None
     analysis: Optional[AutopilotAnalysis] = None
@@ -354,6 +358,7 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     target_url: Optional[str] = Field(default=None, max_length=2048)
     context: Optional[str] = Field(default=None, max_length=8000)
     profile_id: str = Field(default="uae_fintech", max_length=80)
+    document_asset_ids: Optional[List[UUID]] = Field(default=None, max_length=20)
 
 
 class AutopilotDiscoveryRequest(AutopilotExecutionRequest):

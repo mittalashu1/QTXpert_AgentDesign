@@ -45,6 +45,7 @@ class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     target_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="android", server_default="android")
     target_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
     context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    document_asset_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     apk_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="uploaded")
     stage: Mapped[str] = mapped_column(String(80), nullable=False, default="queued")

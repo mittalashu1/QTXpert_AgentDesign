@@ -3,12 +3,14 @@ from typing import Annotated, List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user, require_roles
 from app.config import Settings, get_settings
-from app.database.models.requirement import RequirementSource
+from app.database.models.requirement import Requirement, RequirementSource
 from app.database.models.user import User, UserRole
+from app.database.models.uploaded_asset import UploadedAsset
 from app.database.repositories.requirement_repository import (
     ProjectRepository,
     RequirementRepository,
@@ -19,6 +21,7 @@ from app.schemas.requirement import (
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
+    ReuseRequirementRequest,
     RequirementOut,
 )
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
@@ -205,6 +208,84 @@ async def upload_requirement(
         source=source,
         raw_content=text,
         source_file_path=f"upload:{asset.id}",
+    )
+
+
+@router.post("/requirements/from-upload", response_model=RequirementOut, status_code=status.HTTP_201_CREATED)
+async def reuse_uploaded_requirement(
+    payload: ReuseRequirementRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Use a repository document as a generation input without uploading it again.
+
+    The Upload Repository owns the original bytes. This endpoint only creates
+    the normalized requirement record that Test Design needs, and returns the
+    existing record when the same document was already used in this project.
+    """
+    await _require_owned_project(db, payload.project_id, user.id)
+    asset = await db.scalar(
+        select(UploadedAsset).where(
+            UploadedAsset.id == payload.upload_id,
+            UploadedAsset.owner_id == user.id,
+            UploadedAsset.project_id == payload.project_id,
+            UploadedAsset.status == "ready",
+        )
+    )
+    if asset is None or asset.category not in {"document", "test_data"}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository document not found in this project")
+
+    source_path = f"upload:{asset.id}"
+    existing = await db.scalar(
+        select(Requirement).where(
+            Requirement.project_id == payload.project_id,
+            Requirement.source_file_path == source_path,
+        ).order_by(Requirement.created_at.desc())
+    )
+    if existing is not None:
+        return existing
+
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    chunks: list[bytes] = []
+    total_bytes = 0
+    try:
+        async for chunk in UploadRepositoryService.iter_content(db, asset.id, settings=settings):
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"Document exceeds {settings.MAX_UPLOAD_SIZE_MB}MB limit",
+                )
+            chunks.append(chunk)
+    except UploadRepositoryStorageUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="File storage is temporarily unavailable; retry reusing this document after storage recovers.",
+        ) from exc
+
+    try:
+        text = extract_text(asset.filename, b"".join(chunks))
+    except UnsupportedDocumentTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This repository asset is not a readable document and cannot be used as Test Design input.",
+        ) from exc
+    if not text.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The repository document contains no readable text")
+    if len(text) > settings.MAX_REQUIREMENT_TEXT_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Extracted requirement text is too large for a single generation run",
+        )
+
+    source = RequirementSource.JIRA_EXPORT if asset.extension.lower() in {"json", "csv"} else RequirementSource.BRD_UPLOAD
+    return await RequirementRepository(db).create(
+        project_id=payload.project_id,
+        title=asset.filename,
+        source=source,
+        raw_content=text,
+        source_file_path=source_path,
     )
 
 

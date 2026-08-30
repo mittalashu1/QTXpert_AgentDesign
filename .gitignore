@@ -1,0 +1,15 @@
+# Python caches and local test scratch space
+__pycache__/
+*.py[cod]
+.pytest_cache/
+backend/pytest-run-*/
+backend/.pytest-tmp/
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# Local verification logs
+*.log
+tsc-output.txt

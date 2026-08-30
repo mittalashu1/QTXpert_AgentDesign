@@ -34,6 +34,13 @@ class DirectPromptRequest(BaseModel):
     content: str = Field(min_length=1)
 
 
+class ReuseRequirementRequest(BaseModel):
+    """Create/reuse a requirement from an asset already in the repository."""
+
+    project_id: UUID
+    upload_id: UUID
+
+
 class RequirementOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

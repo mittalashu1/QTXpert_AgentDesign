@@ -89,14 +89,19 @@ async def upload_to_repository(
 
     is_mobile_binary = extension in {"apk", "ipa"}
     max_mb = settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB if is_mobile_binary else settings.MAX_UPLOAD_SIZE_MB
+    normalized_source = (source_module or "test_data").strip()[:80] or "test_data"
+    # Preserve the dedicated Test Data boundary even for older clients that
+    # omit an explicit category. Document-oriented callers pass category=
+    # document for ambiguous formats such as spreadsheets and JSON.
+    effective_category = category or ("test_data" if normalized_source == "test_data" else None)
     try:
         return await UploadRepositoryService.create_from_upload(
             db,
             file,
             user.id,
             project_id=active_project_id,
-            source_module=source_module,
-            category=category,
+            source_module=normalized_source,
+            category=effective_category,
             max_bytes=max_mb * 1024 * 1024,
             minimum_bytes=1024 if is_mobile_binary else 1,
             settings=settings,

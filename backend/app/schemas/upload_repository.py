@@ -28,4 +28,8 @@ class ReuseUploadedAssetRequest(BaseModel):
     upload_id: UUID
     context: str = Field(default="", max_length=8000)
     profile_id: str = Field(default="uae_fintech", max_length=80)
+    # Optional project documentation to reuse as analysis context. ``None``
+    # means preserve the attachments from the previous run when rerunning;
+    # an empty list deliberately clears them.
+    document_asset_ids: Optional[list[UUID]] = Field(default=None, max_length=20)
 

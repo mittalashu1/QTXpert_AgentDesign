@@ -1,6 +1,8 @@
 """Authenticated API endpoints for the unified Autopilot target runner."""
 import asyncio
+import json
 import logging
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +54,7 @@ from app.services.autopilot_context import default_context, list_profiles
 from app.services.autopilot_ir import AutopilotIRCompiler
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
+from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
 from app.services.upload_repository import (
     UploadRepositoryInvalid,
     UploadRepositoryService,
@@ -70,6 +73,112 @@ def _effective_context(value: Optional[str], profile_id: str = "uae_fintech") ->
     """Ensure every entry point uses a safe context, including direct API clients."""
     cleaned = (value or "").strip()
     return cleaned[:8000] if cleaned else default_context(profile_id=profile_id)
+
+
+def _parse_document_asset_ids(value: object) -> list[UUID]:
+    """Parse the JSON form field used by the multipart Autopilot endpoint."""
+    if value is None or value == "":
+        return []
+    parsed: object = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="document_asset_ids must be a JSON array") from exc
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="document_asset_ids must be a JSON array")
+    if len(parsed) > 20:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Select at most 20 supporting documents")
+    result: list[UUID] = []
+    for item in parsed:
+        try:
+            asset_id = UUID(str(item))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="One or more supporting document IDs are invalid") from exc
+        if asset_id not in result:
+            result.append(asset_id)
+    return result
+
+
+def _redact_document_excerpt(value: str) -> str:
+    """Keep obvious credential values out of the model context."""
+    lines: list[str] = []
+    sensitive = re.compile(r"\b(password|passcode|token|secret|otp|api[_ -]?key)\b\s*[:=]", re.IGNORECASE)
+    for line in value.splitlines():
+        lines.append("[redacted sensitive document line]" if sensitive.search(line) else line)
+    return "\n".join(lines)
+
+
+async def _document_context(
+    db: AsyncSession,
+    user: User,
+    project_id: Optional[UUID],
+    document_asset_ids: list[UUID],
+    settings: Settings,
+) -> tuple[list[UUID], str]:
+    """Validate selected repository documents and build a bounded context excerpt."""
+    if not document_asset_ids:
+        return [], ""
+    query = select(UploadedAsset).where(
+        UploadedAsset.id.in_(document_asset_ids),
+        UploadedAsset.owner_id == user.id,
+        UploadedAsset.status == "ready",
+        UploadedAsset.category.in_(["document", "test_data"]),
+    )
+    if project_id is not None:
+        query = query.where(UploadedAsset.project_id == project_id)
+    assets = list((await db.scalars(query)).all())
+    assets_by_id = {asset.id: asset for asset in assets}
+    if len(assets_by_id) != len(document_asset_ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or more supporting documents were not found in this project")
+
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    excerpts: list[str] = []
+    total_bytes = 0
+    for asset_id in document_asset_ids:
+        asset = assets_by_id[asset_id]
+        chunks: list[bytes] = []
+        asset_bytes = 0
+        try:
+            async for chunk in UploadRepositoryService.iter_content(db, asset.id, settings=settings):
+                asset_bytes += len(chunk)
+                total_bytes += len(chunk)
+                if asset_bytes > max_bytes or total_bytes > max_bytes * 2:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"Supporting documents exceed the {settings.MAX_UPLOAD_SIZE_MB * 2}MB analysis context limit",
+                    )
+                chunks.append(chunk)
+            text = extract_text(asset.filename, b"".join(chunks))
+        except UnsupportedDocumentTypeError:
+            # Keep the asset auditable even if its contents are not text
+            # extractable; the target and user context still drive analysis.
+            text = ""
+        except UploadRepositoryStorageUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="File storage is temporarily unavailable; retry after repository access recovers.",
+            ) from exc
+        safe_text = _redact_document_excerpt(text).strip()
+        if safe_text:
+            excerpts.append(f"[Repository document: {asset.filename}]\n{safe_text[:5000]}")
+        else:
+            excerpts.append(f"[Repository document: {asset.filename}]\nContent is stored in the project repository; text extraction is unavailable for this asset.")
+
+    return document_asset_ids, "\n\n".join(excerpts)
+
+
+def _context_with_documents(base_context: Optional[str], profile_id: str, document_excerpt: str) -> str:
+    context = _effective_context(base_context, profile_id)
+    if not document_excerpt:
+        return context
+    prefix = f"{context[:6000]}\n\nSelected repository documentation:\n"
+    return (prefix + document_excerpt)[:8000]
+
+
+def _context_without_documents(value: Optional[str]) -> str:
+    """Recover the editable user/profile brief from a stored effective context."""
+    return (value or "").split("\n\nSelected repository documentation:", 1)[0].strip()
 
 
 async def _active_project(
@@ -257,6 +366,7 @@ async def _start_analysis_from_asset(
     context: Optional[str],
     profile_id: str = "uae_fintech",
     project_id: Optional[UUID] = None,
+    document_asset_ids: Optional[list[UUID]] = None,
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
 
@@ -277,6 +387,7 @@ async def _start_analysis_from_asset(
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
             target_kind="ios" if asset.extension == "ipa" else "android",
             project_id=str(project_id or asset.project_id) if (project_id or asset.project_id) else None,
+            document_asset_ids=[str(value) for value in (document_asset_ids or [])],
         )
     finally:
         await reader.close()
@@ -298,6 +409,7 @@ async def _start_analysis_from_local_path(
     context: Optional[str],
     profile_id: str = "uae_fintech",
     project_id: Optional[UUID] = None,
+    document_asset_ids: Optional[list[UUID]] = None,
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -316,6 +428,7 @@ async def _start_analysis_from_local_path(
             max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
             target_kind="ios" if filename.lower().endswith(".ipa") else "android",
             project_id=str(project_id) if project_id else None,
+            document_asset_ids=[str(value) for value in (document_asset_ids or [])],
         )
     finally:
         await reader.close()
@@ -630,19 +743,26 @@ async def analyze_autopilot_target(
     context: str = Form(default=""),
     profile_id: str = Form(default="uae_fintech"),
     target_url: str = Form(default=""),
+    document_asset_ids: str = Form(default=""),
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Analyze a website URL, Android APK or iOS IPA as one Autopilot job."""
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     service = _service(settings)
+    selected_document_ids = _parse_document_asset_ids(document_asset_ids)
+    selected_document_ids, document_excerpt = await _document_context(
+        db, user, project_id, selected_document_ids, settings
+    )
+    analysis_context = _context_with_documents(context, profile_id, document_excerpt)
     normalized_url = target_url.strip()
     if normalized_url:
         try:
             job_id = await service.save_web_target(
                 normalized_url,
                 str(user.id),
-                context=_effective_context(context, profile_id),
+                context=analysis_context,
                 project_id=str(project_id) if project_id else None,
+                document_asset_ids=[str(value) for value in selected_document_ids],
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -670,10 +790,11 @@ async def analyze_autopilot_target(
             filename,
             file,
             str(user.id),
-            context=_effective_context(context, profile_id),
+            context=analysis_context,
             max_bytes=max_bytes,
             target_kind=target_kind,
             project_id=str(project_id) if project_id else None,
+            document_asset_ids=[str(value) for value in selected_document_ids],
         )
     except AutopilotUploadTooLarge as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
@@ -759,15 +880,20 @@ async def analyze_existing_mobile_app(
         ) from exc
     if asset is None or asset.extension not in {"apk", "ipa"} or (project_id is not None and asset.project_id != project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK/IPA not found in this project")
+    selected_document_ids = payload.document_asset_ids or []
+    selected_document_ids, document_excerpt = await _document_context(
+        db, user, project_id, selected_document_ids, settings
+    )
     return await _start_analysis_from_asset(
         background_tasks=background_tasks,
         db=db,
         settings=settings,
         user=user,
         asset=asset,
-        context=payload.context,
+        context=_context_with_documents(payload.context, payload.profile_id, document_excerpt),
         profile_id=payload.profile_id,
         project_id=project_id,
+        document_asset_ids=selected_document_ids,
     )
 
 
@@ -787,17 +913,42 @@ async def rerun_autopilot_analysis(
     original_record = await _safe_job_record(db, job_id, user.id)
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     original_target_kind = str(original.get("target_kind") or "android")
+    original_document_ids: list[UUID] = []
+    for value in original.get("document_asset_ids", []) or []:
+        try:
+            asset_id = UUID(str(value))
+        except (TypeError, ValueError):
+            continue
+        if asset_id not in original_document_ids:
+            original_document_ids.append(asset_id)
+    if payload.document_asset_ids is None:
+        selected_document_ids = original_document_ids
+        selected_document_ids, document_excerpt = await _document_context(
+            db, user, project_id, selected_document_ids, settings
+        )
+        rerun_context = _context_with_documents(
+            payload.context if payload.context is not None else _context_without_documents(str(original.get("context", ""))),
+            payload.profile_id,
+            document_excerpt,
+        )
+    else:
+        selected_document_ids, document_excerpt = await _document_context(
+            db, user, project_id, payload.document_asset_ids, settings
+        )
+        rerun_context = _context_with_documents(
+            payload.context if payload.context is not None else str(original.get("context", "")),
+            payload.profile_id,
+            document_excerpt,
+        )
     if original_target_kind == "web" and payload.upload_id is None:
         target_url = payload.target_url or str(original.get("target_url") or "")
         try:
             new_job_id = await service.save_web_target(
                 target_url,
                 str(user.id),
-                context=_effective_context(
-                    payload.context if payload.context is not None else str(original.get("context", "")),
-                    payload.profile_id,
-                ),
+                context=rerun_context,
                 project_id=str(project_id) if project_id else str(original.get("project_id") or "") or None,
+                document_asset_ids=[str(value) for value in selected_document_ids],
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -810,9 +961,10 @@ async def rerun_autopilot_analysis(
             user=user,
             source_path=Path(str(original.get("apk_path", ""))),
             filename=Path(str(original.get("filename", "application.apk"))).name,
-            context=payload.context if payload.context is not None else str(original.get("context", "")),
+            context=rerun_context,
             profile_id=payload.profile_id,
             project_id=project_id,
+            document_asset_ids=selected_document_ids,
         )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
@@ -835,16 +987,16 @@ async def rerun_autopilot_analysis(
         ) from exc
     if asset is None or (project_id is not None and asset.project_id != project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK not found in this project")
-    context = payload.context if payload.context is not None else str(original.get("context", ""))
     return await _start_analysis_from_asset(
         background_tasks=background_tasks,
         db=db,
         settings=settings,
         user=user,
         asset=asset,
-        context=context,
+        context=rerun_context,
         profile_id=payload.profile_id,
         project_id=project_id,
+        document_asset_ids=selected_document_ids,
     )
 
 

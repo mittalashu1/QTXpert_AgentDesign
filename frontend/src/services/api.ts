@@ -197,6 +197,11 @@ export const requirementsApi = {
       timeout: 300_000,
     });
   },
+  reuseUpload: (projectId: string, uploadId: string) =>
+    apiClient.post<Requirement>("/requirements/from-upload", {
+      project_id: projectId,
+      upload_id: uploadId,
+    }),
   submitDirectPrompt: (projectId: string, title: string, content: string) =>
     apiClient.post<Requirement>("/requirements/direct-prompt", {
       project_id: projectId,

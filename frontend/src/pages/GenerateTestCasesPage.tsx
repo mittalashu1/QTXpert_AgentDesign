@@ -20,10 +20,11 @@ import ArrowBackOutlinedIcon from "@mui/icons-material/ArrowBackOutlined";
 import MoreVertOutlinedIcon from "@mui/icons-material/MoreVertOutlined";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import RefreshOutlinedIcon from "@mui/icons-material/RefreshOutlined";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { requirementsApi, testCasesApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import ProjectSelector from "@/components/ProjectSelector";
+import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 import { EXPORT_FORMATS, GenerationRun, GenerationRunSummary, TestCase } from "@/types/domain";
 
 const ACTIVE_STATUSES = ["pending", "normalizing", "analyzing", "generating_scenarios", "generating_test_cases", "risk_analysis"];
@@ -288,6 +289,7 @@ function RunRail({ runs, activeId, openingId, renamingId, onSelect, onRename, on
 }
 
 export default function GenerateTestCasesPage() {
+  const navigate = useNavigate();
   const { selectedProjectId } = useSelectedProject();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -312,6 +314,7 @@ export default function GenerateTestCasesPage() {
   const [selectedSource, setSelectedSource] = useState("document");
   const [sourceUrl, setSourceUrl] = useState("");
   const [files, setFiles] = useState<File[]>([]);
+  const [selectedDocumentAssetIds, setSelectedDocumentAssetIds] = useState<string[]>([]);
   const [prompt, setPrompt] = useState("");
   const [coverage, setCoverage] = useState("balanced");
   const [result, setResult] = useState<GenerationRun | null>(null);
@@ -324,6 +327,9 @@ export default function GenerateTestCasesPage() {
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const source = SOURCES.find((item) => item.id === selectedSource) ?? SOURCES[1];
+  useEffect(() => {
+    setSelectedDocumentAssetIds([]);
+  }, [selectedProjectId]);
   const { data: liveRun } = useQuery({
     queryKey: ["generation-run", result?.id],
     queryFn: () => testCasesApi.getRun(result!.id).then((res) => res.data),
@@ -335,16 +341,23 @@ export default function GenerateTestCasesPage() {
   useEffect(() => {
     if (liveRun?.test_cases?.length) { setDraftCases(liveRun.test_cases); setLocalPreview(false); }
   }, [liveRun]);
-  const inputSummary = useMemo(() => [...files.map((file) => file.name), ...(source.kind === "link" && sourceUrl.trim() ? [sourceUrl.trim()] : [])], [files, source.kind, sourceUrl]);
+  const inputSummary = useMemo(() => [
+    ...files.map((file) => file.name),
+    ...(source.kind === "link" && sourceUrl.trim() ? [sourceUrl.trim()] : []),
+    ...(selectedDocumentAssetIds.length ? [`${selectedDocumentAssetIds.length} repository document${selectedDocumentAssetIds.length === 1 ? "" : "s"}`] : []),
+  ], [files, selectedDocumentAssetIds.length, source.kind, sourceUrl]);
 
   const generationMutation = useMutation({
     mutationFn: async () => {
       if (!selectedProjectId) throw new Error("Create or select a project before generating test cases.");
-      if (!files.length && !sourceUrl.trim() && !prompt.trim()) throw new Error("Add a file, link, or prompt first.");
-      setMessage("Uploading your sources and preparing generation…");
+      if (!files.length && !sourceUrl.trim() && !prompt.trim() && !selectedDocumentAssetIds.length) throw new Error("Add a file, link, repository document, or prompt first.");
+      setMessage("Checking repository documents and preparing generation…");
       const requirementIds: string[] = [];
+      for (const assetId of selectedDocumentAssetIds) {
+        requirementIds.push((await requirementsApi.reuseUpload(selectedProjectId, assetId)).data.id);
+      }
       for (const file of files) requirementIds.push((await requirementsApi.upload(selectedProjectId, file)).data.id);
-      const context = [prompt.trim() ? `User guidance:\n${prompt.trim()}` : "", sourceUrl.trim() ? `${source.label} source: ${sourceUrl.trim()}` : "", `Coverage preference: ${coverage}`, inputSummary.length ? `Inputs: ${inputSummary.join(", ")}` : ""].filter(Boolean).join("\n\n");
+      const context = [prompt.trim() ? `User guidance:\n${prompt.trim()}` : "", sourceUrl.trim() ? `${source.label} source: ${sourceUrl.trim()}` : "", selectedDocumentAssetIds.length ? `Supporting repository documents attached: ${selectedDocumentAssetIds.length}` : "", `Coverage preference: ${coverage}`, inputSummary.length ? `Inputs: ${inputSummary.join(", ")}` : ""].filter(Boolean).join("\n\n");
       if (context) requirementIds.push((await requirementsApi.submitDirectPrompt(selectedProjectId, `${source.label} test design`, context)).data.id);
       const profile = coverage === "quick" ? "smoke" : coverage === "thorough" ? "regression" : "feature";
       const testSetTitle = inputHeading(source, files, sourceUrl, prompt);
@@ -359,6 +372,8 @@ export default function GenerateTestCasesPage() {
       setMessage(hasServerCases ? "Generation started. Live progress will appear here." : "Generation is running against your supplied inputs. Real test cases will appear when analysis completes.");
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["generation-history-summaries", selectedProjectId] });
+      queryClient.invalidateQueries({ queryKey: ["repository-documents", selectedProjectId] });
+      queryClient.invalidateQueries({ queryKey: ["uploads", selectedProjectId] });
     },
     onError: (reason) => { setError(apiErrorMessage(reason, "Generation failed.")); setMessage(null); },
   });
@@ -428,6 +443,7 @@ export default function GenerateTestCasesPage() {
     setResult(null);
     setDraftCases([]);
     setFiles([]);
+    setSelectedDocumentAssetIds([]);
     setSourceUrl("");
     setPrompt("");
     setSaved(false);
@@ -564,6 +580,16 @@ export default function GenerateTestCasesPage() {
       <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} flexWrap="wrap">{SOURCES.map((item) => <Button key={item.id} variant={selectedSource === item.id ? "contained" : "outlined"} startIcon={item.kind === "file" ? <CloudUploadOutlinedIcon /> : <AddOutlinedIcon />} onClick={() => chooseSource(item)} sx={{ justifyContent: "flex-start", textTransform: "none", minWidth: 180 }}><Box sx={{ textAlign: "left" }}><Typography variant="body2" sx={{ fontWeight: 700 }}>{item.label}</Typography><Typography variant="caption" sx={{ opacity: 0.75 }}>{item.description}</Typography></Box></Button>)}</Stack>
       <input ref={fileInputRef} hidden type="file" multiple accept={source.accept ?? FILE_EXTENSIONS} onChange={onFiles} />{source.kind === "link" && <TextField label={`${source.label} link`} value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder={source.placeholder} fullWidth helperText="The link is sent as context with your prompt." />}
       <Box onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); }} sx={{ border: "1px dashed", borderColor: "primary.main", borderRadius: 2, p: 2, cursor: "pointer", bgcolor: "action.hover" }}><Typography sx={{ fontWeight: 600 }}>Drop files here or click to browse</Typography><Typography variant="caption" color="text.secondary">Allowed for {source.label}: {source.accept ?? FILE_EXTENSIONS} • up to {source.id === "app" ? MOBILE_PACKAGE_MAX_UPLOAD_MB : DOCUMENT_MAX_UPLOAD_MB} MB</Typography></Box>{files.length > 0 && <Stack spacing={1}>{files.map((file, index) => <Stack key={`${file.name}-${index}`} direction="row" alignItems="center" spacing={1}><Chip label={file.name} onDelete={() => setFiles((current) => current.filter((_, idx) => idx !== index))} deleteIcon={<DeleteOutlineOutlinedIcon />} /><Typography variant="caption" color="text.secondary">{Math.ceil(file.size / 1024)} KB</Typography></Stack>)}</Stack>}
+      <RepositoryDocumentsPicker
+        projectId={selectedProjectId}
+        selectedIds={selectedDocumentAssetIds}
+        onSelectionChange={setSelectedDocumentAssetIds}
+        sourceModule="test_design"
+        title="Existing project documents (optional)"
+        description="Reuse documents already in this project repository. They stay stored once and can be attached to future Test Design runs."
+        compact
+        onOpenRepository={() => navigate("/test-data/documents")}
+      />
       <Divider /><TextField label="What should we test?" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Example: Cover checkout, payment failures, permissions, accessibility, and mobile edge cases." fullWidth multiline minRows={4} helperText="Optional when you upload a source; required when you only provide instructions." />
       <FormControl sx={{ maxWidth: 260 }}><InputLabel id="coverage-label">Coverage</InputLabel><Select labelId="coverage-label" label="Coverage" value={coverage} onChange={(e) => setCoverage(e.target.value)}><MenuItem value="quick">Quick</MenuItem><MenuItem value="balanced">Balanced</MenuItem><MenuItem value="thorough">Thorough</MenuItem></Select><FormHelperText>Controls breadth of scenarios.</FormHelperText></FormControl>
       {message && <Alert severity="info">{message}</Alert>}{error && <Alert severity="error">{error}</Alert>}<Button variant="contained" size="large" startIcon={<AutoAwesomeOutlinedIcon />} onClick={() => generationMutation.mutate()} disabled={generationMutation.isPending || !selectedProjectId} sx={{ alignSelf: "flex-start" }}>{generationMutation.isPending ? "Preparing generation…" : "Analyze and generate test cases"}</Button>

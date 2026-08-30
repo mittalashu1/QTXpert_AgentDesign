@@ -29,9 +29,12 @@ import {
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
 import UploadFileOutlinedIcon from "@mui/icons-material/UploadFileOutlined";
+import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
+import { useNavigate } from "react-router-dom";
 import { documentIntelligenceApi, uploadsApi } from "@/services/api";
 import { DocumentAnalysisRun, DocumentFinding, DocumentFindingStatus, DocumentProfile, UploadedAsset } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
+import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 
 const EXTRACTABLE_EXTENSIONS = new Set([
   "pdf", "docx", "pptx", "txt", "md", "json", "csv", "xlsx", "xls", "xml", "yaml", "yml", "html", "htm",
@@ -87,11 +90,13 @@ function findingColor(severity: string): "error" | "warning" | "info" | "default
 }
 
 export default function DocumentIntelligencePage() {
+  const navigate = useNavigate();
   const { selectedProjectId, selectedProject } = useSelectedProject();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState(0);
   const [profile, setProfile] = useState<DocumentProfile>("general");
   const [changeContext, setChangeContext] = useState("");
+  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -101,6 +106,7 @@ export default function DocumentIntelligencePage() {
     setMessage("");
     setError("");
     setTab(0);
+    setSelectedAssetIds([]);
   }, [selectedProjectId]);
 
   useEffect(() => {
@@ -124,7 +130,9 @@ export default function DocumentIntelligencePage() {
   });
 
   const projectAssets = useMemo(
-    () => (uploadsQuery.data || []).filter((asset) => !EXCLUDED.has(asset.extension.toLowerCase())),
+    // Test data and application builds have their own repositories. Document
+    // Intelligence should only review assets classified as documents.
+    () => (uploadsQuery.data || []).filter((asset) => asset.category === "document" && asset.source_module !== "test_data" && !EXCLUDED.has(asset.extension.toLowerCase())),
     [uploadsQuery.data]
   );
   const analyzableAssets = useMemo(
@@ -139,6 +147,7 @@ export default function DocumentIntelligencePage() {
         const response = await uploadsApi.upload(file, {
           projectId: selectedProjectId,
           sourceModule: "document_intelligence",
+          category: "document",
         });
         results.push(response.data);
       }
@@ -146,6 +155,7 @@ export default function DocumentIntelligencePage() {
     },
     onSuccess: async (assets) => {
       await queryClient.invalidateQueries({ queryKey: ["document-intelligence-assets", selectedProjectId] });
+      await queryClient.invalidateQueries({ queryKey: ["repository-documents", selectedProjectId] });
       setMessage(`${assets.length} document${assets.length === 1 ? "" : "s"} added to ${selectedProject?.name || "this project"}.`);
       setError("");
     },
@@ -155,8 +165,9 @@ export default function DocumentIntelligencePage() {
   const analyzeMutation = useMutation({
     mutationFn: () => documentIntelligenceApi.analyze({
       project_id: selectedProjectId,
-      // Every analyzable document in the active project is deliberately included.
-      asset_ids: analyzableAssets.map((asset) => asset.id),
+      // Empty selection means review every extractable repository document;
+      // an explicit selection keeps a focused review reproducible.
+      asset_ids: selectedAssetIds.length ? selectedAssetIds : analyzableAssets.map((asset) => asset.id),
       profile,
       additional_context: changeContext,
     }),
@@ -255,12 +266,28 @@ export default function DocumentIntelligencePage() {
               </FormControl>
             </Grid>
             <Grid item xs={12} sm={6} lg={2}>
-              <Button component="label" variant="outlined" startIcon={<UploadFileOutlinedIcon />} fullWidth disabled={uploadMutation.isPending}>
-                Add documents
-                <input hidden multiple type="file" onChange={handleFiles} accept=".pdf,.docx,.pptx,.txt,.md,.json,.csv,.xlsx,.xls,.xml,.yaml,.yml,.html,.htm" />
-              </Button>
+              <Stack spacing={1}>
+                <Button component="label" variant="outlined" startIcon={<UploadFileOutlinedIcon />} fullWidth disabled={uploadMutation.isPending}>
+                  Add documents
+                  <input hidden multiple type="file" onChange={handleFiles} accept=".pdf,.docx,.pptx,.txt,.md,.json,.csv,.xlsx,.xls,.xml,.yaml,.yml,.html,.htm" />
+                </Button>
+                <Button variant="text" size="small" startIcon={<FolderOutlinedIcon />} onClick={() => navigate("/test-data/documents")} fullWidth>
+                  Open repository
+                </Button>
+              </Stack>
             </Grid>
           </Grid>
+          <RepositoryDocumentsPicker
+            projectId={selectedProjectId}
+            selectedIds={selectedAssetIds}
+            onSelectionChange={setSelectedAssetIds}
+            sourceModule="document_intelligence"
+            title="Choose repository documents (optional)"
+            description="Review selected documents only, or leave the selection empty to review every stored document."
+            compact
+            allowUpload={false}
+            onOpenRepository={() => navigate("/test-data/documents")}
+          />
           <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} alignItems={{ md: "center" }} sx={{ mt: 2 }}>
             <Button
               variant="contained"
@@ -271,7 +298,7 @@ export default function DocumentIntelligencePage() {
               {running ? "Reviewing documentation…" : "Run AI review"}
             </Button>
             <Typography variant="caption" color="text.secondary">
-              {analyzableAssets.length} project document{analyzableAssets.length === 1 ? "" : "s"} included automatically · existing requirements and test baseline are also considered
+              {selectedAssetIds.length ? `${selectedAssetIds.length} selected document${selectedAssetIds.length === 1 ? "" : "s"}` : `${analyzableAssets.length} stored document${analyzableAssets.length === 1 ? "" : "s"} available`} for review · upload once, reuse from the repository
             </Typography>
           </Stack>
           {(running || uploadMutation.isPending) && <LinearProgress sx={{ mt: 2 }} />}
@@ -343,16 +370,19 @@ function CoverageTable({ run, rows, context }: { run?: DocumentAnalysisRun | nul
 
 function DocumentsTable({ assets, run }: { assets: UploadedAsset[]; run?: DocumentAnalysisRun | null }) {
   const inventory = new Map((run?.document_inventory || []).map((item) => [item.asset_id, item]));
-  if (!assets.length) return <Alert severity="info">No documents are stored for this project yet.</Alert>;
+  if (!assets.length) return <Alert severity="info">No documents are stored for this project yet. Upload one or open the Document repository to add it.</Alert>;
   return (
     <TableContainer>
       <Table size="small">
-        <TableHead><TableRow><TableCell>Document</TableCell><TableCell>Type</TableCell><TableCell>Quality</TableCell><TableCell>Testability</TableCell><TableCell>Change fit</TableCell><TableCell>Issues</TableCell><TableCell>Source</TableCell></TableRow></TableHead>
+        <TableHead><TableRow><TableCell>Document</TableCell><TableCell>Type</TableCell><TableCell>Quality</TableCell><TableCell>Testability</TableCell><TableCell>Change fit</TableCell><TableCell>Issues</TableCell><TableCell>Source</TableCell><TableCell>Size</TableCell><TableCell>Uploaded</TableCell><TableCell>Storage</TableCell><TableCell>Status</TableCell></TableRow></TableHead>
         <TableBody>
           {assets.map((asset) => {
             const item = inventory.get(asset.id);
             const fit = item ? Math.round((item.quality_score + item.testability_score) / 2) : null;
-            return <TableRow key={asset.id} hover><TableCell><Typography variant="body2" fontWeight={700}>{asset.filename}</Typography><Typography variant="caption" color="text.secondary">{asset.extension.toUpperCase()}</Typography></TableCell><TableCell>{item?.document_type || "Pending review"}</TableCell><TableCell>{item ? `${item.quality_score}%` : "—"}</TableCell><TableCell>{item ? `${item.testability_score}%` : "—"}</TableCell><TableCell>{fit === null ? "—" : `${fit}%`}</TableCell><TableCell>{item?.issue_count ?? "—"}</TableCell><TableCell>{pretty(asset.source_module)}</TableCell></TableRow>;
+            const formatBytes = (value: number) => value < 1024 * 1024 ? `${Math.max(1, Math.round(value / 1024))} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`;
+            const uploaded = new Date(asset.created_at);
+            const uploadedLabel = Number.isNaN(uploaded.getTime()) ? "—" : uploaded.toLocaleString();
+            return <TableRow key={asset.id} hover><TableCell><Typography variant="body2" fontWeight={700}>{asset.filename}</Typography><Typography variant="caption" color="text.secondary">{asset.extension.toUpperCase()} · SHA {asset.sha256.slice(0, 10)}…</Typography></TableCell><TableCell>{item?.document_type || "Pending review"}</TableCell><TableCell>{item ? `${item.quality_score}%` : "—"}</TableCell><TableCell>{item ? `${item.testability_score}%` : "—"}</TableCell><TableCell>{fit === null ? "—" : `${fit}%`}</TableCell><TableCell>{item?.issue_count ?? "—"}</TableCell><TableCell>{pretty(asset.source_module)}</TableCell><TableCell>{formatBytes(asset.size_bytes)}</TableCell><TableCell sx={{ whiteSpace: "nowrap" }}>{uploadedLabel}</TableCell><TableCell><Chip size="small" variant="outlined" label={pretty(asset.storage_backend)} /></TableCell><TableCell><Chip size="small" color={asset.status === "ready" ? "success" : "warning"} variant="outlined" label={pretty(asset.status)} /></TableCell></TableRow>;
           })}
         </TableBody>
       </Table>

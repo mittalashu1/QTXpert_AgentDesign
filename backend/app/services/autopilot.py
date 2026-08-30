@@ -51,6 +51,14 @@ from app.services.autopilot_context import default_context, get_profile
 logger = logging.getLogger(__name__)
 _MISSING = object()
 
+
+def _is_uuid(value: object) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError):
+        return False
+
 # APK parsers can briefly use hundreds of MiB for resource tables. Render's
 # low-cost instance has a small memory envelope, so serialize the expensive
 # analysis section across requests and restart recovery. The semaphore lives
@@ -268,6 +276,8 @@ class AutopilotPrototypeService:
                     uuid.UUID(str(repository_asset_id)) if repository_asset_id else None
                 )
                 record.context = str(job.get("context", ""))[:8000]
+                document_asset_ids = job.get("document_asset_ids")
+                record.document_asset_ids = [str(value) for value in (document_asset_ids or [])][:20]
                 record.apk_path = job.get("apk_path")
                 record.status = str(job.get("status", "uploaded"))
                 record.stage = str(job.get("stage", "queued"))
@@ -304,6 +314,7 @@ class AutopilotPrototypeService:
                     "target_kind": record.target_kind or "android",
                     "target_url": record.target_url,
                     "context": record.context or "",
+                    "document_asset_ids": list(getattr(record, "document_asset_ids", None) or []),
                     "apk_path": record.apk_path,
                     "status": record.status,
                     "stage": record.stage,
@@ -405,6 +416,7 @@ class AutopilotPrototypeService:
         *,
         target_kind: str | None = None,
         project_id: str | None = None,
+        document_asset_ids: list[str] | None = None,
     ) -> tuple[str, Path]:
         job_id = str(uuid4())
         job_dir = self._job_dir(job_id)
@@ -421,6 +433,7 @@ class AutopilotPrototypeService:
             "target_kind": kind,
             "target_url": None,
             "context": context[:8000],
+            "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "apk_path": str(artifact_path),
             "status": "uploaded",
@@ -442,6 +455,7 @@ class AutopilotPrototypeService:
         *,
         target_kind: str | None = None,
         project_id: str | None = None,
+        document_asset_ids: list[str] | None = None,
     ) -> tuple[str, Path]:
         """Persist an UploadFile incrementally instead of duplicating it in memory.
 
@@ -477,6 +491,7 @@ class AutopilotPrototypeService:
                 "target_kind": kind,
                 "target_url": None,
                 "context": context[:8000],
+                "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "apk_path": str(artifact_path),
                 "status": "uploaded",
@@ -504,6 +519,7 @@ class AutopilotPrototypeService:
         context: str = "",
         *,
         project_id: str | None = None,
+        document_asset_ids: list[str] | None = None,
     ) -> str:
         """Create a durable URL job without copying website data to storage."""
         url = self.validate_web_url(target_url, allow_private=self.settings.APP_ENV == "local")
@@ -520,6 +536,7 @@ class AutopilotPrototypeService:
             "target_kind": "web",
             "target_url": url,
             "context": context[:8000],
+            "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "uploaded",
             "stage": "queued",
@@ -571,6 +588,12 @@ class AutopilotPrototypeService:
                 )
                 job = await self.load_job(job_id)
         artifact_path = job.get("apk_path")
+        document_asset_ids: list[uuid.UUID] = []
+        for value in job.get("document_asset_ids", []) or []:
+            try:
+                document_asset_ids.append(uuid.UUID(str(value)))
+            except (TypeError, ValueError):
+                continue
         return AutopilotJobStatus(
             job_id=job_id,
             filename=job["filename"],
@@ -582,6 +605,7 @@ class AutopilotPrototypeService:
             created_at=job["created_at"],
             updated_at=job.get("updated_at", job["created_at"]),
             context=str(job.get("context", "")),
+            document_asset_ids=document_asset_ids,
             artifact_available=(bool(job.get("target_url")) if target_kind == "web" else bool(artifact_path and Path(artifact_path).is_file())),
             error=job.get("error"),
             analysis=analysis,
@@ -700,6 +724,28 @@ class AutopilotPrototypeService:
                 deduped.append(test)
                 seen.add(key)
 
+        document_asset_ids = [
+            uuid.UUID(str(value))
+            for value in (job.get("document_asset_ids", []) or [])
+            if _is_uuid(value)
+        ]
+        analysis_basis = [
+            "Observed target metadata and bounded runtime/HTML evidence",
+            (
+                "Selected profile and user-supplied context used as analysis scope"
+                if context_text
+                else "No user context supplied; profile scope was unavailable"
+            ),
+            "Deterministic coverage and safety rules",
+            "LLM enrichment applied to context-aware journeys and test design"
+            if ai_enrichment_used
+            else "LLM enrichment unavailable; deterministic fallback retained the selected scope",
+        ]
+        if document_asset_ids:
+            analysis_basis.append(
+                f"{len(document_asset_ids)} selected repository document(s) supplied bounded, redacted context"
+            )
+
         analysis = AutopilotAnalysis(
             job_id=job_id,
             filename=job["filename"],
@@ -732,18 +778,8 @@ class AutopilotPrototypeService:
             capabilities=self._capabilities(metadata),
             context_considered=bool(context_text),
             ai_enrichment_used=ai_enrichment_used,
-            analysis_basis=[
-                "Observed target metadata and bounded runtime/HTML evidence",
-                (
-                    "Selected profile and user-supplied context used as analysis scope"
-                    if context_text
-                    else "No user context supplied; profile scope was unavailable"
-                ),
-                "Deterministic coverage and safety rules",
-                "LLM enrichment applied to context-aware journeys and test design"
-                if ai_enrichment_used
-                else "LLM enrichment unavailable; deterministic fallback retained the selected scope",
-            ],
+            analysis_basis=analysis_basis,
+            document_asset_ids=document_asset_ids,
         )
         await asyncio.to_thread(self._metadata_path(job_id).write_text, analysis.model_dump_json(indent=2), "utf-8")
         await self._persist_job(job, analysis=analysis.model_dump(mode="json"))

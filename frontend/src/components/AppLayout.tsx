@@ -110,16 +110,20 @@ export default function AppLayout() {
                 {!designNavCollapsed && item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}
               </ListItemButton>
             ))}
-            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={designNavCollapsed ? "Test Data" : undefined} sx={{ borderRadius: 2, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined, justifyContent: designNavCollapsed ? "center" : undefined, px: designNavCollapsed ? 1 : undefined }}>
+            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={designNavCollapsed ? "Repositories" : undefined} sx={{ borderRadius: 2, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined, justifyContent: designNavCollapsed ? "center" : undefined, px: designNavCollapsed ? 1 : undefined }}>
               <ListItemIcon sx={{ minWidth: designNavCollapsed ? "auto" : 38, color: "text.secondary", justifyContent: "center" }}><StorageOutlinedIcon /></ListItemIcon>
-              {!designNavCollapsed && <ListItemText primary="Test Data" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
+              {!designNavCollapsed && <ListItemText primary="Repositories" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
               {!designNavCollapsed && (testDataOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />)}
             </ListItemButton>
             <Collapse in={testDataOpen && !designNavCollapsed} timeout="auto" unmountOnExit>
               <List disablePadding>
                 <ListItemButton component={NavLink} to="/test-data/uploads" sx={{ ...navSx, pl: 4.6 }}>
                   <ListItemIcon sx={{ minWidth: 34, color: "text.secondary" }}><CloudUploadOutlinedIcon fontSize="small" /></ListItemIcon>
-                  <ListItemText primary="Uploads" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
+                  <ListItemText primary="Test data" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
+                </ListItemButton>
+                <ListItemButton component={NavLink} to="/test-data/documents" sx={{ ...navSx, pl: 4.6 }}>
+                  <ListItemIcon sx={{ minWidth: 34, color: "text.secondary" }}><DescriptionOutlinedIcon fontSize="small" /></ListItemIcon>
+                  <ListItemText primary="Documents" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
                 </ListItemButton>
               </List>
             </Collapse>

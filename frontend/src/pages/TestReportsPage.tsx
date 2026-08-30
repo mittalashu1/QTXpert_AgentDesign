@@ -141,7 +141,7 @@ export default function TestReportsPage() {
       <Card variant="outlined" sx={{ mb: 3 }}>
         <CardContent>
           <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1} sx={{ mb: 1.5 }}>
-            <Box><Typography variant="h6" fontWeight={800}>Execution history</Typography><Typography variant="body2" color="text.secondary">Every row opens the complete per-case report. Mobile packages stay reusable in Uploads; evidence is retained here.</Typography></Box>
+            <Box><Typography variant="h6" fontWeight={800}>Execution history</Typography><Typography variant="body2" color="text.secondary">Every row opens the complete per-case report. Mobile packages stay reusable in Repositories → Documents; evidence is retained here.</Typography></Box>
             {runs.isFetching && <LinearProgress sx={{ width: 120 }} />}
           </Stack>
           {!runs.isLoading && !(runs.data ?? []).length ? <Alert severity="info">No execution runs are available yet.</Alert> : (

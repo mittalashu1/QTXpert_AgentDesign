@@ -20,6 +20,7 @@ import { apiClient } from "@/services/apiClient";
 import { uploadsApi } from "@/services/api";
 import { UploadedAsset } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
+import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 
 type TestBucket =
   | "installation" | "page_level" | "functional" | "uat" | "ui" | "accessibility"
@@ -43,11 +44,12 @@ type Analysis = {
   clarification_questions: string[]; tests: TestCase[]; release_risks: string[];
   warnings: string[]; capabilities: Record<string, boolean>;
   context_considered?: boolean; ai_enrichment_used?: boolean; analysis_basis?: string[];
+  document_asset_ids?: string[];
 };
 type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; playwright_available?: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: Provider };
 type AnalysisJob = {
   job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed";
-  target_kind?: TargetKind; target_url?: string | null; stage: string; progress: number; context?: string; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
+  target_kind?: TargetKind; target_url?: string | null; stage: string; progress: number; context?: string; document_asset_ids?: string[]; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
 };
 type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
 type ReportCheck = {
@@ -277,6 +279,14 @@ function readableError(error: unknown, fallback: string) {
   return fallback;
 }
 
+function contextForEditor(value: string) {
+  // The API stores a bounded effective context that may include selected
+  // repository excerpts. Keep those excerpts out of the editable brief so a
+  // rerun does not append the same documents twice or expose their full text
+  // in the profile editor.
+  return value.split("\n\nSelected repository documentation:")[0]?.trim() || value;
+}
+
 class TerminalAutopilotJobError extends Error {
   readonly terminal = true;
 }
@@ -321,6 +331,7 @@ export default function AutopilotPage() {
   const { selectedProjectId } = useSelectedProject();
   const [file, setFile] = useState<File | null>(null);
   const [storedApks, setStoredApks] = useState<UploadedAsset[]>([]);
+  const [selectedDocumentAssetIds, setSelectedDocumentAssetIds] = useState<string[]>([]);
   const [selectedUploadId, setSelectedUploadId] = useState("");
   const [targetKind, setTargetKind] = useState<TargetKind>("android");
   const [targetUrl, setTargetUrl] = useState("");
@@ -438,16 +449,20 @@ export default function AutopilotPage() {
     }).catch(() => setProviderStatus(null));
   }, []);
   useEffect(() => { void refreshStoredApks(selectedProjectId); }, [refreshStoredApks, selectedProjectId]);
+  useEffect(() => { setSelectedDocumentAssetIds([]); }, [selectedProjectId]);
 
   const applyJob = useCallback((job: AnalysisJob) => {
     setAnalysisProgress(job.progress); setAnalysisStage(job.stage);
     if (job.target_kind) setTargetKind(job.target_kind);
     if (job.target_url !== undefined) setTargetUrl(job.target_url || "");
     if (job.context !== undefined && job.context.trim()) {
-      setContext(job.context);
-      setProfileId(profileIdFromContext(job.context, profiles));
+      const editableContext = contextForEditor(job.context);
+      setContext(editableContext);
+      setProfileId(profileIdFromContext(editableContext, profiles));
       setContextSource("custom");
     }
+    if (job.document_asset_ids) setSelectedDocumentAssetIds(job.document_asset_ids);
+    else if (job.analysis?.document_asset_ids) setSelectedDocumentAssetIds(job.analysis.document_asset_ids);
     setArtifactAvailable(job.artifact_available !== false);
     if (job.status === "analyzed" && job.analysis) {
       setAnalysis(job.analysis);
@@ -626,12 +641,13 @@ export default function AutopilotPage() {
     try {
       let response;
       if (selectedUploadId && !isWebsite) {
-        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId }, { timeout: 300000 });
+        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId, document_asset_ids: selectedDocumentAssetIds }, { timeout: 300000 });
       } else {
         const form = new FormData();
         if (isWebsite) form.append("target_url", targetUrl.trim());
         else form.append("file", file as File);
         form.append("context", context); form.append("profile_id", profileId);
+        form.append("document_asset_ids", JSON.stringify(selectedDocumentAssetIds));
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
         if (!isWebsite) await refreshStoredApks(selectedProjectId);
       }
@@ -749,7 +765,7 @@ export default function AutopilotPage() {
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
-        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId },
+        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, document_asset_ids: selectedDocumentAssetIds },
         { timeout: 300000 },
       );
       // Keep the last completed analysis visible while the replacement job
@@ -836,7 +852,7 @@ export default function AutopilotPage() {
           {targetKind !== "web" && <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">Stored mobile build</InputLabel><Select labelId="stored-apk-label" label="Stored mobile build" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { const value = event.target.value; const selected = storedApks.find((asset) => asset.id === value); setSelectedUploadId(value); if (value) { setFile(null); const nextTarget = selected?.extension === "ipa" ? "ios" : "android"; setTargetKind(nextTarget); if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected?.filename?.replace(/\.(apk|ipa)$/i, ""))); } if (!analysis) resetResult(); else setError(""); }}>
             <MenuItem value="">Upload a new APK/IPA</MenuItem>{storedApks.map((asset) => <MenuItem key={asset.id} value={asset.id}>{asset.filename} · {formatBytes(asset.size_bytes)} · {new Date(asset.created_at).toLocaleDateString()}</MenuItem>)}
            </Select></FormControl>}
-          {targetKind !== "web" && (selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 2.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1.2} alignItems="center"><FolderOutlinedIcon color="primary" /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored {selectedStoredApk.extension.toUpperCase()} · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: 1 }} onClick={() => navigate("/test-data/uploads")}>Open repository</Button></Box>
+          {targetKind !== "web" && (selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 2.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1.2} alignItems="center"><FolderOutlinedIcon color="primary" /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored {selectedStoredApk.extension.toUpperCase()} · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: 1 }} onClick={() => navigate("/test-data/documents")}>Open repository</Button></Box>
           : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || (targetKind === "ios" ? "Choose an iOS IPA" : "Choose an Android APK")}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>{targetKind === "ios" ? "Choose IPA" : "Choose APK"}<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
@@ -854,6 +870,16 @@ export default function AutopilotPage() {
           </Stack>
         </Grid>
       </Grid>
+      <RepositoryDocumentsPicker
+        projectId={selectedProjectId}
+        selectedIds={selectedDocumentAssetIds}
+        onSelectionChange={setSelectedDocumentAssetIds}
+        sourceModule="autopilot"
+        title="Supporting project documents (optional)"
+        description="Reuse requirements, API contracts, test plans and other repository documents as bounded context for this Autopilot run."
+        compact
+        onOpenRepository={() => navigate("/test-data/documents")}
+      />
     {busy && <Box sx={{ mt: 2 }}><Box sx={{ height: 4, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}><Box sx={{ height: "100%", width: `${Math.min(99, Math.max(3, analysisProgress))}%`, bgcolor: "primary.main", transition: "width .4s ease" }} /></Box><Typography variant="caption" color="text.secondary">{analysisStage === "complete" ? "finalizing" : analysisStage.replaceAll("_", " ")} · {Math.min(99, Math.max(3, analysisProgress))}%</Typography></Box>}
     </Paper>
 

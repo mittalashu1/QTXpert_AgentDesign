@@ -84,7 +84,7 @@ The service also writes one JSON record per execution under the job's local `exe
 
 If the PostgreSQL chunk repository is full, a new APK upload now returns `507 Insufficient Storage` with an actionable capacity/object-storage message and removes only the incomplete local job. Existing stored APKs can still be selected for reuse where the repository remains readable.
 
-The current Android analysis consumes the APK and the optional Autopilot context. Project documents are stored by Document Intelligence but are not automatically injected into APK analysis yet; until that integration is implemented, summarize any document-derived acceptance criteria in the context field.
+The current Android analysis consumes the APK, the optional Autopilot context, and any repository documents explicitly selected in the Autopilot document picker. Selected documents are streamed from the shared Upload Repository, redacted for common secret-looking fields, and bounded before they are appended to the analysis context. Unselected documents are never injected implicitly, so each run records exactly which document asset IDs informed it. Document Intelligence and Test Design use the same repository records rather than creating duplicate uploads.
 
 ### 7. BrowserStack real-device adapter
 

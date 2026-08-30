@@ -15,7 +15,7 @@ import DashboardPage from "@/pages/DashboardPage";
 import TestExecutionPage from "@/pages/TestExecutionPage";
 import TestReportsPage from "@/pages/TestReportsPage";
 import AutopilotPage from "@/pages/AutopilotPage";
-import UploadsPage from "@/pages/UploadsPage";
+import UploadsPage, { DocumentsRepositoryPage } from "@/pages/UploadsPage";
 import CostCenterPage from "@/pages/CostCenterPage";
 import { Alert, Box, Button, CircularProgress } from "@mui/material";
 
@@ -72,6 +72,7 @@ export default function App() {
         <Route path="design" element={<GenerateTestCasesPage />} />
         <Route path="generate" element={<Navigate to="/design" replace />} />
         <Route path="test-data/uploads" element={<UploadsPage />} />
+        <Route path="test-data/documents" element={<DocumentsRepositoryPage />} />
         <Route path="uploads" element={<Navigate to="/test-data/uploads" replace />} />
         <Route path="execution" element={<TestExecutionPage />} />
         <Route path="reports" element={<TestReportsPage />} />

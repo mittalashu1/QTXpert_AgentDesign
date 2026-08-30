@@ -546,7 +546,7 @@ export default function TestExecutionPage() {
           <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={2}>
             <Box>
               <Typography variant="h6" sx={{ fontWeight: 800 }}>Results live in Test reports</Typography>
-              <Typography variant="body2" color="text.secondary">Execution history, per-case outcomes, defects and mobile evidence are report-owned. Original packages remain available in Uploads for reuse.</Typography>
+              <Typography variant="body2" color="text.secondary">Execution history, per-case outcomes, defects and mobile evidence are report-owned. Original packages remain available in Repositories → Documents for reuse.</Typography>
             </Box>
             <Button variant="outlined" endIcon={<OpenInNewOutlinedIcon />} onClick={() => navigate("/reports")}>Open Test reports</Button>
           </Stack>
