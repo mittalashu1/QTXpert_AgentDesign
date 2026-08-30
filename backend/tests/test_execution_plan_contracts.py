@@ -1,7 +1,7 @@
 import pytest
 from uuid import uuid4
 
-from app.api.routes.execution_plans import _plan_payload, _preflight_plan
+from app.api.routes.execution_plans import _compact_plan_name, _plan_payload, _preflight_plan
 from app.api.routes.executions import _compile_mobile_steps
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
 
@@ -24,6 +24,16 @@ def _case(*, selected=True, mode="automated", steps=None, candidate=True):
         is_automation_candidate=candidate,
         risk_level="low",
     )
+
+
+def test_compact_plan_name_respects_database_limit_and_word_boundary():
+    long_title = "Test coverage targets the primary customer journeys and state transitions " * 8
+
+    compacted = _compact_plan_name(long_title)
+
+    assert len(compacted) <= 255
+    assert compacted.endswith("…")
+    assert not compacted.endswith(" ")
 
 
 @pytest.mark.asyncio

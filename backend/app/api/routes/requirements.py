@@ -22,7 +22,12 @@ from app.schemas.requirement import (
     RequirementOut,
 )
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
-from app.services.upload_repository import UploadRepositoryService, UploadRepositoryStorageUnavailable
+from app.services.upload_repository import (
+    UploadRepositoryInvalid,
+    UploadRepositoryService,
+    UploadRepositoryStorageUnavailable,
+    UploadRepositoryTooLarge,
+)
 
 router = APIRouter(tags=["requirements"])
 
@@ -89,60 +94,103 @@ async def upload_requirement(
     settings: Annotated[Settings, Depends(get_settings)],
     file: UploadFile = File(...),
 ):
-    """Upload a BRD/Jira/Confluence export and retain its original file for reuse."""
+    """Upload a readable requirement or a mobile build and retain it for reuse.
+
+    Readable documents use the normal document limit; APK/IPA product inputs
+    use the larger Autopilot limit and are streamed into the shared repository.
+    """
     await _require_owned_project(db, project_id, user.id)
     extension = Path(file.filename or "").suffix.lower().lstrip(".")
     if extension not in settings.allowed_upload_extensions_list:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported file type")
 
-    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    chunks: list[bytes] = []
-    total_bytes = 0
-    while chunk := await file.read(1024 * 1024):
-        total_bytes += len(chunk)
-        if total_bytes > max_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"File exceeds {settings.MAX_UPLOAD_SIZE_MB}MB limit",
-            )
-        chunks.append(chunk)
-    data = b"".join(chunks)
     filename = Path(file.filename or "upload").name
-    try:
-        text = extract_text(filename, data)
-    except UnsupportedDocumentTypeError:
+    is_mobile_binary = extension in {"apk", "ipa"}
+    max_mb = settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB if is_mobile_binary else settings.MAX_UPLOAD_SIZE_MB
+    max_bytes = max_mb * 1024 * 1024
+    asset_category = extension if is_mobile_binary else "document"
+
+    if is_mobile_binary:
+        # APK/IPA files are binary products, not readable requirements. Stream
+        # them directly into the repository so a 200+ MB package never has to
+        # be duplicated in the API process memory.
         text = (
             f"Binary product input uploaded: {filename}.\n"
             f"File type: {extension or 'unknown'}\n"
             "Generate coverage from the accompanying user guidance and treat "
             "this asset as the product under test."
         )
-    if not text.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The uploaded file contains no readable text")
-    if len(text) > settings.MAX_REQUIREMENT_TEXT_CHARS:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Extracted requirement text is too large for a single generation run",
-        )
-
-    try:
-        asset = await UploadRepositoryService.create_from_bytes(
-            db,
-            data,
-            user.id,
-            filename=filename,
-            content_type=file.content_type,
-            project_id=project_id,
-            source_module="design",
-            category="document",
-            max_bytes=max_bytes,
-            settings=settings,
-        )
-    except UploadRepositoryStorageUnavailable as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="File storage is temporarily unavailable; check object-storage configuration and retry.",
-        ) from exc
+        try:
+            asset = await UploadRepositoryService.create_from_upload(
+                db,
+                file,
+                user.id,
+                project_id=project_id,
+                source_module="design",
+                category=asset_category,
+                max_bytes=max_bytes,
+                minimum_bytes=1024,
+                settings=settings,
+            )
+        except UploadRepositoryTooLarge as exc:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+        except UploadRepositoryInvalid as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except UploadRepositoryStorageUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="File storage is temporarily unavailable; check object-storage configuration and retry.",
+            ) from exc
+    else:
+        chunks: list[bytes] = []
+        total_bytes = 0
+        while chunk := await file.read(1024 * 1024):
+            total_bytes += len(chunk)
+            if total_bytes > max_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File exceeds {max_mb}MB limit",
+                )
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        try:
+            text = extract_text(filename, data)
+        except UnsupportedDocumentTypeError:
+            text = (
+                f"Binary product input uploaded: {filename}.\n"
+                f"File type: {extension or 'unknown'}\n"
+                "Generate coverage from the accompanying user guidance and treat "
+                "this asset as the product under test."
+            )
+        if not text.strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The uploaded file contains no readable text")
+        if len(text) > settings.MAX_REQUIREMENT_TEXT_CHARS:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="Extracted requirement text is too large for a single generation run",
+            )
+        try:
+            asset = await UploadRepositoryService.create_from_bytes(
+                db,
+                data,
+                user.id,
+                filename=filename,
+                content_type=file.content_type,
+                project_id=project_id,
+                source_module="design",
+                category=asset_category,
+                max_bytes=max_bytes,
+                settings=settings,
+            )
+        except UploadRepositoryTooLarge as exc:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
+        except UploadRepositoryInvalid as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except UploadRepositoryStorageUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="File storage is temporarily unavailable; check object-storage configuration and retry.",
+            ) from exc
 
     source = (
         RequirementSource.JIRA_EXPORT

@@ -68,7 +68,8 @@ still shown when a model has no configured rate.
 ## Uploads / Rate limiting
 | Variable | Default | Description |
 |---|---|---|
-| `MAX_UPLOAD_SIZE_MB` | 25 | Per-file upload limit |
+| `MAX_UPLOAD_SIZE_MB` | 25 | Per-file readable document limit (BRD/export/test-data text inputs) |
+| `AUTOPILOT_MAX_UPLOAD_SIZE_MB` | 250 | Per-file APK/IPA limit shared by Autopilot and Design app-source uploads |
 | `ALLOWED_UPLOAD_EXTENSIONS` | pdf,docx,txt,md,json,csv | Accepted BRD/export formats |
 | `UPLOAD_STORAGE_PATH` | ./storage/uploads | Local scratch path (uploads are processed then discarded; nothing is persisted to disk beyond this) |
 | `RATE_LIMIT_PER_MINUTE` | 60 | Per-client-IP request budget |

@@ -29,6 +29,10 @@ import { EXPORT_FORMATS, GenerationRun, GenerationRunSummary, TestCase } from "@
 const ACTIVE_STATUSES = ["pending", "normalizing", "analyzing", "generating_scenarios", "generating_test_cases", "risk_analysis"];
 const PROGRESS: Record<string, number> = { pending: 5, normalizing: 15, analyzing: 35, generating_scenarios: 55, generating_test_cases: 75, risk_analysis: 90, completed: 100, failed: 100 };
 const FILE_EXTENSIONS = ".pdf,.docx,.txt,.md,.json,.csv";
+// Keep the client hint aligned with the backend defaults. Documents remain
+// intentionally small; mobile packages use the larger Autopilot allowance.
+const DOCUMENT_MAX_UPLOAD_MB = 25;
+const MOBILE_PACKAGE_MAX_UPLOAD_MB = 250;
 const LOCAL_CHAT_STORAGE_KEY = "qtxpert-saved-chats";
 const RUN_RAIL_RENDER_LIMIT = 100;
 const MAX_TITLE_WORDS = 20;
@@ -42,7 +46,7 @@ function apiErrorMessage(reason: unknown, fallback: string): string {
 }
 
 const SOURCES: InputSource[] = [
-  { id: "app", label: "App / APK", description: "Upload a product package", kind: "file", accept: ".apk,.ipa,.zip" },
+  { id: "app", label: "App / APK / IPA", description: "Upload a product package (up to 250 MB)", kind: "file", accept: ".apk,.ipa,.zip" },
   { id: "document", label: "Documents", description: "PDF, DOCX, TXT, CSV", kind: "file", accept: FILE_EXTENSIONS },
   { id: "video", label: "Video walkthrough", description: "MP4, MOV, WEBM", kind: "file", accept: ".mp4,.mov,.webm" },
   { id: "jira", label: "Jira", description: "Paste a story or export URL", kind: "link", placeholder: "https://company.atlassian.net/browse/QA-123" },
@@ -384,8 +388,15 @@ export default function GenerateTestCasesPage() {
   const addFiles = (incoming: File[]) => {
     const valid = incoming.filter((file) => allowedExtensions.includes(`.${file.name.split(".").pop()?.toLowerCase() ?? ""}`));
     const invalid = incoming.filter((file) => !valid.includes(file));
-    if (invalid.length) setError(`Skipped ${invalid.map((file) => file.name).join(", ")}. Allowed for ${source.label}: ${source.accept ?? FILE_EXTENSIONS}.`);
-    if (valid.length) setFiles((current) => [...current, ...valid]);
+    const maxUploadMb = source.id === "app" ? MOBILE_PACKAGE_MAX_UPLOAD_MB : DOCUMENT_MAX_UPLOAD_MB;
+    const maxUploadBytes = maxUploadMb * 1024 * 1024;
+    const oversized = valid.filter((file) => file.size > maxUploadBytes);
+    const accepted = valid.filter((file) => !oversized.includes(file));
+    const messages: string[] = [];
+    if (invalid.length) messages.push(`Skipped ${invalid.map((file) => file.name).join(", ")}. Allowed for ${source.label}: ${source.accept ?? FILE_EXTENSIONS}.`);
+    if (oversized.length) messages.push(`Skipped ${oversized.map((file) => file.name).join(", ")}. ${source.id === "app" ? "APK/IPA packages" : "Files"} may be up to ${maxUploadMb} MB.`);
+    setError(messages.length ? messages.join(" ") : null);
+    if (accepted.length) setFiles((current) => [...current, ...accepted]);
   };
   const onFiles = (event: ChangeEvent<HTMLInputElement>) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ""; };
   const chooseSource = (item: InputSource) => {
@@ -552,7 +563,7 @@ export default function GenerateTestCasesPage() {
     <Card sx={{ borderRadius: 3 }}><CardContent><Stack spacing={3}><Box><Typography variant="h6">Start a test-design chat</Typography><Typography variant="body2" color="text.secondary">Upload an app, requirements, or video; paste links; and describe what matters. QTXpert sends these inputs to the authenticated generation service.</Typography></Box>
       <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} flexWrap="wrap">{SOURCES.map((item) => <Button key={item.id} variant={selectedSource === item.id ? "contained" : "outlined"} startIcon={item.kind === "file" ? <CloudUploadOutlinedIcon /> : <AddOutlinedIcon />} onClick={() => chooseSource(item)} sx={{ justifyContent: "flex-start", textTransform: "none", minWidth: 180 }}><Box sx={{ textAlign: "left" }}><Typography variant="body2" sx={{ fontWeight: 700 }}>{item.label}</Typography><Typography variant="caption" sx={{ opacity: 0.75 }}>{item.description}</Typography></Box></Button>)}</Stack>
       <input ref={fileInputRef} hidden type="file" multiple accept={source.accept ?? FILE_EXTENSIONS} onChange={onFiles} />{source.kind === "link" && <TextField label={`${source.label} link`} value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder={source.placeholder} fullWidth helperText="The link is sent as context with your prompt." />}
-      <Box onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); }} sx={{ border: "1px dashed", borderColor: "primary.main", borderRadius: 2, p: 2, cursor: "pointer", bgcolor: "action.hover" }}><Typography sx={{ fontWeight: 600 }}>Drop files here or click to browse</Typography><Typography variant="caption" color="text.secondary">Allowed for {source.label}: {source.accept ?? FILE_EXTENSIONS}</Typography></Box>{files.length > 0 && <Stack spacing={1}>{files.map((file, index) => <Stack key={`${file.name}-${index}`} direction="row" alignItems="center" spacing={1}><Chip label={file.name} onDelete={() => setFiles((current) => current.filter((_, idx) => idx !== index))} deleteIcon={<DeleteOutlineOutlinedIcon />} /><Typography variant="caption" color="text.secondary">{Math.ceil(file.size / 1024)} KB</Typography></Stack>)}</Stack>}
+      <Box onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); }} sx={{ border: "1px dashed", borderColor: "primary.main", borderRadius: 2, p: 2, cursor: "pointer", bgcolor: "action.hover" }}><Typography sx={{ fontWeight: 600 }}>Drop files here or click to browse</Typography><Typography variant="caption" color="text.secondary">Allowed for {source.label}: {source.accept ?? FILE_EXTENSIONS} • up to {source.id === "app" ? MOBILE_PACKAGE_MAX_UPLOAD_MB : DOCUMENT_MAX_UPLOAD_MB} MB</Typography></Box>{files.length > 0 && <Stack spacing={1}>{files.map((file, index) => <Stack key={`${file.name}-${index}`} direction="row" alignItems="center" spacing={1}><Chip label={file.name} onDelete={() => setFiles((current) => current.filter((_, idx) => idx !== index))} deleteIcon={<DeleteOutlineOutlinedIcon />} /><Typography variant="caption" color="text.secondary">{Math.ceil(file.size / 1024)} KB</Typography></Stack>)}</Stack>}
       <Divider /><TextField label="What should we test?" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Example: Cover checkout, payment failures, permissions, accessibility, and mobile edge cases." fullWidth multiline minRows={4} helperText="Optional when you upload a source; required when you only provide instructions." />
       <FormControl sx={{ maxWidth: 260 }}><InputLabel id="coverage-label">Coverage</InputLabel><Select labelId="coverage-label" label="Coverage" value={coverage} onChange={(e) => setCoverage(e.target.value)}><MenuItem value="quick">Quick</MenuItem><MenuItem value="balanced">Balanced</MenuItem><MenuItem value="thorough">Thorough</MenuItem></Select><FormHelperText>Controls breadth of scenarios.</FormHelperText></FormControl>
       {message && <Alert severity="info">{message}</Alert>}{error && <Alert severity="error">{error}</Alert>}<Button variant="contained" size="large" startIcon={<AutoAwesomeOutlinedIcon />} onClick={() => generationMutation.mutate()} disabled={generationMutation.isPending || !selectedProjectId} sx={{ alignSelf: "flex-start" }}>{generationMutation.isPending ? "Preparing generation…" : "Analyze and generate test cases"}</Button>

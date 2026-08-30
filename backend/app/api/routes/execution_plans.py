@@ -30,6 +30,7 @@ from app.schemas.execution import (
 
 router = APIRouter(tags=["execution-plans"])
 
+_EXECUTION_PLAN_NAME_MAX_LENGTH = 255
 _HIGH_IMPACT_STEP = re.compile(
     r"\b(delete|remove|withdraw|transfer|payment|pay|purchase|close account|send money|otp)\b",
     re.IGNORECASE,
@@ -46,6 +47,19 @@ def _source_title(run: GenerationRun) -> str:
     if run.requirement_summary and run.requirement_summary.strip():
         return run.requirement_summary.strip()[:500]
     return f"{run.generation_profile.replace('_', ' ').title()} test set"
+
+
+def _compact_plan_name(value: str) -> str:
+    """Keep the database-backed plan name within its 255-character contract."""
+    normalized = re.sub(r"\s+", " ", value or "").strip()
+    if len(normalized) <= _EXECUTION_PLAN_NAME_MAX_LENGTH:
+        return normalized
+    # Reserve one character for an ellipsis and prefer a word boundary so the
+    # execution selector remains readable for legacy long Design titles.
+    clipped = normalized[: _EXECUTION_PLAN_NAME_MAX_LENGTH - 1].rsplit(" ", 1)[0].rstrip()
+    if not clipped:
+        clipped = normalized[: _EXECUTION_PLAN_NAME_MAX_LENGTH - 1]
+    return f"{clipped}…"
 
 
 async def _load_plan(db: AsyncSession, plan_id: UUID, user_id: UUID) -> ExecutionPlan:
@@ -303,7 +317,8 @@ async def import_execution_plan(
     if not run.test_cases:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The selected Test Design run has no test cases")
 
-    title = (payload.name or "").strip() or _source_title(run)
+    source_title = _source_title(run)
+    title = _compact_plan_name((payload.name or "").strip() or source_title)
     plan = ExecutionPlan(
         project_id=run.project_id,
         source_generation_run_id=run.id,
@@ -311,7 +326,7 @@ async def import_execution_plan(
         name=title,
         suite_type=payload.suite_type,
         status="draft",
-        source_title=_source_title(run),
+        source_title=source_title,
         source_created_at=run.created_at,
     )
     db.add(plan)

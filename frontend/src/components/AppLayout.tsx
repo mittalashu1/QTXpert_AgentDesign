@@ -19,6 +19,7 @@ import { useThemeMode } from "@/contexts/ThemeModeContext";
 import ProjectSelector from "@/components/ProjectSelector";
 
 const drawerWidth = 248;
+const compactDrawerWidth = 64;
 const COST_ADMIN_EMAIL = "admin@qtxpert.com";
 const navigation = [
   { to: "/", label: "Dashboard", icon: <DashboardOutlinedIcon />, end: true },
@@ -35,13 +36,23 @@ export default function AppLayout() {
   const { user, logout } = useAuth();
   const { mode, toggleMode } = useThemeMode();
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const [designNavHovered, setDesignNavHovered] = useState(false);
   const [testDataOpen, setTestDataOpen] = useState(location.pathname.startsWith("/test-data"));
   const canViewCosts = user?.role === "admin" && user.email.trim().toLowerCase() === COST_ADMIN_EMAIL;
   const designRunFocused = location.pathname === "/design" && Boolean(new URLSearchParams(location.search).get("run"));
+  // Keep the focused Design run spacious while leaving an always-available icon rail.
+  // Hovering the rail temporarily reveals the full workspace navigation.
+  const designNavCollapsed = designRunFocused && !designNavHovered;
+  const drawerRootWidth = designRunFocused ? compactDrawerWidth : drawerWidth;
+  const drawerPaperWidth = designNavCollapsed ? compactDrawerWidth : drawerWidth;
 
   useEffect(() => {
     if (location.pathname.startsWith("/test-data")) setTestDataOpen(true);
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!designRunFocused) setDesignNavHovered(false);
+  }, [designRunFocused]);
 
   const navSx = {
     borderRadius: 2,
@@ -69,24 +80,42 @@ export default function AppLayout() {
           </Menu>
         </Toolbar>
       </AppBar>
-      {!designRunFocused && <Drawer variant="permanent" sx={{ width: drawerWidth, flexShrink: 0, "& .MuiDrawer-paper": { width: drawerWidth, boxSizing: "border-box", borderRightColor: "divider", bgcolor: "background.paper" } }}>
+      <Drawer
+        variant="permanent"
+        onMouseEnter={() => { if (designRunFocused) setDesignNavHovered(true); }}
+        onMouseLeave={() => { if (designRunFocused) setDesignNavHovered(false); }}
+        sx={{
+          width: drawerRootWidth,
+          flexShrink: 0,
+          overflow: "visible",
+          transition: "width 160ms ease",
+          "& .MuiDrawer-paper": {
+            width: drawerPaperWidth,
+            boxSizing: "border-box",
+            borderRightColor: "divider",
+            bgcolor: "background.paper",
+            overflowX: "hidden",
+            transition: "width 160ms ease",
+          },
+        }}
+      >
         <Toolbar />
-        <Box sx={{ px: 1.5, py: 2 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ px: 1.5, fontWeight: 700, letterSpacing: ".12em" }}>QUALITY WORKSPACE</Typography>
+        <Box sx={{ px: designNavCollapsed ? 0.75 : 1.5, py: 2 }}>
+          {!designNavCollapsed && <Typography variant="caption" color="text.secondary" sx={{ px: 1.5, fontWeight: 700, letterSpacing: ".12em", whiteSpace: "nowrap" }}>QUALITY WORKSPACE</Typography>}
           <List sx={{ mt: 1 }}>
             {navigation.map((item) => (
-              <ListItemButton key={item.to} component={NavLink} to={item.to} end={item.end} sx={navSx}>
-                <ListItemIcon sx={{ minWidth: 38, color: "text.secondary" }}>{item.icon}</ListItemIcon>
-                <ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
-                {item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}
+              <ListItemButton key={item.to} component={NavLink} to={item.to} end={item.end} title={designNavCollapsed ? item.label : undefined} sx={{ ...navSx, justifyContent: designNavCollapsed ? "center" : undefined, px: designNavCollapsed ? 1 : undefined }}>
+                <ListItemIcon sx={{ minWidth: designNavCollapsed ? "auto" : 38, color: "text.secondary", justifyContent: "center" }}>{item.icon}</ListItemIcon>
+                {!designNavCollapsed && <ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
+                {!designNavCollapsed && item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}
               </ListItemButton>
             ))}
-            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} sx={{ borderRadius: 2, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined }}>
-              <ListItemIcon sx={{ minWidth: 38, color: "text.secondary" }}><StorageOutlinedIcon /></ListItemIcon>
-              <ListItemText primary="Test Data" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
-              {testDataOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={designNavCollapsed ? "Test Data" : undefined} sx={{ borderRadius: 2, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined, justifyContent: designNavCollapsed ? "center" : undefined, px: designNavCollapsed ? 1 : undefined }}>
+              <ListItemIcon sx={{ minWidth: designNavCollapsed ? "auto" : 38, color: "text.secondary", justifyContent: "center" }}><StorageOutlinedIcon /></ListItemIcon>
+              {!designNavCollapsed && <ListItemText primary="Test Data" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
+              {!designNavCollapsed && (testDataOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />)}
             </ListItemButton>
-            <Collapse in={testDataOpen} timeout="auto" unmountOnExit>
+            <Collapse in={testDataOpen && !designNavCollapsed} timeout="auto" unmountOnExit>
               <List disablePadding>
                 <ListItemButton component={NavLink} to="/test-data/uploads" sx={{ ...navSx, pl: 4.6 }}>
                   <ListItemIcon sx={{ minWidth: 34, color: "text.secondary" }}><CloudUploadOutlinedIcon fontSize="small" /></ListItemIcon>
@@ -96,16 +125,16 @@ export default function AppLayout() {
             </Collapse>
             {canViewCosts && <>
               <Divider sx={{ my: 1.25 }} />
-              <ListItemButton component={NavLink} to="/cost-center" sx={navSx}>
-                <ListItemIcon sx={{ minWidth: 38, color: "text.secondary" }}><AccountBalanceWalletOutlinedIcon /></ListItemIcon>
-                <ListItemText primary="Cost Center" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />
-                <Chip label="ADMIN" size="small" sx={{ height: 20, fontSize: 9, fontWeight: 800 }} />
+              <ListItemButton component={NavLink} to="/cost-center" title={designNavCollapsed ? "Cost Center" : undefined} sx={{ ...navSx, justifyContent: designNavCollapsed ? "center" : undefined, px: designNavCollapsed ? 1 : undefined }}>
+                <ListItemIcon sx={{ minWidth: designNavCollapsed ? "auto" : 38, color: "text.secondary", justifyContent: "center" }}><AccountBalanceWalletOutlinedIcon /></ListItemIcon>
+                {!designNavCollapsed && <ListItemText primary="Cost Center" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
+                {!designNavCollapsed && <Chip label="ADMIN" size="small" sx={{ height: 20, fontSize: 9, fontWeight: 800 }} />}
               </ListItemButton>
             </>}
           </List>
         </Box>
-      </Drawer>}
-      <Box component="main" sx={{ ml: designRunFocused ? 0 : `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
+      </Drawer>
+      <Box component="main" sx={{ ml: designRunFocused ? `${compactDrawerWidth}px` : `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
     </Box>
   );
 }

@@ -26,6 +26,15 @@ services:
       - key: UPLOAD_STORAGE_BACKEND
         # APKs and evidence live in the configured private R2 bucket.
         value: object_store
+      - key: MAX_UPLOAD_SIZE_MB
+        # BRDs and other readable documents stay bounded independently from
+        # mobile application packages.
+        value: "25"
+      - key: AUTOPILOT_MAX_UPLOAD_SIZE_MB
+        # Shared by Autopilot and Design when an APK/IPA is supplied as the
+        # product under test. Keep this explicit so Blueprint syncs cannot
+        # accidentally restore the old 25 MB document limit.
+        value: "250"
       - key: OBJECT_STORAGE_ENDPOINT_URL
         sync: false
       - key: OBJECT_STORAGE_BUCKET

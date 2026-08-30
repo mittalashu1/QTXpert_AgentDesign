@@ -192,6 +192,9 @@ export const requirementsApi = {
     return apiClient.post<Requirement>("/upload", formData, {
       params: { project_id: projectId },
       headers: { "Content-Type": "multipart/form-data" },
+      // APK/IPA sources can be hundreds of megabytes and are streamed by the
+      // backend. Allow enough time for the upload on a normal connection.
+      timeout: 300_000,
     });
   },
   submitDirectPrompt: (projectId: string, title: string, content: string) =>
