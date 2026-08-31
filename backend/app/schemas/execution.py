@@ -2,7 +2,7 @@ from datetime import datetime
 from uuid import UUID
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field
 
 
 ExecutionSuiteType = Literal["smoke", "feature", "regression", "deep_regression"]
@@ -13,7 +13,11 @@ ExecutionProvider = Literal["playwright", "browserstack", "appium"]
 class ExecutionCreate(BaseModel):
     project_id: UUID
     name: str = Field(min_length=1, max_length=255)
-    base_url: HttpUrl | None = None
+    # Keep target URLs as strings at the request boundary.  The execution
+    # routes perform the same HTTP(S), DNS and private-network checks for all
+    # execution entry points, so doing URL parsing here can turn a target into
+    # FastAPI's opaque 422 response before that useful validation can run.
+    base_url: str | None = Field(default=None, max_length=2048)
     browser: str = Field(default="chromium", pattern="^chromium$")
     test_case_ids: list[UUID] = Field(min_length=1, max_length=100)
     target_kind: ExecutionTargetKind = "web"
@@ -51,7 +55,7 @@ class ExecutionPlanCasesUpdate(BaseModel):
 class ExecutionPlanPreflight(BaseModel):
     target_kind: ExecutionTargetKind = "web"
     provider: ExecutionProvider = "playwright"
-    base_url: HttpUrl | None = None
+    base_url: str | None = Field(default=None, max_length=2048)
     app_asset_id: UUID | None = None
     device_name: str | None = Field(default=None, max_length=120)
     platform_version: str | None = Field(default=None, max_length=40)
@@ -64,7 +68,7 @@ class ExecutionPlanPreflight(BaseModel):
 class ExecutionPlanExecute(BaseModel):
     target_kind: ExecutionTargetKind = "web"
     provider: ExecutionProvider = "playwright"
-    base_url: HttpUrl | None = None
+    base_url: str | None = Field(default=None, max_length=2048)
     app_asset_id: UUID | None = None
     device_name: str | None = Field(default=None, max_length=120)
     platform_version: str | None = Field(default=None, max_length=40)
