@@ -180,9 +180,9 @@ class DocumentIntelligenceService:
         assets = list(result.all())
         if len(assets) != len(unique_ids):
             raise ValueError("One or more selected documents are unavailable or do not belong to this project.")
-        non_documents = [asset.filename for asset in assets if asset.category != "document"]
+        non_documents = [asset.filename for asset in assets if not UploadRepositoryService.is_reusable_document(asset)]
         if non_documents:
-            raise ValueError("Document Intelligence accepts document-repository files only; choose test data or app builds from their dedicated modules.")
+            raise ValueError("Document Intelligence accepts reusable project documents only; choose test data or app builds from their dedicated modules.")
         run = DocumentAnalysisRun(
             project_id=project_id,
             requested_by_id=requested_by_id,
