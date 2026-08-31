@@ -44,19 +44,10 @@ def test_web_target_url_is_deferred_to_execution_target_validation():
     returning an unhelpful 422.  The route now owns URL and network policy so
     malformed or unsafe targets can return a specific error instead.
     """
-    preflight = ExecutionPlanPreflight(
-        target_kind="web",
-        provider="playwright",
-        base_url="https://investnation.com",
-    )
-    execute = ExecutionPlanExecute(
-        target_kind="web",
-        provider="playwright",
-        base_url="https://investnation.com",
-    )
-
-    assert preflight.base_url == "https://investnation.com"
-    assert execute.base_url == "https://investnation.com"
+    for model in (ExecutionPlanPreflight, ExecutionPlanExecute):
+        for value in ("https://investnation.com", "investnation.com"):
+            payload = model(target_kind="web", provider="playwright", base_url=value)
+            assert payload.base_url == value
 
 
 @pytest.mark.asyncio
