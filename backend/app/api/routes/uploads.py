@@ -91,9 +91,14 @@ async def upload_to_repository(
     max_mb = settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB if is_mobile_binary else settings.MAX_UPLOAD_SIZE_MB
     normalized_source = (source_module or "test_data").strip()[:80] or "test_data"
     # Preserve the dedicated Test Data boundary even for older clients that
-    # omit an explicit category. Document-oriented callers pass category=
-    # document for ambiguous formats such as spreadsheets and JSON.
-    effective_category = category or ("test_data" if normalized_source == "test_data" else None)
+    # omit an explicit category. A document-oriented caller should classify
+    # every parser-supported extension as a document, including legacy
+    # ambiguous formats such as spreadsheets and YAML.
+    effective_category = category or (
+        "test_data" if normalized_source == "test_data"
+        else "document" if extension in UploadRepositoryService.REUSABLE_DOCUMENT_EXTENSIONS
+        else None
+    )
     try:
         return await UploadRepositoryService.create_from_upload(
             db,

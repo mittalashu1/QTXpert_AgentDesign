@@ -32,14 +32,14 @@ import UploadFileOutlinedIcon from "@mui/icons-material/UploadFileOutlined";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { useNavigate } from "react-router-dom";
 import { documentIntelligenceApi, uploadsApi } from "@/services/api";
-import { DocumentAnalysisRun, DocumentFinding, DocumentFindingStatus, DocumentProfile, UploadedAsset } from "@/types/domain";
+import { DocumentAnalysisRun, DocumentFinding, DocumentFindingStatus, DocumentProfile, isReusableProjectDocument, UploadedAsset } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 
 const EXTRACTABLE_EXTENSIONS = new Set([
   "pdf", "docx", "pptx", "txt", "md", "json", "csv", "xlsx", "xls", "xml", "yaml", "yml", "html", "htm",
 ]);
-const EXCLUDED = new Set(["apk", "ipa", "mp4", "mov", "webm"]);
+const EMPTY_SCORES: Record<string, number> = {};
 
 const profileLabels: Record<DocumentProfile, string> = {
   general: "General enterprise",
@@ -89,6 +89,13 @@ function findingColor(severity: string): "error" | "warning" | "info" | "default
   return "default";
 }
 
+function errorMessage(reason: unknown, fallback: string): string {
+  const candidate = reason as { response?: { data?: { detail?: unknown } }; message?: unknown };
+  if (typeof candidate?.response?.data?.detail === "string") return candidate.response.data.detail;
+  if (reason instanceof Error && reason.message) return reason.message;
+  return fallback;
+}
+
 export default function DocumentIntelligencePage() {
   const navigate = useNavigate();
   const { selectedProjectId, selectedProject } = useSelectedProject();
@@ -130,9 +137,9 @@ export default function DocumentIntelligencePage() {
   });
 
   const projectAssets = useMemo(
-    // Test data and application builds have their own repositories. Document
-    // Intelligence should only review assets classified as documents.
-    () => (uploadsQuery.data || []).filter((asset) => asset.category === "document" && asset.source_module !== "test_data" && !EXCLUDED.has(asset.extension.toLowerCase())),
+    // Keep the same source/extension rule as the repository picker so legacy
+    // document uploads remain available for a new review.
+    () => (uploadsQuery.data || []).filter(isReusableProjectDocument),
     [uploadsQuery.data]
   );
   const analyzableAssets = useMemo(
@@ -154,12 +161,14 @@ export default function DocumentIntelligencePage() {
       return results;
     },
     onSuccess: async (assets) => {
+      // Make newly added documents immediately usable by the next review.
+      setSelectedAssetIds((current) => Array.from(new Set([...current, ...assets.map((asset) => asset.id)])));
       await queryClient.invalidateQueries({ queryKey: ["document-intelligence-assets", selectedProjectId] });
       await queryClient.invalidateQueries({ queryKey: ["repository-documents", selectedProjectId] });
       setMessage(`${assets.length} document${assets.length === 1 ? "" : "s"} added to ${selectedProject?.name || "this project"}.`);
       setError("");
     },
-    onError: (reason: any) => setError(reason?.response?.data?.detail || reason?.message || "Document upload failed"),
+    onError: (reason) => setError(errorMessage(reason, "Document upload failed")),
   });
 
   const analyzeMutation = useMutation({
@@ -177,7 +186,7 @@ export default function DocumentIntelligencePage() {
       await queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] });
       setTab(0);
     },
-    onError: (reason: any) => setError(reason?.response?.data?.detail || reason?.message || "Document analysis could not start"),
+    onError: (reason) => setError(errorMessage(reason, "Document analysis could not start")),
   });
 
   const reviewMutation = useMutation({
@@ -187,7 +196,7 @@ export default function DocumentIntelligencePage() {
         suggested_refinement: finding.suggested_refinement,
       }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] }),
-    onError: (reason: any) => setError(reason?.response?.data?.detail || "Finding update failed"),
+    onError: (reason) => setError(errorMessage(reason, "Finding update failed")),
   });
 
   const publishMutation = useMutation({
@@ -197,12 +206,12 @@ export default function DocumentIntelligencePage() {
       queryClient.invalidateQueries({ queryKey: ["requirements", selectedProjectId] });
       queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] });
     },
-    onError: (reason: any) => setError(reason?.response?.data?.detail || "Could not publish the intelligence baseline"),
+    onError: (reason) => setError(errorMessage(reason, "Could not publish the intelligence baseline")),
   });
 
   const run = latestRunQuery.data;
   const running = Boolean(run && ["queued", "extracting", "analyzing"].includes(run.status));
-  const scores = run?.scores || {};
+  const scores = run?.scores ?? EMPTY_SCORES;
   const unresolved = (run?.findings || []).filter((finding) => !["resolved", "rejected"].includes(finding.status));
   const critical = unresolved.filter((finding) => finding.severity === "critical").length;
   const high = unresolved.filter((finding) => finding.severity === "high").length;

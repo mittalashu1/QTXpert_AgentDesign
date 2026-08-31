@@ -144,11 +144,10 @@ async def _document_context(
         UploadedAsset.id.in_(document_asset_ids),
         UploadedAsset.owner_id == user.id,
         UploadedAsset.status == "ready",
-        UploadedAsset.category.in_(["document", "test_data"]),
     )
     if project_id is not None:
         query = query.where(UploadedAsset.project_id == project_id)
-    assets = list((await db.scalars(query)).all())
+    assets = [asset for asset in (await db.scalars(query)).all() if UploadRepositoryService.is_reusable_document(asset)]
     assets_by_id = {asset.id: asset for asset in assets}
     if len(assets_by_id) != len(document_asset_ids):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="One or more supporting documents were not found in this project")

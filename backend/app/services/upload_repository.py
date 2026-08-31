@@ -47,10 +47,31 @@ class UploadRepositoryStorageUnavailable(UploadRepositoryError):
 class UploadRepositoryService:
     CHUNK_SIZE = 1024 * 1024
 
-    DOCUMENT_EXTENSIONS = {"pdf", "docx", "txt", "md", "json", "csv"}
+    DOCUMENT_EXTENSIONS = {"pdf", "docx", "pptx", "txt", "md", "json", "csv", "html", "htm"}
     TEST_DATA_EXTENSIONS = {"xlsx", "xls", "xml", "yaml", "yml"}
     MOBILE_EXTENSIONS = {"apk", "ipa"}
     MEDIA_EXTENSIONS = {"mp4", "mov", "webm", "png", "jpg", "jpeg"}
+    REUSABLE_DOCUMENT_EXTENSIONS = DOCUMENT_EXTENSIONS | TEST_DATA_EXTENSIONS
+    NON_DOCUMENT_CATEGORIES = MOBILE_EXTENSIONS | MEDIA_EXTENSIONS | {"autopilot_evidence", "execution_evidence"}
+    NON_DOCUMENT_SOURCES = {"test_data", "autopilot_evidence", "execution_report"}
+
+    @classmethod
+    def is_reusable_document(cls, asset: UploadedAsset) -> bool:
+        """Return whether an asset is safe to attach as document context.
+
+        Assets created before the repository split may be categorized as
+        ``test_data`` or ``other`` even when a document-oriented module stored
+        them. The source boundary and supported extension recover those
+        documents without allowing test-data repositories, builds, media or
+        execution evidence into document-aware queries.
+        """
+        status = str(getattr(asset, "status", "ready") or "").lower()
+        source = str(getattr(asset, "source_module", "") or "").lower()
+        category = str(getattr(asset, "category", "") or "").lower()
+        extension = str(getattr(asset, "extension", "") or "").lower().lstrip(".")
+        if status != "ready" or source in cls.NON_DOCUMENT_SOURCES or category in cls.NON_DOCUMENT_CATEGORIES:
+            return False
+        return category == "document" or extension in cls.REUSABLE_DOCUMENT_EXTENSIONS
 
     @staticmethod
     def _settings(settings: Optional[Settings]) -> Settings:

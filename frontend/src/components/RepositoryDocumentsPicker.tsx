@@ -1,4 +1,4 @@
-import { ChangeEvent, DragEvent, useMemo, useState } from "react";
+import { ChangeEvent, DragEvent, KeyboardEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -24,11 +24,9 @@ import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { uploadsApi } from "@/services/api";
-import { UploadedAsset } from "@/types/domain";
+import { isReusableProjectDocument, REUSABLE_DOCUMENT_EXTENSIONS, UploadedAsset } from "@/types/domain";
 
-const DOCUMENT_EXTENSIONS = new Set([
-  "pdf", "docx", "pptx", "txt", "md", "json", "csv", "xlsx", "xls", "xml", "yaml", "yml", "html", "htm",
-]);
+const DOCUMENT_EXTENSIONS = REUSABLE_DOCUMENT_EXTENSIONS;
 const DOCUMENT_ACCEPT = ".pdf,.docx,.pptx,.txt,.md,.json,.csv,.xlsx,.xls,.xml,.yaml,.yml,.html,.htm";
 const DOCUMENT_MAX_UPLOAD_MB = 25;
 
@@ -81,15 +79,20 @@ export default function RepositoryDocumentsPicker({
   const [error, setError] = useState("");
   const documentsQuery = useQuery({
     queryKey: ["repository-documents", projectId],
-    queryFn: () => uploadsApi.list({ project_id: projectId || undefined, category: "document" }).then((response) => response.data),
+    // Fetch the project metadata without a category constraint. Older
+    // repository uploads can carry a test-data/other category even though
+    // their source and extension identify them as reusable documentation.
+    queryFn: () => uploadsApi.list({ project_id: projectId || undefined }).then((response) => response.data),
     enabled: Boolean(projectId),
   });
 
   const documents = useMemo(
-    () => (documentsQuery.data || []).filter((asset) => asset.category === "document" && asset.source_module !== "test_data" && asset.status === "ready"),
+    () => (documentsQuery.data || []).filter(isReusableProjectDocument),
     [documentsQuery.data],
   );
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selectedDocuments = useMemo(() => documents.filter((asset) => selectedSet.has(asset.id)), [documents, selectedSet]);
+  const allDocumentsSelected = documents.length > 0 && documents.every((asset) => selectedSet.has(asset.id));
 
   const uploadMutation = useMutation({
     mutationFn: async (files: File[]) => {
@@ -143,6 +146,15 @@ export default function RepositoryDocumentsPicker({
     if (selectedSet.has(id)) onSelectionChange(selectedIds.filter((selectedId) => selectedId !== id));
     else if (selectedIds.length < maxSelected) onSelectionChange([...selectedIds, id]);
   };
+  const handleRowKeyDown = (event: KeyboardEvent<HTMLTableRowElement>, id: string) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggle(id);
+  };
+  const selectAll = () => {
+    const nextIds = [...selectedIds, ...documents.filter((asset) => !selectedSet.has(asset.id)).map((asset) => asset.id)];
+    onSelectionChange(Array.from(new Set(nextIds)).slice(0, maxSelected));
+  };
 
   return (
     <Card variant="outlined" sx={{ borderRadius: 3 }}>
@@ -182,24 +194,37 @@ export default function RepositoryDocumentsPicker({
             <Typography variant="body2" color="text.secondary">No reusable documents are stored for this project yet.</Typography>
           </Stack>
         ) : (
-          <TableContainer sx={{ maxHeight: compact ? 260 : 360 }}>
+          <>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between" sx={{ mb: 1 }}>
+              <Typography variant="caption" color="text.secondary">Click a document row or use Attach to include it in this run.</Typography>
+              <Stack direction="row" spacing={0.5}>
+                <Button size="small" onClick={selectAll} disabled={allDocumentsSelected || selectedIds.length >= maxSelected}>Select all</Button>
+                <Button size="small" onClick={() => onSelectionChange([])} disabled={!selectedIds.length}>Clear</Button>
+              </Stack>
+            </Stack>
+            {selectedDocuments.length > 0 && <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap" sx={{ mb: 1.25 }}>
+              {selectedDocuments.map((asset) => <Chip key={asset.id} size="small" color="primary" label={asset.filename} onDelete={() => toggle(asset.id)} />)}
+            </Stack>}
+            <TableContainer sx={{ maxHeight: compact ? 260 : 360 }}>
             <Table size="small" stickyHeader>
-              <TableHead><TableRow><TableCell padding="checkbox" /><TableCell>Document</TableCell><TableCell>Size</TableCell><TableCell>Uploaded</TableCell><TableCell>Source</TableCell></TableRow></TableHead>
+              <TableHead><TableRow><TableCell padding="checkbox" /><TableCell>Document</TableCell><TableCell>Size</TableCell><TableCell>Uploaded</TableCell><TableCell>Source</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead>
               <TableBody>
                 {documents.map((asset) => {
                   const checked = selectedSet.has(asset.id);
                   const disabled = !checked && selectedIds.length >= maxSelected;
-                  return <TableRow key={asset.id} hover selected={checked}>
-                    <TableCell padding="checkbox"><Tooltip title={disabled ? `Select up to ${maxSelected} documents` : checked ? "Remove from this run" : "Attach to this run"}><span><Checkbox checked={checked} disabled={disabled} onChange={() => toggle(asset.id)} inputProps={{ "aria-label": `Attach ${asset.filename}` }} /></span></Tooltip></TableCell>
+                  return <TableRow key={asset.id} hover selected={checked} tabIndex={0} aria-selected={checked} onClick={() => toggle(asset.id)} onKeyDown={(event) => handleRowKeyDown(event, asset.id)} sx={{ cursor: disabled ? "not-allowed" : "pointer" }}>
+                    <TableCell padding="checkbox"><Tooltip title={disabled ? `Select up to ${maxSelected} documents` : checked ? "Remove from this run" : "Attach to this run"}><span><Checkbox checked={checked} disabled={disabled} onClick={(event) => event.stopPropagation()} onChange={() => toggle(asset.id)} inputProps={{ "aria-label": `Attach ${asset.filename}` }} /></span></Tooltip></TableCell>
                     <TableCell sx={{ minWidth: 180 }}><Typography variant="body2" fontWeight={700} noWrap>{asset.filename}</Typography><Typography variant="caption" color="text.secondary">{asset.extension.toUpperCase()} · SHA {asset.sha256.slice(0, 10)}…</Typography></TableCell>
                     <TableCell>{formatBytes(asset.size_bytes)}</TableCell>
                     <TableCell sx={{ whiteSpace: "nowrap" }}>{new Date(asset.created_at).toLocaleString()}</TableCell>
                     <TableCell><Chip size="small" variant="outlined" label={displaySource(asset.source_module)} /></TableCell>
+                    <TableCell align="right"><Button size="small" variant={checked ? "contained" : "outlined"} color={checked ? "primary" : "inherit"} disabled={disabled} onClick={(event) => { event.stopPropagation(); toggle(asset.id); }}>{checked ? "Attached" : "Attach"}</Button></TableCell>
                   </TableRow>;
                 })}
               </TableBody>
             </Table>
-          </TableContainer>
+            </TableContainer>
+          </>
         )}
       </CardContent>
     </Card>
