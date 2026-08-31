@@ -40,9 +40,49 @@ import type { ExecutionPlan, ExecutionPlanCase, ExecutionProvider, ExecutionRun,
 
 const STEPS = ["Import from Test Design", "Select cases", "Preflight and run", "Review evidence"];
 
+type ApiErrorDetail = {
+  loc?: unknown;
+  msg?: unknown;
+  message?: unknown;
+  detail?: unknown;
+};
+
 function apiErrorMessage(reason: unknown, fallback: string): string {
-  const detail = (reason as AxiosError<{ detail?: string }>)?.response?.data?.detail;
-  return typeof detail === "string" ? detail : reason instanceof Error ? reason.message : fallback;
+  const error = reason as AxiosError<{ detail?: unknown }>;
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === "string" && detail.trim()) return detail;
+
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return String(item);
+      const entry = item as ApiErrorDetail;
+      const message = typeof entry.msg === "string"
+        ? entry.msg
+        : typeof entry.message === "string"
+          ? entry.message
+          : typeof entry.detail === "string" ? entry.detail : "";
+      const location = Array.isArray(entry.loc)
+        ? entry.loc.filter((part): part is string | number => typeof part === "string" || typeof part === "number").join(".")
+        : "";
+      return message ? (location ? `${location}: ${message}` : message) : "";
+    }).filter(Boolean);
+    if (messages.length) return messages.join(" · ");
+  }
+
+  if (detail && typeof detail === "object") {
+    const entry = detail as ApiErrorDetail;
+    const message = typeof entry.message === "string"
+      ? entry.message
+      : typeof entry.msg === "string"
+        ? entry.msg
+        : typeof entry.detail === "string" ? entry.detail : "";
+    if (message) return message;
+  }
+
+  if (reason instanceof Error && reason.message) return reason.message;
+  const status = error?.response?.status;
+  return status ? `${fallback} (HTTP ${status})` : fallback;
 }
 
 function compactTitle(value: string, maxLength = 68) {
