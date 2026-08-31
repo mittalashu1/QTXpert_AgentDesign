@@ -26,7 +26,7 @@ import DownloadOutlinedIcon from "@mui/icons-material/DownloadOutlined";
 import DeleteOutlineOutlinedIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { uploadsApi } from "@/services/api";
-import { UploadedAsset } from "@/types/domain";
+import { isReusableProjectDocument, UploadedAsset } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 
 export type RepositoryMode = "test_data" | "documents";
@@ -129,12 +129,13 @@ export default function UploadsPage({ mode = "test_data" }: UploadsPageProps) {
       return asset.category === "test_data" || asset.source_module === "test_data";
     });
     if (category === "all" || (!isDocumentRepository && category === "test_data")) return assets;
+    if (isDocumentRepository && category === "document") return assets.filter(isReusableProjectDocument);
     return assets.filter((asset) => asset.category === category);
   }, [category, isDocumentRepository, uploadsQuery.data]);
 
   const summary = useMemo(() => ({
     files: rows.length,
-    documents: rows.filter((item) => item.category === "document").length,
+    documents: rows.filter(isReusableProjectDocument).length,
     mobile: rows.filter((item) => MOBILE_EXTENSIONS.has(item.category) || MOBILE_EXTENSIONS.has(item.extension.toLowerCase())).length,
     bytes: rows.reduce((total, item) => total + item.size_bytes, 0),
   }), [rows]);
