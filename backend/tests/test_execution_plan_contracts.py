@@ -4,6 +4,7 @@ from uuid import uuid4
 from app.api.routes.execution_plans import _compact_plan_name, _plan_payload, _preflight_plan
 from app.api.routes.executions import _compile_mobile_steps
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
+from app.schemas.execution import ExecutionPlanExecute, ExecutionPlanPreflight
 
 
 def _case(*, selected=True, mode="automated", steps=None, candidate=True):
@@ -34,6 +35,28 @@ def test_compact_plan_name_respects_database_limit_and_word_boundary():
     assert len(compacted) <= 255
     assert compacted.endswith("…")
     assert not compacted.endswith(" ")
+
+
+def test_web_target_url_is_deferred_to_execution_target_validation():
+    """A target request must reach the route's actionable URL validator.
+
+    FastAPI's HttpUrl parser could reject browser-entered targets first,
+    returning an unhelpful 422.  The route now owns URL and network policy so
+    malformed or unsafe targets can return a specific error instead.
+    """
+    preflight = ExecutionPlanPreflight(
+        target_kind="web",
+        provider="playwright",
+        base_url="https://investnation.com",
+    )
+    execute = ExecutionPlanExecute(
+        target_kind="web",
+        provider="playwright",
+        base_url="https://investnation.com",
+    )
+
+    assert preflight.base_url == "https://investnation.com"
+    assert execute.base_url == "https://investnation.com"
 
 
 @pytest.mark.asyncio
