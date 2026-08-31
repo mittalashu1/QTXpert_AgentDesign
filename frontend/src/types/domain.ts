@@ -37,6 +37,30 @@ export interface UploadedAsset {
   updated_at: string;
 }
 
+/**
+ * File types that can be attached as project documentation context.
+ *
+ * Spreadsheet and markup files are included because the document processor
+ * can extract text from them. Their stored category may still be `test_data`
+ * for assets created before the repository split, so attachment eligibility
+ * must use the filename and source boundary as well as the category.
+ */
+export const REUSABLE_DOCUMENT_EXTENSIONS = new Set([
+  "pdf", "docx", "pptx", "txt", "md", "json", "csv", "xlsx", "xls", "xml", "yaml", "yml", "html", "htm",
+]);
+
+const NON_DOCUMENT_ASSET_CATEGORIES = new Set(["apk", "ipa", "media", "autopilot_evidence", "execution_evidence"]);
+const NON_DOCUMENT_ASSET_SOURCES = new Set(["test_data", "autopilot_evidence", "execution_report"]);
+
+/** Return whether an uploaded asset can be attached to a document-aware run. */
+export function isReusableProjectDocument(asset: UploadedAsset): boolean {
+  const extension = String(asset.extension || "").toLowerCase().replace(/^\./, "");
+  const category = String(asset.category || "").toLowerCase();
+  const source = String(asset.source_module || "").toLowerCase();
+  if (asset.status !== "ready" || NON_DOCUMENT_ASSET_SOURCES.has(source) || NON_DOCUMENT_ASSET_CATEGORIES.has(category)) return false;
+  return category === "document" || REUSABLE_DOCUMENT_EXTENSIONS.has(extension);
+}
+
 export type DocumentProfile = "general" | "banking" | "retail" | "saas" | "government";
 export type DocumentFindingStatus = "open" | "accepted" | "rejected" | "resolved" | "needs_clarification";
 
