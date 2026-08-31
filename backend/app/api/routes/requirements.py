@@ -233,7 +233,7 @@ async def reuse_uploaded_requirement(
             UploadedAsset.status == "ready",
         )
     )
-    if asset is None or asset.category not in {"document", "test_data"}:
+    if asset is None or not UploadRepositoryService.is_reusable_document(asset):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository document not found in this project")
 
     source_path = f"upload:{asset.id}"
