@@ -60,6 +60,29 @@ def _blocked_label(label: str, href: str = "") -> tuple[str, str | None]:
     return "safe", None
 
 
+async def _capture_screenshot(page: Any, path: Path) -> tuple[str | None, str | None]:
+    """Capture best-effort visual evidence without failing the web check.
+
+    Full-page screenshots wait for every page font and may hang on public
+    sites that keep a font request open. A screenshot is useful evidence, but
+    it is not the assertion performed by a safe smoke or suite check. Keep a
+    short deadline, fall back to the viewport, and report the limitation as
+    evidence instead of turning a successful page load into a false failure.
+    """
+    try:
+        await page.screenshot(path=str(path), full_page=True, timeout=8000)
+        return str(path), None
+    except Exception as first_error:
+        try:
+            await page.screenshot(path=str(path), full_page=False, timeout=5000)
+            return str(path), (
+                "Full-page screenshot unavailable; viewport evidence captured "
+                f"({type(first_error).__name__})."
+            )
+        except Exception as second_error:
+            return None, f"Screenshot unavailable: {type(second_error).__name__}: {str(second_error)[:180]}"
+
+
 class AutopilotWebService:
     def __init__(self, settings: Settings, prototype: AutopilotPrototypeService):
         self.settings = settings
@@ -99,28 +122,31 @@ class AutopilotWebService:
                     await page.wait_for_load_state("networkidle", timeout=3000)
                 except Exception:
                     pass
-                await page.screenshot(path=str(screenshot_path), full_page=True)
+                captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
                 html = await page.content()
                 source_path.write_text(html, encoding="utf-8")
                 status_code = response.status if response is not None else None
                 title = await page.title()
+                evidence = {
+                    "url": page.url,
+                    "title": title[:300],
+                    "status_code": status_code,
+                    "content_length": len(html),
+                    "duration_seconds": round(time.perf_counter() - started, 2),
+                    "provider": "playwright",
+                    "read_only": True,
+                }
+                if screenshot_warning:
+                    evidence["screenshot_warning"] = screenshot_warning
                 return {
                     "status": "passed" if status_code is None or status_code < 400 else "failed",
                     "target_kind": "web",
                     "target_url": target_url,
                     "current_package": None,
                     "current_activity": None,
-                    "screenshot_path": str(screenshot_path),
+                    "screenshot_path": captured_screenshot,
                     "page_source_path": str(source_path),
-                    "evidence": {
-                        "url": page.url,
-                        "title": title[:300],
-                        "status_code": status_code,
-                        "content_length": len(html),
-                        "duration_seconds": round(time.perf_counter() - started, 2),
-                        "provider": "playwright",
-                        "read_only": True,
-                    },
+                    "evidence": evidence,
                     "error": None if status_code is None or status_code < 400 else f"Website returned HTTP {status_code}",
                 }
             finally:
@@ -171,7 +197,9 @@ class AutopilotWebService:
                         ).hexdigest()
                         screenshot_path = evidence_root / f"{screen_id}.png"
                         source_path = evidence_root / f"{screen_id}.html"
-                        await page.screenshot(path=str(screenshot_path), full_page=True)
+                        captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
+                        if screenshot_warning:
+                            warnings.append(f"{screen_id}: {screenshot_warning}")
                         source_path.write_text(html, encoding="utf-8")
                         screens.append(
                             DiscoveredScreen(
@@ -179,7 +207,7 @@ class AutopilotWebService:
                                 fingerprint=fingerprint,
                                 url=page.url,
                                 title=title or None,
-                                screenshot_path=str(screenshot_path),
+                                screenshot_path=captured_screenshot,
                                 page_source_path=str(source_path),
                                 controls=controls,
                             )
@@ -284,8 +312,11 @@ class AutopilotWebService:
                         if test.bucket == "ui":
                             path = self.prototype._job_dir(job_id) / "evidence" / "web-suite" / f"{test.test_id}.png"
                             path.parent.mkdir(parents=True, exist_ok=True)
-                            await page.screenshot(path=str(path), full_page=True)
-                            evidence["screenshot_path"] = str(path)
+                            captured_screenshot, screenshot_warning = await _capture_screenshot(page, path)
+                            if captured_screenshot:
+                                evidence["screenshot_path"] = captured_screenshot
+                            if screenshot_warning:
+                                evidence["screenshot_warning"] = screenshot_warning
                         if test.bucket == "security":
                             evidence["security_headers"] = {
                                 key: response.headers.get(key)
@@ -425,3 +456,4 @@ class AutopilotWebService:
                 await self.browser.close()
             if self.manager is not None:
                 await self.manager.stop()
+
