@@ -66,6 +66,7 @@ async def generate_testcases(
             llm_provider_override=payload.llm_provider_override,
             generation_profile=payload.generation_profile,
             test_set_title=payload.test_set_title,
+            source_document_analysis_id=payload.source_document_analysis_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

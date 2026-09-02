@@ -12,8 +12,20 @@ from app.config import Settings, get_settings
 from app.database.models.llm_usage import LLMUsageEvent
 from app.database.models.user import User, UserRole
 from app.database.session import get_db_session
-from app.schemas.usage import AICostBreakdown, AICostSummary, AzureActualCost, CostSurface
+from app.schemas.usage import (
+    AICostBreakdown,
+    AICostSummary,
+    AzureActualCost,
+    CostCatalogInfo,
+    CostSurface,
+)
 from app.services.azure_cost_service import AzureCostService
+from app.services.cost_catalog import (
+    CostCatalogSnapshotView,
+    refresh_cost_catalog,
+    refresh_cost_catalog_if_due,
+    surface_metadata,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 COST_ADMIN_EMAIL = "admin@qtxpert.com"
@@ -56,9 +68,20 @@ def _provider_estimates(model_rows) -> dict[str, dict[str, float | int]]:
     return dict(providers)
 
 
-def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list[CostSurface]:
+def _build_cost_surfaces(
+    settings: Settings,
+    model_rows,
+    azure_snapshot,
+    catalog_snapshot: CostCatalogSnapshotView | None = None,
+) -> list[CostSurface]:
     """Describe every known QTXpert billing surface without inventing zero-cost values."""
     providers = _provider_estimates(model_rows)
+
+    def surface(**values) -> CostSurface:
+        """Build a row and enrich it with safe portal/limit metadata."""
+        key = str(values.get("key") or "")
+        values.update(surface_metadata(key, settings, catalog_snapshot))
+        return CostSurface(**values)
 
     def provider_surface(
         key: str,
@@ -85,7 +108,7 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
             coverage = "not_configured"
             estimate_value = None
             note = "Provider is not currently configured. No cost should be assumed from this service."
-        return CostSurface(
+        return surface(
             key=key,
             category="AI / LLM",
             service=service,
@@ -102,7 +125,7 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
     azure_estimate = float(azure_usage.get("estimated_cost_usd", 0.0) or 0.0)
     azure_configured = bool(settings.AZURE_OPENAI_API_KEY and settings.AZURE_ENDPOINT)
     if azure_snapshot.connected and azure_snapshot.actual_cost is not None:
-        azure_surface = CostSurface(
+        azure_surface = surface(
             key="azure_openai",
             category="AI / LLM",
             service="Azure OpenAI",
@@ -116,7 +139,7 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
             action=None,
         )
     elif azure_configured or azure_requests:
-        azure_surface = CostSurface(
+        azure_surface = surface(
             key="azure_openai",
             category="AI / LLM",
             service="Azure OpenAI",
@@ -128,7 +151,7 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
             action="Configure/repair Azure Cost Management credentials to reconcile the provider invoice.",
         )
     else:
-        azure_surface = CostSurface(
+        azure_surface = surface(
             key="azure_openai",
             category="AI / LLM",
             service="Azure OpenAI",
@@ -141,23 +164,28 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
 
     postgres_external = _external_service_url(settings.POSTGRES_URL)
     redis_external = _external_service_url(settings.REDIS_URL)
+    jira_configured = bool(settings.JIRA_URL)
+    confluence_configured = bool(settings.CONFLUENCE_URL)
+    r2_configured = settings.object_storage_configured or bool(
+        settings.CLOUDFLARE_API_TOKEN and settings.CLOUDFLARE_ACCOUNT_ID
+    )
     surfaces = [
         azure_surface,
         provider_surface("gemini", "Google Gemini API", bool(settings.GOOGLE_API_KEY), "QTXpert token estimate; Google invoice not connected", "Add Google Cloud billing export/API reconciliation if actual spend is required."),
         provider_surface("openai", "OpenAI API", bool(settings.OPENAI_API_KEY), "QTXpert token estimate; OpenAI invoice not connected", "Add provider billing reconciliation when an API is available for the account."),
         provider_surface("anthropic", "Anthropic API", bool(settings.ANTHROPIC_API_KEY), "QTXpert token estimate; Anthropic invoice not connected", "Reconcile against the Anthropic billing portal/invoice."),
         provider_surface("bedrock", "AWS Bedrock", bool(settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY), "QTXpert token estimate; AWS Cost Explorer not connected", "Connect AWS Cost Explorer/Cost and Usage Reports for actual Bedrock spend."),
-        CostSurface(
+        surface(
             key="render_backend",
             category="Hosting",
             service="Render · Backend Web Service",
             configured=True,
             coverage="manual",
             billing_source="Render invoice / dashboard",
-            note="Runtime hosting can incur fixed plan and usage charges. QTXpert does not currently ingest Render billing.",
-            action="Reconcile monthly against the Render invoice or add a Render billing feed when available.",
+            note="Runtime hosting can incur fixed plan and usage charges. QTXpert does not currently ingest the Render invoice.",
+            action="Open the Render billing portal to reconcile the service plan and monthly usage.",
         ),
-        CostSurface(
+        surface(
             key="render_frontend",
             category="Hosting",
             service="Render · Frontend Web Service",
@@ -165,19 +193,19 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
             coverage="manual",
             billing_source="Render invoice / dashboard",
             note="Frontend hosting is a separate billing surface and is not included in the AI cost meter.",
-            action="Reconcile monthly against the Render invoice.",
+            action="Open the Render billing portal to reconcile the frontend plan and usage.",
         ),
-        CostSurface(
+        surface(
             key="postgresql",
             category="Data",
-            service="PostgreSQL Database",
+            service="Neon Postgres Database",
             configured=postgres_external,
             coverage="manual" if postgres_external else "not_configured",
-            billing_source="Database/Render invoice",
+            billing_source="Neon billing portal / invoice",
             note="Persistent database compute/storage/backup charges are not metered by QTXpert." if postgres_external else "No external PostgreSQL billing surface detected from the configured URL.",
-            action="Track database plan, storage growth and backup charges in the hosting invoice." if postgres_external else None,
+            action="Confirm the Neon plan, spending limit and storage growth in the billing portal." if postgres_external else None,
         ),
-        CostSurface(
+        surface(
             key="redis_worker",
             category="Data / Workers",
             service="Redis / Background Worker Infrastructure",
@@ -187,17 +215,17 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
             note="Queue/cache infrastructure is not connected to a billing feed." if redis_external else "No external Redis service is currently detected.",
             action="Add the Redis/worker provider invoice if a managed queue is enabled." if redis_external else None,
         ),
-        CostSurface(
+        surface(
             key="browserstack",
             category="Device Cloud",
             service="BrowserStack App Automate",
             configured=settings.browserstack_configured,
             coverage="manual" if settings.browserstack_configured else "not_configured",
             billing_source="BrowserStack subscription / usage invoice",
-            note="Real-device Autopilot sessions can consume paid BrowserStack capacity; QTXpert has no billing connector.",
-            action="Track plan, parallel sessions and overages from BrowserStack billing." if settings.browserstack_configured else None,
+            note="Real-device Autopilot sessions can consume paid BrowserStack capacity; plan capacity is refreshed when credentials are configured.",
+            action="Review parallel capacity and subscription usage in BrowserStack." if settings.browserstack_configured else None,
         ),
-        CostSurface(
+        surface(
             key="pinecone",
             category="Data / AI",
             service="Pinecone Vector Database",
@@ -207,7 +235,7 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
             note="Vector storage/query usage is not included in QTXpert's LLM meter." if settings.VECTOR_DB_PROVIDER == "pinecone" else "Pinecone is currently disabled.",
             action="Reconcile Pinecone storage/read/write usage when enabled." if settings.VECTOR_DB_PROVIDER == "pinecone" else None,
         ),
-        CostSurface(
+        surface(
             key="github",
             category="Engineering",
             service="GitHub / GitHub Actions",
@@ -217,7 +245,7 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
             note="Repository seats, Actions minutes/storage and future paid runners are not ingested by QTXpert.",
             action="Review GitHub billing monthly, especially Actions minutes and artifact storage.",
         ),
-        CostSurface(
+        surface(
             key="domain_dns",
             category="Platform",
             service="Domain Registration & DNS",
@@ -227,15 +255,48 @@ def _build_cost_surfaces(settings: Settings, model_rows, azure_snapshot) -> list
             note="Domain renewal, premium DNS or optional CDN/security charges are outside application metering.",
             action="Track annual domain renewal and any paid DNS/CDN plan separately.",
         ),
-        CostSurface(
+        surface(
+            key="jira",
+            category="Integrations",
+            service="Jira",
+            configured=jira_configured,
+            coverage="manual" if jira_configured else "not_configured",
+            billing_source="Atlassian billing portal / invoice",
+            note="Jira is an optional integration; QTXpert does not ingest Atlassian billing or seat usage.",
+            action="Review Jira seats, automation usage and plan limits in Atlassian administration." if jira_configured else None,
+        ),
+        surface(
+            key="confluence",
+            category="Integrations",
+            service="Confluence",
+            configured=confluence_configured,
+            coverage="manual" if confluence_configured else "not_configured",
+            billing_source="Atlassian billing portal / invoice",
+            note="Confluence is an optional integration; QTXpert does not ingest Atlassian billing or storage usage.",
+            action="Review Confluence seats, storage and plan limits in Atlassian administration." if confluence_configured else None,
+        ),
+        surface(
             key="upload_storage",
             category="Storage",
             service="Upload & Test Evidence Storage",
+            # QTXpert always has an application storage backend (R2 in
+            # production, PostgreSQL chunks during local migration).  The
+            # underlying provider is shown separately below.
             configured=True,
             coverage="manual",
-            billing_source="Current hosting/storage invoice",
-            note="APK, documents, screenshots, XML and future video evidence can drive storage and egress cost. There is no separate storage billing feed today.",
-            action="When object storage is introduced, add storage, request and egress reconciliation to this Cost Center.",
+            billing_source="Configured storage backend / provider invoice",
+            note=f"APK, documents, screenshots, XML and future video evidence use the {settings.UPLOAD_STORAGE_BACKEND} backend.",
+            action="Review the Cloudflare R2 row for provider limits and live object counts when object storage is enabled.",
+        ),
+        surface(
+            key="cloudflare_r2",
+            category="Storage",
+            service="Cloudflare R2 Object Storage",
+            configured=r2_configured,
+            coverage="manual" if r2_configured else "not_configured",
+            billing_source="Cloudflare R2 billing portal / metrics API",
+            note="Private R2 storage is the durable home for APKs, documents and execution evidence. Account metrics are refreshed when a scoped Cloudflare token is configured.",
+            action="Review R2 billing and metrics; enable the optional Cloudflare connector for live object counts." if r2_configured else "Configure the private R2 bucket and scoped metrics token.",
         ),
     ]
     return surfaces
@@ -287,7 +348,10 @@ async def get_ai_costs(
     if azure_snapshot.connected and azure_snapshot.actual_cost is not None and (azure_snapshot.currency or "").upper() == "USD":
         variance_usd = azure_snapshot.actual_cost - estimated_cost
 
-    surfaces = _build_cost_surfaces(settings, model_rows, azure_snapshot)
+    # Provider probes are cached in Neon and refreshed at most monthly.  A
+    # missing connector never prevents the static catalog from rendering.
+    catalog_snapshot = await refresh_cost_catalog_if_due(db, settings)
+    surfaces = _build_cost_surfaces(settings, model_rows, azure_snapshot, catalog_snapshot)
     return AICostSummary(
         period_days=days,
         since=since,
@@ -322,4 +386,26 @@ async def get_ai_costs(
         variance_usd=variance_usd,
         cost_surfaces=surfaces,
         untracked_surface_count=sum(surface.coverage == "manual" for surface in surfaces),
+        catalog=CostCatalogInfo(
+            status=catalog_snapshot.status,
+            last_refreshed_at=catalog_snapshot.refreshed_at,
+            next_refresh_at=catalog_snapshot.next_refresh_at,
+            error=catalog_snapshot.error,
+        ),
+    )
+
+
+@router.post("/cost-catalog/refresh", response_model=CostCatalogInfo)
+async def refresh_cost_catalog_endpoint(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    _user: Annotated[User, Depends(require_cost_admin)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> CostCatalogInfo:
+    """Force a safe provider metadata refresh for the owner Cost Center."""
+    snapshot = await refresh_cost_catalog(db, settings, force=True)
+    return CostCatalogInfo(
+        status=snapshot.status,
+        last_refreshed_at=snapshot.refreshed_at,
+        next_refresh_at=snapshot.next_refresh_at,
+        error=snapshot.error,
     )

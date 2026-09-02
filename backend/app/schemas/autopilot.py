@@ -84,6 +84,7 @@ class AutopilotAnalysis(BaseModel):
     # Repository documentation attached to this run. The IDs make the source
     # of the context auditable without copying document contents into reports.
     document_asset_ids: List[UUID] = Field(default_factory=list)
+    document_analysis_run_id: Optional[UUID] = None
 
 
 ReportCheckStatus = Literal["pass", "fail", "warning", "pending", "not_assessed"]
@@ -201,12 +202,20 @@ class AutopilotJobSummary(BaseModel):
     surface_identity: str = ""
     surface_version: int = 1
     repository_asset_id: Optional[UUID] = None
+    document_analysis_run_id: Optional[UUID] = None
     created_at: str
 
 
 class AutopilotSurface(BaseModel):
-    """A versioned profile/target/build scope shown as an Autopilot tab."""
+    """One isolated Test & Audit Report tab for a profile/target/build scope.
 
+    ``surface_key`` remains the stable duplicate-detection key for backwards
+    compatibility. ``report_tab_key`` is unique per active analysis version so
+    choosing ``new`` creates a separate report tab instead of replacing the
+    existing one in the UI.
+    """
+
+    report_tab_key: str = ""
     surface_key: str
     surface_identity: str
     profile_id: str = "uae_fintech"
@@ -215,6 +224,7 @@ class AutopilotSurface(BaseModel):
     filename: str = ""
     latest_job_id: str
     latest_status: str
+    surface_version: int = 1
     version_count: int = 1
     latest_created_at: str
     latest_updated_at: str
@@ -228,6 +238,7 @@ class AutopilotJobStatus(BaseModel):
     target_kind: AutopilotTargetKind = "android"
     target_url: Optional[str] = None
     profile_id: str = "uae_fintech"
+    report_tab_key: str = ""
     surface_key: str = ""
     surface_identity: str = ""
     surface_version: int = 1
@@ -238,6 +249,7 @@ class AutopilotJobStatus(BaseModel):
     updated_at: str
     context: str = ""
     document_asset_ids: List[UUID] = Field(default_factory=list)
+    document_analysis_run_id: Optional[UUID] = None
     artifact_available: bool = True
     error: Optional[str] = None
     analysis: Optional[AutopilotAnalysis] = None
@@ -390,6 +402,10 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     profile_id: str = Field(default="uae_fintech", max_length=80)
     surface_action: Literal["ask", "new", "override"] = "new"
     document_asset_ids: Optional[List[UUID]] = Field(default=None, max_length=20)
+    document_analysis_run_id: Optional[UUID] = Field(
+        default=None,
+        description="Optional replacement Document Intelligence baseline; omitted preserves the original link.",
+    )
 
 
 class AutopilotDiscoveryRequest(AutopilotExecutionRequest):

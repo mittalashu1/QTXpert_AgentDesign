@@ -21,6 +21,10 @@ class GenerateTestCasesRequest(BaseModel):
         max_length=500,
         description="Optional user-facing title derived from the source document or query.",
     )
+    source_document_analysis_id: Optional[UUID] = Field(
+        default=None,
+        description="Optional completed Document Intelligence run that supplied the source requirement.",
+    )
 
 
 class TestCaseUpdate(BaseModel):
@@ -78,6 +82,7 @@ class GenerationRunOut(BaseModel):
 
     id: UUID
     project_id: UUID
+    source_document_analysis_id: Optional[UUID] = None
     status: RunStatus
     llm_provider: str
     llm_model: str
@@ -103,6 +108,7 @@ class GenerationRunSummaryOut(BaseModel):
 
     id: UUID
     project_id: UUID
+    source_document_analysis_id: Optional[UUID] = None
     status: RunStatus
     llm_provider: str
     llm_model: str

@@ -107,6 +107,7 @@ export interface DocumentAnalysisRun {
   status: "queued" | "extracting" | "analyzing" | "completed" | "failed" | string;
   profile: DocumentProfile | string;
   asset_ids: string[];
+  additional_context?: string | null;
   document_inventory: DocumentInventoryItem[] | null;
   knowledge_model: Record<string, string[]> | null;
   scores: Record<string, number> | null;
@@ -120,6 +121,51 @@ export interface DocumentAnalysisRun {
   findings: DocumentFinding[];
   created_at: string;
   updated_at: string;
+}
+
+export interface DocumentContext {
+  run_id: string;
+  project_id: string;
+  status: string;
+  profile: string;
+  context: string;
+  asset_ids: string[];
+  summary: string | null;
+  published_requirement_id: string | null;
+  open_finding_count: number;
+  critical_finding_count: number;
+  high_finding_count: number;
+}
+
+export interface DocumentTraceabilityGeneration {
+  id: string;
+  status: string;
+  title: string | null;
+  test_case_count: number;
+  created_at: string;
+}
+
+export interface DocumentTraceability {
+  run_id: string;
+  project_id: string;
+  status: string;
+  published_requirement_id: string | null;
+  finding_count: number;
+  open_finding_count: number;
+  critical_finding_count: number;
+  high_finding_count: number;
+  generated_test_case_count: number;
+  generation_runs: DocumentTraceabilityGeneration[];
+  execution_plan_count: number;
+  execution_run_count: number;
+  active_execution_count: number;
+  executed_test_count: number;
+  passed_count: number;
+  failed_count: number;
+  blocked_count: number;
+  pending_test_count: number;
+  skipped_test_count: number;
+  next_actions: string[];
 }
 
 export type RequirementSource =
@@ -177,6 +223,7 @@ export interface TestCase {
 export interface GenerationRun {
   id: string;
   project_id: string;
+  source_document_analysis_id?: string | null;
   status: RunStatus;
   llm_provider: string;
   llm_model: string;
@@ -196,6 +243,7 @@ export interface GenerationRun {
 export interface GenerationRunSummary {
   id: string;
   project_id: string;
+  source_document_analysis_id?: string | null;
   status: RunStatus;
   llm_provider: string;
   llm_model: string;
@@ -260,6 +308,17 @@ export type ExecutionSuiteType = "smoke" | "feature" | "regression" | "deep_regr
 export type ExecutionPlanStatus = "draft" | "ready" | "blocked" | "queued" | "running" | "completed" | "failed" | string;
 export type ExecutionPlanReadiness = "pending" | "not_selected" | "manual_review" | "ready" | "blocked" | "approval_required" | string;
 
+export interface ExecutionInputRequirement {
+  key: string;
+  label: string;
+  category: string;
+  description: string;
+  case_ids: string[];
+  case_keys: string[];
+  required: boolean;
+  provided: boolean;
+}
+
 export interface ExecutionPlanCase {
   id: string;
   source_test_case_id: string | null;
@@ -301,6 +360,8 @@ export interface ExecutionPlan {
   selected_automated_cases: number;
   ready_cases: number;
   blocked_cases: number;
+  input_references: Record<string, string>;
+  input_requirements: ExecutionInputRequirement[];
   cases: ExecutionPlanCase[];
 }
 
@@ -343,6 +404,35 @@ export interface AzureActualCost {
   error: string | null;
 }
 
+export interface CostSurface {
+  key: string;
+  category: string;
+  service: string;
+  configured: boolean | null;
+  coverage: "actual" | "estimated" | "manual" | "not_configured";
+  actual_cost: number | null;
+  estimated_cost_usd: number | null;
+  currency: string | null;
+  billing_source: string;
+  note: string;
+  action: string | null;
+  portal_url: string | null;
+  pricing_url: string | null;
+  limits_url: string | null;
+  limits: string[];
+  account_plan: string | null;
+  live_usage: Record<string, string | number | boolean | null> | null;
+  last_verified_at: string | null;
+  provider_error: string | null;
+}
+
+export interface CostCatalogInfo {
+  status: "fresh" | "partial" | "due" | "unavailable";
+  last_refreshed_at: string | null;
+  next_refresh_at: string | null;
+  error: string | null;
+}
+
 export interface AICostSummary {
   period_days: number;
   since: string;
@@ -354,6 +444,9 @@ export interface AICostSummary {
   by_model: AICostBreakdown[];
   azure: AzureActualCost;
   variance_usd: number | null;
+  cost_surfaces: CostSurface[];
+  untracked_surface_count: number;
+  catalog: CostCatalogInfo;
 }
 
 export const EXPORT_FORMATS = [

@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.database.session import AsyncSessionLocal
 from app.services.data_retention import cleanup_generated_data
 from app.services.autopilot_recovery import recover_interrupted_autopilot_jobs
+from app.services.cost_catalog import refresh_cost_catalog_if_due
 
 settings_obj = get_settings()
 
@@ -104,6 +105,30 @@ def create_app() -> FastAPI:
                 logger.exception("Generated-data startup retention failed")
 
         app.state.data_retention = asyncio.create_task(_run_retention())
+
+    @app.on_event("startup")
+    async def schedule_cost_catalog_refresh() -> None:
+        """Refresh provider plan/usage metadata without delaying HTTP startup.
+
+        The task is intentionally detached from the request path.  The Cost
+        Center endpoint also refreshes a stale snapshot on demand, so a cold
+        start or a transient database/provider outage remains visible as a
+        partial catalog rather than breaking the application.
+        """
+        if not settings_obj.COST_CENTER_AUTO_REFRESH_ENABLED:
+            logger.info("Cost Center automatic refresh disabled")
+            app.state.cost_catalog_refresh = None
+            return
+
+        async def _run_catalog_refresh() -> None:
+            try:
+                async with AsyncSessionLocal() as session:
+                    await refresh_cost_catalog_if_due(session, settings_obj)
+                logger.info("Cost Center catalog refresh check completed")
+            except Exception:
+                logger.exception("Cost Center catalog refresh failed")
+
+        app.state.cost_catalog_refresh = asyncio.create_task(_run_catalog_refresh())
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):

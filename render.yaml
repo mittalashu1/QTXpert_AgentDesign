@@ -74,6 +74,30 @@ services:
         value: "true"
       - key: DATA_RETENTION_RUN_ON_STARTUP
         value: "false"
+      - key: COST_CENTER_AUTO_REFRESH_ENABLED
+        value: "true"
+      - key: COST_CENTER_REFRESH_DAYS
+        value: "30"
+      - key: COST_CENTER_REFRESH_TIMEOUT_SECONDS
+        value: "8"
+      # Optional account-level plan/usage connectors. Store the values only in
+      # Render's secret environment; QTXpert persists metrics, never tokens.
+      - key: NEON_API_KEY
+        sync: false
+      - key: NEON_ORG_ID
+        sync: false
+      - key: NEON_PLAN
+        # Current workspace plan from the Neon console; update this label if
+        # the account is moved to Scale or another plan.
+        value: Launch
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: RENDER_BACKEND_PLAN
+        value: Starter
+      - key: RENDER_FRONTEND_PLAN
+        value: Free
       - key: LLM_PROVIDER
         value: router
       - key: LLM_ROUTER_LOW_COST

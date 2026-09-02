@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -28,18 +28,20 @@ import {
 } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
-import UploadFileOutlinedIcon from "@mui/icons-material/UploadFileOutlined";
-import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
+import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
+import AccountTreeOutlinedIcon from "@mui/icons-material/AccountTreeOutlined";
+import AssessmentOutlinedIcon from "@mui/icons-material/AssessmentOutlined";
 import { useNavigate } from "react-router-dom";
-import { documentIntelligenceApi, uploadsApi } from "@/services/api";
-import { DocumentAnalysisRun, DocumentFinding, DocumentFindingStatus, DocumentProfile, isReusableProjectDocument, UploadedAsset } from "@/types/domain";
+import { documentIntelligenceApi } from "@/services/api";
+import { DocumentAnalysisRun, DocumentFinding, DocumentFindingStatus, DocumentProfile, DocumentTraceability, UploadedAsset } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
+import { useRepositoryAssets } from "@/components/repositoryAssets";
 
 const EXTRACTABLE_EXTENSIONS = new Set([
   "pdf", "docx", "pptx", "txt", "md", "json", "csv", "xlsx", "xls", "xml", "yaml", "yml", "html", "htm",
 ]);
-const EMPTY_SCORES: Record<string, number> = {};
+const EXCLUDED = new Set(["apk", "ipa", "mp4", "mov", "webm"]);
 
 const profileLabels: Record<DocumentProfile, string> = {
   general: "General enterprise",
@@ -89,16 +91,29 @@ function findingColor(severity: string): "error" | "warning" | "info" | "default
   return "default";
 }
 
-function errorMessage(reason: unknown, fallback: string): string {
-  const candidate = reason as { response?: { data?: { detail?: unknown } }; message?: unknown };
-  if (typeof candidate?.response?.data?.detail === "string") return candidate.response.data.detail;
-  if (reason instanceof Error && reason.message) return reason.message;
+function readableError(reason: unknown, fallback: string): string {
+  if (typeof reason === "object" && reason !== null) {
+    const candidate = reason as {
+      response?: { data?: { detail?: unknown } };
+      message?: unknown;
+    };
+    const detail = candidate.response?.data?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (typeof candidate.message === "string" && candidate.message.trim()) return candidate.message;
+  }
   return fallback;
+}
+
+function redactContextForStorage(value: string) {
+  return value
+    .replace(/(["']?\b(?:password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key|client[_ -]?secret|refresh[_ -]?token)\b["']?)\s*[:=]\s*(["']?)[^,;\n"']+\2/gi, "$1: [REDACTED]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, "Bearer [REDACTED]")
+    .slice(0, 8000);
 }
 
 export default function DocumentIntelligencePage() {
   const navigate = useNavigate();
-  const { selectedProjectId, selectedProject } = useSelectedProject();
+  const { selectedProjectId } = useSelectedProject();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState(0);
   const [profile, setProfile] = useState<DocumentProfile>("general");
@@ -109,7 +124,10 @@ export default function DocumentIntelligencePage() {
 
   useEffect(() => {
     if (!selectedProjectId) return;
-    setChangeContext(localStorage.getItem(`qtxpert-document-context:${selectedProjectId}`) || "");
+    const storedContext = localStorage.getItem(`qtxpert-document-context:${selectedProjectId}`) || "";
+    const safeContext = redactContextForStorage(storedContext);
+    setChangeContext(safeContext);
+    if (safeContext !== storedContext) localStorage.setItem(`qtxpert-document-context:${selectedProjectId}`, safeContext);
     setMessage("");
     setError("");
     setTab(0);
@@ -117,13 +135,13 @@ export default function DocumentIntelligencePage() {
   }, [selectedProjectId]);
 
   useEffect(() => {
-    if (selectedProjectId) localStorage.setItem(`qtxpert-document-context:${selectedProjectId}`, changeContext);
+    if (selectedProjectId) localStorage.setItem(`qtxpert-document-context:${selectedProjectId}`, redactContextForStorage(changeContext));
   }, [selectedProjectId, changeContext]);
 
-  const uploadsQuery = useQuery({
-    queryKey: ["document-intelligence-assets", selectedProjectId],
-    queryFn: () => uploadsApi.list({ project_id: selectedProjectId }).then((response) => response.data),
-    enabled: Boolean(selectedProjectId),
+  const uploadsQuery = useRepositoryAssets({
+    projectId: selectedProjectId,
+    categories: ["document"],
+    cacheKey: "document-intelligence-assets",
   });
 
   const latestRunQuery = useQuery({
@@ -136,40 +154,28 @@ export default function DocumentIntelligencePage() {
     },
   });
 
+  const traceabilityQuery = useQuery<DocumentTraceability | null>({
+    queryKey: ["document-intelligence-traceability", latestRunQuery.data?.id],
+    queryFn: () => latestRunQuery.data?.id
+      ? documentIntelligenceApi.traceability(latestRunQuery.data.id).then((response) => response.data)
+      : Promise.resolve(null),
+    enabled: Boolean(latestRunQuery.data?.id && latestRunQuery.data?.status === "completed"),
+    refetchInterval: (query) => {
+      const value = query.state.data;
+      return value && (value.active_execution_count > 0 || value.generation_runs.some((item) => ["pending", "normalizing", "analyzing", "generating_scenarios", "generating_test_cases", "risk_analysis"].includes(item.status))) ? 4000 : false;
+    },
+  });
+
   const projectAssets = useMemo(
-    // Keep the same source/extension rule as the repository picker so legacy
-    // document uploads remain available for a new review.
-    () => (uploadsQuery.data || []).filter(isReusableProjectDocument),
-    [uploadsQuery.data]
+    // Test data and application builds have their own repositories. Document
+    // Intelligence should only review assets classified as documents.
+    () => uploadsQuery.assets.filter((asset) => asset.category === "document" && asset.source_module !== "test_data" && !EXCLUDED.has(asset.extension.toLowerCase())),
+    [uploadsQuery.assets]
   );
   const analyzableAssets = useMemo(
     () => projectAssets.filter((asset) => EXTRACTABLE_EXTENSIONS.has(asset.extension.toLowerCase())),
     [projectAssets]
   );
-
-  const uploadMutation = useMutation({
-    mutationFn: async (files: File[]) => {
-      const results: UploadedAsset[] = [];
-      for (const file of files) {
-        const response = await uploadsApi.upload(file, {
-          projectId: selectedProjectId,
-          sourceModule: "document_intelligence",
-          category: "document",
-        });
-        results.push(response.data);
-      }
-      return results;
-    },
-    onSuccess: async (assets) => {
-      // Make newly added documents immediately usable by the next review.
-      setSelectedAssetIds((current) => Array.from(new Set([...current, ...assets.map((asset) => asset.id)])));
-      await queryClient.invalidateQueries({ queryKey: ["document-intelligence-assets", selectedProjectId] });
-      await queryClient.invalidateQueries({ queryKey: ["repository-documents", selectedProjectId] });
-      setMessage(`${assets.length} document${assets.length === 1 ? "" : "s"} added to ${selectedProject?.name || "this project"}.`);
-      setError("");
-    },
-    onError: (reason) => setError(errorMessage(reason, "Document upload failed")),
-  });
 
   const analyzeMutation = useMutation({
     mutationFn: () => documentIntelligenceApi.analyze({
@@ -186,7 +192,7 @@ export default function DocumentIntelligencePage() {
       await queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] });
       setTab(0);
     },
-    onError: (reason) => setError(errorMessage(reason, "Document analysis could not start")),
+    onError: (reason: unknown) => setError(readableError(reason, "Document analysis could not start")),
   });
 
   const reviewMutation = useMutation({
@@ -195,26 +201,45 @@ export default function DocumentIntelligencePage() {
         status,
         suggested_refinement: finding.suggested_refinement,
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] }),
-    onError: (reason) => setError(errorMessage(reason, "Finding update failed")),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] });
+      if (run?.id) queryClient.invalidateQueries({ queryKey: ["document-intelligence-traceability", run.id] });
+    },
+    onError: (reason: unknown) => setError(readableError(reason, "Finding update failed")),
   });
 
   const publishMutation = useMutation({
     mutationFn: (runId: string) => documentIntelligenceApi.publish(runId),
-    onSuccess: (response) => {
+    onSuccess: (response, runId) => {
       setMessage(response.data.message);
       queryClient.invalidateQueries({ queryKey: ["requirements", selectedProjectId] });
       queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] });
+      queryClient.invalidateQueries({ queryKey: ["document-intelligence-traceability", runId] });
     },
-    onError: (reason) => setError(errorMessage(reason, "Could not publish the intelligence baseline")),
+    onError: (reason: unknown) => setError(readableError(reason, "Could not publish the intelligence baseline")),
+  });
+
+  const generateTestsMutation = useMutation({
+    mutationFn: (runId: string) => documentIntelligenceApi.generateTests(runId, {
+      generation_profile: "feature",
+      test_set_title: "Document Intelligence test design",
+    }),
+    onSuccess: async (response) => {
+      setMessage(response.data.message);
+      await queryClient.invalidateQueries({ queryKey: ["document-intelligence-traceability", run?.id] });
+      await queryClient.invalidateQueries({ queryKey: ["requirements", selectedProjectId] });
+      navigate(`/design?run=${response.data.generation_run_id}`);
+    },
+    onError: (reason: unknown) => setError(readableError(reason, "Test Design generation could not start")),
   });
 
   const run = latestRunQuery.data;
   const running = Boolean(run && ["queued", "extracting", "analyzing"].includes(run.status));
-  const scores = run?.scores ?? EMPTY_SCORES;
+  const scores = useMemo(() => run?.scores || {}, [run?.scores]);
   const unresolved = (run?.findings || []).filter((finding) => !["resolved", "rejected"].includes(finding.status));
   const critical = unresolved.filter((finding) => finding.severity === "critical").length;
   const high = unresolved.filter((finding) => finding.severity === "high").length;
+  const traceability = traceabilityQuery.data;
 
   const coverageRows = useMemo(() => Object.keys(areaLabels).map((key) => {
     const score = Math.max(0, Math.min(100, Math.round(scores[key] || 0)));
@@ -227,12 +252,6 @@ export default function DocumentIntelligencePage() {
       improvement: related?.suggested_refinement || related?.title || (score >= 85 ? "No material gap identified." : "Review the supporting documentation for this area."),
     };
   }), [scores, unresolved]);
-
-  const handleFiles = (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.target.files || []);
-    if (files.length) uploadMutation.mutate(files);
-    event.target.value = "";
-  };
 
   if (!selectedProjectId) return <Alert severity="info">Create or select a project from the top bar.</Alert>;
 
@@ -255,7 +274,7 @@ export default function DocumentIntelligencePage() {
       <Card variant="outlined" sx={{ borderRadius: 3 }}>
         <CardContent>
           <Grid container spacing={2} alignItems="flex-start">
-            <Grid item xs={12} lg={7}>
+            <Grid item xs={12} lg={8}>
               <TextField
                 label="Change / scope context"
                 value={changeContext}
@@ -266,24 +285,13 @@ export default function DocumentIntelligencePage() {
                 fullWidth
               />
             </Grid>
-            <Grid item xs={12} sm={6} lg={3}>
+            <Grid item xs={12} sm={6} lg={4}>
               <FormControl fullWidth size="small">
                 <InputLabel>Analysis profile</InputLabel>
                 <Select label="Analysis profile" value={profile} onChange={(event) => setProfile(event.target.value as DocumentProfile)}>
                   {(Object.keys(profileLabels) as DocumentProfile[]).map((item) => <MenuItem key={item} value={item}>{profileLabels[item]}</MenuItem>)}
                 </Select>
               </FormControl>
-            </Grid>
-            <Grid item xs={12} sm={6} lg={2}>
-              <Stack spacing={1}>
-                <Button component="label" variant="outlined" startIcon={<UploadFileOutlinedIcon />} fullWidth disabled={uploadMutation.isPending}>
-                  Add documents
-                  <input hidden multiple type="file" onChange={handleFiles} accept=".pdf,.docx,.pptx,.txt,.md,.json,.csv,.xlsx,.xls,.xml,.yaml,.yml,.html,.htm" />
-                </Button>
-                <Button variant="text" size="small" startIcon={<FolderOutlinedIcon />} onClick={() => navigate("/test-data/documents")} fullWidth>
-                  Open repository
-                </Button>
-              </Stack>
             </Grid>
           </Grid>
           <RepositoryDocumentsPicker
@@ -292,9 +300,11 @@ export default function DocumentIntelligencePage() {
             onSelectionChange={setSelectedAssetIds}
             sourceModule="document_intelligence"
             title="Choose repository documents (optional)"
-            description="Review selected documents only, or leave the selection empty to review every stored document."
+            description="Upload a new document or select existing files from this project repository. Leave the selection empty to review every stored document."
             compact
-            allowUpload={false}
+            assets={projectAssets}
+            assetsLoading={uploadsQuery.isLoading || uploadsQuery.isFetching}
+            assetsError={uploadsQuery.isError}
             onOpenRepository={() => navigate("/test-data/documents")}
           />
           <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} alignItems={{ md: "center" }} sx={{ mt: 2 }}>
@@ -310,7 +320,7 @@ export default function DocumentIntelligencePage() {
               {selectedAssetIds.length ? `${selectedAssetIds.length} selected document${selectedAssetIds.length === 1 ? "" : "s"}` : `${analyzableAssets.length} stored document${analyzableAssets.length === 1 ? "" : "s"} available`} for review · upload once, reuse from the repository
             </Typography>
           </Stack>
-          {(running || uploadMutation.isPending) && <LinearProgress sx={{ mt: 2 }} />}
+          {(running || analyzeMutation.isPending) && <LinearProgress sx={{ mt: 2 }} />}
         </CardContent>
       </Card>
 
@@ -333,11 +343,46 @@ export default function DocumentIntelligencePage() {
           <Alert severity={run.readiness_score >= 85 ? "success" : run.readiness_score >= 70 ? "info" : run.readiness_score >= 50 ? "warning" : "error"}>
             <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ md: "center" }} justifyContent="space-between">
               <Box><b>{pretty(run.readiness_status)}</b>{run.summary ? ` · ${run.summary}` : ""}</Box>
-              <Button size="small" variant="contained" startIcon={<CheckCircleOutlineIcon />} disabled={publishMutation.isPending} onClick={() => publishMutation.mutate(run.id)}>
-                {run.published_requirement_id ? "Refresh Test Design baseline" : "Send to Test Design"}
-              </Button>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                <Button size="small" variant="outlined" startIcon={<CheckCircleOutlineIcon />} disabled={publishMutation.isPending} onClick={() => publishMutation.mutate(run.id)}>
+                  {run.published_requirement_id ? "Refresh baseline" : "Publish baseline"}
+                </Button>
+                <Button size="small" variant="contained" startIcon={generateTestsMutation.isPending ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={generateTestsMutation.isPending || traceability?.generation_runs.some((item) => ["pending", "normalizing", "analyzing", "generating_scenarios", "generating_test_cases", "risk_analysis"].includes(item.status))} onClick={() => generateTestsMutation.mutate(run.id)}>
+                  Generate Test Design
+                </Button>
+              </Stack>
             </Stack>
           </Alert>
+          <Card variant="outlined" sx={{ borderRadius: 3 }}>
+            <CardContent>
+              <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} alignItems={{ md: "center" }} justifyContent="space-between">
+                <Box>
+                  <Typography variant="h6" fontWeight={800}>Downstream delivery</Typography>
+                  <Typography variant="body2" color="text.secondary">Trace this static document baseline into Test Design, Test Execution and runtime reporting.</Typography>
+                </Box>
+                <Chip size="small" label={`Last analysis: ${new Date(run.updated_at).toLocaleString()}`} variant="outlined" />
+              </Stack>
+              {traceabilityQuery.isLoading && <LinearProgress sx={{ mt: 2 }} />}
+              {traceability && <>
+                <Grid container spacing={1.25} sx={{ mt: 1 }}>
+                  {[
+                    ["Open findings", traceability.open_finding_count, traceability.critical_finding_count ? `${traceability.critical_finding_count} critical` : "Review before sign-off"],
+                    ["Test Design cases", traceability.generated_test_case_count, `${traceability.generation_runs.length} linked run${traceability.generation_runs.length === 1 ? "" : "s"}`],
+                    ["Execution plans", traceability.execution_plan_count, `${traceability.execution_run_count} run${traceability.execution_run_count === 1 ? "" : "s"}`],
+                    ["Runtime results", traceability.executed_test_count, traceability.active_execution_count ? `${traceability.active_execution_count} run${traceability.active_execution_count === 1 ? "" : "s"} in progress` : traceability.executed_test_count ? `${traceability.passed_count} passed · ${traceability.failed_count} failed` : traceability.pending_test_count ? `${traceability.pending_test_count} result${traceability.pending_test_count === 1 ? "" : "s"} pending` : "Pending execution"],
+                  ].map(([label, value, detail]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2, height: "100%" }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h5" fontWeight={800}>{value}</Typography><Typography variant="caption" color="text.secondary">{detail}</Typography></Box></Grid>)}
+                </Grid>
+                <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1.5 }}>
+                  {traceability.generation_runs[0] && <Button size="small" variant="outlined" startIcon={<PlayArrowRoundedIcon />} onClick={() => navigate(`/design?run=${traceability.generation_runs[0].id}`)}>Open Test Design</Button>}
+                  <Button size="small" variant="outlined" startIcon={<AutoAwesomeIcon />} onClick={() => navigate(`/autopilot?document_run=${run.id}`)}>Open Autopilot with baseline</Button>
+                  <Button size="small" variant="outlined" startIcon={<AccountTreeOutlinedIcon />} onClick={() => navigate("/execution")}>Open Test Execution</Button>
+                  <Button size="small" variant="outlined" startIcon={<AssessmentOutlinedIcon />} onClick={() => navigate("/reports")}>Open Test Reports</Button>
+                </Stack>
+                {traceability.next_actions.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}><Typography variant="body2" fontWeight={700}>Next actions</Typography>{traceability.next_actions.slice(0, 4).map((action) => <Typography variant="body2" key={action}>• {action}</Typography>)}</Alert>}
+              </>}
+              {!traceabilityQuery.isLoading && !traceability && <Alert severity="info" sx={{ mt: 1.5 }}>Downstream traceability will appear when this analysis is available.</Alert>}
+            </CardContent>
+          </Card>
         </>
       )}
 
@@ -349,7 +394,7 @@ export default function DocumentIntelligencePage() {
           <Tab label="Refinements" />
         </Tabs>
         <CardContent>
-          {tab === 0 && <CoverageTable run={run} rows={coverageRows} context={changeContext} />}
+          {tab === 0 && <CoverageTable run={run} rows={coverageRows} context={changeContext || run?.additional_context || ""} />}
           {tab === 1 && <DocumentsTable assets={projectAssets} run={run} />}
           {tab === 2 && <FindingsTable run={run} onReview={(finding, status) => reviewMutation.mutate({ finding, status })} />}
           {tab === 3 && <RefinementsTable run={run} onReview={(finding, status) => reviewMutation.mutate({ finding, status })} />}

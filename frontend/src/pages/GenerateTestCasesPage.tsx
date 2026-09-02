@@ -5,7 +5,7 @@ import {
   Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Card,
   CardContent, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Divider,
   FormControl, FormHelperText, IconButton, InputLabel, LinearProgress, Menu,
-  MenuItem, Select, Stack, TextField, Tooltip, Typography,
+  MenuItem, Paper, Select, Stack, TextField, Tooltip, Typography,
 } from "@mui/material";
 import AddOutlinedIcon from "@mui/icons-material/AddOutlined";
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
@@ -24,7 +24,7 @@ import Grid from "@mui/material/Grid2";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { requirementsApi, testCasesApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
-import ProjectSelector from "@/components/ProjectSelector";
+import PageHeader from "@/components/PageHeader";
 import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 import { EXPORT_FORMATS, GenerationRun, GenerationRunSummary, TestCase } from "@/types/domain";
 
@@ -57,7 +57,7 @@ const SOURCES: InputSource[] = [
 ];
 
 function EditableCase({ testCase, onChange }: { testCase: TestCase; onChange: (next: TestCase) => void }) {
-  return <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1.75, minWidth: 0, "&:before": { display: "none" } }}>
+  return <Accordion variant="outlined" disableGutters sx={{ borderRadius: 1.75, minWidth: 0, bgcolor: "background.paper", "&:before": { display: "none" }, "&:hover": { borderColor: "primary.main" } }}>
     <AccordionSummary expandIcon={<ExpandMoreOutlinedIcon />} sx={{ px: 1.25, py: 0.35, minHeight: 62, "& .MuiAccordionSummary-content": { my: 0.45, minWidth: 0 } }}>
       <Stack spacing={0.6} sx={{ minWidth: 0, pr: 1 }}>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={{ xs: 0.25, sm: 1 }} alignItems={{ xs: "flex-start", sm: "center" }}>
@@ -69,7 +69,7 @@ function EditableCase({ testCase, onChange }: { testCase: TestCase; onChange: (n
         <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
           <Chip size="small" label={testCase.test_type.replace(/_/g, " ")} sx={{ height: 20, "& .MuiChip-label": { px: 0.8, fontSize: ".68rem" } }} />
           <Chip size="small" color={testCase.priority === "high" || testCase.priority === "critical" ? "error" : "warning"} label={testCase.priority} sx={{ height: 20, "& .MuiChip-label": { px: 0.8, fontSize: ".68rem" } }} />
-          <Typography variant="caption" color="text.secondary" sx={{ alignSelf: "center", fontSize: ".68rem" }}>Edit details</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ alignSelf: "center", fontSize: ".68rem" }}>Open details</Typography>
         </Stack>
       </Stack>
     </AccordionSummary>
@@ -213,13 +213,13 @@ function RunRail({ runs, activeId, openingId, renamingId, onSelect, onRename, on
     }
   };
 
-  return <Card variant="outlined" sx={{ width: { xs: "100%", lg: 280 }, flexShrink: 0, position: { lg: "sticky" }, top: 16, borderRadius: 3 }}>
+  return <Card variant="outlined" sx={{ width: { xs: "100%", lg: 292 }, flexShrink: 0, position: { lg: "sticky" }, top: 16, borderRadius: 3, overflow: "hidden" }}>
     <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
       <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-        <Box><Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Test runs</Typography><Typography sx={{ fontSize: ".7rem" }} color="text.secondary">Revisit and improve saved suites</Typography></Box>
-        <Button size="small" startIcon={<AddOutlinedIcon />} onClick={onNew} sx={{ textTransform: "none", whiteSpace: "nowrap", minWidth: 0 }}>New</Button>
+        <Box sx={{ minWidth: 0 }}><Stack direction="row" spacing={.75} alignItems="center"><Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Test design sets</Typography><Chip size="small" label={runs.length} sx={{ height: 20, "& .MuiChip-label": { px: .75, fontSize: ".66rem" } }} /></Stack><Typography sx={{ fontSize: ".7rem" }} color="text.secondary">Saved cases you can revisit</Typography></Box>
+        <Button size="small" startIcon={<AddOutlinedIcon />} onClick={onNew} sx={{ textTransform: "none", whiteSpace: "nowrap", minWidth: 0 }}>New design</Button>
       </Stack>
-      <TextField size="small" fullWidth value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search runs" sx={{ mb: 1 }} />
+      <TextField size="small" fullWidth value={search} onChange={(event) => setSearch(event.target.value)} label="Search test sets" placeholder="Name or scenario" sx={{ mb: 1 }} inputProps={{ "aria-label": "Search test design sets" }} />
       <Stack spacing={0.6} sx={{ maxHeight: { lg: "calc(100vh - 235px)" }, overflowY: "auto", pr: 0.25, minHeight: 0, "& > .MuiCard-root": { flexShrink: 0 } }}>
         {displayedRuns.map((run) => {
           const title = runTitle(run);
@@ -229,7 +229,7 @@ function RunRail({ runs, activeId, openingId, renamingId, onSelect, onRename, on
           const opening = openingId === run.id;
           const editing = editingId === run.id;
           const renaming = renamingId === run.id;
-          return <Card key={run.id} variant="outlined" onClick={() => { if (!opening && !editing) void onSelect(run); }} sx={{ cursor: opening ? "progress" : editing ? "default" : "pointer", flexShrink: 0, minHeight: 50, opacity: opening || renaming ? 0.7 : 1, borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s, opacity .15s", "&:hover": { borderColor: "primary.main" } }}>
+          return <Card key={run.id} variant="outlined" role="button" tabIndex={editing || opening ? -1 : 0} onClick={() => { if (!opening && !editing) void onSelect(run); }} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && !opening && !editing) { event.preventDefault(); void onSelect(run); } }} sx={{ cursor: opening ? "progress" : editing ? "default" : "pointer", flexShrink: 0, minHeight: 50, opacity: opening || renaming ? 0.7 : 1, borderColor: selected ? "primary.main" : "divider", bgcolor: selected ? "action.selected" : "background.paper", transition: "border-color .15s, background-color .15s, opacity .15s", "&:hover": { borderColor: "primary.main" }, "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: -2 } }}>
             <CardContent sx={{ px: 1, py: 0.7, "&:last-child": { pb: 0.7 } }}>
               {editing ? <Stack direction="row" spacing={0.25} alignItems="center">
                 <TextField
@@ -259,7 +259,7 @@ function RunRail({ runs, activeId, openingId, renamingId, onSelect, onRename, on
           </Card>;
         })}
         {visibleRuns.length > displayedRuns.length && <Typography variant="caption" color="text.secondary" sx={{ px: 0.5, py: 1 }}>Showing the first {RUN_RAIL_RENDER_LIMIT} of {visibleRuns.length} runs. Use search to find older suites.</Typography>}
-        {!visibleRuns.length && <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>No saved runs yet. Start a new test to create one.</Typography>}
+        {!visibleRuns.length && <Box sx={{ p: 1 }}><Typography variant="body2" color="text.secondary">No saved test sets match this search.</Typography><Button size="small" startIcon={<AddOutlinedIcon />} onClick={onNew} sx={{ mt: .75, px: 0 }}>Create a design</Button></Box>}
       </Stack>
       <Menu anchorEl={menuAnchorEl} open={Boolean(menuAnchorEl) && Boolean(menuRun)} onClose={closeMenu}>
         <MenuItem onClick={() => { if (menuRun) beginRename(menuRun); closeMenu(); }} disabled={Boolean(menuRun && renamingId === menuRun.id)}>
@@ -424,6 +424,11 @@ export default function GenerateTestCasesPage() {
   };
   const onFiles = (event: ChangeEvent<HTMLInputElement>) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ""; };
   const chooseSource = (item: InputSource) => {
+    if (item.id !== selectedSource) {
+      setFiles([]);
+      setSourceUrl("");
+      setError(null);
+    }
     setSelectedSource(item.id);
     if (item.kind === "file") {
       const input = fileInputRef.current;
@@ -602,12 +607,29 @@ export default function GenerateTestCasesPage() {
   const workspace = (content: ReactNode) => <Stack direction={{ xs: "column", lg: "row" }} spacing={2} alignItems="flex-start"><RunRail runs={allRuns} activeId={run?.id} openingId={openingRunId} renamingId={renamingRunId} onSelect={openRun} onRename={renameRun} onDelete={deleteRun} onNew={startNewChat} /><Box sx={{ flex: 1, minWidth: 0, width: "100%" }}>{content}</Box></Stack>;
 
   if (run) return workspace(<Stack spacing={2}>
-    <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box sx={{ minWidth: 0 }}><Button size="small" startIcon={<ArrowBackOutlinedIcon />} onClick={exitRunView} sx={{ mb: 0.5, textTransform: "none" }}>Back to Test design</Button><Typography variant="h5" sx={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis" }}>{runTitle(run)}</Typography><Typography color="text.secondary">{run.status === "completed" ? `${draftCases.length} editable test cases` : draftCases.length ? `${draftCases.length} test cases ready • generating more` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap"><Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button><Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={saveMutation.isPending || (run.status !== "completed" && !localPreview)}>{saveMutation.isPending ? "Saving…" : saved ? "Saved" : "Save suite"}</Button></Stack></Stack>
+    <Box>
+      <Button size="small" startIcon={<ArrowBackOutlinedIcon />} onClick={exitRunView} sx={{ mb: 1, px: 0, textTransform: "none" }}>Back to test design</Button>
+      <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1.5}>
+        <Box sx={{ minWidth: 0 }}>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            <Typography variant="overline" color="primary.main" sx={{ fontWeight: 800, letterSpacing: ".12em" }}>TEST DESIGN</Typography>
+            <Chip size="small" label={run.status.replaceAll("_", " ")} color={run.status === "completed" ? "success" : run.status === "failed" ? "error" : "info"} variant="outlined" />
+          </Stack>
+          <Typography variant="h5" sx={{ mt: .25, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2 }}>{runTitle(run)}</Typography>
+          <Typography color="text.secondary" sx={{ mt: .35 }}>{run.status === "completed" ? `${draftCases.length} editable test cases` : draftCases.length ? `${draftCases.length} cases ready · more generating` : `Working: ${run.status.replaceAll("_", " ")}`}</Typography>
+          {run.source_document_analysis_id && <Chip size="small" label="Document Intelligence baseline" variant="outlined" clickable onClick={() => navigate("/documents")} sx={{ mt: 1 }} />}
+        </Box>
+        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+          <Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button>
+          <Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={saveMutation.isPending || (run.status !== "completed" && !localPreview)}>{saveMutation.isPending ? "Saving…" : saved ? "Saved" : "Save suite"}</Button>
+        </Stack>
+      </Stack>
+    </Box>
     {isActive && <LinearProgress variant="determinate" value={PROGRESS[run.status] ?? 10} />}
     {isActive && <Alert severity="info">{draftCases.length ? `${draftCases.length} real test cases are ready to review below. Additional coverage is still generating.` : "Analyzing your inputs. The first completed test-case batch will appear here automatically."}</Alert>}
     {run.error_message && <Alert severity={run.status === "failed" ? "error" : "warning"}>{run.error_message}</Alert>}
     {(run.status === "completed" || localPreview) && <>
-      <Card variant="outlined"><CardContent><Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h6">Review and improve</Typography><Typography variant="body2" color="text.secondary">Every field is editable. Grouped sections make the suite easy to scan before you save it.</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>{["excel", "csv", "json"].map((format) => <Button key={format} size="small" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => exportMutation.mutate(format)} disabled={exportMutation.isPending}>{format === "excel" ? "Excel" : format.toUpperCase()}</Button>)}</Stack></Stack></CardContent></Card>
+      <Card variant="outlined"><CardContent><Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h6">Review cases</Typography><Typography variant="body2" color="text.secondary">Edit grouped cases, export a copy, then save the design set.</Typography></Box><Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>{["excel", "csv", "json"].map((format) => <Button key={format} size="small" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => exportMutation.mutate(format)} disabled={exportMutation.isPending}>{format === "excel" ? "Excel" : format.toUpperCase()}</Button>)}</Stack></Stack></CardContent></Card>
       <Grid container spacing={1.25}>
         {[["Total cases", draftCases.length, "Generated scenarios"], ["Automation candidates", automationCandidateCount, "Ready for execution review"], ["High-risk cases", highRiskCount, "Critical or blocker severity"], ["Coverage groups", testTypeOptions.length, "Functional areas represented"]].map(([label, value, helper]) => <Grid key={String(label)} size={{ xs: 6, sm: 3 }}><Card variant="outlined" sx={{ height: "100%" }}><CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h5" sx={{ fontWeight: 800, mt: 0.35 }}>{value}</Typography><Typography variant="caption" color="text.secondary">{helper}</Typography></CardContent></Card></Grid>)}
       </Grid>
@@ -624,25 +646,79 @@ export default function GenerateTestCasesPage() {
   </Stack>);
 
   return workspace(<Stack spacing={3}>
-    <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ xs: "flex-start", md: "center" }} spacing={1}><Box><Typography variant="h5" sx={{ fontWeight: 700 }}>Test design workspace</Typography><Typography color="text.secondary">Bring every source and instruction together on one page.</Typography></Box><Stack direction="row" spacing={1}><Button onClick={startNewChat}>＋ New chat</Button><ProjectSelector /></Stack></Stack>
-    <Card sx={{ borderRadius: 3 }}><CardContent><Stack spacing={3}><Box><Typography variant="h6">Start a test-design chat</Typography><Typography variant="body2" color="text.secondary">Upload an app, requirements, or video; paste links; and describe what matters. QTXpert sends these inputs to the authenticated generation service.</Typography></Box>
-      <Stack direction={{ xs: "column", md: "row" }} spacing={1.5} flexWrap="wrap">{SOURCES.map((item) => <Button key={item.id} variant={selectedSource === item.id ? "contained" : "outlined"} startIcon={item.kind === "file" ? <CloudUploadOutlinedIcon /> : <AddOutlinedIcon />} onClick={() => chooseSource(item)} sx={{ justifyContent: "flex-start", textTransform: "none", minWidth: 180 }}><Box sx={{ textAlign: "left" }}><Typography variant="body2" sx={{ fontWeight: 700 }}>{item.label}</Typography><Typography variant="caption" sx={{ opacity: 0.75 }}>{item.description}</Typography></Box></Button>)}</Stack>
-      <input ref={fileInputRef} hidden type="file" multiple accept={source.accept ?? FILE_EXTENSIONS} onChange={onFiles} />{source.kind === "link" && <TextField label={`${source.label} link`} value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder={source.placeholder} fullWidth helperText="The link is sent as context with your prompt." />}
-      <Box onClick={() => fileInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); }} sx={{ border: "1px dashed", borderColor: "primary.main", borderRadius: 2, p: 2, cursor: "pointer", bgcolor: "action.hover" }}><Typography sx={{ fontWeight: 600 }}>Drop files here or click to browse</Typography><Typography variant="caption" color="text.secondary">Allowed for {source.label}: {source.accept ?? FILE_EXTENSIONS} • up to {source.id === "app" ? MOBILE_PACKAGE_MAX_UPLOAD_MB : DOCUMENT_MAX_UPLOAD_MB} MB</Typography></Box>{files.length > 0 && <Stack spacing={1}>{files.map((file, index) => <Stack key={`${file.name}-${index}`} direction="row" alignItems="center" spacing={1}><Chip label={file.name} onDelete={() => setFiles((current) => current.filter((_, idx) => idx !== index))} deleteIcon={<DeleteOutlineOutlinedIcon />} /><Typography variant="caption" color="text.secondary">{Math.ceil(file.size / 1024)} KB</Typography></Stack>)}</Stack>}
-      <RepositoryDocumentsPicker
-        projectId={selectedProjectId}
-        selectedIds={selectedDocumentAssetIds}
-        onSelectionChange={setSelectedDocumentAssetIds}
-        sourceModule="test_design"
-        title="Existing project documents (optional)"
-        description="Reuse documents already in this project repository. They stay stored once and can be attached to future Test Design runs."
-        compact
-        onOpenRepository={() => navigate("/test-data/documents")}
-      />
-      <Divider /><TextField label="What should we test?" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Example: Cover checkout, payment failures, permissions, accessibility, and mobile edge cases." fullWidth multiline minRows={4} helperText="Optional when you upload a source; required when you only provide instructions." />
-      <FormControl sx={{ maxWidth: 260 }}><InputLabel id="coverage-label">Coverage</InputLabel><Select labelId="coverage-label" label="Coverage" value={coverage} onChange={(e) => setCoverage(e.target.value)}><MenuItem value="quick">Quick</MenuItem><MenuItem value="balanced">Balanced</MenuItem><MenuItem value="thorough">Thorough</MenuItem></Select><FormHelperText>Controls breadth of scenarios.</FormHelperText></FormControl>
-      {message && <Alert severity="info">{message}</Alert>}{error && <Alert severity="error">{error}</Alert>}<Button variant="contained" size="large" startIcon={<AutoAwesomeOutlinedIcon />} onClick={() => generationMutation.mutate()} disabled={generationMutation.isPending || !selectedProjectId} sx={{ alignSelf: "flex-start" }}>{generationMutation.isPending ? "Preparing generation…" : "Analyze and generate test cases"}</Button>
-    </Stack></CardContent></Card><Typography variant="caption" color="text.secondary">Signed-in workspace • generation runs are stored in Test runs • exports are available after completion</Typography>
+    <PageHeader
+      eyebrow="TEST DESIGN"
+      title="Create a test design"
+      description="Bring product context into one reviewable set of test cases."
+    />
+    <Card variant="outlined" sx={{ borderRadius: 3 }}>
+      <CardContent sx={{ p: { xs: 2, md: 3 }, "&:last-child": { pb: { xs: 2, md: 3 } } }}>
+        <Stack spacing={2.5}>
+          <Box>
+            <Typography variant="overline" color="primary.main" sx={{ fontWeight: 800, letterSpacing: ".12em" }}>01 · SOURCE</Typography>
+            <Typography variant="h6" sx={{ mt: 0.25 }}>Choose what to design from</Typography>
+            <Typography variant="body2" color="text.secondary">Upload an app or document, attach a repository asset, paste a link, or describe the flow.</Typography>
+          </Box>
+          <Grid container spacing={1}>
+            {SOURCES.map((item) => (
+              <Grid key={item.id} size={{ xs: 12, sm: 6, md: 4 }}>
+                <Button
+                  fullWidth
+                  variant={selectedSource === item.id ? "contained" : "outlined"}
+                  startIcon={item.kind === "file" ? <CloudUploadOutlinedIcon /> : <AddOutlinedIcon />}
+                  onClick={() => chooseSource(item)}
+                  sx={{ minHeight: 64, justifyContent: "flex-start", textAlign: "left", textTransform: "none", px: 1.5 }}
+                >
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>{item.label}</Typography>
+                    <Typography variant="caption" sx={{ opacity: 0.75 }}>{item.description}</Typography>
+                  </Box>
+                </Button>
+              </Grid>
+            ))}
+          </Grid>
+          <input ref={fileInputRef} hidden type="file" multiple accept={source.accept ?? FILE_EXTENSIONS} onChange={onFiles} />
+          {source.kind === "link" && <TextField label={`${source.label} link`} value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder={source.placeholder} fullWidth helperText="Used as context for this design." />}
+          {source.kind === "file" && <Box
+            role="button"
+            tabIndex={0}
+            onClick={() => fileInputRef.current?.click()}
+            onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); fileInputRef.current?.click(); } }}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); }}
+            sx={{ border: "1px dashed", borderColor: "primary.main", borderRadius: 2, p: 2, cursor: "pointer", bgcolor: "action.hover", "&:hover": { bgcolor: "action.selected" }, "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: 2 } }}
+          >
+            <Typography sx={{ fontWeight: 600 }}>Drop files here or browse</Typography>
+            <Typography variant="caption" color="text.secondary">Accepted: {source.accept ?? FILE_EXTENSIONS} · up to {source.id === "app" ? MOBILE_PACKAGE_MAX_UPLOAD_MB : DOCUMENT_MAX_UPLOAD_MB} MB</Typography>
+          </Box>}
+          {files.length > 0 && <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}><Stack spacing={1}>{files.map((file, index) => <Stack key={`${file.name}-${index}`} direction="row" alignItems="center" spacing={1}><Chip label={file.name} onDelete={() => setFiles((current) => current.filter((_, idx) => idx !== index))} deleteIcon={<DeleteOutlineOutlinedIcon />} /><Typography variant="caption" color="text.secondary">{Math.ceil(file.size / 1024)} KB</Typography></Stack>)}</Stack></Paper>}
+          <RepositoryDocumentsPicker
+            projectId={selectedProjectId}
+            selectedIds={selectedDocumentAssetIds}
+            onSelectionChange={setSelectedDocumentAssetIds}
+            sourceModule="test_design"
+            title="Existing project documents (optional)"
+            description="Reuse documents already in this project repository. They stay stored once and can be attached to future Test Design runs."
+            compact
+            onOpenRepository={() => navigate("/test-data/documents")}
+          />
+          <Divider />
+          <Box>
+            <Typography variant="overline" color="primary.main" sx={{ fontWeight: 800, letterSpacing: ".12em" }}>02 · GUIDANCE</Typography>
+            <Typography variant="h6" sx={{ mt: 0.25 }}>What should we test?</Typography>
+            <TextField label="Test focus (optional)" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Example: checkout, payment failures, permissions, accessibility, and mobile edge cases" fullWidth multiline minRows={3} helperText="Optional when a source is attached; required for instructions-only design." sx={{ mt: 1 }} />
+          </Box>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }}>
+            <FormControl size="small" sx={{ minWidth: { sm: 220 } }}><InputLabel id="coverage-label">Coverage depth</InputLabel><Select labelId="coverage-label" label="Coverage depth" value={coverage} onChange={(e) => setCoverage(e.target.value)}><MenuItem value="quick">Quick · smoke focus</MenuItem><MenuItem value="balanced">Balanced · core journeys</MenuItem><MenuItem value="thorough">Thorough · broad coverage</MenuItem></Select><FormHelperText>How broad should the generated coverage be?</FormHelperText></FormControl>
+            <Chip size="small" variant="outlined" label={inputSummary.length ? `${inputSummary.length} source${inputSummary.length === 1 ? "" : "s"} selected` : "No sources selected"} />
+          </Stack>
+          {message && <Alert severity="info">{message}</Alert>}
+          {error && <Alert severity="error">{error}</Alert>}
+          <Button variant="contained" size="large" startIcon={<AutoAwesomeOutlinedIcon />} onClick={() => generationMutation.mutate()} disabled={generationMutation.isPending || !selectedProjectId} sx={{ alignSelf: "flex-start" }}>{generationMutation.isPending ? "Preparing…" : "Generate test cases"}</Button>
+        </Stack>
+      </CardContent>
+    </Card>
+    <Typography variant="caption" color="text.secondary">Saved design sets stay linked to this project and can be reopened from the left rail.</Typography>
   </Stack>);
 }
 

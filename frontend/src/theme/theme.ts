@@ -22,8 +22,107 @@ const shared: ThemeOptions = {
   shape: { borderRadius: 10 },
 };
 
+/**
+ * A restrained glass treatment for the workspace shell. The material is kept
+ * on navigation and containers only; content remains opaque and high contrast
+ * so the interface stays useful for dense QA evidence and reduced-transparency
+ * accessibility settings.
+ */
+const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
+  const dark = mode === "dark";
+  return {
+    MuiCssBaseline: {
+      styleOverrides: {
+        body: {
+          backgroundImage: dark
+            ? "radial-gradient(circle at 12% -8%, rgba(18, 199, 192, .12), transparent 34%), radial-gradient(circle at 92% 8%, rgba(232, 160, 61, .08), transparent 26%)"
+            : "radial-gradient(circle at 12% -8%, rgba(14, 124, 119, .10), transparent 34%), radial-gradient(circle at 92% 8%, rgba(232, 160, 61, .08), transparent 26%)",
+          backgroundAttachment: "fixed",
+        },
+        "*, *::before, *::after": {
+          scrollbarColor: dark ? "#2A4658 transparent" : "#B8C8CE transparent",
+          scrollbarWidth: "thin",
+        },
+        "@media (prefers-reduced-motion: reduce)": {
+          "*, *::before, *::after": {
+            animationDuration: "0.01ms !important",
+            animationIterationCount: "1 !important",
+            transitionDuration: "0.01ms !important",
+            scrollBehavior: "auto !important",
+          },
+        },
+      },
+    },
+    MuiAppBar: {
+      styleOverrides: {
+        root: {
+          backgroundColor: dark ? "rgba(17, 30, 46, .82)" : "rgba(255, 255, 255, .80)",
+          backdropFilter: "blur(18px) saturate(140%)",
+          WebkitBackdropFilter: "blur(18px) saturate(140%)",
+        },
+      },
+    },
+    MuiDrawer: {
+      styleOverrides: {
+        paper: {
+          backgroundColor: dark ? "rgba(17, 30, 46, .88)" : "rgba(255, 255, 255, .86)",
+          backdropFilter: "blur(18px) saturate(130%)",
+          WebkitBackdropFilter: "blur(18px) saturate(130%)",
+        },
+      },
+    },
+    MuiCard: {
+      styleOverrides: {
+        root: {
+          borderRadius: 16,
+          backgroundImage: "none",
+          boxShadow: dark ? "0 16px 34px rgba(0, 0, 0, .18)" : "0 16px 34px rgba(15, 27, 45, .055)",
+        },
+      },
+    },
+    MuiPaper: {
+      styleOverrides: {
+        root: {
+          backgroundImage: "none",
+        },
+      },
+    },
+    MuiButton: {
+      styleOverrides: {
+        root: {
+          borderRadius: 11,
+          minHeight: 38,
+          transition: "transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease",
+        },
+        contained: {
+          boxShadow: "none",
+          "&:hover": {
+            boxShadow: dark ? "0 8px 18px rgba(18, 199, 192, .20)" : "0 8px 18px rgba(14, 124, 119, .18)",
+            transform: "translateY(-1px)",
+          },
+        },
+      },
+    },
+    MuiChip: {
+      styleOverrides: {
+        root: {
+          borderRadius: 999,
+        },
+      },
+    },
+    MuiAlert: {
+      styleOverrides: {
+        root: {
+          borderRadius: 12,
+        },
+      },
+    },
+  };
+};
+
 export const lightTheme = createTheme({
   ...shared,
+  components: components("light"),
   palette: {
     mode: "light",
     primary: { main: "#0E7C77", contrastText: "#FFFFFF" },
@@ -39,6 +138,7 @@ export const lightTheme = createTheme({
 
 export const darkTheme = createTheme({
   ...shared,
+  components: components("dark"),
   palette: {
     mode: "dark",
     primary: { main: "#12C7C0", contrastText: "#06120F" },

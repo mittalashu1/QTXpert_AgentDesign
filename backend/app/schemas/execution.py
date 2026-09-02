@@ -1,6 +1,6 @@
 from datetime import datetime
 from uuid import UUID
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -41,15 +41,44 @@ class ExecutionPlanImport(BaseModel):
 
 
 class ExecutionPlanCaseSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: UUID
     selected: bool
     execution_mode: ExecutionMode = "automated"
+    # Imported cases are snapshots. These optional fields let a user convert
+    # generated prose into the small, executable DSL without going back to
+    # Test Design.
+    steps: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    expected_result: str | None = Field(default=None, min_length=1, max_length=10000)
+    test_data: dict[str, Any] | None = Field(default=None)
 
 
 class ExecutionPlanCasesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cases: list[ExecutionPlanCaseSelection] = Field(min_length=1, max_length=500)
+
+
+class ExecutionInputRequirementOut(BaseModel):
+    """A safe, human-readable setup question surfaced by preflight."""
+
+    key: str
+    label: str
+    category: str
+    description: str
+    case_ids: list[UUID] = Field(default_factory=list)
+    case_keys: list[str] = Field(default_factory=list)
+    required: bool = True
+    provided: bool = False
+
+
+class ExecutionPlanInputsUpdate(BaseModel):
+    """Store references to setup data, never the underlying secret."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    inputs: dict[str, str] = Field(default_factory=dict)
 
 
 class ExecutionPlanPreflight(BaseModel):
@@ -179,6 +208,8 @@ class ExecutionPlanOut(BaseModel):
     selected_automated_cases: int
     ready_cases: int
     blocked_cases: int
+    input_references: dict[str, str] = Field(default_factory=dict)
+    input_requirements: list[ExecutionInputRequirementOut] = Field(default_factory=list)
     cases: list[ExecutionPlanCaseOut] = Field(default_factory=list)
 
 class DashboardSummary(BaseModel):

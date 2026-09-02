@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps.auth_deps import get_current_user
-from app.api.routes.executions import _compile_steps, _run_execution, _validate_execution_target
+from app.api.routes.executions import _compile_mobile_steps, _compile_steps, _run_execution, _validate_execution_target
 from app.config import Settings, get_settings
 from app.database.models.execution import ExecutionResult, ExecutionRun, ResultStatus
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
@@ -22,6 +22,7 @@ from app.schemas.execution import (
     ExecutionPlanCasesUpdate,
     ExecutionPlanExecute,
     ExecutionPlanImport,
+    ExecutionPlanInputsUpdate,
     ExecutionPlanOut,
     ExecutionPlanPreflight,
     ExecutionPlanRerun,
@@ -33,6 +34,30 @@ router = APIRouter(tags=["execution-plans"])
 _EXECUTION_PLAN_NAME_MAX_LENGTH = 255
 _HIGH_IMPACT_STEP = re.compile(
     r"\b(delete|remove|withdraw|transfer|payment|pay|purchase|close account|send money|otp)\b",
+    re.IGNORECASE,
+)
+_AUTHENTICATION_TEXT = re.compile(
+    r"\b(log[ -]?in|sign[ -]?in|authenticate|authentication|credential|username|password|passcode|mfa|otp|one[- ]time)\b",
+    re.IGNORECASE,
+)
+_TEST_DATA_TEXT = re.compile(
+    r"\b(test data|seeded|synthetic|customer|account|portfolio|beneficiar(?:y|ies)|cart|order|email|phone|amount|balance|investment)\b",
+    re.IGNORECASE,
+)
+_ENVIRONMENT_TEXT = re.compile(
+    r"\b(staging|sandbox|uat|non[- ]production|environment|reset|cleanup|seed)\b",
+    re.IGNORECASE,
+)
+_SUPPORTED_STEP_PREFIXES = (
+    "navigate ", "click ", "fill ", "assert-text ", "assert-url ",
+    "tap ", "assert-visible ",
+)
+_SENSITIVE_INPUT = re.compile(
+    r"\b(password|passcode|secret|token|otp|api[ _-]?key|access[ _-]?key)\b\s*[:=]",
+    re.IGNORECASE,
+)
+_SENSITIVE_FIELD = re.compile(
+    r"\b(password|passcode|secret|token|otp|api[ _-]?key|access[ _-]?key)\b",
     re.IGNORECASE,
 )
 
@@ -60,6 +85,225 @@ def _compact_plan_name(value: str) -> str:
     if not clipped:
         clipped = normalized[: _EXECUTION_PLAN_NAME_MAX_LENGTH - 1]
     return f"{clipped}…"
+
+
+def _case_text(case: ExecutionPlanCase) -> str:
+    """Return searchable case text without exposing or persisting secrets."""
+    data = " ".join(f"{key} {value}" for key, value in (case.test_data or {}).items())
+    return " ".join(
+        str(value or "")
+        for value in (case.scenario, case.objective, case.preconditions, case.expected_result, data, *(case.steps or []))
+    )
+
+
+def _has_placeholder(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(re.search(r"<[^>]+>|\[\s*(?:to be supplied|value|placeholder|todo)[^\]]*\]", value, re.IGNORECASE))
+    if isinstance(value, dict):
+        return any(_has_placeholder(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_placeholder(item) for item in value)
+    return False
+
+
+def _case_has_test_data(case: ExecutionPlanCase) -> bool:
+    return bool(case.test_data) and not _has_placeholder(case.test_data)
+
+
+def _case_requires_authentication(case: ExecutionPlanCase) -> bool:
+    """Detect an authenticated journey without treating a sign-in button as a credential need.
+
+    Generated journeys often contain a harmless ``tap ... Sign in`` or
+    ``assert-visible ... login`` step.  Those controls do not prove that the
+    run needs credentials, while narrative instructions (or a credential
+    entry step) do.  Keeping this distinction makes guided setup actionable
+    and avoids blocking deterministic smoke checks unnecessarily.
+    """
+    narrative = " ".join(
+        str(value or "")
+        for value in (
+            case.scenario,
+            case.objective,
+            case.preconditions,
+            case.expected_result,
+            *(f"{key} {value}" for key, value in (case.test_data or {}).items()),
+        )
+    )
+    if _AUTHENTICATION_TEXT.search(narrative):
+        return True
+    for raw in case.steps or []:
+        step = str(raw or "").strip()
+        lower = step.lower()
+        if lower.startswith("fill ") and re.search(r"\b(user(?:name)?|email|pass(?:word|code)?|credential|mfa|otp)\b", lower):
+            return True
+        # Navigation, tap/click, and assertion labels may mention sign-in or
+        # login without requiring an authenticated account.
+        if lower.startswith(("navigate ", "tap ", "click ", "assert-text ", "assert-visible ", "assert-url ")):
+            continue
+        if _AUTHENTICATION_TEXT.search(step):
+            return True
+    return False
+
+
+def _unsupported_step(case: ExecutionPlanCase) -> str | None:
+    """Find generated prose that needs a user conversion before execution."""
+    for raw in case.steps or []:
+        step = str(raw).strip()
+        lower = step.lower()
+        if lower in {"launch", "launch app", "open app", "start app", "install and launch application", "back", "press back", "navigate back"}:
+            continue
+        if lower.startswith(_SUPPORTED_STEP_PREFIXES):
+            # The compiler will provide the precise syntax error (for example,
+            # a fill command missing its locator/value separator).
+            try:
+                _compile_steps([step], "https://example.invalid")
+            except ValueError:
+                try:
+                    _compile_mobile_steps([step])
+                except ValueError:
+                    return step
+            else:
+                continue
+            continue
+        return step
+    return None
+
+
+def _input_requirements(plan: ExecutionPlan) -> list[dict]:
+    """Build deterministic, actionable setup questions for the selected cases."""
+    references = plan.runtime_inputs or {}
+    requirements: dict[str, dict] = {}
+
+    def add(
+        key: str,
+        label: str,
+        category: str,
+        description: str,
+        case: ExecutionPlanCase | None = None,
+        *,
+        provided: bool | None = None,
+    ) -> None:
+        item = requirements.setdefault(
+            key,
+            {
+                "key": key,
+                "label": label,
+                "category": category,
+                "description": description,
+                "case_ids": [],
+                "case_keys": [],
+                "required": True,
+                "provided": bool(str(references.get(key, "")).strip()) if provided is None else provided,
+            },
+        )
+        if case is not None:
+            if case.id not in item["case_ids"]:
+                item["case_ids"].append(case.id)
+            if case.test_case_key not in item["case_keys"]:
+                item["case_keys"].append(case.test_case_key)
+        if provided is not None:
+            item["provided"] = item["provided"] and provided
+
+    selected = [
+        case for case in plan.cases
+        if case.selected and case.execution_mode == "automated"
+    ]
+    for case in selected:
+        text = _case_text(case)
+        if _case_requires_authentication(case):
+            add(
+                "authentication_reference",
+                "Authentication reference",
+                "authentication",
+                "Use a non-production vault or credential reference (for example vault://qa/investor). Never enter a password, token, or OTP.",
+                case,
+            )
+        if _TEST_DATA_TEXT.search(text) and not _case_has_test_data(case):
+            add(
+                "test_data_reference",
+                "Synthetic test-data reference",
+                "test_data",
+                "Point to a seeded or synthetic account/data set for this case. Do not paste personal or production data.",
+                case,
+            )
+        if _ENVIRONMENT_TEXT.search(text):
+            add(
+                "environment_reference",
+                "Environment and reset reference",
+                "environment",
+                "Name the non-production environment and its reset/cleanup reference so the journey can be repeated safely.",
+                case,
+            )
+        unsupported = _unsupported_step(case)
+        if not unsupported and case.blocker_reason and "unsupported" in case.blocker_reason.lower():
+            # Target-specific compilers (web vs mobile) may reject a command
+            # that is valid for the other surface. Keep that blocker visible
+            # in the guided setup panel even though the generic union parser
+            # cannot identify it before a target is selected.
+            unsupported = next((str(step).strip() for step in case.steps if str(step).strip()), "the generated journey")
+        if unsupported:
+            add(
+                f"case:{case.id}:automation_steps",
+                "Convert automation steps",
+                "automation",
+                "Replace generated prose with explicit commands: navigate, click/tap, fill, assert-text, assert-url, or assert-visible on mobile.",
+                case,
+                provided=False,
+            )
+        impact = next((str(step).strip() for step in case.steps if _HIGH_IMPACT_STEP.search(str(step))), None)
+        if impact:
+            add(
+                "approval_reference",
+                "Business-impact approval reference",
+                "approval",
+                "Provide an approved test-window or change record before payment, transfer, deletion, OTP, or other irreversible actions run.",
+                case,
+            )
+
+    # Stable ordering keeps the UI and API response predictable for a guided
+    # question-and-answer flow.
+    return sorted(requirements.values(), key=lambda item: (item["category"], item["label"], item["key"]))
+
+
+def _setup_blockers(plan: ExecutionPlan, case: ExecutionPlanCase, target_kind: str = "web") -> list[str]:
+    refs = plan.runtime_inputs or {}
+    text = _case_text(case)
+    blockers: list[str] = []
+    if _case_requires_authentication(case) and not str(refs.get("authentication_reference", "")).strip():
+        blockers.append("Authentication setup is required; add a non-production credential reference in Guided setup")
+    if _TEST_DATA_TEXT.search(text) and not _case_has_test_data(case) and not str(refs.get("test_data_reference", "")).strip():
+        blockers.append("Synthetic test data is required; add a dataset/account reference in Guided setup")
+    if _ENVIRONMENT_TEXT.search(text) and not str(refs.get("environment_reference", "")).strip():
+        blockers.append("Environment/reset details are required; add a non-production environment reference in Guided setup")
+    if next((str(step).strip() for step in case.steps if _HIGH_IMPACT_STEP.search(str(step))), None) and not str(refs.get("approval_reference", "")).strip():
+        blockers.append("Approval is required for business-impacting actions; add an approval reference in Guided setup")
+    unsupported = _unsupported_step(case)
+    if unsupported:
+        label = "Unsupported mobile automation step" if target_kind in {"android", "ios"} else "Unsupported automation step"
+        blockers.append(f"{label}: {unsupported!r}. Convert it to an explicit supported command")
+    return blockers
+
+
+def _reject_sensitive_reference(value: str) -> str:
+    """Normalize a setup reference and reject accidental secret paste-ins."""
+    normalized = re.sub(r"\s+", " ", value or "").strip()
+    if len(normalized) > 500:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Setup references must be 500 characters or fewer.")
+    if _SENSITIVE_INPUT.search(normalized):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use a non-production vault/reference identifier. Raw passwords, tokens, API keys, and OTPs are never stored.",
+        )
+    return normalized
+
+
+def _contains_sensitive_data(value: object) -> bool:
+    """Reject credential-shaped JSON keys before case snapshots are saved."""
+    if isinstance(value, dict):
+        return any(_SENSITIVE_FIELD.search(str(key)) or _contains_sensitive_data(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_contains_sensitive_data(item) for item in value)
+    return False
 
 
 async def _load_plan(db: AsyncSession, plan_id: UUID, user_id: UUID) -> ExecutionPlan:
@@ -91,6 +335,8 @@ def _plan_payload(plan: ExecutionPlan) -> dict:
         "selected_automated_cases": plan.selected_automated_cases,
         "ready_cases": plan.ready_cases,
         "blocked_cases": plan.blocked_cases,
+        "input_references": dict(plan.runtime_inputs or {}),
+        "input_requirements": _input_requirements(plan),
         "cases": sorted(plan.cases, key=lambda item: item.selection_order),
     }
 
@@ -129,7 +375,7 @@ async def _preflight_plan(
     case_ids: set[UUID] | None = None,
     target_kind: str = "web",
 ) -> None:
-    """Compile selected cases without guessing unsupported actions."""
+    """Compile selected cases and surface every setup action explicitly."""
     for case in plan.cases:
         if case_ids is not None and case.id not in case_ids:
             continue
@@ -145,17 +391,24 @@ async def _preflight_plan(
             case.readiness = "blocked"
             case.blocker_reason = "The source Test Design case is no longer available. Re-import the Design run."
             continue
+        setup_blockers = _setup_blockers(plan, case, target_kind)
         impact = next((str(step).strip() for step in case.steps if _HIGH_IMPACT_STEP.search(str(step))), None)
-        if impact:
-            case.readiness = "approval_required"
-            case.blocker_reason = f"Potentially business-impacting step requires approval: {impact}"
+        if setup_blockers:
+            # Keep the explicit approval state for a sole approval blocker so
+            # downstream reporting can distinguish it from missing data or
+            # unsupported generated prose.
+            case.readiness = "approval_required" if impact and len(setup_blockers) == 1 else "blocked"
+            case.blocker_reason = "; ".join(setup_blockers)
             continue
         if target_kind in {"android", "ios"}:
-            # Mobile cases are compiled by the Appium adapter at run time.
-            # Keep the plan selectable here, but let unsupported prose become
-            # an explicit blocked result instead of pretending it passed.
-            case.readiness = "ready"
-            case.blocker_reason = None
+            try:
+                _compile_mobile_steps(case.steps or [])
+            except ValueError as exc:
+                case.readiness = "blocked"
+                case.blocker_reason = str(exc)
+            else:
+                case.readiness = "ready"
+                case.blocker_reason = None
         else:
             try:
                 _compile_steps(case.steps or [], base_url or "")
@@ -215,6 +468,14 @@ async def _queue_plan_execution(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="No selected test case is runnable. Resolve the preflight blockers or choose another case.",
+        )
+    unready = [case for case in automated if case.readiness != "ready"]
+    if unready:
+        names = ", ".join(case.test_case_key for case in unready[:12])
+        suffix = " …" if len(unready) > 12 else ""
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Resolve setup or conversion blockers before running all selected cases: {names}{suffix}",
         )
     missing_source = [case.test_case_key for case in automated if case.source_test_case_id is None]
     if missing_source:
@@ -374,12 +635,82 @@ async def update_execution_plan_cases(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="One or more cases do not belong to this execution plan")
     for case_id, update in updates.items():
         case = known[case_id]
+        if update.steps is not None:
+            normalized_steps = [str(step).strip() for step in update.steps]
+            if any(not step for step in normalized_steps):
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"{case.test_case_key} contains an empty automation step")
+            case.steps = normalized_steps
+        if update.expected_result is not None:
+            normalized_expected = update.expected_result.strip()
+            if not normalized_expected:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"{case.test_case_key} needs an expected result")
+            case.expected_result = normalized_expected
+        if "test_data" in update.model_fields_set:
+            # Test data is deliberately limited to references/synthetic values;
+            # reject fields that look like credentials before they reach JSON.
+            serialized = repr(update.test_data)
+            if update.test_data is not None and len(update.test_data) > 50:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Test data may contain at most 50 fields")
+            if update.test_data is not None and len(serialized) > 20000:
+                raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Test data is too large; use a repository or dataset reference")
+            if update.test_data is not None and (_contains_sensitive_data(update.test_data) or _SENSITIVE_INPUT.search(serialized)):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Do not store passwords, tokens, or OTPs in test data. Use a non-production reference instead.",
+                )
+            case.test_data = update.test_data
         case.selected = update.selected
         case.execution_mode = update.execution_mode
         case.readiness = "pending" if update.selected and update.execution_mode == "automated" else (
             "manual_review" if update.selected else "not_selected"
         )
         case.blocker_reason = None
+    plan.status = "draft"
+    await db.commit()
+    return _plan_payload(await _load_plan(db, plan.id, user.id))
+
+
+@router.patch("/execution-plans/{plan_id}/inputs", response_model=ExecutionPlanOut)
+async def update_execution_plan_inputs(
+    plan_id: UUID,
+    payload: ExecutionPlanInputsUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Save non-secret setup references and let preflight re-evaluate cases."""
+    plan = await _load_plan(db, plan_id, user.id)
+    if plan.status not in {"draft", "ready", "blocked"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Setup inputs cannot be changed after execution is queued. Import a new snapshot instead.",
+        )
+    existing_references = dict(plan.runtime_inputs or {})
+    if len(payload.inputs) > 20:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="At most 20 setup references may be supplied")
+    requirements = {
+        item["key"] for item in _input_requirements(plan)
+        if not item["key"].startswith("case:")
+    } | set(existing_references)
+    unknown = sorted(set(payload.inputs) - requirements)
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown setup input(s): {', '.join(unknown)}. Run preflight to refresh the required questions.",
+        )
+    references = existing_references
+    for key, value in payload.inputs.items():
+        normalized = _reject_sensitive_reference(value)
+        if normalized:
+            references[key] = normalized
+        else:
+            references.pop(key, None)
+    plan.runtime_inputs = references or None
+    # Changing setup data invalidates the previous readiness decision. The
+    # next preflight is the single source of truth for executable cases.
+    for case in plan.cases:
+        if case.selected and case.execution_mode == "automated":
+            case.readiness = "pending"
+            case.blocker_reason = None
     plan.status = "draft"
     await db.commit()
     return _plan_payload(await _load_plan(db, plan.id, user.id))
@@ -458,7 +789,10 @@ async def execute_execution_plan(
         platform_version=target["platform_version"],
         appium_url=target["appium_url"],
         appium_app=target["appium_app"],
-        target_metadata=target["target_metadata"],
+        target_metadata={
+            **target["target_metadata"],
+            "input_references": dict(plan.runtime_inputs or {}),
+        },
     )
 
 
@@ -519,6 +853,10 @@ async def rerun_execution_plan(
         platform_version=target["platform_version"],
         appium_url=target["appium_url"],
         appium_app=target["appium_app"],
-        target_metadata={**(source.target_metadata or {}), **target["target_metadata"]},
+        target_metadata={
+            **(source.target_metadata or {}),
+            **target["target_metadata"],
+            "input_references": dict(plan.runtime_inputs or {}),
+        },
     )
 

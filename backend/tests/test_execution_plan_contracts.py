@@ -1,7 +1,7 @@
 import pytest
 from uuid import uuid4
 
-from app.api.routes.execution_plans import _compact_plan_name, _plan_payload, _preflight_plan
+from app.api.routes.execution_plans import _compact_plan_name, _input_requirements, _plan_payload, _preflight_plan
 from app.api.routes.executions import _compile_mobile_steps
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
 from app.schemas.execution import ExecutionPlanExecute, ExecutionPlanPreflight
@@ -118,4 +118,55 @@ async def test_mobile_preflight_allows_target_validation_to_defer_step_support()
 
     assert plan.status == "ready"
     assert plan.cases[0].readiness == "ready"
+
+
+@pytest.mark.asyncio
+async def test_preflight_surfaces_auth_and_data_setup_instead_of_a_dead_end():
+    plan = ExecutionPlan(name="Authenticated flow", suite_type="feature", status="draft")
+    plan.cases.append(_case(
+        steps=["Log in with a valid customer", "click #portfolio"],
+    ))
+
+    await _preflight_plan(plan, "https://example.com")
+
+    assert plan.status == "blocked"
+    assert plan.cases[0].readiness == "blocked"
+    assert "Authentication setup is required" in (plan.cases[0].blocker_reason or "")
+    requirements = _input_requirements(plan)
+    assert {item["key"] for item in requirements} >= {
+        "authentication_reference",
+        "test_data_reference",
+    }
+    assert all(not item["provided"] for item in requirements if item["key"] in {"authentication_reference", "test_data_reference"})
+
+
+@pytest.mark.asyncio
+async def test_setup_references_and_explicit_steps_make_case_runnable():
+    plan = ExecutionPlan(name="Authenticated flow", suite_type="feature", status="draft")
+    plan.runtime_inputs = {
+        "authentication_reference": "vault://qa/customer",
+        "test_data_reference": "dataset://seeded/customer-01",
+    }
+    plan.cases.append(_case(
+        steps=["navigate /login", "fill #email :: qa@example.com", "click #submit", "assert-url /home"],
+    ))
+
+    await _preflight_plan(plan, "https://example.com")
+
+    assert plan.status == "ready"
+    assert plan.cases[0].readiness == "ready"
+    assert not [item for item in _input_requirements(plan) if not item["provided"]]
+
+
+@pytest.mark.asyncio
+async def test_mobile_preflight_blocks_prose_and_offers_conversion_requirement():
+    plan = ExecutionPlan(name="Mobile flow", suite_type="smoke", status="draft")
+    plan.cases.append(_case(steps=["Open the account screen and verify the balance"]))
+
+    await _preflight_plan(plan, None, target_kind="android")
+
+    assert plan.status == "blocked"
+    assert plan.cases[0].readiness == "blocked"
+    assert "Unsupported mobile automation step" in (plan.cases[0].blocker_reason or "")
+    assert any(item["category"] == "automation" for item in _input_requirements(plan))
 

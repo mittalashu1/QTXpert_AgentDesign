@@ -1,4 +1,4 @@
-# QTXpert Autopilot — Android Prototype
+# QTXpert Autopilot — Mobile and Web Prototype
 
 ## Product intent
 
@@ -6,13 +6,13 @@ QTXpert Autopilot is the autonomous mobile Quality Engineering entry point for Q
 
 `APK/IPA → application understanding → minimal context → test strategy → test cases → QTX Test IR → automation → device execution → evidence → RCA → healing → coverage learning → release confidence`
 
-The current prototype establishes the Android vertical slice and safe execution boundary.
+The current prototype establishes the Android/iOS vertical slices and safe execution boundary. APK and IPA uploads up to the configured `AUTOPILOT_MAX_UPLOAD_SIZE_MB` (250 MB by default) are streamed into the repository and remain eligible for runtime execution. For packages above `AUTOPILOT_DEEP_PARSE_MAX_MB` (64 MB by default), Autopilot deliberately avoids memory-heavy resource-table parsing, records SHA-256 and bounded ZIP metadata, and continues with deterministic coverage; this is a safe metadata-only analysis state, not an upload or execution failure.
 
 ## What is implemented
 
 ### 1. APK intake and application intelligence
 
-Authenticated users can upload an Android APK (prototype limit 250 MB). QTXpert stores an owner-bound job, computes SHA-256, and uses Androguard to extract:
+Authenticated users can upload an Android APK or iOS IPA (250 MB by default). QTXpert stores an owner-bound job, computes SHA-256, and uses bounded archive inspection for every package. Android packages under the deep-parse safety threshold additionally use Androguard to extract:
 
 - application/package/version information
 - min/target SDK
@@ -82,11 +82,36 @@ The Autopilot page exposes both rerun paths: **Rerun** beside a previous smoke r
 
 The service also writes one JSON record per execution under the job's local `executions/` directory as a degraded-database fallback. On Render, the PostgreSQL/Upload Repository records are the durable source of truth; the local filesystem is only a working copy.
 
+Selecting an existing APK/IPA for a new analysis returns the queued job before
+copying the binary from R2 or PostgreSQL. Materialization and analysis continue
+in the background, and status polling also recovers legacy jobs asynchronously;
+large repository assets therefore do not hold the browser request open until a
+proxy timeout.
+
 If the PostgreSQL chunk repository is full, a new APK upload now returns `507 Insufficient Storage` with an actionable capacity/object-storage message and removes only the incomplete local job. Existing stored APKs can still be selected for reuse where the repository remains readable.
 
 The current Android analysis consumes the APK, the optional Autopilot context, and any repository documents explicitly selected in the Autopilot document picker. Selected documents are streamed from the shared Upload Repository, redacted for common secret-looking fields, and bounded before they are appended to the analysis context. Unselected documents are never injected implicitly, so each run records exactly which document asset IDs informed it. Document Intelligence and Test Design use the same repository records rather than creating duplicate uploads.
 
-### 7. BrowserStack real-device adapter
+### 7. Document Intelligence quality gate
+
+Document Intelligence is the evidence gate before test design, rather than a second upload area:
+
+1. Upload or select requirements, API contracts, architecture, test plans and other supported documents from the project Document repository.
+2. Run the AI review. Deterministic checks catch unresolved placeholders, vague/non-testable wording, missing acceptance or error behavior, missing NFR/security controls and profile-specific gaps. The AI then cross-checks the same evidence against the current project baseline.
+3. Review or resolve findings. The run remains a static documentation assessment; it never becomes a runtime pass/fail result.
+4. Publish the reviewed run as a versioned Test Design requirement, or use **Generate Test Design** to start a linked generation run directly.
+5. Use **Open Autopilot with baseline** to attach the bounded, redacted summary and source document IDs to a web/APK/IPA analysis. The full document text stays in the repository.
+6. Import the linked Test Design run into Test Execution. The execution plan and Test Reports can trace back to the exact Document Intelligence run through the stored lineage IDs.
+
+The API contracts are:
+
+- `GET /api/v1/document-intelligence/runs/{run_id}/context` — bounded, redacted baseline for downstream prompts.
+- `GET /api/v1/document-intelligence/runs/{run_id}/traceability` — finding, design, execution and runtime-result counters plus next actions.
+- `POST /api/v1/document-intelligence/runs/{run_id}/generate-tests` — publish and start a linked Test Design run.
+
+Document findings are intentionally labelled as static evidence. Release decisions remain **PENDING** until Test Execution records conclusive runtime evidence; open documentation findings are carried forward as risks and setup questions instead of being reported as passed tests.
+
+### 8. BrowserStack real-device adapter
 
 When these backend secrets exist:
 
@@ -146,7 +171,7 @@ The hosted Render API cannot reach your laptop's `127.0.0.1` and cannot read a l
 
 The verified local run completed successfully with the InvestNation UAT APK on `emulator-5554` / Android 17 and produced launch screenshot/UI-source evidence under the per-run `outputs/local-smoke-runtime-validation/<job-id>/evidence/<execution-id>/` directory. A prior run exposed an Android System UI/launcher ANR; runtime validation now records that as a failed/blocked run instead of reporting a false pass.
 
-### 8. Autopilot workspace
+### 9. Autopilot workspace
 
 The React workspace is available under `/autopilot` and shows:
 

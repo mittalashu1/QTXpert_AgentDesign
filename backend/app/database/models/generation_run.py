@@ -35,6 +35,16 @@ class GenerationRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     requested_by_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
+    # Optional provenance link to the exact Document Intelligence baseline
+    # that supplied the requirement used for this generation.  Keeping this
+    # on the run (rather than inferring it from a mutable Requirement row)
+    # makes the document -> design -> execution chain auditable.
+    source_document_analysis_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("document_analysis_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[RunStatus] = mapped_column(
         Enum(RunStatus, name="run_status", values_callable=lambda enum_cls: [e.value for e in enum_cls]), 
         default=RunStatus.PENDING, nullable=False

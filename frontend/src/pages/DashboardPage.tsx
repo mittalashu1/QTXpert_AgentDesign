@@ -17,6 +17,7 @@ import {
   FormControlLabel,
   IconButton,
   LinearProgress,
+  Paper,
   Stack,
   TextField,
   Tooltip,
@@ -25,18 +26,23 @@ import {
 import Grid from "@mui/material/Grid2";
 import AssignmentOutlinedIcon from "@mui/icons-material/AssignmentOutlined";
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
+import ArrowForwardRoundedIcon from "@mui/icons-material/ArrowForwardRounded";
+import ArchitectureOutlinedIcon from "@mui/icons-material/ArchitectureOutlined";
+import AssessmentOutlinedIcon from "@mui/icons-material/AssessmentOutlined";
 import BugReportOutlinedIcon from "@mui/icons-material/BugReportOutlined";
 import CheckCircleOutlineOutlinedIcon from "@mui/icons-material/CheckCircleOutlineOutlined";
+import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import HistoryOutlinedIcon from "@mui/icons-material/HistoryOutlined";
+import SecurityOutlinedIcon from "@mui/icons-material/SecurityOutlined";
 import TuneOutlinedIcon from "@mui/icons-material/TuneOutlined";
 import RefreshOutlinedIcon from "@mui/icons-material/RefreshOutlined";
 import RestoreOutlinedIcon from "@mui/icons-material/RestoreOutlined";
 import WarningAmberOutlinedIcon from "@mui/icons-material/WarningAmberOutlined";
 import { Link as RouterLink } from "react-router-dom";
-import { dashboardApi } from "@/services/api";
+import { dashboardApi, documentIntelligenceApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
-import type { ExecutionRun } from "@/types/domain";
+import type { DocumentAnalysisRun, ExecutionRun } from "@/types/domain";
 
 type MetricKey =
   | "requirements"
@@ -46,7 +52,7 @@ type MetricKey =
   | "open_defects"
   | "automation_candidates";
 
-type WidgetKey = "metrics" | "posture" | "execution" | "signals";
+type WidgetKey = "metrics" | "posture" | "execution" | "signals" | "documentation";
 
 interface DashboardPreferences {
   title: string;
@@ -77,6 +83,7 @@ const defaultPreferences = (): DashboardPreferences => ({
     posture: true,
     execution: true,
     signals: true,
+    documentation: true,
   },
   metricLabels: {
     requirements: "Requirements",
@@ -120,6 +127,7 @@ const widgetDefinitions: Array<{ key: WidgetKey; label: string; description: str
   { key: "posture", label: "Coverage results", description: "Observed coverage and completion rates." },
   { key: "execution", label: "Last run", description: "The latest saved execution run and its test counts." },
   { key: "signals", label: "Action required", description: "Counts of items that need follow-up." },
+  { key: "documentation", label: "Documentation quality gate", description: "Early findings from Document Intelligence before test design." },
 ];
 
 const preferenceKey = (projectId: string) => `qtxpert-dashboard-preferences:${projectId}`;
@@ -166,6 +174,10 @@ function runColor(status: string): "success" | "error" | "warning" | "info" | "d
   return "default";
 }
 
+function displayDocumentStatus(status: string) {
+  return status.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 function progressValue(numerator: number, denominator: number) {
   if (!denominator) return 0;
   return Math.min(100, Math.round((numerator / denominator) * 100));
@@ -179,6 +191,25 @@ interface ActionItem {
   route: string;
 }
 
+type WorkflowState = "ready" | "active" | "pending";
+
+interface WorkflowStage {
+  key: string;
+  step: string;
+  title: string;
+  description: string;
+  to: string;
+  icon: ReactNode;
+  state: WorkflowState;
+  stateLabel: string;
+}
+
+const workflowStateColor: Record<WorkflowState, "success" | "info" | "default"> = {
+  ready: "success",
+  active: "info",
+  pending: "default",
+};
+
 export default function DashboardPage() {
   const { selectedProjectId } = useSelectedProject();
   const [preferences, setPreferences] = useState<DashboardPreferences>(defaultPreferences);
@@ -189,6 +220,15 @@ export default function DashboardPage() {
     queryKey: ["dashboard", selectedProjectId],
     queryFn: () => dashboardApi.summary(selectedProjectId).then((response) => response.data),
     enabled: Boolean(selectedProjectId),
+  });
+  const documentReview = useQuery<DocumentAnalysisRun | null>({
+    queryKey: ["document-intelligence-latest", selectedProjectId],
+    queryFn: () => documentIntelligenceApi.latest(selectedProjectId).then((response) => response.data),
+    enabled: Boolean(selectedProjectId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status && ["queued", "extracting", "analyzing"].includes(status) ? 3000 : false;
+    },
   });
 
   useEffect(() => {
@@ -243,6 +283,56 @@ export default function DashboardPage() {
     detail: "Open reports to review the latest observed results.",
     route: "/reports",
   }];
+
+  const workflowStages = useMemo<WorkflowStage[]>(() => {
+    const documentStatus = documentReview.data?.status;
+    const documentRunning = Boolean(documentStatus && ["queued", "extracting", "analyzing"].includes(documentStatus));
+    const documentCompleted = documentStatus === "completed";
+    const documentFailed = documentStatus === "failed";
+    const executionAvailable = Boolean(data?.execution_runs);
+    return [
+      {
+        key: "understand",
+        step: "01",
+        title: "Understand",
+        description: "Review requirements and surface gaps before cases are designed.",
+        to: "/documents",
+        icon: <DescriptionOutlinedIcon />,
+        state: documentRunning ? "active" : documentCompleted ? "ready" : "pending",
+        stateLabel: documentRunning ? "Reviewing" : documentCompleted ? "Baseline ready" : documentFailed ? "Review needed" : "Start here",
+      },
+      {
+        key: "design",
+        step: "02",
+        title: "Design",
+        description: "Turn trusted context into traceable, reviewable test journeys.",
+        to: "/design",
+        icon: <ArchitectureOutlinedIcon />,
+        state: data?.test_cases ? "ready" : documentCompleted ? "active" : "pending",
+        stateLabel: data?.test_cases ? `${data.test_cases} cases` : documentCompleted ? "Ready to generate" : "After review",
+      },
+      {
+        key: "execute",
+        step: "03",
+        title: "Autopilot",
+        description: "Explore web, Android and iOS targets with safe, evidence-led execution.",
+        to: "/autopilot",
+        icon: <AutoAwesomeOutlinedIcon />,
+        state: executionAvailable ? "ready" : data?.test_cases ? "active" : "pending",
+        stateLabel: executionAvailable ? "Run available" : data?.test_cases ? "Ready to run" : "After design",
+      },
+      {
+        key: "evidence",
+        step: "04",
+        title: "Evidence",
+        description: "Inspect outcomes, defects and release readiness in one report trail.",
+        to: "/reports",
+        icon: <AssessmentOutlinedIcon />,
+        state: executionAvailable ? "ready" : "pending",
+        stateLabel: executionAvailable ? "Evidence available" : "After execution",
+      },
+    ];
+  }, [data, documentReview.data?.status]);
 
   const openCustomize = () => {
     setDraftPreferences(copyPreferences(preferences));
@@ -312,6 +402,103 @@ export default function DashboardPage() {
       {summary.isLoading && <LinearProgress sx={{ mb: 2 }} />}
       {summary.isError && <Alert severity="warning" sx={{ mb: 2 }}>Dashboard data is temporarily unavailable. Try refreshing the view.</Alert>}
 
+      <Card
+        variant="outlined"
+        sx={{
+          mb: 3,
+          overflow: "hidden",
+          borderRadius: 4,
+          borderColor: "rgba(14, 124, 119, .28)",
+          background: (theme) => theme.palette.mode === "dark"
+            ? "linear-gradient(135deg, rgba(18, 199, 192, .12), rgba(17, 30, 46, .82) 58%, rgba(232, 160, 61, .06))"
+            : "linear-gradient(135deg, rgba(14, 124, 119, .10), rgba(255, 255, 255, .86) 58%, rgba(232, 160, 61, .08))",
+        }}
+      >
+        <CardContent sx={{ p: { xs: 2.25, md: 3 }, "&:last-child": { pb: { xs: 2.25, md: 3 } } }}>
+          <Grid container spacing={{ xs: 2.5, md: 4 }} alignItems="center">
+            <Grid size={{ xs: 12, md: 7 }}>
+              <Stack spacing={1.25}>
+                <Chip size="small" label="AUTONOMOUS QUALITY LOOP" color="primary" variant="outlined" sx={{ alignSelf: "flex-start", fontWeight: 800, letterSpacing: ".06em" }} />
+                <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: "-.02em" }}>From product intent to release evidence.</Typography>
+                <Typography color="text.secondary" sx={{ maxWidth: 680 }}>
+                  QTXpert brings documentation, test design, safe exploration, execution and reporting into one traceable path. AI proposes the next best check; deterministic engines and human approvals keep the evidence trustworthy.
+                </Typography>
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ pt: .5 }}>
+                  <Button component={RouterLink} to="/autopilot" variant="contained" endIcon={<ArrowForwardRoundedIcon />}>Open Autopilot</Button>
+                  <Button component={RouterLink} to="/documents" variant="outlined">Review documents</Button>
+                </Stack>
+              </Stack>
+            </Grid>
+            <Grid size={{ xs: 12, md: 5 }}>
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 2,
+                  borderRadius: 3,
+                  backgroundColor: (theme) => theme.palette.mode === "dark" ? "rgba(7, 18, 29, .46)" : "rgba(255, 255, 255, .64)",
+                  backdropFilter: "blur(14px)",
+                  WebkitBackdropFilter: "blur(14px)",
+                }}
+              >
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <SecurityOutlinedIcon color="primary" fontSize="small" />
+                  <Typography variant="subtitle2" fontWeight={800}>Operating model</Typography>
+                </Stack>
+                <Typography variant="body2" sx={{ mt: 1 }}>AI plans · engines execute · people approve risk</Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .75 }}>
+                  One report lineage across every target and build.
+                </Typography>
+                <Stack direction="row" spacing={.75} useFlexGap flexWrap="wrap" sx={{ mt: 1.5 }}>
+                  {["Web", "Android", "iOS"].map((target) => <Chip key={target} size="small" label={target} variant="outlined" />)}
+                </Stack>
+              </Paper>
+            </Grid>
+          </Grid>
+
+          <Divider sx={{ my: { xs: 2.25, md: 2.75 } }} />
+          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={.5} sx={{ mb: 1.5 }}>
+            <Box>
+              <Typography variant="subtitle1" fontWeight={800}>Quality loop</Typography>
+              <Typography variant="body2" color="text.secondary">Follow the evidence from source to release.</Typography>
+            </Box>
+            <Typography variant="caption" color="text.secondary">Select a stage to continue</Typography>
+          </Stack>
+          <Grid container spacing={1.25}>
+            {workflowStages.map((stage) => (
+              <Grid key={stage.key} size={{ xs: 12, sm: 6, lg: 3 }}>
+                <CardActionArea
+                  component={RouterLink}
+                  to={stage.to}
+                  aria-label={`Open ${stage.title}`}
+                  sx={{
+                    height: "100%",
+                    p: 1.5,
+                    border: "1px solid",
+                    borderColor: "divider",
+                    borderRadius: 2.5,
+                    bgcolor: "background.paper",
+                    transition: "transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease",
+                    "&:hover": { transform: "translateY(-2px)", borderColor: "primary.main", boxShadow: 2 },
+                  }}
+                >
+                  <Stack direction="row" spacing={1.1} alignItems="flex-start">
+                    <Box sx={{ display: "grid", placeItems: "center", width: 34, height: 34, borderRadius: 2, bgcolor: "action.hover", color: "primary.main", flexShrink: 0 }}>{stage.icon}</Box>
+                    <Box sx={{ minWidth: 0 }}>
+                      <Stack direction="row" spacing={.75} alignItems="center" justifyContent="space-between">
+                        <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace", fontWeight: 700 }}>{stage.step}</Typography>
+                        <Chip size="small" label={stage.stateLabel} color={workflowStateColor[stage.state]} variant="outlined" sx={{ height: 22, maxWidth: "100%", "& .MuiChip-label": { overflow: "hidden", textOverflow: "ellipsis" } }} />
+                      </Stack>
+                      <Typography variant="body2" fontWeight={800} sx={{ mt: .5 }}>{stage.title}</Typography>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .35, lineHeight: 1.45 }}>{stage.description}</Typography>
+                    </Box>
+                  </Stack>
+                </CardActionArea>
+              </Grid>
+            ))}
+          </Grid>
+        </CardContent>
+      </Card>
+
       {preferences.visibleWidgets.metrics && visibleMetricDefinitions.length > 0 && (
         <Box sx={{ mb: 3 }}>
           <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
@@ -354,6 +541,40 @@ export default function DashboardPage() {
 
       {visibleWidgetCount > 0 && (
         <Grid container spacing={2.5}>
+          {preferences.visibleWidgets.documentation && (
+            <Grid size={{ xs: 12 }}>
+              <Card variant="outlined" sx={{ borderRadius: 3 }}>
+                <CardActionArea component={RouterLink} to="/documents" aria-label="Open Document Intelligence quality gate" sx={{ alignItems: "stretch" }}>
+                  <CardContent sx={{ p: 2.25, "&:last-child": { pb: 2.25 } }}>
+                    <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1.5}>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography variant="h6">Documentation quality gate</Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.35 }}>
+                          Document Intelligence surfaces missing requirements, ambiguity and control gaps before cases are designed.
+                        </Typography>
+                      </Box>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Chip
+                          size="small"
+                          color={documentReview.data?.status === "completed" ? "success" : documentReview.data?.status === "failed" ? "error" : "info"}
+                          variant="outlined"
+                          label={documentReview.isLoading ? "Loading" : documentReview.data ? documentReview.data.status === "completed" ? `${Math.round(documentReview.data.readiness_score)}% ready` : displayDocumentStatus(documentReview.data.status) : "Not reviewed"}
+                        />
+                        {documentReview.data?.status === "completed" && <Chip size="small" variant="outlined" label={`${documentReview.data.findings.filter((finding) => !["resolved", "rejected"].includes(finding.status)).length} open findings`} />}
+                      </Stack>
+                    </Stack>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+                      {documentReview.data?.status === "completed"
+                        ? `Last review: ${formatDate(documentReview.data.updated_at)} · findings remain static evidence until runtime execution confirms behaviour.`
+                        : documentReview.data?.status === "failed"
+                          ? documentReview.data.error_message || "Open Document Intelligence to retry the review."
+                          : "Run a documentation review to establish the evidence baseline for Test Design and Autopilot."}
+                    </Typography>
+                  </CardContent>
+                </CardActionArea>
+              </Card>
+            </Grid>
+          )}
           {preferences.visibleWidgets.posture && (
             <Grid size={{ xs: 12, md: 7 }}>
               <Card variant="outlined" sx={{ height: "100%", borderRadius: 3 }}>

@@ -52,6 +52,15 @@ class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     surface_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     document_asset_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Optional link to the reviewed documentation baseline used to scope this
+    # Autopilot run.  The raw document bytes remain in the repository; this
+    # reference keeps the evidence lineage without duplicating content.
+    document_analysis_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("document_analysis_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     apk_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="uploaded")
     stage: Mapped[str] = mapped_column(String(80), nullable=False, default="queued")

@@ -77,6 +77,7 @@ class GenerationRunRepository:
             summaries.append({
                 "id": run.id,
                 "project_id": run.project_id,
+                "source_document_analysis_id": run.source_document_analysis_id,
                 "status": run.status,
                 "llm_provider": run.llm_provider,
                 "llm_model": run.llm_model,
