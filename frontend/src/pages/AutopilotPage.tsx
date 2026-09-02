@@ -771,7 +771,11 @@ export default function AutopilotPage() {
       const nextTarget = /\.ipa$/i.test(selected.name) ? "ios" : "android";
       setTargetKind(nextTarget);
       setTargetUrl("");
-      if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected.name.replace(/\.(apk|ipa)$/i, "")));
+      // A newly selected build defines a new analysis surface. Rebuild the
+      // brief immediately so an older job's application name/platform cannot
+      // leak into the next run; the user can still edit it afterwards.
+      setContext(contextForTarget(selectedProfile, nextTarget, selected.name.replace(/\.(apk|ipa)$/i, "")));
+      setContextSource("default");
     }
     resetResult();
   };
@@ -1099,8 +1103,12 @@ export default function AutopilotPage() {
                const next = event.target.value as TargetKind;
                setTargetKind(next);
                setFile(null); setSelectedUploadId(""); resetResult();
-              if (contextSource === "default") setContext(contextForTarget(selectedProfile, next, null, next === "web" ? targetUrl : null));
-              if (next === "web") setProvider("playwright");
+               // Switching target starts a new surface. Always replace the
+               // old target identity in the brief instead of carrying a
+               // previously loaded APK/URL context into this run.
+               setContext(contextForTarget(selectedProfile, next, null, next === "web" ? targetUrl : null));
+               setContextSource("default");
+               if (next === "web") setProvider("playwright");
               else if (provider === "playwright") setProvider(providerStatus?.browserstack_configured ? "browserstack" : "appium");
             }}>
               <MenuItem value="web">Web</MenuItem>
@@ -1125,13 +1133,14 @@ export default function AutopilotPage() {
             emptyLabel="Upload a new build"
             helperText="Choose a build already stored for this project, or upload a new one below."
             onChange={(value, selected) => {
-              setSelectedUploadId(value);
-              if (selected) {
-                setFile(null);
-                const nextTarget = repositoryAssetExtension(selected) === "ipa" ? "ios" : "android";
-                setTargetKind(nextTarget);
-                if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected.filename.replace(/\.(apk|ipa)$/i, "")));
-              }
+               setSelectedUploadId(value);
+               if (selected) {
+                 setFile(null);
+                 const nextTarget = repositoryAssetExtension(selected) === "ipa" ? "ios" : "android";
+                 setTargetKind(nextTarget);
+                 setContext(contextForTarget(selectedProfile, nextTarget, selected.filename.replace(/\.(apk|ipa)$/i, "")));
+                 setContextSource("default");
+               }
               if (!analysis) resetResult(); else setError("");
             }}
             disabled={busy || contextBusy}
