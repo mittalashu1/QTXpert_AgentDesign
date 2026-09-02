@@ -33,4 +33,8 @@ class ReuseUploadedAssetRequest(BaseModel):
     # means preserve the attachments from the previous run when rerunning;
     # an empty list deliberately clears them.
     document_asset_ids: Optional[list[UUID]] = Field(default=None, max_length=20)
+    document_analysis_run_id: Optional[UUID] = Field(
+        default=None,
+        description="Optional completed Document Intelligence baseline linked to this analysis.",
+    )
 

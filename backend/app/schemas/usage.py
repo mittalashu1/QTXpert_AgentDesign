@@ -1,6 +1,6 @@
 """Response models for workspace-wide usage and cost reporting."""
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -39,6 +39,23 @@ class CostSurface(BaseModel):
     billing_source: str
     note: str
     action: str | None = None
+    portal_url: str | None = None
+    pricing_url: str | None = None
+    limits_url: str | None = None
+    limits: list[str] = Field(default_factory=list)
+    account_plan: str | None = None
+    live_usage: dict[str, Any] | None = None
+    last_verified_at: datetime | None = None
+    provider_error: str | None = None
+
+
+class CostCatalogInfo(BaseModel):
+    """Refresh state for provider account metadata (never includes secrets)."""
+
+    status: Literal["fresh", "partial", "due", "unavailable"] = "unavailable"
+    last_refreshed_at: datetime | None = None
+    next_refresh_at: datetime | None = None
+    error: str | None = None
 
 
 class AICostSummary(BaseModel):
@@ -54,3 +71,4 @@ class AICostSummary(BaseModel):
     variance_usd: float | None = None
     cost_surfaces: list[CostSurface] = Field(default_factory=list)
     untracked_surface_count: int = 0
+    catalog: CostCatalogInfo = Field(default_factory=CostCatalogInfo)

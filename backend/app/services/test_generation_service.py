@@ -15,6 +15,7 @@ from app.agents.test_design_agent.graph import build_test_design_graph
 from app.agents.test_design_agent.nodes import _call_json
 from app.config import Settings
 from app.database.models.generation_run import GenerationRun, RunStatus
+from app.database.models.document_intelligence import DocumentAnalysisRun
 from app.database.models.test_case import Priority, RiskLevel, Severity, TestCase, TestCaseType
 from app.database.repositories.requirement_repository import RequirementRepository
 from app.database.repositories.requirement_repository import ProjectRepository
@@ -95,9 +96,35 @@ class TestGenerationService:
         llm_provider_override: Optional[str] = None,
         generation_profile: str = "feature",
         test_set_title: Optional[str] = None,
+        source_document_analysis_id: UUID | None = None,
     ) -> GenerationRun:
         if await ProjectRepository(self._db).get_for_owner(project_id, requested_by_id) is None:
             raise ValueError("Project not found")
+
+        # A linked Document Intelligence run is a versioned baseline, not a
+        # hint to generate from every requirement in the project. Resolve its
+        # published requirement first and scope the generation to that exact
+        # requirement when callers do not provide an explicit selection.
+        if source_document_analysis_id is not None:
+            source_run = await self._db.scalar(
+                select(DocumentAnalysisRun).where(
+                    DocumentAnalysisRun.id == source_document_analysis_id,
+                    DocumentAnalysisRun.project_id == project_id,
+                    DocumentAnalysisRun.requested_by_id == requested_by_id,
+                )
+            )
+            if source_run is None:
+                raise ValueError("Document Intelligence baseline not found for this project.")
+            if source_run.status != "completed":
+                raise ValueError("Complete the Document Intelligence review before generating Test Design.")
+            if source_run.published_requirement_id is None:
+                raise ValueError("Publish the Document Intelligence baseline before generating Test Design.")
+            if requirement_ids:
+                if source_run.published_requirement_id not in set(requirement_ids):
+                    raise ValueError("The selected requirements do not include the Document Intelligence baseline.")
+            else:
+                requirement_ids = [source_run.published_requirement_id]
+
         if requirement_ids and len(requirement_ids) > self._settings.MAX_REQUIREMENTS_PER_GENERATION:
             raise ValueError(
                 f"Select at most {self._settings.MAX_REQUIREMENTS_PER_GENERATION} requirements per generation."
@@ -123,6 +150,7 @@ class TestGenerationService:
             llm_model=provider.model_name,
             generation_profile=generation_profile,
             title=_derive_test_set_title(requirements, test_set_title),
+            source_document_analysis_id=source_document_analysis_id,
         )
         self._db.add(run)
         await self._db.commit()

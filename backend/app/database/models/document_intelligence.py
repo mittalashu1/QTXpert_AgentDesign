@@ -35,6 +35,10 @@ class DocumentAnalysisRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
     profile: Mapped[str] = mapped_column(String(40), nullable=False, default="general")
     asset_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Redacted user-provided scope is retained so a downstream Test Design or
+    # Autopilot run can reproduce exactly what the review assessed without
+    # persisting credentials or other secret-looking values.
+    additional_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # AI/deterministic outputs. JSON is intentional because the intelligence
     # schema will evolve faster than the relational core during the prototype.

@@ -1,4 +1,7 @@
+import json
+import zipfile
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -7,6 +10,7 @@ from app.schemas.autopilot import AutopilotAnalysis, AutopilotExecutionRequest
 from app.services.autopilot import (
     AutopilotPrototypeService,
     AutopilotUploadTooLarge,
+    build_report_tab_key,
     build_surface_key,
     normalize_surface_identity,
 )
@@ -358,6 +362,18 @@ def test_surface_identity_is_stable_and_secret_free():
     assert build_surface_key("uae_fintech", "web", identity) != build_surface_key("payments_cards", "web", identity)
 
 
+def test_report_tab_key_keeps_new_versions_independently_selectable():
+    scope_key = build_surface_key("uae_fintech", "android", "sha256:release")
+
+    first = build_report_tab_key(scope_key, 1, "job-one")
+    second = build_report_tab_key(scope_key, 2, "job-two")
+
+    assert first != second
+    assert scope_key in first and scope_key in second
+    assert first.endswith(":1:job-one")
+    assert second.endswith(":2:job-two")
+
+
 def test_ai_context_keeps_selected_surface_identity():
     baseline = profile_context(
         DEFAULT_AUTOPILOT_PROFILE_ID,
@@ -485,6 +501,48 @@ async def test_large_upload_stream_is_written_incrementally(tmp_path):
 
     assert path.read_bytes() == b"a" * 1024 + b"b" * 1024
     assert (tmp_path / job_id / "job.json").exists()
+
+
+def test_large_apk_uses_safe_zip_inventory_without_shadowing_zipfile(tmp_path):
+    """A large APK follows the metadata-only path without a parser error.
+
+    The previous fallback imported ``zipfile`` inside the exception branch,
+    which made Python treat it as a local variable and raised
+    ``UnboundLocalError`` before the ZIP inventory could be read.
+    """
+    apk_path = tmp_path / "large-release.apk"
+    with zipfile.ZipFile(apk_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("assets/payload.bin", b"x" * (2 * 1024 * 1024))
+
+    service = _service(tmp_path, AUTOPILOT_DEEP_PARSE_MAX_MB=1)
+    result = service._analyze_apk_sync(apk_path)
+
+    assert result["file_count"] == 1
+    assert any("bounded archive metadata" in warning for warning in result["warnings"])
+    assert not any("UnboundLocalError" in warning for warning in result["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_reused_repository_asset_is_queued_without_copying_bytes(tmp_path):
+    """Reusing a stored build returns a status before its bytes are copied."""
+    service = _service(tmp_path)
+    asset_id = UUID("11111111-1111-4111-8111-111111111111")
+
+    job_id, artifact_path = await service.save_reused_asset_job(
+        "release.apk",
+        "owner",
+        asset_id,
+        context="safe test context",
+        target_kind="android",
+    )
+
+    assert not artifact_path.exists()
+    manifest = json.loads((artifact_path.parent / "job.json").read_text(encoding="utf-8"))
+    assert manifest["repository_asset_id"] == str(asset_id)
+    assert manifest["artifact_materialization"] == "queued"
+    status = await service.get_job_status(job_id)
+    assert status.status == "uploaded"
+    assert status.artifact_available is True
 
 
 @pytest.mark.asyncio

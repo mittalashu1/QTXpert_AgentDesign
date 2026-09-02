@@ -240,6 +240,24 @@ class Settings(BaseSettings):
     DATA_RETENTION_INCLUDE_EPHEMERAL_ASSETS: bool = True
     DATA_RETENTION_RUN_ON_STARTUP: bool = False
 
+    # ------------------------------------------------------------------ #
+    # Cost Center catalog and provider usage connectors
+    # ------------------------------------------------------------------ #
+    # The catalog is useful without credentials (links and documented limits
+    # remain visible), while these optional credentials add account-specific
+    # plan/usage information.  Secrets are read only from the environment and
+    # are never persisted in the Cost Center snapshot or returned by the API.
+    COST_CENTER_AUTO_REFRESH_ENABLED: bool = True
+    COST_CENTER_REFRESH_DAYS: int = Field(default=30, ge=1, le=365)
+    COST_CENTER_REFRESH_TIMEOUT_SECONDS: int = Field(default=8, ge=2, le=60)
+    NEON_API_KEY: Optional[str] = None
+    NEON_ORG_ID: Optional[str] = None
+    NEON_PLAN: Optional[str] = None
+    CLOUDFLARE_API_TOKEN: Optional[str] = None
+    CLOUDFLARE_ACCOUNT_ID: Optional[str] = None
+    RENDER_BACKEND_PLAN: str = "Starter"
+    RENDER_FRONTEND_PLAN: str = "Free"
+
     BROWSERSTACK_USERNAME: Optional[str] = None
     BROWSERSTACK_ACCESS_KEY: Optional[str] = None
     BROWSERSTACK_HUB_URL: str = "https://hub-cloud.browserstack.com/wd/hub"

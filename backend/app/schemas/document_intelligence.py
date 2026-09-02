@@ -50,6 +50,7 @@ class DocumentAnalysisRunOut(BaseModel):
     status: str
     profile: str
     asset_ids: list
+    additional_context: Optional[str] = None
     document_inventory: Optional[list]
     knowledge_model: Optional[dict]
     scores: Optional[dict]
@@ -75,4 +76,67 @@ class PublishIntelligenceResponse(BaseModel):
     run_id: UUID
     requirement_id: UUID
     title: str
+    message: str
+
+
+class DocumentContextOut(BaseModel):
+    """A bounded, redacted context excerpt safe to attach to another module."""
+
+    run_id: UUID
+    project_id: UUID
+    status: str
+    profile: str
+    context: str
+    asset_ids: list[UUID] = Field(default_factory=list)
+    summary: Optional[str] = None
+    published_requirement_id: Optional[UUID] = None
+    open_finding_count: int = 0
+    critical_finding_count: int = 0
+    high_finding_count: int = 0
+
+
+class DocumentTraceabilityGenerationOut(BaseModel):
+    id: UUID
+    status: str
+    title: Optional[str] = None
+    test_case_count: int = 0
+    created_at: datetime
+
+
+class DocumentTraceabilityOut(BaseModel):
+    """Downstream delivery counters for one immutable document analysis."""
+
+    run_id: UUID
+    project_id: UUID
+    status: str
+    published_requirement_id: Optional[UUID] = None
+    finding_count: int = 0
+    open_finding_count: int = 0
+    critical_finding_count: int = 0
+    high_finding_count: int = 0
+    generated_test_case_count: int = 0
+    generation_runs: list[DocumentTraceabilityGenerationOut] = Field(default_factory=list)
+    execution_plan_count: int = 0
+    execution_run_count: int = 0
+    active_execution_count: int = 0
+    executed_test_count: int = 0
+    passed_count: int = 0
+    failed_count: int = 0
+    blocked_count: int = 0
+    pending_test_count: int = 0
+    skipped_test_count: int = 0
+    next_actions: list[str] = Field(default_factory=list)
+
+
+class DocumentGenerateTestsRequest(BaseModel):
+    generation_profile: Literal["smoke", "feature", "regression", "deep_regression"] = "feature"
+    test_set_title: Optional[str] = Field(default=None, max_length=500)
+
+
+class DocumentGenerateTestsResponse(BaseModel):
+    run_id: UUID
+    generation_run_id: UUID
+    requirement_id: UUID
+    status: str
+    title: Optional[str] = None
     message: str

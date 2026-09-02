@@ -77,6 +77,19 @@ const readinessColor = (status?: string): "error" | "warning" | "success" | "inf
 
 const pretty = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 
+function readableError(reason: unknown, fallback: string): string {
+  if (typeof reason === "object" && reason !== null) {
+    const candidate = reason as {
+      response?: { data?: { detail?: unknown } };
+      message?: unknown;
+    };
+    const detail = candidate.response?.data?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    if (typeof candidate.message === "string" && candidate.message.trim()) return candidate.message;
+  }
+  return fallback;
+}
+
 export default function RequirementUploadPage() {
   const { selectedProjectId } = useSelectedProject();
   const queryClient = useQueryClient();
@@ -138,7 +151,7 @@ export default function RequirementUploadPage() {
       setMessage(`${assets.length} document${assets.length === 1 ? "" : "s"} added to the project repository.`);
       setError("");
     },
-    onError: (err: any) => setError(err?.response?.data?.detail || err?.message || "Document upload failed"),
+    onError: (err: unknown) => setError(readableError(err, "Document upload failed")),
   });
 
   const analyzeMutation = useMutation({
@@ -154,7 +167,7 @@ export default function RequirementUploadPage() {
       queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] });
       setTab(0);
     },
-    onError: (err: any) => setError(err?.response?.data?.detail || err?.message || "Document analysis could not start"),
+    onError: (err: unknown) => setError(readableError(err, "Document analysis could not start")),
   });
 
   const reviewMutation = useMutation({
@@ -164,7 +177,7 @@ export default function RequirementUploadPage() {
         suggested_refinement: finding.suggested_refinement,
       }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] }),
-    onError: (err: any) => setError(err?.response?.data?.detail || "Finding update failed"),
+    onError: (err: unknown) => setError(readableError(err, "Finding update failed")),
   });
 
   const publishMutation = useMutation({
@@ -175,7 +188,7 @@ export default function RequirementUploadPage() {
       queryClient.invalidateQueries({ queryKey: ["document-intelligence-latest", selectedProjectId] });
       queryClient.invalidateQueries({ queryKey: ["requirements", selectedProjectId] });
     },
-    onError: (err: any) => setError(err?.response?.data?.detail || err?.message || "Could not publish the intelligence baseline"),
+    onError: (err: unknown) => setError(readableError(err, "Could not publish the intelligence baseline")),
   });
 
   const run = latestRunQuery.data;

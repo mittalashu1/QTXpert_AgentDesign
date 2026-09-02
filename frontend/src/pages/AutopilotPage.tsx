@@ -1,10 +1,10 @@
 import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, FormControl, FormControlLabel, Grid, InputLabel,
   MenuItem, Paper, Select, Stack, Switch, Table, TableBody, TableCell, TableContainer,
-  TableHead, TableRow, TextField, Typography,
+  TableHead, TableRow, Tab, Tabs, TextField, Typography,
 } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
@@ -17,10 +17,12 @@ import TravelExploreOutlinedIcon from "@mui/icons-material/TravelExploreOutlined
 import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import { apiClient } from "@/services/apiClient";
-import { uploadsApi } from "@/services/api";
-import { UploadedAsset } from "@/types/domain";
+import { documentIntelligenceApi, uploadsApi } from "@/services/api";
+import { DocumentContext } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
+import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
+import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
 
 type TestBucket =
   | "installation" | "page_level" | "functional" | "uat" | "ui" | "accessibility"
@@ -44,12 +46,12 @@ type Analysis = {
   clarification_questions: string[]; tests: TestCase[]; release_risks: string[];
   warnings: string[]; capabilities: Record<string, boolean>;
   context_considered?: boolean; ai_enrichment_used?: boolean; analysis_basis?: string[];
-  document_asset_ids?: string[];
+  document_asset_ids?: string[]; document_analysis_run_id?: string | null;
 };
 type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; playwright_available?: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: Provider };
 type AnalysisJob = {
   job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed" | "superseded";
-  target_kind?: TargetKind; target_url?: string | null; profile_id?: string; surface_key?: string; surface_identity?: string; surface_version?: number; repository_asset_id?: string | null; stage: string; progress: number; context?: string; document_asset_ids?: string[]; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
+  target_kind?: TargetKind; target_url?: string | null; profile_id?: string; report_tab_key?: string; surface_key?: string; surface_identity?: string; surface_version?: number; repository_asset_id?: string | null; stage: string; progress: number; context?: string; document_asset_ids?: string[]; document_analysis_run_id?: string | null; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
 };
 type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
 type ReportCheck = {
@@ -136,10 +138,10 @@ type ProfileOption = {
   id: string; name: string; description: string; brief_context: string;
 };
 type ContextResponse = { context: string; source: "default" | "ai" | "fallback"; profile_id?: string; warning?: string | null };
-type SurfaceTab = {
-  surface_key: string; surface_identity: string; profile_id: string; target_kind: TargetKind;
+type ReportTab = {
+  report_tab_key?: string; surface_key: string; surface_identity: string; profile_id: string; target_kind: TargetKind;
   target_url?: string | null; filename: string; latest_job_id: string; latest_status: string;
-  version_count: number; latest_created_at: string; latest_updated_at: string; is_current: boolean;
+  surface_version?: number; version_count?: number; latest_created_at: string; latest_updated_at: string; is_current: boolean;
 };
 type SetupProfile = {
   job_id: string; credential_reference: string; account_role: string; environment_name: string;
@@ -298,7 +300,7 @@ function readableError(error: unknown, fallback: string) {
   return fallback;
 }
 
-function duplicateSurfaceDetails(error: unknown) {
+function duplicateReportTabDetails(error: unknown) {
   const candidate = error as { response?: { status?: number; data?: { detail?: unknown } } };
   const detail = candidate?.response?.data?.detail;
   if (candidate?.response?.status !== 409 || !detail || typeof detail !== "object") return null;
@@ -332,6 +334,79 @@ function ReportRiskTable({ risks }: { risks: ReportRisk[] }) {
   return <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Risk</TableCell><TableCell>Severity</TableCell><TableCell>Likelihood / impact</TableCell><TableCell>Evidence and mitigation</TableCell></TableRow></TableHead><TableBody>{risks.map((risk) => <TableRow key={risk.risk_id} hover><TableCell sx={{ minWidth: 220 }}><Typography variant="body2" fontWeight={700}>{risk.title}</Typography><Typography variant="caption" color="text.secondary">{risk.risk_id} · {reportStatusLabel(risk.status)}</Typography></TableCell><TableCell><Chip size="small" label={risk.severity.toUpperCase()} color={reportRiskColor[risk.severity]} variant="outlined" /></TableCell><TableCell>{risk.likelihood.toUpperCase()} / {risk.impact.toUpperCase()}</TableCell><TableCell sx={{ minWidth: 340 }}><Typography variant="caption" display="block">{risk.evidence}</Typography><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Mitigation: {risk.mitigation}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>;
 }
 
+function reportTargetLabel(targetKind: TargetKind) {
+  return targetKind === "web" ? "Web" : targetKind === "ios" ? "iOS" : "Android";
+}
+
+function reportIdentityLabel(surface: ReportTab) {
+  if (surface.target_kind === "web") return surface.surface_identity || "Website";
+  return surface.filename || `${reportTargetLabel(surface.target_kind)} build`;
+}
+
+function reportTabKey(surface: ReportTab) {
+  return surface.report_tab_key || `${surface.surface_key}:${surface.surface_version || surface.version_count || 1}:${surface.latest_job_id}`;
+}
+
+function ReportTabs({ reportTabs, profiles, activeReportTabKey, loading, disabled, onSelect }: {
+  reportTabs: ReportTab[];
+  profiles: ProfileOption[];
+  activeReportTabKey: string;
+  loading: boolean;
+  disabled: boolean;
+  onSelect: (reportTab: ReportTab) => void;
+}) {
+  if (reportTabs.length === 0) return null;
+  const activeReportTab = reportTabs.find((reportTab) => reportTabKey(reportTab) === activeReportTabKey)
+    ?? reportTabs.find((reportTab) => reportTab.surface_key === activeReportTabKey)
+    ?? reportTabs[0];
+  const selectedReportTabKey = reportTabKey(activeReportTab);
+  const activeProfileName = profiles.find((profile) => profile.id === activeReportTab.profile_id)?.name || activeReportTab.profile_id;
+  return <Box sx={{ mb: 2 }}>
+    <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
+      <Box>
+        <Typography variant="subtitle2" fontWeight={800}>Report tabs</Typography>
+        <Typography variant="caption" color="text.secondary">Each tab is isolated by profile, application target and build or URL.</Typography>
+      </Box>
+      {loading && <CircularProgress size={16} aria-label="Loading report views" />}
+    </Stack>
+    <Tabs
+      value={selectedReportTabKey}
+      onChange={(_, value: string) => {
+        const selected = reportTabs.find((reportTab) => reportTabKey(reportTab) === value);
+        if (selected) onSelect(selected);
+      }}
+      variant="scrollable"
+      scrollButtons="auto"
+      allowScrollButtonsMobile
+      aria-label="Test and Audit Report tabs"
+      sx={{ mt: .75, minHeight: 48, "& .MuiTab-root": { minHeight: 48, alignItems: "flex-start", textAlign: "left", textTransform: "none", px: 1.5, py: 1 } }}
+    >
+      {reportTabs.map((reportTab) => {
+        const targetLabel = reportTargetLabel(reportTab.target_kind);
+        const identity = reportIdentityLabel(reportTab);
+        const profileName = profiles.find((profile) => profile.id === reportTab.profile_id)?.name || reportTab.profile_id;
+        return <Tab
+          key={reportTabKey(reportTab)}
+          value={reportTabKey(reportTab)}
+          disabled={disabled}
+          aria-label={`${profileName} · ${targetLabel} · ${identity}`}
+          title={`${profileName} · ${targetLabel} · ${identity}`}
+          label={<Stack spacing={.1} sx={{ minWidth: 0, maxWidth: { xs: 170, sm: 230 } }}>
+            <Typography variant="body2" fontWeight={700} noWrap>{profileName}</Typography>
+            <Typography variant="caption" color="text.secondary" noWrap>{targetLabel} · {identity}{(reportTab.surface_version ?? 0) > 1 ? ` · v${reportTab.surface_version}` : ""}</Typography>
+          </Stack>}
+        />;
+      })}
+    </Tabs>
+    <Stack direction={{ xs: "column", sm: "row" }} spacing={{ xs: .25, sm: 1 }} sx={{ mt: .75, minWidth: 0 }}>
+      <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>Active report</Typography>
+      <Typography variant="caption" color="text.secondary" noWrap sx={{ overflow: "hidden", textOverflow: "ellipsis" }} title={`${activeProfileName} · ${reportTargetLabel(activeReportTab.target_kind)} · ${reportIdentityLabel(activeReportTab)}`}>
+        {activeProfileName} · {reportTargetLabel(activeReportTab.target_kind)} · {reportIdentityLabel(activeReportTab)}{(activeReportTab.surface_version ?? 0) > 1 ? ` · v${activeReportTab.surface_version}` : ""}
+      </Typography>
+    </Stack>
+  </Box>;
+}
+
 function RuntimeScreenPreview({ screen }: { screen: DiscoveredScreen }) {
   const [imageUrl, setImageUrl] = useState("");
   useEffect(() => {
@@ -360,14 +435,14 @@ function RuntimeScreenPreview({ screen }: { screen: DiscoveredScreen }) {
 
 export default function AutopilotPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { selectedProjectId } = useSelectedProject();
   const [file, setFile] = useState<File | null>(null);
-  const [storedApks, setStoredApks] = useState<UploadedAsset[]>([]);
   const [selectedDocumentAssetIds, setSelectedDocumentAssetIds] = useState<string[]>([]);
+  const [documentAnalysisRunId, setDocumentAnalysisRunId] = useState("");
   const [selectedUploadId, setSelectedUploadId] = useState("");
   const [targetKind, setTargetKind] = useState<TargetKind>("android");
   const [targetUrl, setTargetUrl] = useState("");
-  const [repositoryLoading, setRepositoryLoading] = useState(false);
   const [profiles, setProfiles] = useState<ProfileOption[]>(DEFAULT_PROFILE_OPTIONS);
   const [profileId, setProfileId] = useState(DEFAULT_PROFILE_ID);
   const [context, setContext] = useState(DEFAULT_AUTOPILOT_CONTEXT);
@@ -386,9 +461,9 @@ export default function AutopilotPage() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
-  const [surfaceTabs, setSurfaceTabs] = useState<SurfaceTab[]>([]);
-  const [surfaceLoading, setSurfaceLoading] = useState(false);
-  const [activeSurfaceKey, setActiveSurfaceKey] = useState("");
+  const [reportTabs, setReportTabs] = useState<ReportTab[]>([]);
+  const [reportTabsLoading, setReportTabsLoading] = useState(false);
+  const [activeReportTabKey, setActiveReportTabKey] = useState("");
   const [duplicatePrompt, setDuplicatePrompt] = useState<{ message: string; existingJobId: string; createdAt: string } | null>(null);
   const [provider, setProvider] = useState<Provider>("browserstack");
   const [busy, setBusy] = useState(false);
@@ -412,6 +487,15 @@ export default function AutopilotPage() {
     () => profiles.find((profile) => profile.id === profileId) ?? DEFAULT_PROFILE_OPTIONS[0],
     [profileId, profiles],
   );
+  const mobileAssets = useRepositoryAssets({
+    projectId: selectedProjectId,
+    extensions: ["apk", "ipa"],
+    excludeCategories: ["autopilot_evidence", "execution_evidence"],
+    excludeSourceModules: ["autopilot_evidence", "execution_report"],
+    cacheKey: "autopilot-mobile-assets",
+  });
+  const storedApks = mobileAssets.assets;
+  const repositoryLoading = mobileAssets.isLoading || mobileAssets.isFetching;
 
   const refreshProfiles = useCallback(async () => {
     try {
@@ -423,30 +507,24 @@ export default function AutopilotPage() {
     }
   }, []);
 
-  const refreshStoredApks = useCallback(async (projectId: string) => {
-    if (!projectId) { setStoredApks([]); return; }
-    setRepositoryLoading(true);
+  const refreshReportTabs = useCallback(async (projectId: string) => {
+    if (!projectId) { setReportTabs([]); return; }
+    setReportTabsLoading(true);
     try {
-      const [apkResult, ipaResult] = await Promise.all([
-        uploadsApi.list({ category: "apk", project_id: projectId }),
-        uploadsApi.list({ category: "ipa", project_id: projectId }),
-      ]);
-      setStoredApks([...apkResult.data, ...ipaResult.data].sort((left, right) => right.created_at.localeCompare(left.created_at)));
-    }
-    catch { setStoredApks([]); }
-    finally { setRepositoryLoading(false); }
-  }, []);
-
-  const refreshSurfaces = useCallback(async (projectId: string) => {
-    if (!projectId) { setSurfaceTabs([]); return; }
-    setSurfaceLoading(true);
-    try {
-      const response = await apiClient.get<SurfaceTab[]>("/autopilot/surfaces", { timeout: 15000 });
-      setSurfaceTabs(response.data);
-      if (response.data[0]) setActiveSurfaceKey((current) => current || response.data[0].surface_key);
+      let response;
+      try {
+        response = await apiClient.get<ReportTab[]>("/autopilot/report-tabs", { timeout: 15000 });
+      } catch (error) {
+        // Keep compatibility with deployments that have not rolled out the
+        // report-tab alias yet; the response shape remains compatible.
+        if ((error as { response?: { status?: number } })?.response?.status !== 404) throw error;
+        response = await apiClient.get<ReportTab[]>("/autopilot/surfaces", { timeout: 15000 });
+      }
+      setReportTabs(response.data);
+      if (response.data[0]) setActiveReportTabKey((current) => current || reportTabKey(response.data[0]));
     } catch {
-      setSurfaceTabs([]);
-    } finally { setSurfaceLoading(false); }
+      setReportTabs([]);
+    } finally { setReportTabsLoading(false); }
   }, []);
 
   const refreshAutomation = useCallback(async (jobId: string) => {
@@ -496,28 +574,72 @@ export default function AutopilotPage() {
       }
     }).catch(() => setProviderStatus(null));
   }, []);
-  useEffect(() => { void refreshStoredApks(selectedProjectId); }, [refreshStoredApks, selectedProjectId]);
   useEffect(() => {
-    setActiveSurfaceKey("");
-    void refreshSurfaces(selectedProjectId);
-  }, [refreshSurfaces, selectedProjectId]);
-  useEffect(() => { setSelectedDocumentAssetIds([]); }, [selectedProjectId]);
+    setActiveReportTabKey("");
+    void refreshReportTabs(selectedProjectId);
+  }, [refreshReportTabs, selectedProjectId]);
+  useEffect(() => {
+    setSelectedDocumentAssetIds([]);
+    setDocumentAnalysisRunId("");
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    const runId = searchParams.get("document_run") || "";
+    if (!selectedProjectId || !runId) return;
+    let active = true;
+    const attachBaseline = async () => {
+      try {
+        const response = await documentIntelligenceApi.context(runId);
+        const baseline: DocumentContext = response.data;
+        if (!active || baseline.project_id !== selectedProjectId) return;
+        setDocumentAnalysisRunId(baseline.run_id);
+        setSelectedDocumentAssetIds(baseline.asset_ids);
+        // Keep the editable brief compact. The full, bounded baseline is
+        // rebuilt server-side from document_analysis_run_id when analysis
+        // starts, so shortening the preview never drops evidence.
+        const contextPreview = baseline.context.length > 2400
+          ? `${baseline.context.slice(0, 2399).trimEnd()}…`
+          : baseline.context;
+        setContext(contextPreview);
+        const profileMap: Record<string, string> = {
+          banking: "uae_fintech",
+          retail: "ecommerce_marketplace",
+          saas: "custom",
+          government: "custom",
+          general: "general_mobile",
+        };
+        setProfileId(profileMap[baseline.profile] || profileIdFromContext(baseline.context, profiles));
+        setContextSource("custom");
+        setContextNotice("Document Intelligence baseline attached. It will scope analysis and remain linked to the resulting evidence.");
+      } catch (err) {
+        if (active) setError(readableError(err, "Unable to attach the Document Intelligence baseline"));
+      }
+    };
+    void attachBaseline();
+    return () => { active = false; };
+  }, [profiles, searchParams, selectedProjectId]);
 
   const applyJob = useCallback((job: AnalysisJob) => {
     setAnalysisProgress(job.progress); setAnalysisStage(job.stage);
     if (job.target_kind) setTargetKind(job.target_kind);
     if (job.target_url !== undefined) setTargetUrl(job.target_url || "");
     if (job.profile_id) setProfileId(job.profile_id);
-    if (job.surface_key) setActiveSurfaceKey(job.surface_key);
+    if (job.report_tab_key) setActiveReportTabKey(job.report_tab_key);
+    else if (job.surface_key) setActiveReportTabKey(`${job.surface_key}:${job.surface_version || 1}:${job.job_id}`);
     if (job.repository_asset_id) setSelectedUploadId(job.repository_asset_id);
     if (job.context !== undefined && job.context.trim()) {
       const editableContext = contextForEditor(job.context);
-      setContext(editableContext);
-      if (!job.profile_id) setProfileId(profileIdFromContext(editableContext, profiles));
+      const contextPreview = editableContext.length > 2400
+        ? `${editableContext.slice(0, 2399).trimEnd()}…`
+        : editableContext;
+      setContext(contextPreview);
+      if (!job.profile_id) setProfileId(profileIdFromContext(contextPreview, profiles));
       setContextSource("custom");
     }
     if (job.document_asset_ids) setSelectedDocumentAssetIds(job.document_asset_ids);
     else if (job.analysis?.document_asset_ids) setSelectedDocumentAssetIds(job.analysis.document_asset_ids);
+    if (job.document_analysis_run_id) setDocumentAnalysisRunId(job.document_analysis_run_id);
+    else if (job.analysis?.document_analysis_run_id) setDocumentAnalysisRunId(job.analysis.document_analysis_run_id);
     setArtifactAvailable(job.artifact_available !== false);
     if (job.status === "analyzed" && job.analysis) {
       setAnalysis(job.analysis);
@@ -560,7 +682,7 @@ export default function AutopilotPage() {
     const restore = async () => {
       if (!selectedProjectId) return;
       try {
-        await refreshSurfaces(selectedProjectId);
+        await refreshReportTabs(selectedProjectId);
         const job = (await apiClient.get<AnalysisJob | null>("/autopilot/jobs/latest", { timeout: 15000 })).data;
         if (!active || !job) return;
         applyJob(job);
@@ -578,7 +700,7 @@ export default function AutopilotPage() {
     };
     void restore();
     return () => { active = false; };
-  }, [selectedProjectId, applyJob, pollAnalysis, refreshSurfaces]);
+  }, [selectedProjectId, applyJob, pollAnalysis, refreshReportTabs]);
 
   useEffect(() => {
     let active = true;
@@ -715,7 +837,7 @@ export default function AutopilotPage() {
     try {
       let response;
       if (selectedUploadId && !isWebsite) {
-        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId, surface_action: surfaceAction, document_asset_ids: selectedDocumentAssetIds }, { timeout: 300000 });
+        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId, surface_action: surfaceAction, document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined }, { timeout: 300000 });
       } else {
         const form = new FormData();
         if (isWebsite) form.append("target_url", targetUrl.trim());
@@ -723,12 +845,17 @@ export default function AutopilotPage() {
         form.append("context", context); form.append("profile_id", profileId);
         form.append("surface_action", surfaceAction);
         form.append("document_asset_ids", JSON.stringify(selectedDocumentAssetIds));
+        if (documentAnalysisRunId) form.append("document_analysis_run_id", documentAnalysisRunId);
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
-        if (!isWebsite) await refreshStoredApks(selectedProjectId);
+        if (!isWebsite) {
+          // Repository refresh is convenience metadata; a successful analysis
+          // must remain usable if the list endpoint has a transient failure.
+          try { await mobileAssets.refetch(); } catch { /* keep the analysis result */ }
+        }
       }
-      applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshSurfaces(selectedProjectId);
+      applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshReportTabs(selectedProjectId);
     } catch (err) {
-      const duplicate = duplicateSurfaceDetails(err);
+      const duplicate = duplicateReportTabDetails(err);
       if (duplicate && surfaceAction === "ask") {
         setDuplicatePrompt(duplicate);
       } else {
@@ -738,15 +865,15 @@ export default function AutopilotPage() {
     finally { setBusy(false); }
   };
 
-  const selectSurface = async (surface: SurfaceTab) => {
-    if (busy || !selectedProjectId || surface.latest_job_id === analysis?.job_id) return;
-    setBusy(true); setError(""); resetResult(); setActiveSurfaceKey(surface.surface_key);
+  const selectReportTab = async (reportTab: ReportTab) => {
+    if (busy || !selectedProjectId || reportTab.latest_job_id === analysis?.job_id) return;
+    setBusy(true); setError(""); resetResult(); setActiveReportTabKey(reportTabKey(reportTab));
     try {
-      const job = (await apiClient.get<AnalysisJob>(`/autopilot/jobs/${surface.latest_job_id}`, { timeout: 20000 })).data;
+      const job = (await apiClient.get<AnalysisJob>(`/autopilot/jobs/${reportTab.latest_job_id}`, { timeout: 20000 })).data;
       applyJob(job);
       if (job.status === "uploaded" || job.status === "analyzing") await pollAnalysis(job.job_id);
     } catch (err) {
-      setError(readableError(err, "Unable to open this Autopilot surface"));
+      setError(readableError(err, "Unable to open this report tab"));
     } finally { setBusy(false); }
   };
 
@@ -859,7 +986,7 @@ export default function AutopilotPage() {
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
-        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, surface_action: "new", target_url: targetKind === "web" ? targetUrl.trim() || undefined : undefined, document_asset_ids: selectedDocumentAssetIds },
+        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, surface_action: "new", target_url: targetKind === "web" ? targetUrl.trim() || undefined : undefined, document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined },
         { timeout: 300000 },
       );
       // Keep the last completed analysis visible while the replacement job
@@ -868,7 +995,7 @@ export default function AutopilotPage() {
       applyJob(response.data);
       await pollAnalysis(response.data.job_id);
       await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id);
-      await refreshSurfaces(selectedProjectId);
+      await refreshReportTabs(selectedProjectId);
     } catch (err) { setError(readableError(err, "Autopilot rerun failed")); }
     finally { setBusy(false); }
   };
@@ -897,26 +1024,6 @@ export default function AutopilotPage() {
       <Stack direction="row" spacing={1.5} alignItems="center"><AutoAwesomeIcon color="primary" /><Typography variant="h4" fontWeight={800}>Autopilot</Typography></Stack>
       <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>Inspect a web, Android or iOS target, generate complete coverage, discover safe journeys and report only evidence-backed outcomes.</Typography>
     </Box>
-
-    {surfaceTabs.length > 0 && <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 3 }}>
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
-        <Box><Typography variant="subtitle2" fontWeight={800}>Test surfaces</Typography><Typography variant="caption" color="text.secondary">Each profile + target + build/URL keeps its own analysis and report.</Typography></Box>
-        {surfaceLoading && <CircularProgress size={16} />}
-      </Stack>
-      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
-        {surfaceTabs.map((surface) => {
-          const profileName = profiles.find((profile) => profile.id === surface.profile_id)?.name || surface.profile_id;
-          const targetLabel = surface.target_kind === "web" ? "Web" : surface.target_kind === "ios" ? "iOS" : "Android";
-          // The API intentionally returns a query/fragment-free identity for
-          // web targets. Use it in the tab label so invite codes, tokens and
-          // other URL state can never be echoed into the UI.
-          const identity = surface.target_kind === "web" ? (surface.surface_identity || "Website") : surface.filename;
-          return <Button key={surface.surface_key} size="small" variant={activeSurfaceKey === surface.surface_key ? "contained" : "outlined"} onClick={() => void selectSurface(surface)} disabled={busy} sx={{ maxWidth: 330, justifyContent: "flex-start", textTransform: "none", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }} title={`${profileName} · ${targetLabel} · ${identity}`}>
-            {profileName} · {targetLabel} · {identity}{surface.version_count > 1 ? ` · v${surface.version_count}` : ""}
-          </Button>;
-        })}
-      </Stack>
-    </Paper>}
 
     <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
       <Box sx={{ mb: 2.5 }}>
@@ -964,9 +1071,30 @@ export default function AutopilotPage() {
       </Grid>
       <Grid container spacing={3}>
         <Grid item xs={12} md={5}><Stack spacing={2}>
-          {targetKind !== "web" && <FormControl fullWidth size="small"><InputLabel id="stored-apk-label">Stored build</InputLabel><Select labelId="stored-apk-label" label="Stored build" value={selectedUploadId} disabled={repositoryLoading || busy} onChange={(event) => { const value = event.target.value; const selected = storedApks.find((asset) => asset.id === value); setSelectedUploadId(value); if (value) { setFile(null); const nextTarget = selected?.extension === "ipa" ? "ios" : "android"; setTargetKind(nextTarget); if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected?.filename?.replace(/\.(apk|ipa)$/i, ""))); } if (!analysis) resetResult(); else setError(""); }}>
-            <MenuItem value="">Upload a new build</MenuItem>{storedApks.map((asset) => <MenuItem key={asset.id} value={asset.id} sx={{ maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{asset.filename} · {formatBytes(asset.size_bytes)} · {new Date(asset.created_at).toLocaleDateString()}</MenuItem>)}
-           </Select></FormControl>}
+          {targetKind !== "web" && <RepositoryAssetPicker
+            projectId={selectedProjectId}
+            value={selectedUploadId}
+            assets={storedApks}
+            assetsLoading={repositoryLoading}
+            assetsError={mobileAssets.isError}
+            extensions={["apk", "ipa"]}
+            cacheKey="autopilot-mobile-assets"
+            label="Existing APK / IPA from repository"
+            emptyLabel="Upload a new build"
+            helperText="Choose a build already stored for this project, or upload a new one below."
+            onChange={(value, selected) => {
+              setSelectedUploadId(value);
+              if (selected) {
+                setFile(null);
+                const nextTarget = repositoryAssetExtension(selected) === "ipa" ? "ios" : "android";
+                setTargetKind(nextTarget);
+                if (contextSource === "default") setContext(contextForTarget(selectedProfile, nextTarget, selected.filename.replace(/\.(apk|ipa)$/i, "")));
+              }
+              if (!analysis) resetResult(); else setError("");
+            }}
+            disabled={busy || contextBusy}
+            onOpenRepository={() => navigate("/test-data/documents")}
+          />}
           {targetKind !== "web" && (selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 2.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1.2} alignItems="center"><FolderOutlinedIcon color="primary" /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored {selectedStoredApk.extension.toUpperCase()} · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: 1 }} onClick={() => navigate("/test-data/documents")}>Open repository</Button></Box>
           : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || `Choose a ${targetKind === "ios" ? "iOS IPA" : "Android APK"}`}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>Choose build<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
         </Stack></Grid>
@@ -995,6 +1123,9 @@ export default function AutopilotPage() {
         compact
         onOpenRepository={() => navigate("/test-data/documents")}
       />
+      {documentAnalysisRunId && <Alert severity="info" sx={{ mt: 1.5 }}>
+        Document Intelligence baseline attached. Static document findings guide coverage; runtime pass/fail is established only after execution.
+      </Alert>}
     {busy && <Box sx={{ mt: 2 }}><Box sx={{ height: 4, borderRadius: 2, overflow: "hidden", bgcolor: "action.hover" }}><Box sx={{ height: "100%", width: `${Math.min(99, Math.max(3, analysisProgress))}%`, bgcolor: "primary.main", transition: "width .4s ease" }} /></Box><Typography variant="caption" color="text.secondary">{analysisStage === "complete" ? "finalizing" : analysisStage.replaceAll("_", " ")} · {Math.min(99, Math.max(3, analysisProgress))}%</Typography></Box>}
     </Paper>
 
@@ -1014,6 +1145,12 @@ export default function AutopilotPage() {
       </Grid>
     </CardContent></Card>}
 
+    {reportTabs.length > 0 && !report && <Card variant="outlined" sx={{ borderRadius: 3 }}><CardContent>
+      <Typography variant="h6" fontWeight={800}>Test &amp; Audit Report</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mt: .35, mb: 1.5 }}>Choose a report tab to reopen its isolated analysis and evidence.</Typography>
+      <ReportTabs reportTabs={reportTabs} profiles={profiles} activeReportTabKey={activeReportTabKey} loading={reportTabsLoading} disabled={busy} onSelect={(reportTab) => { void selectReportTab(reportTab); }} />
+    </CardContent></Card>}
+
     {error && <Alert severity="error">{error}</Alert>}
 
     {analysis && stats && <>
@@ -1022,6 +1159,7 @@ export default function AutopilotPage() {
           <Stack direction="row" spacing={1} alignItems="center"><FactCheckOutlinedIcon color="primary" /><Box><Typography variant="h6" fontWeight={800}>{report.report_title}</Typography><Typography variant="caption" color="text.secondary">{report.role} · {report.prepared_for}</Typography><Typography variant="caption" color="text.secondary" display="block">Last run: {report.last_run_at ? new Date(report.last_run_at).toLocaleString() : "Pending — execution is yet to be completed."}</Typography></Box></Stack>
           <Chip label={`RELEASE: ${report.recommendation.replaceAll("_", "-")}`} color={report.recommendation === "NO_GO" ? "error" : reportPending ? "info" : "warning"} sx={{ fontWeight: 800 }} />
         </Stack>
+        <ReportTabs reportTabs={reportTabs} profiles={profiles} activeReportTabKey={activeReportTabKey} loading={reportTabsLoading} disabled={busy} onSelect={(reportTab) => { void selectReportTab(reportTab); }} />
         <Alert severity={report.recommendation === "NO_GO" ? "error" : reportPending ? "info" : "warning"} sx={{ mt: 2 }}><b>{report.recommendation.replaceAll("_", "-")}</b> — {report.rationale}</Alert>
         {reportPending ? <Grid container spacing={1.5} sx={{ mt: .5 }}>
           {[["Decision", "PENDING"], ["Execution", "Pending"], ["Functional", "Pending"], ["Non-functional", "Pending"], ["Compliance", "Pending"], ["Last run", "—"]].map(([label, value]) => <Grid item xs={6} sm={4} md={2} key={label}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}
@@ -1197,16 +1335,16 @@ export default function AutopilotPage() {
     </>}
 
     <Dialog open={Boolean(duplicatePrompt)} onClose={() => !busy && setDuplicatePrompt(null)} fullWidth maxWidth="sm">
-      <DialogTitle>Existing Autopilot surface</DialogTitle>
+      <DialogTitle>Existing Test &amp; Audit Report tab</DialogTitle>
       <DialogContent>
         <Alert severity="info" sx={{ mb: 2 }}>{duplicatePrompt?.message}</Alert>
         {duplicatePrompt?.createdAt && <Typography variant="body2" color="text.secondary">Previous result: {new Date(duplicatePrompt.createdAt).toLocaleString()}</Typography>}
-        <Typography variant="body2" sx={{ mt: 1 }}>Create a new version to keep the previous evidence, or override the previous version and make this run current.</Typography>
+        <Typography variant="body2" sx={{ mt: 1 }}>Keep the existing evidence and create a new report tab, or override the existing tab and make this run current.</Typography>
       </DialogContent>
       <DialogActions>
         <Button onClick={() => setDuplicatePrompt(null)} disabled={busy}>Cancel</Button>
-        <Button variant="outlined" onClick={() => { setDuplicatePrompt(null); void analyze("new"); }} disabled={busy}>Keep previous · new version</Button>
-        <Button variant="contained" color="warning" onClick={() => { setDuplicatePrompt(null); void analyze("override"); }} disabled={busy}>Override previous</Button>
+        <Button variant="outlined" onClick={() => { setDuplicatePrompt(null); void analyze("new"); }} disabled={busy}>Create new report tab</Button>
+        <Button variant="contained" color="warning" onClick={() => { setDuplicatePrompt(null); void analyze("override"); }} disabled={busy}>Override existing tab</Button>
       </DialogActions>
     </Dialog>
 

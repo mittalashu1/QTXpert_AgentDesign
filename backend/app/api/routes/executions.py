@@ -588,6 +588,9 @@ async def _run_mobile_execution(run_id: UUID) -> None:
                     **evidence_ids,
                     "current_package": driver_result.get("current_package"),
                     "current_activity": driver_result.get("current_activity"),
+                    # Keep the report auditable without copying credentials;
+                    # the plan stores only non-secret setup references.
+                    "input_references": dict((run.target_metadata or {}).get("input_references") or {}),
                 }
             run.target_metadata = {
                 **(run.target_metadata or {}),
@@ -619,6 +622,14 @@ async def _run_mobile_execution(run_id: UUID) -> None:
             if run.execution_plan is not None:
                 run.execution_plan.status = "completed" if run.status == ExecutionStatus.COMPLETED else "failed"
             await db.commit()
+            if run.status == ExecutionStatus.COMPLETED:
+                logger.info(
+                    "Mobile execution completed run_id=%s passed=%s failed=%s blocked=%s",
+                    run_id,
+                    run.passed_tests,
+                    run.failed_tests,
+                    run.blocked_tests,
+                )
             try:
                 import shutil
 
@@ -714,11 +725,20 @@ async def _run_execution(run_id: UUID) -> None:
                             elif action == "assert-url" and target not in page.url:
                                 raise AssertionError(f"Expected URL to contain {target!r}, got {page.url!r}")
                         result.status = ResultStatus.PASSED
-                        result.evidence = {"final_url": page.url, "title": await page.title(), "dsl_version": "1.0"}
+                        result.evidence = {
+                            "final_url": page.url,
+                            "title": await page.title(),
+                            "dsl_version": "1.0",
+                            "input_references": dict((run.target_metadata or {}).get("input_references") or {}),
+                        }
                     except Exception as exc:
                         result.status = ResultStatus.FAILED
                         result.error_message = str(exc)[:4000]
-                        result.evidence = {"final_url": page.url, "dsl_version": "1.0"}
+                        result.evidence = {
+                            "final_url": page.url,
+                            "dsl_version": "1.0",
+                            "input_references": dict((run.target_metadata or {}).get("input_references") or {}),
+                        }
                     finally:
                         result.duration_ms = int((time.perf_counter() - started) * 1000)
                         await page.close()

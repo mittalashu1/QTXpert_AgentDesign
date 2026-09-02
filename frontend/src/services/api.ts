@@ -14,6 +14,8 @@ import {
   AICostSummary,
   UploadedAsset,
   DocumentAnalysisRun,
+  DocumentContext,
+  DocumentTraceability,
   DocumentFinding,
   DocumentFindingStatus,
   DocumentProfile,
@@ -78,8 +80,17 @@ export const executionPlansApi = {
   }) => apiClient.post<ExecutionPlan>("/execution-plans/import", payload),
   updateCases: (
     planId: string,
-    cases: Array<{ id: string; selected: boolean; execution_mode: "automated" | "manual" }>,
+    cases: Array<{
+      id: string;
+      selected: boolean;
+      execution_mode: "automated" | "manual";
+      steps?: string[];
+      expected_result?: string;
+      test_data?: Record<string, unknown> | null;
+    }>,
   ) => apiClient.patch<ExecutionPlan>(`/execution-plans/${planId}/cases`, { cases }),
+  updateInputs: (planId: string, inputs: Record<string, string>) =>
+    apiClient.patch<ExecutionPlan>(`/execution-plans/${planId}/inputs`, { inputs }),
   preflight: (planId: string, payload: {
     target_kind: ExecutionTargetKind;
     provider: ExecutionProvider;
@@ -163,6 +174,10 @@ export const documentIntelligenceApi = {
     }),
   getRun: (runId: string) =>
     apiClient.get<DocumentAnalysisRun>(`/document-intelligence/runs/${runId}`),
+  context: (runId: string) =>
+    apiClient.get<DocumentContext>(`/document-intelligence/runs/${runId}/context`),
+  traceability: (runId: string) =>
+    apiClient.get<DocumentTraceability>(`/document-intelligence/runs/${runId}/traceability`),
   analyze: (payload: {
     project_id: string;
     asset_ids: string[];
@@ -181,6 +196,17 @@ export const documentIntelligenceApi = {
     apiClient.post<{ run_id: string; requirement_id: string; title: string; message: string }>(
       `/document-intelligence/runs/${runId}/publish`
     ),
+  generateTests: (runId: string, payload?: {
+    generation_profile?: "smoke" | "feature" | "regression" | "deep_regression";
+    test_set_title?: string;
+  }) => apiClient.post<{
+    run_id: string;
+    generation_run_id: string;
+    requirement_id: string;
+    status: string;
+    title: string | null;
+    message: string;
+  }>(`/document-intelligence/runs/${runId}/generate-tests`, payload || {}),
 };
 
 export const requirementsApi = {
@@ -217,6 +243,7 @@ export const testCasesApi = {
     llmProviderOverride?: string,
     generationProfile: "smoke" | "feature" | "regression" | "deep_regression" = "feature",
     testSetTitle?: string,
+    sourceDocumentAnalysisId?: string,
   ) =>
     apiClient.post<GenerationRun>("/generate-testcases", {
       project_id: projectId,
@@ -224,6 +251,7 @@ export const testCasesApi = {
       llm_provider_override: llmProviderOverride,
       generation_profile: generationProfile,
       test_set_title: testSetTitle,
+      source_document_analysis_id: sourceDocumentAnalysisId,
     }),
   history: (projectId: string) =>
     apiClient.get<GenerationRun[]>("/history", { params: { project_id: projectId } }),

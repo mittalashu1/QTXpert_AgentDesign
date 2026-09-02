@@ -98,6 +98,16 @@ def build_surface_key(profile_id: str | None, target_kind: str, identity: str) -
     raw = "|".join(((profile_id or "uae_fintech").strip().lower(), (target_kind or "android").strip().lower(), identity.strip()))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+
+def build_report_tab_key(surface_key: str | None, surface_version: int | None, job_id: str) -> str:
+    """Build a stable UI key for one retained report version.
+
+    The scope key is shared by duplicate detection; the version and job id
+    distinguish explicit ``new`` report tabs without exposing target details.
+    """
+    version = max(1, int(surface_version or 1))
+    return f"{str(surface_key or '')}:{version}:{job_id}"
+
 # APK parsers can briefly use hundreds of MiB for resource tables. Render's
 # low-cost instance has a small memory envelope, so serialize the expensive
 # analysis section across requests and restart recovery. The semaphore lives
@@ -442,6 +452,12 @@ class AutopilotPrototypeService:
                 record.context = str(job.get("context", ""))[:8000]
                 document_asset_ids = job.get("document_asset_ids")
                 record.document_asset_ids = [str(value) for value in (document_asset_ids or [])][:20]
+                document_analysis_run_id = job.get("document_analysis_run_id")
+                record.document_analysis_run_id = (
+                    uuid.UUID(str(document_analysis_run_id))
+                    if document_analysis_run_id and _is_uuid(document_analysis_run_id)
+                    else None
+                )
                 record.apk_path = job.get("apk_path")
                 record.status = str(job.get("status", "uploaded"))
                 record.stage = str(job.get("stage", "queued"))
@@ -481,6 +497,7 @@ class AutopilotPrototypeService:
                     "repository_asset_id": str(record.repository_asset_id) if record.repository_asset_id else None,
                     "context": record.context or "",
                     "document_asset_ids": list(getattr(record, "document_asset_ids", None) or []),
+                    "document_analysis_run_id": str(record.document_analysis_run_id) if getattr(record, "document_analysis_run_id", None) else None,
                     "apk_path": record.apk_path,
                     "status": record.status,
                     "stage": record.stage,
@@ -586,6 +603,7 @@ class AutopilotPrototypeService:
         target_kind: str | None = None,
         project_id: str | None = None,
         document_asset_ids: list[str] | None = None,
+        document_analysis_run_id: str | None = None,
         profile_id: str = "uae_fintech",
         surface_key: str = "",
         surface_identity: str = "",
@@ -611,6 +629,7 @@ class AutopilotPrototypeService:
             "surface_version": surface_version,
             "context": context[:8000],
             "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
+            "document_analysis_run_id": str(document_analysis_run_id) if document_analysis_run_id else None,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "apk_path": str(artifact_path),
             "status": "uploaded",
@@ -633,6 +652,7 @@ class AutopilotPrototypeService:
         target_kind: str | None = None,
         project_id: str | None = None,
         document_asset_ids: list[str] | None = None,
+        document_analysis_run_id: str | None = None,
         profile_id: str = "uae_fintech",
         surface_key: str = "",
         surface_identity: str = "",
@@ -658,7 +678,7 @@ class AutopilotPrototypeService:
                 total += len(chunk)
                 if max_bytes and total > max_bytes:
                     raise AutopilotUploadTooLarge(
-                        f"APK exceeds the {max_bytes // (1024 * 1024)}MB Autopilot prototype limit"
+                        f"Mobile artifact exceeds the {max_bytes // (1024 * 1024)}MB Autopilot upload limit"
                     )
                 await asyncio.to_thread(handle.write, chunk)
             await asyncio.to_thread(handle.flush)
@@ -677,6 +697,7 @@ class AutopilotPrototypeService:
                 "surface_version": surface_version,
                 "context": context[:8000],
                 "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
+                "document_analysis_run_id": str(document_analysis_run_id) if document_analysis_run_id else None,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "apk_path": str(artifact_path),
                 "status": "uploaded",
@@ -697,6 +718,64 @@ class AutopilotPrototypeService:
             if handle is not None:
                 await asyncio.to_thread(handle.close)
 
+    async def save_reused_asset_job(
+        self,
+        filename: str,
+        owner_id: str,
+        repository_asset_id: str | UUID,
+        context: str = "",
+        *,
+        target_kind: str | None = None,
+        project_id: str | None = None,
+        document_asset_ids: list[str] | None = None,
+        document_analysis_run_id: str | None = None,
+        profile_id: str = "uae_fintech",
+        surface_key: str = "",
+        surface_identity: str = "",
+        surface_version: int = 1,
+    ) -> tuple[str, Path]:
+        """Create a job for a repository asset without blocking on its bytes.
+
+        Reusing a large APK/IPA used to materialize the whole object and then
+        stream it into a second job file before returning the HTTP 202. On a
+        hosted service that transfer can outlive the proxy timeout. Persist a
+        queued manifest first; the route schedules materialization and analysis
+        after the response, while the repository asset remains the durable
+        source of truth.
+        """
+        job_id = str(uuid4())
+        job_dir = self._job_dir(job_id)
+        job_dir.mkdir(parents=True, exist_ok=False)
+        safe_name = Path(filename).name or "application.apk"
+        artifact_path = job_dir / safe_name
+        kind = target_kind or ("ios" if safe_name.lower().endswith(".ipa") else "android")
+        seed = {
+            "job_id": job_id,
+            "owner_id": owner_id,
+            "project_id": project_id,
+            "filename": safe_name,
+            "target_kind": kind,
+            "target_url": None,
+            "profile_id": profile_id,
+            "surface_key": surface_key,
+            "surface_identity": surface_identity,
+            "surface_version": surface_version,
+            "context": context[:8000],
+            "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
+            "document_analysis_run_id": str(document_analysis_run_id) if document_analysis_run_id else None,
+            "repository_asset_id": str(repository_asset_id),
+            "artifact_materialization": "queued",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "apk_path": str(artifact_path),
+            "status": "uploaded",
+            "stage": "queued",
+            "progress": 5,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await asyncio.to_thread((job_dir / "job.json").write_text, json.dumps(seed, indent=2), "utf-8")
+        await self._persist_job(seed)
+        return job_id, artifact_path
+
     async def save_web_target(
         self,
         target_url: str,
@@ -705,6 +784,7 @@ class AutopilotPrototypeService:
         *,
         project_id: str | None = None,
         document_asset_ids: list[str] | None = None,
+        document_analysis_run_id: str | None = None,
         profile_id: str = "uae_fintech",
         surface_key: str = "",
         surface_identity: str = "",
@@ -730,6 +810,7 @@ class AutopilotPrototypeService:
             "surface_version": surface_version,
             "context": context[:8000],
             "document_asset_ids": [str(value) for value in (document_asset_ids or [])][:20],
+            "document_analysis_run_id": str(document_analysis_run_id) if document_analysis_run_id else None,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "uploaded",
             "stage": "queued",
@@ -764,9 +845,14 @@ class AutopilotPrototypeService:
                 job = await self.load_job(job_id)
         elif job.get("status") in {"uploaded", "analyzing"}:
             # A Render deploy replaces the container filesystem. Do not leave a
-            # durable in-flight job polling forever when its APK is gone.
+            # durable in-flight job polling forever when its artifact is gone.
             apk_path = job.get("apk_path")
-            target_available = bool(job.get("target_url")) if target_kind == "web" else bool(apk_path and Path(apk_path).is_file())
+            repository_asset_available = bool(job.get("repository_asset_id"))
+            target_available = (
+                bool(job.get("target_url"))
+                if target_kind == "web"
+                else bool(apk_path and Path(apk_path).is_file()) or repository_asset_available
+            )
             if not target_available:
                 await self.update_job(
                     job_id,
@@ -787,6 +873,9 @@ class AutopilotPrototypeService:
                 document_asset_ids.append(uuid.UUID(str(value)))
             except (TypeError, ValueError):
                 continue
+        document_analysis_run_id = None
+        if job.get("document_analysis_run_id") and _is_uuid(job.get("document_analysis_run_id")):
+            document_analysis_run_id = uuid.UUID(str(job["document_analysis_run_id"]))
         return AutopilotJobStatus(
             job_id=job_id,
             filename=job["filename"],
@@ -794,6 +883,11 @@ class AutopilotPrototypeService:
             target_kind=target_kind,
             target_url=job.get("target_url"),
             profile_id=str(job.get("profile_id") or "uae_fintech"),
+            report_tab_key=build_report_tab_key(
+                str(job.get("surface_key") or ""),
+                int(job.get("surface_version") or 1),
+                job_id,
+            ),
             surface_key=str(job.get("surface_key") or ""),
             surface_identity=str(job.get("surface_identity") or ""),
             surface_version=int(job.get("surface_version") or 1),
@@ -804,7 +898,12 @@ class AutopilotPrototypeService:
             updated_at=job.get("updated_at", job["created_at"]),
             context=str(job.get("context", "")),
             document_asset_ids=document_asset_ids,
-            artifact_available=(bool(job.get("target_url")) if target_kind == "web" else bool(artifact_path and Path(artifact_path).is_file())),
+            document_analysis_run_id=document_analysis_run_id,
+            artifact_available=(
+                bool(job.get("target_url"))
+                if target_kind == "web"
+                else bool(artifact_path and Path(artifact_path).is_file()) or bool(job.get("repository_asset_id"))
+            ),
             error=job.get("error"),
             analysis=analysis,
         )
@@ -961,6 +1060,9 @@ class AutopilotPrototypeService:
             for value in (job.get("document_asset_ids", []) or [])
             if _is_uuid(value)
         ]
+        document_analysis_run_id = None
+        if job.get("document_analysis_run_id") and _is_uuid(job.get("document_analysis_run_id")):
+            document_analysis_run_id = uuid.UUID(str(job["document_analysis_run_id"]))
         analysis_basis = [
             "Observed target metadata and bounded runtime/HTML evidence",
             (
@@ -976,6 +1078,10 @@ class AutopilotPrototypeService:
         if document_asset_ids:
             analysis_basis.append(
                 f"{len(document_asset_ids)} selected repository document(s) supplied bounded, redacted context"
+            )
+        if document_analysis_run_id:
+            analysis_basis.append(
+                "Completed Document Intelligence baseline linked; its findings are static evidence and remain pending runtime validation"
             )
 
         analysis = AutopilotAnalysis(
@@ -1012,6 +1118,7 @@ class AutopilotPrototypeService:
             ai_enrichment_used=ai_enrichment_used,
             analysis_basis=analysis_basis,
             document_asset_ids=document_asset_ids,
+            document_analysis_run_id=document_analysis_run_id,
         )
         await asyncio.to_thread(self._metadata_path(job_id).write_text, analysis.model_dump_json(indent=2), "utf-8")
         await self._persist_job(job, analysis=analysis.model_dump(mode="json"))
@@ -1150,6 +1257,24 @@ class AutopilotPrototypeService:
             result["warnings"].append(f"IPA metadata parsing was partial: {type(exc).__name__}: {str(exc)[:240]}")
         return result
 
+    @staticmethod
+    def _safe_zip_inventory(artifact_path: Path, artifact_label: str) -> tuple[int, str | None]:
+        """Return a bounded archive entry count without affecting analysis.
+
+        ``ZipFile.infolist`` reads the archive central directory only; it does
+        not decompress the package payload.  That makes it a safe fallback for
+        large APK/IPA files when the resource-table parser is intentionally
+        skipped.  Keep this helper in one place so the fallback never imports
+        ``zipfile`` inside the parser function (an inner import would shadow
+        the module-level name and raise ``UnboundLocalError`` on the large-file
+        path).
+        """
+        try:
+            with zipfile.ZipFile(artifact_path) as archive:
+                return len(archive.infolist()), None
+        except Exception as exc:  # pragma: no cover - corrupt archives/provider files
+            return 0, f"{artifact_label} ZIP inventory was unavailable: {type(exc).__name__}"
+
     def _analyze_apk_sync(self, apk_path: Path) -> Dict[str, Any]:
         digest = hashlib.sha256()
         with apk_path.open("rb") as handle:
@@ -1170,14 +1295,14 @@ class AutopilotPrototypeService:
         deep_parse_limit = self.settings.AUTOPILOT_DEEP_PARSE_MAX_MB * 1024 * 1024
         if result["size_bytes"] > deep_parse_limit:
             result["warnings"].append(
-                f"Deep APK parsing skipped for this {result['size_bytes'] / (1024 * 1024):.1f}MB artifact "
-                f"(limit {self.settings.AUTOPILOT_DEEP_PARSE_MAX_MB}MB) to protect the analysis worker memory budget."
+                f"Large APK handled in safe metadata mode ({result['size_bytes'] / (1024 * 1024):.1f}MB; "
+                f"deep resource threshold {self.settings.AUTOPILOT_DEEP_PARSE_MAX_MB}MB) to protect the analysis worker memory budget; "
+                "bounded archive metadata and SHA-256 remain available, and the build remains eligible for runtime execution."
             )
-            try:
-                with zipfile.ZipFile(apk_path) as archive:
-                    result["file_count"] = len(archive.infolist())
-            except Exception as exc:
-                result["warnings"].append(f"APK ZIP inventory was unavailable: {type(exc).__name__}")
+            file_count, warning = self._safe_zip_inventory(apk_path, "APK")
+            result["file_count"] = file_count
+            if warning:
+                result["warnings"].append(warning)
             return result
         try:
             # Androguard 4.x uses Loguru for resource-table diagnostics. Its
@@ -1214,13 +1339,8 @@ class AutopilotPrototypeService:
             result["debuggable"] = str(debuggable).lower() == "true" if debuggable is not None else None
         except Exception as exc:
             result["warnings"].append(f"Deep APK parsing was partial: {type(exc).__name__}: {exc}")
-            try:
-                import zipfile
-
-                with zipfile.ZipFile(apk_path) as archive:
-                    result["file_count"] = len(archive.infolist())
-            except Exception:
-                pass
+            file_count, _ = self._safe_zip_inventory(apk_path, "APK")
+            result["file_count"] = file_count
         return result
 
     def _build_deterministic_tests(self, meta: Dict[str, Any]) -> List[AutopilotTest]:

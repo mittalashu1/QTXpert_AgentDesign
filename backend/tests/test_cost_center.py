@@ -54,12 +54,18 @@ def test_cost_inventory_lists_unmetered_ecosystem_surfaces_without_fake_zeroes()
         "github",
         "domain_dns",
         "upload_storage",
+        "cloudflare_r2",
     }
     assert required.issubset(by_key)
     assert by_key["browserstack"].coverage == "manual"
     assert by_key["postgresql"].coverage == "manual"
     assert by_key["gemini"].coverage == "manual"
     assert by_key["openai"].coverage == "not_configured"
+    assert by_key["postgresql"].service == "Neon Postgres Database"
+    assert by_key["postgresql"].portal_url == "https://console.neon.tech/"
+    assert by_key["cloudflare_r2"].pricing_url == "https://developers.cloudflare.com/r2/pricing/"
+    assert by_key["cloudflare_r2"].limits
+    assert all(surface.portal_url for surface in surfaces)
 
     for surface in surfaces:
         if surface.coverage in {"manual", "not_configured"}:
@@ -83,3 +89,4 @@ def test_azure_actual_cost_is_marked_authoritative_when_connected():
     assert azure.coverage == "actual"
     assert azure.actual_cost == 20.0
     assert azure.currency == "USD"
+    assert azure.portal_url == "https://portal.azure.com/"

@@ -1,6 +1,7 @@
 import io
 import json
 import uuid
+from types import SimpleNamespace
 
 import openpyxl
 
@@ -93,3 +94,50 @@ def test_xlsx_extractor_preserves_sheet_and_cells():
     assert "[SHEET: Test Cases]" in text
     assert "Valid login" in text
     assert "Dashboard displayed" in text
+
+
+def test_context_payload_is_bounded_redacted_and_evidence_led():
+    service = DocumentIntelligenceService(None, Settings())  # type: ignore[arg-type]
+    asset_id = uuid.uuid4()
+    run = SimpleNamespace(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        status="completed",
+        profile="banking",
+        additional_context="Validate the transfer journey in staging; password: secret-value",
+        readiness_score=62,
+        readiness_status="needs_refinement",
+        summary="Review password: secret-value and confirm the transfer rule.",
+        document_inventory=[{"filename": "Payments BRD.docx", "document_type": "BRD"}],
+        knowledge_model={"business_rules": ["Transfer limit is pending confirmation."], "open_questions": ["Who approves a reversal?"]},
+        findings=[SimpleNamespace(
+            status="open",
+            severity="high",
+            title="Missing reversal rule",
+            testing_impact="The expected recovery outcome is not defined.",
+            description="A reversal rule is absent.",
+        )],
+        asset_ids=[str(asset_id)],
+        published_requirement_id=None,
+    )
+
+    payload = service.build_context_payload(run)
+
+    assert payload["asset_ids"] == [asset_id]
+    assert "static evidence; not runtime proof" in payload["context"]
+    assert "password: [REDACTED]" in payload["context"]
+    assert "secret-value" not in payload["context"]
+    assert "Change/scope context:" in payload["context"]
+    assert "Missing reversal rule" in payload["context"]
+
+
+def test_document_text_redacts_credentials_before_evidence_or_ai():
+    service = DocumentIntelligenceService(None, Settings())  # type: ignore[arg-type]
+    safe = service._redact_sensitive_text(
+        "Password: super-secret\nAuthorization: Bearer abcdefghijklmnop.example-token\n{\"client_secret\": \"json-secret\"}"
+    )
+    assert "super-secret" not in safe
+    assert "abcdefghijklmnop" not in safe
+    assert "json-secret" not in safe
+    assert "Password: [REDACTED]" in safe
+    assert "Bearer [REDACTED]" in safe

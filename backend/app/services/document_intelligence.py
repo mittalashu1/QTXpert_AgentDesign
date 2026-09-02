@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,6 +22,8 @@ from app.agents.test_design_agent.json_utils import parse_llm_json
 from app.config import Settings
 from app.database.models.document_intelligence import DocumentAnalysisRun, DocumentFinding
 from app.database.models.generation_run import GenerationRun
+from app.database.models.execution import ExecutionResult, ExecutionRun
+from app.database.models.execution_plan import ExecutionPlan
 from app.database.models.requirement import Requirement, RequirementSource, RequirementStatus
 from app.database.models.test_case import TestCase
 from app.database.models.uploaded_asset import UploadedAsset
@@ -31,6 +33,7 @@ from app.llm.factory import get_llm_provider
 from app.prompts.document_intelligence_prompts import build_document_review_prompt
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
 from app.services.upload_repository import UploadRepositoryService
+from app.services.test_generation_service import TestGenerationService
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,19 @@ _SCORE_KEYS = (
 
 _SEVERITIES = {"critical", "high", "medium", "low"}
 _FINDING_STATUSES = {"open", "accepted", "rejected", "resolved", "needs_clarification"}
+
+_SENSITIVE_CONTEXT_RE = re.compile(
+    r"(?im)(?P<key>[\"']?\b(?:password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key|client[_ -]?secret|refresh[_ -]?token)\b[\"']?)\s*[:=]\s*(?P<quote>[\"']?)(?P<value>[^,;\n\"']+)(?P=quote)"
+)
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}")
+
+
+def _is_uuid(value: object) -> bool:
+    try:
+        UUID(str(value))
+        return True
+    except (TypeError, ValueError):
+        return False
 
 _DOCUMENT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("API Specification", ("openapi", "swagger", "postman", "api specification", "endpoint")),
@@ -163,6 +179,7 @@ class DocumentIntelligenceService:
         requested_by_id: UUID,
         asset_ids: list[UUID],
         profile: str,
+        additional_context: str = "",
     ) -> DocumentAnalysisRun:
         unique_ids = list(dict.fromkeys(asset_ids))
         if not unique_ids:
@@ -189,6 +206,7 @@ class DocumentIntelligenceService:
             status="queued",
             profile=profile,
             asset_ids=[str(asset_id) for asset_id in unique_ids],
+            additional_context=self._safe_context_text(additional_context, 8000) or None,
         )
         self.db.add(run)
         await self.db.commit()
@@ -215,6 +233,17 @@ class DocumentIntelligenceService:
         run.status = "extracting"
         run.error_message = None
         await self.db.commit()
+
+        # The context is captured on the run at creation time.  Falling back
+        # to the method argument keeps older callers compatible while making
+        # the stored review and every downstream hand-off deterministic.
+        additional_context = self._safe_context_text(
+            additional_context or getattr(run, "additional_context", ""),
+            8000,
+        )
+        if additional_context and additional_context != (getattr(run, "additional_context", "") or ""):
+            run.additional_context = additional_context
+            await self.db.commit()
 
         asset_ids = [UUID(value) for value in run.asset_ids]
         result = await self.db.scalars(
@@ -253,7 +282,11 @@ class DocumentIntelligenceService:
                         confidence=1.0,
                     )
                 )
-            clean_text = text.strip()
+            # Documents are evidence, but they can still contain pasted
+            # credentials or authorization headers. Redact before checks,
+            # model enrichment and evidence excerpts so downstream modules
+            # never receive a secret merely because it was in a source file.
+            clean_text = self._redact_sensitive_text(text.strip())
             document_type, classification_confidence = _classify_document(asset.filename, clean_text)
             docs_findings = self._deterministic_document_checks(asset, clean_text, document_type)
             deterministic_findings.extend(docs_findings)
@@ -282,7 +315,10 @@ class DocumentIntelligenceService:
                 documents=documents,
                 existing_system_context=existing_context,
                 deterministic_findings=deterministic_findings,
-                additional_context=additional_context[:8000],
+                # Do not forward credentials accidentally pasted into the
+                # change brief. The same redaction is used for downstream
+                # Autopilot/Test Design context hand-offs.
+                additional_context=self._safe_context_text(additional_context, 8000),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Document Intelligence AI enrichment failed; using deterministic fallback: %s", exc)
@@ -501,17 +537,27 @@ class DocumentIntelligenceService:
             asset_id = raw.get("asset_id")
             if asset_id and str(asset_id) not in valid_asset_ids:
                 asset_id = None
+            raw_evidence = raw.get("evidence") if isinstance(raw.get("evidence"), list) else []
+            safe_evidence = []
+            for evidence_item in raw_evidence[:20]:
+                if isinstance(evidence_item, dict):
+                    safe_evidence.append({
+                        str(key): self._redact_sensitive_text(value, 2000) if isinstance(value, str) else value
+                        for key, value in evidence_item.items()
+                    })
+                elif isinstance(evidence_item, str):
+                    safe_evidence.append(self._redact_sensitive_text(evidence_item, 2000))
             item = _finding(
                 asset_id=str(asset_id) if asset_id else None,
                 category=str(raw.get("category") or "incomplete_requirement")[:80],
                 severity=str(raw.get("severity") or "medium").lower(),
                 confidence=_clamp_confidence(raw.get("confidence"), 0.75),
-                title=str(raw.get("title") or "Documentation finding"),
-                description=str(raw.get("description") or "Documentation quality issue detected."),
-                testing_impact=str(raw.get("testing_impact") or "May reduce the reliability of derived test coverage."),
-                evidence=raw.get("evidence") if isinstance(raw.get("evidence"), list) else [],
-                original_text=str(raw.get("original_text")) if raw.get("original_text") else None,
-                suggested_refinement=str(raw.get("suggested_refinement")) if raw.get("suggested_refinement") else None,
+                title=self._redact_sensitive_text(raw.get("title") or "Documentation finding", 500),
+                description=self._redact_sensitive_text(raw.get("description") or "Documentation quality issue detected."),
+                testing_impact=self._redact_sensitive_text(raw.get("testing_impact") or "May reduce the reliability of derived test coverage."),
+                evidence=safe_evidence,
+                original_text=self._redact_sensitive_text(raw.get("original_text")) if raw.get("original_text") else None,
+                suggested_refinement=self._redact_sensitive_text(raw.get("suggested_refinement")) if raw.get("suggested_refinement") else None,
             )
             key = (item["category"], item["title"].lower(), item.get("asset_id") or "")
             if key not in dedupe:
@@ -572,18 +618,29 @@ class DocumentIntelligenceService:
             "non_functional_requirements", "security_controls", "data_rules", "error_recovery_rules", "open_questions",
         ):
             value = knowledge_model.get(key, [])
-            knowledge_model[key] = value if isinstance(value, list) else []
+            knowledge_model[key] = [
+                self._redact_sensitive_text(item, 2000)
+                for item in value[:50]
+            ] if isinstance(value, list) else []
 
         missing_documents = ai_result.get("missing_documents") if isinstance(ai_result.get("missing_documents"), list) else []
+        missing_documents = [
+            item if not isinstance(item, str) else self._redact_sensitive_text(item, 500)
+            for item in missing_documents[:50]
+        ]
         recommendations = ai_result.get("recommendations") if isinstance(ai_result.get("recommendations"), list) else []
-        summary = str(ai_result.get("summary") or "QTXpert completed a documentation quality and testability review using deterministic QA checks. AI enrichment was unavailable for this run.")
+        recommendations = [self._redact_sensitive_text(item, 2000) for item in recommendations[:50]]
+        summary = self._redact_sensitive_text(
+            ai_result.get("summary")
+            or "QTXpert completed a documentation quality and testability review using deterministic QA checks. AI enrichment was unavailable for this run."
+        )
         return {
             "document_inventory": inventory,
             "scores": scores,
             "knowledge_model": knowledge_model,
             "findings": findings,
             "missing_documents": missing_documents,
-            "recommendations": [str(item) for item in recommendations][:50],
+            "recommendations": recommendations,
             "summary": summary,
             "readiness_score": readiness_score,
             "readiness_status": readiness_status,
@@ -640,6 +697,234 @@ class DocumentIntelligenceService:
         )
         return run
 
+    @staticmethod
+    def _safe_context_text(value: object, limit: int = 700) -> str:
+        """Bound and redact model/user text before it crosses module boundaries."""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = DocumentIntelligenceService._redact_sensitive_text(text)
+        return re.sub(r"\s+", " ", text)[:limit]
+
+    @staticmethod
+    def _redact_sensitive_text(value: object, limit: int | None = None) -> str:
+        """Redact common credential forms while retaining useful field names."""
+        text = str(value or "")
+        text = _SENSITIVE_CONTEXT_RE.sub(
+            lambda match: f"{match.group('key')}: [REDACTED]", text
+        )
+        text = _BEARER_TOKEN_RE.sub("Bearer [REDACTED]", text)
+        return text[:limit] if limit else text
+
+    def build_context_payload(self, run: DocumentAnalysisRun) -> dict[str, Any]:
+        """Build a concise, evidence-led context hand-off for other modules.
+
+        This deliberately contains findings and extracted knowledge rather than
+        the full document text.  The source documents remain in the repository,
+        while downstream prompts receive a bounded summary that is safe to
+        persist and easy to audit.
+        """
+        knowledge = run.knowledge_model or {}
+        inventory = run.document_inventory or []
+        open_findings = [
+            finding for finding in run.findings
+            if finding.status not in {"rejected", "resolved"}
+        ]
+        lines = [
+            "Document Intelligence baseline (static evidence; not runtime proof).",
+            f"Analysis profile: {self._safe_context_text(run.profile, 80) or 'general'}.",
+            f"Documentation readiness: {int(run.readiness_score or 0)}% ({self._safe_context_text(run.readiness_status, 100) or 'pending'}).",
+        ]
+        stored_context = self._safe_context_text(getattr(run, "additional_context", ""), 1200)
+        if stored_context:
+            lines.append(f"Change/scope context: {stored_context}")
+        if run.summary:
+            lines.append(f"Review summary: {self._safe_context_text(run.summary, 900)}")
+        if inventory:
+            documents = []
+            for item in inventory[:20]:
+                if not isinstance(item, dict):
+                    continue
+                filename = self._safe_context_text(item.get("filename"), 180)
+                document_type = self._safe_context_text(item.get("document_type"), 100)
+                if filename:
+                    documents.append(f"{filename} ({document_type or 'document'})")
+            if documents:
+                lines.append("Documents reviewed: " + ", ".join(documents))
+        labels = {
+            "business_rules": "Business rules",
+            "functional_requirements": "Functional requirements",
+            "user_journeys": "Critical journeys",
+            "acceptance_criteria": "Acceptance criteria",
+            "integrations": "Integrations",
+            "dependencies": "Dependencies",
+            "validation_rules": "Validation rules",
+            "regulatory_requirements": "Regulatory requirements",
+            "non_functional_requirements": "Non-functional requirements",
+            "security_controls": "Security controls",
+            "data_rules": "Data rules",
+            "error_recovery_rules": "Error/recovery rules",
+            "open_questions": "Open questions",
+        }
+        for key, label in labels.items():
+            values = knowledge.get(key)
+            if not isinstance(values, list):
+                continue
+            cleaned = [self._safe_context_text(item, 260) for item in values]
+            cleaned = [item for item in cleaned if item]
+            if cleaned:
+                lines.append(f"{label}: " + " | ".join(cleaned[:5]))
+        if open_findings:
+            finding_lines = []
+            for finding in sorted(
+                open_findings,
+                key=lambda item: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(item.severity, 9),
+            )[:12]:
+                detail = self._safe_context_text(finding.testing_impact or finding.description, 260)
+                finding_lines.append(
+                    f"[{self._safe_context_text(finding.severity, 30).upper()}] "
+                    f"{self._safe_context_text(finding.title, 240)}"
+                    + (f" — {detail}" if detail else "")
+                )
+            lines.append("Open documentation findings: " + " | ".join(finding_lines))
+        lines.append(
+            "Use this baseline to scope test design and setup questions. Do not report a runtime pass/fail, "
+            "security approval or compliance conclusion until execution supplies evidence."
+        )
+        context = "\n".join(lines)
+        return {
+            "run_id": run.id,
+            "project_id": run.project_id,
+            "status": run.status,
+            "profile": run.profile,
+            "context": context[:7000],
+            "asset_ids": [UUID(str(value)) for value in (run.asset_ids or []) if _is_uuid(value)],
+            "summary": run.summary,
+            "published_requirement_id": run.published_requirement_id,
+            "open_finding_count": len(open_findings),
+            "critical_finding_count": sum(1 for item in open_findings if item.severity == "critical"),
+            "high_finding_count": sum(1 for item in open_findings if item.severity == "high"),
+        }
+
+    async def get_context(self, run_id: UUID, owner_id: UUID) -> dict[str, Any]:
+        run = await self.get_run(run_id, owner_id)
+        return self.build_context_payload(run)
+
+    async def get_traceability(self, run_id: UUID, owner_id: UUID) -> dict[str, Any]:
+        """Return the document -> design -> execution evidence chain."""
+        run = await self.get_run(run_id, owner_id)
+        generation_runs = list((await self.db.scalars(
+            select(GenerationRun)
+            .where(
+                GenerationRun.source_document_analysis_id == run.id,
+                GenerationRun.project_id == run.project_id,
+                GenerationRun.requested_by_id == owner_id,
+            )
+            .order_by(GenerationRun.created_at.desc())
+        )).all())
+        generation_ids = [item.id for item in generation_runs]
+        case_counts: dict[UUID, int] = {}
+        if generation_ids:
+            rows = await self.db.execute(
+                select(TestCase.generation_run_id, func.count(TestCase.id))
+                .where(TestCase.generation_run_id.in_(generation_ids))
+                .group_by(TestCase.generation_run_id)
+            )
+            case_counts = {generation_id: int(count or 0) for generation_id, count in rows.all()}
+
+        plans: list[ExecutionPlan] = []
+        if generation_ids:
+            plans = list((await self.db.scalars(
+                select(ExecutionPlan).where(
+                    ExecutionPlan.project_id == run.project_id,
+                    ExecutionPlan.created_by_id == owner_id,
+                    ExecutionPlan.source_generation_run_id.in_(generation_ids),
+                )
+            )).all())
+        plan_ids = [item.id for item in plans]
+        execution_runs: list[ExecutionRun] = []
+        if plan_ids:
+            execution_runs = list((await self.db.scalars(
+                select(ExecutionRun).where(
+                    ExecutionRun.project_id == run.project_id,
+                    ExecutionRun.requested_by_id == owner_id,
+                    ExecutionRun.execution_plan_id.in_(plan_ids),
+                )
+            )).all())
+        execution_ids = [item.id for item in execution_runs]
+        active_execution_count = sum(
+            1
+            for item in execution_runs
+            if str(getattr(getattr(item, "status", None), "value", getattr(item, "status", ""))) in {"queued", "running"}
+        )
+        result_counts = {"passed": 0, "failed": 0, "blocked": 0, "pending": 0, "skipped": 0, "executed": 0}
+        if execution_ids:
+            results = list((await self.db.scalars(
+                select(ExecutionResult).where(ExecutionResult.execution_run_id.in_(execution_ids))
+            )).all())
+            for result in results:
+                status_value = getattr(result.status, "value", result.status)
+                status_value = str(status_value)
+                if status_value in result_counts:
+                    result_counts[status_value] += 1
+                    if status_value in {"passed", "failed", "blocked"}:
+                        result_counts["executed"] += 1
+
+        open_findings = [
+            item for item in run.findings if item.status not in {"rejected", "resolved"}
+        ]
+        generation_payload = [
+            {
+                "id": item.id,
+                "status": getattr(item.status, "value", item.status),
+                "title": item.title,
+                "test_case_count": case_counts.get(item.id, 0),
+                "created_at": item.created_at,
+            }
+            for item in generation_runs
+        ]
+        next_actions: list[str] = []
+        if run.status != "completed":
+            next_actions.append("Complete the Document Intelligence review before downstream generation.")
+        if open_findings:
+            next_actions.append(f"Review {len(open_findings)} open documentation finding(s) before sign-off.")
+        if not generation_runs:
+            next_actions.append("Generate a Test Design baseline from this analysis.")
+        elif not any(case_counts.get(item.id, 0) for item in generation_runs):
+            next_actions.append("Wait for Test Design generation to finish and validate its cases.")
+        if not plans:
+            next_actions.append("Import the completed Test Design run into Test Execution and select cases.")
+        elif not execution_runs:
+            next_actions.append("Run the selected execution plan to collect runtime evidence.")
+        elif active_execution_count:
+            next_actions.append("Wait for the linked execution run to finish; runtime pass/fail remains provisional while it is active.")
+        elif not result_counts["executed"]:
+            next_actions.append("Complete the execution run; pass/fail remains pending until results are recorded.")
+        else:
+            next_actions.append("Review runtime results and the release report before making a decision.")
+        return {
+            "run_id": run.id,
+            "project_id": run.project_id,
+            "status": run.status,
+            "published_requirement_id": run.published_requirement_id,
+            "finding_count": len(run.findings),
+            "open_finding_count": len(open_findings),
+            "critical_finding_count": sum(1 for item in open_findings if item.severity == "critical"),
+            "high_finding_count": sum(1 for item in open_findings if item.severity == "high"),
+            "generated_test_case_count": sum(case_counts.values()),
+            "generation_runs": generation_payload,
+            "execution_plan_count": len(plans),
+            "execution_run_count": len(execution_runs),
+            "active_execution_count": active_execution_count,
+            "executed_test_count": result_counts["executed"],
+            "passed_count": result_counts["passed"],
+            "failed_count": result_counts["failed"],
+            "blocked_count": result_counts["blocked"],
+            "pending_test_count": result_counts["pending"],
+            "skipped_test_count": result_counts["skipped"],
+            "next_actions": list(dict.fromkeys(next_actions)),
+        }
+
     async def review_finding(
         self,
         finding_id: UUID,
@@ -683,18 +968,31 @@ class DocumentIntelligenceService:
                 "scores": run.scores or {},
             },
             "summary": run.summary,
+            "change_context": self._safe_context_text(getattr(run, "additional_context", ""), 1200),
             "knowledge_model": knowledge,
             "open_documentation_findings": open_findings,
             "analysis_run_id": str(run.id),
         }
         raw_content = json.dumps(baseline, ensure_ascii=False, indent=2)
-        external_key = f"document-intelligence:{run.project_id}"
-        requirement = await self.db.scalar(
-            select(Requirement).where(
-                Requirement.project_id == run.project_id,
-                Requirement.external_key == external_key,
+        # New analyses get an immutable requirement identity.  Historical
+        # project-wide baselines are still honoured through
+        # ``published_requirement_id`` so existing reports remain stable.
+        external_key = f"document-intelligence:{run.id}"
+        requirement = None
+        if run.published_requirement_id:
+            requirement = await self.db.scalar(
+                select(Requirement).where(
+                    Requirement.id == run.published_requirement_id,
+                    Requirement.project_id == run.project_id,
+                )
             )
-        )
+        if requirement is None:
+            requirement = await self.db.scalar(
+                select(Requirement).where(
+                    Requirement.project_id == run.project_id,
+                    Requirement.external_key == external_key,
+                )
+            )
         if requirement is None:
             requirement = Requirement(
                 project_id=run.project_id,
@@ -720,3 +1018,45 @@ class DocumentIntelligenceService:
         await self.db.commit()
         await self.db.refresh(requirement)
         return requirement
+
+    async def create_test_design_run(
+        self,
+        run_id: UUID,
+        owner_id: UUID,
+        *,
+        generation_profile: str = "feature",
+        test_set_title: str | None = None,
+    ) -> tuple[DocumentAnalysisRun, Requirement, GenerationRun]:
+        """Publish one analysis baseline and start a linked Test Design run."""
+        analysis_run = await self.get_run(run_id, owner_id)
+        if analysis_run.status != "completed":
+            raise ValueError("Complete the Document Intelligence review before generating Test Design.")
+        active_generation = await self.db.scalar(
+            select(GenerationRun).where(
+                GenerationRun.source_document_analysis_id == analysis_run.id,
+                GenerationRun.project_id == analysis_run.project_id,
+                GenerationRun.requested_by_id == owner_id,
+                GenerationRun.status.in_(
+                    {
+                        "pending",
+                        "normalizing",
+                        "analyzing",
+                        "generating_scenarios",
+                        "generating_test_cases",
+                        "risk_analysis",
+                    }
+                ),
+            ).limit(1)
+        )
+        if active_generation is not None:
+            raise ValueError("A Test Design generation from this document baseline is already running.")
+        requirement = await self.publish_to_test_design(run_id, owner_id)
+        generation = await TestGenerationService(self.db, self.settings).create_run(
+            project_id=analysis_run.project_id,
+            requested_by_id=owner_id,
+            requirement_ids=[requirement.id],
+            generation_profile=generation_profile,
+            test_set_title=test_set_title or "Document Intelligence test design",
+            source_document_analysis_id=analysis_run.id,
+        )
+        return analysis_run, requirement, generation

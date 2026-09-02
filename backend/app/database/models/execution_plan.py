@@ -38,6 +38,10 @@ class ExecutionPlan(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="draft")
     source_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     source_created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Non-secret setup references supplied during execution preflight. These
+    # are identifiers for a vault entry, seeded dataset, environment, or
+    # approval record; raw passwords, tokens, and OTPs are never persisted.
+    runtime_inputs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     cases: Mapped[List["ExecutionPlanCase"]] = relationship(
         back_populates="plan",
@@ -92,7 +96,8 @@ class ExecutionPlanCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     readiness: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
     blocker_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    # Immutable fields copied from Test Design at import time.
+    # Snapshot fields copied from Test Design at import time. The execution
+    # workflow may refine steps/data on this copy without mutating Test Design.
     test_case_key: Mapped[str] = mapped_column(String(50), nullable=False)
     requirement_traceability: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     test_type: Mapped[str] = mapped_column(String(50), nullable=False)

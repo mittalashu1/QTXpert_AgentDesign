@@ -19,10 +19,11 @@ from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
 from app.database.models.autopilot_execution import AutopilotExecution
 from app.database.models.autopilot_job import AutopilotJob
+from app.database.models.document_intelligence import DocumentAnalysisRun
 from app.database.models.uploaded_asset import UploadedAsset
 from app.database.models.user import User
 from app.database.repositories.requirement_repository import ProjectRepository
-from app.database.session import get_db_session
+from app.database.session import AsyncSessionLocal, get_db_session
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotAnalysisRerunRequest,
@@ -49,6 +50,7 @@ from app.services.autopilot import (
     AutopilotPrototypeService,
     AutopilotUploadInvalid,
     AutopilotUploadTooLarge,
+    build_report_tab_key,
     _is_uuid,
     build_surface_key,
     normalize_surface_identity,
@@ -60,6 +62,7 @@ from app.services.autopilot_ir import AutopilotIRCompiler
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
+from app.services.document_intelligence import DocumentIntelligenceService
 from app.services.upload_repository import (
     UploadRepositoryInvalid,
     UploadRepositoryService,
@@ -69,10 +72,102 @@ from app.services.upload_repository import (
 
 router = APIRouter(prefix="/autopilot", tags=["autopilot"])
 logger = logging.getLogger(__name__)
+_REPOSITORY_MATERIALIZATION_TASKS: set[str] = set()
 
 
 def _service(settings: Settings) -> AutopilotPrototypeService:
     return AutopilotPrototypeService(settings)
+
+
+async def _materialize_repository_asset_and_analyze(
+    settings: Settings,
+    job_id: str,
+    asset_id: UUID,
+    owner_id: UUID,
+) -> None:
+    """Materialize a reusable mobile build after the 202 response is sent.
+
+    Stored APK/IPA reuse must not hold the HTTP request open while a large R2
+    object is copied to the worker. The task is idempotent so a status poll or
+    process-restart recovery can safely enqueue it again.
+    """
+    service = _service(settings)
+    try:
+        logger.info(
+            "Autopilot repository materialization started job_id=%s asset_id=%s",
+            job_id,
+            asset_id,
+        )
+        job = await service.load_job(job_id)
+        if job.get("status") in {"analyzed", "failed", "superseded"}:
+            return
+        target = Path(job.get("apk_path") or service.root / job_id / Path(job.get("filename") or "application.apk").name)
+        if not target.is_file():
+            await service.update_job(job_id, artifact_materialization="materializing")
+            async with AsyncSessionLocal() as session:
+                await UploadRepositoryService.materialize(
+                    session,
+                    asset_id,
+                    owner_id,
+                    target,
+                    settings=settings,
+                )
+        await service.update_job(
+            job_id,
+            apk_path=str(target),
+            artifact_materialization="complete",
+        )
+        await service.analyze_safely(job_id)
+        final_job = await service.load_job(job_id)
+        logger.info(
+            "Autopilot repository materialization and analysis finished job_id=%s asset_id=%s status=%s",
+            job_id,
+            asset_id,
+            final_job.get("status"),
+        )
+    except Exception as exc:  # pragma: no cover - provider/storage specific
+        logger.exception("Autopilot repository materialization failed job_id=%s asset_id=%s", job_id, asset_id)
+        try:
+            await service.update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                progress=100,
+                error=(
+                    "The stored mobile artifact could not be materialized for analysis. "
+                    f"{type(exc).__name__}: {str(exc)[:700]}"
+                ),
+                artifact_materialization="failed",
+            )
+        except Exception:  # pragma: no cover - defensive local fallback
+            logger.exception("Autopilot repository materialization failure could not be recorded job_id=%s", job_id)
+    finally:
+        _REPOSITORY_MATERIALIZATION_TASKS.discard(job_id)
+
+
+def _queue_repository_materialization(
+    background_tasks: BackgroundTasks,
+    settings: Settings,
+    job_id: str,
+    asset_id: UUID,
+    owner_id: UUID,
+) -> None:
+    """Queue one materialization task per in-process job."""
+    if job_id in _REPOSITORY_MATERIALIZATION_TASKS:
+        return
+    _REPOSITORY_MATERIALIZATION_TASKS.add(job_id)
+    logger.info(
+        "Autopilot repository materialization queued job_id=%s asset_id=%s",
+        job_id,
+        asset_id,
+    )
+    background_tasks.add_task(
+        _materialize_repository_asset_and_analyze,
+        settings,
+        job_id,
+        asset_id,
+        owner_id,
+    )
 
 
 def _effective_context(
@@ -121,13 +216,31 @@ def _parse_document_asset_ids(value: object) -> list[UUID]:
     return result
 
 
+def _merge_document_asset_ids(*groups: list[UUID] | None) -> list[UUID]:
+    """Merge document selections while respecting Autopilot's 20-document limit.
+
+    A Document Intelligence baseline can contribute its own source assets in
+    addition to documents selected in the Autopilot form.  Keep the baseline
+    first (so its reviewed evidence is never dropped), de-duplicate IDs, and
+    cap the combined selection at the same limit enforced by the form parser.
+    """
+    result: list[UUID] = []
+    for group in groups:
+        for asset_id in group or []:
+            if asset_id in result:
+                continue
+            result.append(asset_id)
+            if len(result) >= 20:
+                return result
+    return result
+
+
 def _redact_document_excerpt(value: str) -> str:
     """Keep obvious credential values out of the model context."""
-    lines: list[str] = []
-    sensitive = re.compile(r"\b(password|passcode|token|secret|otp|api[_ -]?key)\b\s*[:=]", re.IGNORECASE)
-    for line in value.splitlines():
-        lines.append("[redacted sensitive document line]" if sensitive.search(line) else line)
-    return "\n".join(lines)
+    # Keep Autopilot's document excerpts on the same redaction path as
+    # Document Intelligence. This covers plain text, JSON/YAML key-value
+    # pairs and bearer tokens without duplicating divergent regexes.
+    return DocumentIntelligenceService._redact_sensitive_text(value)
 
 
 async def _document_context(
@@ -208,6 +321,31 @@ def _context_with_documents(
         return context
     prefix = f"{context[:6000]}\n\nSelected repository documentation:\n"
     return (prefix + document_excerpt)[:8000]
+
+
+async def _document_analysis_baseline(
+    db: AsyncSession,
+    user: User,
+    settings: Settings,
+    run_id: UUID | None,
+    project_id: UUID | None,
+) -> tuple[UUID | None, list[UUID], str]:
+    """Load a completed Document Intelligence baseline for a downstream run."""
+    if run_id is None:
+        return None, [], ""
+    try:
+        analysis_run = await DocumentIntelligenceService(db, settings).get_run(run_id, user.id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document Intelligence baseline not found") from exc
+    if project_id is not None and analysis_run.project_id != project_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document Intelligence baseline is not in this project")
+    if analysis_run.status != "completed":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Complete the Document Intelligence review before using its baseline")
+    payload = DocumentIntelligenceService(db, settings).build_context_payload(analysis_run)
+    # Autopilot accepts at most twenty supporting documents per run. The
+    # baseline itself remains complete and auditable; only the prompt-side
+    # attachment list is bounded here.
+    return run_id, list(payload.get("asset_ids") or [])[:20], str(payload.get("context") or "")
 
 
 def _context_without_documents(value: Optional[str]) -> str:
@@ -299,7 +437,9 @@ async def _upload_sha256(upload: UploadFile, max_bytes: int = 0) -> str:
         total += len(chunk)
         if max_bytes and total > max_bytes:
             await upload.seek(0)
-            raise AutopilotUploadTooLarge(f"APK exceeds the {max_bytes // (1024 * 1024)}MB Autopilot prototype limit")
+            raise AutopilotUploadTooLarge(
+                f"Mobile artifact exceeds the {max_bytes // (1024 * 1024)}MB Autopilot upload limit"
+            )
         hasher.update(chunk)
     await upload.seek(0)
     return hasher.hexdigest()
@@ -388,7 +528,10 @@ async def _guard_surface(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "duplicate_surface",
-                "message": "This profile, target and build already have an Autopilot result.",
+                "message": (
+                    "A Test & Audit Report already exists for this profile, target and build/URL. "
+                    "Choose whether to keep it and create a new report tab, or override the existing tab."
+                ),
                 "surface_key": key,
                 "surface_identity": identity,
                 "existing_job_id": latest_job_id,
@@ -621,6 +764,7 @@ async def _start_analysis_from_asset(
     profile_id: str = "uae_fintech",
     project_id: Optional[UUID] = None,
     document_asset_ids: Optional[list[UUID]] = None,
+    document_analysis_run_id: Optional[UUID] = None,
     canonical_profile_id: str = "uae_fintech",
     surface_key: str = "",
     surface_identity: str = "",
@@ -628,40 +772,34 @@ async def _start_analysis_from_asset(
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
 
-    The materialized file is disposable; the repository asset remains the
-    source of truth and can be used again after a Render restart.
+    Return the queued job before materializing the file. The repository asset
+    remains the source of truth and can be used again after a Render restart;
+    the worker copies it into its disposable working directory in the
+    background.
     """
     service = _service(settings)
-    temp_dir = service.root / "_repository_reuse" / f"{asset.id}-{uuid4()}"
-    temp_path = temp_dir / Path(asset.filename).name
-    await UploadRepositoryService.materialize(db, asset.id, user.id, temp_path, settings=settings)
-    reader = _AsyncPathReader(temp_path)
-    try:
-        job_id, _ = await service.save_upload_stream(
-            asset.filename,
-            reader,
-            str(user.id),
-            context=_effective_context(
-                context,
-                profile_id,
-                target_kind="ios" if asset.extension == "ipa" else "android",
-                application_name=asset.filename.rsplit(".", 1)[0],
-            ),
-            max_bytes=settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024,
+    job_id, _ = await service.save_reused_asset_job(
+        asset.filename,
+        str(user.id),
+        asset.id,
+        context=_effective_context(
+            context,
+            profile_id,
             target_kind="ios" if asset.extension == "ipa" else "android",
-            project_id=str(project_id or asset.project_id) if (project_id or asset.project_id) else None,
-            document_asset_ids=[str(value) for value in (document_asset_ids or [])],
-            profile_id=canonical_profile_id,
-            surface_key=surface_key,
-            surface_identity=surface_identity,
-            surface_version=surface_version,
-        )
-    finally:
-        await reader.close()
-        await asyncio.to_thread(shutil.rmtree, temp_dir, True)
+            application_name=asset.filename.rsplit(".", 1)[0],
+        ),
+        target_kind="ios" if asset.extension == "ipa" else "android",
+        project_id=str(project_id or asset.project_id) if (project_id or asset.project_id) else None,
+        document_asset_ids=[str(value) for value in (document_asset_ids or [])],
+        document_analysis_run_id=str(document_analysis_run_id) if document_analysis_run_id else None,
+        profile_id=canonical_profile_id,
+        surface_key=surface_key,
+        surface_identity=surface_identity,
+        surface_version=surface_version,
+    )
 
     await _link_repository_asset(db, service, job_id, asset.id)
-    background_tasks.add_task(service.analyze_safely, job_id)
+    _queue_repository_materialization(background_tasks, settings, job_id, asset.id, user.id)
     result = await service.get_job_status(job_id)
     return await _mark_repository_available(db, result, user.id)
 
@@ -677,6 +815,7 @@ async def _start_analysis_from_local_path(
     profile_id: str = "uae_fintech",
     project_id: Optional[UUID] = None,
     document_asset_ids: Optional[list[UUID]] = None,
+    document_analysis_run_id: Optional[UUID] = None,
     canonical_profile_id: str = "uae_fintech",
     surface_key: str = "",
     surface_identity: str = "",
@@ -705,6 +844,7 @@ async def _start_analysis_from_local_path(
             target_kind="ios" if filename.lower().endswith(".ipa") else "android",
             project_id=str(project_id) if project_id else None,
             document_asset_ids=[str(value) for value in (document_asset_ids or [])],
+            document_analysis_run_id=str(document_analysis_run_id) if document_analysis_run_id else None,
             profile_id=canonical_profile_id,
             surface_key=surface_key,
             surface_identity=surface_identity,
@@ -1013,14 +1153,22 @@ async def get_autopilot_profiles(
     return list_profiles()
 
 
-@router.get("/surfaces", response_model=list[AutopilotSurface])
-async def get_autopilot_surfaces(
+@router.get("/report-tabs", response_model=list[AutopilotSurface])
+@router.get("/surfaces", response_model=list[AutopilotSurface], include_in_schema=False)
+async def get_autopilot_report_tabs(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
-    """List isolated profile/target/build workspaces for the active project."""
+    """List retained Test & Audit Report tabs for the active project.
+
+    ``/surfaces`` remains as a hidden compatibility alias for older clients.
+    Unlike the original implementation, every non-superseded analysis is
+    returned as a tab.  That means an explicit ``new`` choice retains the
+    previous report and creates a separately selectable tab; ``override`` is
+    the only action that supersedes the previous tab.
+    """
     service = _service(settings)
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     records: list[AutopilotJob] = []
@@ -1046,6 +1194,11 @@ async def get_autopilot_surfaces(
         for record in records:
             profile_id, target_kind, identity, key = _record_surface_key(record)
             rows.append({
+                "report_tab_key": build_report_tab_key(
+                    key,
+                    int(getattr(record, "surface_version", None) or 1),
+                    record.job_id,
+                ),
                 "surface_key": key,
                 "surface_identity": identity,
                 "profile_id": profile_id,
@@ -1056,7 +1209,7 @@ async def get_autopilot_surfaces(
                 "latest_status": record.status,
                 "latest_created_at": record.created_at.isoformat(),
                 "latest_updated_at": record.updated_at.isoformat(),
-                "_version": int(getattr(record, "surface_version", None) or 1),
+                "surface_version": int(getattr(record, "surface_version", None) or 1),
             })
     else:
         for job in await service.list_local_jobs(str(user.id), str(project_id) if project_id else None):
@@ -1064,6 +1217,11 @@ async def get_autopilot_surfaces(
                 continue
             profile_id, target_kind, identity, key = _local_surface_key(job)
             rows.append({
+                "report_tab_key": build_report_tab_key(
+                    key,
+                    int(job.get("surface_version") or 1),
+                    str(job.get("job_id")),
+                ),
                 "surface_key": key,
                 "surface_identity": identity,
                 "profile_id": profile_id,
@@ -1074,21 +1232,22 @@ async def get_autopilot_surfaces(
                 "latest_status": job.get("status", "uploaded"),
                 "latest_created_at": str(job.get("created_at", "")),
                 "latest_updated_at": str(job.get("updated_at", job.get("created_at", ""))),
-                "_version": int(job.get("surface_version") or 1),
+                "surface_version": int(job.get("surface_version") or 1),
             })
 
-    grouped: dict[str, dict] = {}
+    version_counts: dict[str, int] = {}
+    for row in rows:
+        version_counts[row["surface_key"]] = version_counts.get(row["surface_key"], 0) + 1
+    result: list[AutopilotSurface] = []
     for row in rows:
         key = row["surface_key"]
-        current = grouped.get(key)
-        if current is None:
-            grouped[key] = row
-        else:
-            current["_version"] = max(current["_version"], row["_version"])
-    result: list[AutopilotSurface] = []
-    for row in grouped.values():
-        version_count = row.pop("_version", 1)
-        result.append(AutopilotSurface(version_count=version_count, is_current=row["latest_status"] != "superseded", **row))
+        result.append(
+            AutopilotSurface(
+                version_count=version_counts.get(key, 1),
+                is_current=row["latest_status"] != "superseded",
+                **row,
+            )
+        )
     result.sort(key=lambda item: item.latest_updated_at, reverse=True)
     return result
 
@@ -1105,6 +1264,7 @@ async def analyze_autopilot_target(
     target_url: str = Form(default=""),
     surface_action: str = Form(default="ask"),
     document_asset_ids: str = Form(default=""),
+    document_analysis_run_id: str = Form(default=""),
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Analyze a website URL, Android APK or iOS IPA as one Autopilot job."""
@@ -1114,6 +1274,16 @@ async def analyze_autopilot_target(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="surface_action must be ask, new or override")
     profile_id = _canonical_profile_id(profile_id)
     selected_document_ids = _parse_document_asset_ids(document_asset_ids)
+    baseline_id: UUID | None = None
+    if document_analysis_run_id.strip():
+        try:
+            baseline_id = UUID(document_analysis_run_id.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="document_analysis_run_id is invalid") from exc
+    baseline_id, baseline_asset_ids, baseline_context = await _document_analysis_baseline(
+        db, user, settings, baseline_id, project_id
+    )
+    selected_document_ids = _merge_document_asset_ids(baseline_asset_ids, selected_document_ids)
     selected_document_ids, document_excerpt = await _document_context(
         db, user, project_id, selected_document_ids, settings
     )
@@ -1129,6 +1299,8 @@ async def analyze_autopilot_target(
         target_url=normalized_url or None,
         application_name=Path(file.filename).stem if file is not None and file.filename else None,
     )
+    if baseline_context:
+        analysis_context = f"{baseline_context}\n\n{analysis_context}"[:8000]
     if normalized_url:
         try:
             normalized_url = service.validate_web_url(
@@ -1153,6 +1325,7 @@ async def analyze_autopilot_target(
                 context=analysis_context,
                 project_id=str(project_id) if project_id else None,
                 document_asset_ids=[str(value) for value in selected_document_ids],
+                document_analysis_run_id=str(baseline_id) if baseline_id else None,
                 profile_id=profile_id,
                 surface_key=surface_key,
                 surface_identity=surface_identity,
@@ -1205,6 +1378,7 @@ async def analyze_autopilot_target(
             target_kind=target_kind,
             project_id=str(project_id) if project_id else None,
             document_asset_ids=[str(value) for value in selected_document_ids],
+            document_analysis_run_id=str(baseline_id) if baseline_id else None,
             profile_id=profile_id,
             surface_key=surface_key,
             surface_identity=surface_identity,
@@ -1294,6 +1468,15 @@ async def analyze_existing_mobile_app(
         ) from exc
     if asset is None or asset.extension not in {"apk", "ipa"} or (project_id is not None and asset.project_id != project_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reusable APK/IPA not found in this project")
+    max_bytes = settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if asset.size_bytes and asset.size_bytes > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Stored mobile artifact exceeds the {settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB}MB "
+                "Autopilot upload limit. Choose a smaller build or raise the configured limit."
+            ),
+        )
     canonical_profile, surface_identity, surface_key, surface_version = await _guard_surface(
         db=db,
         service=_service(settings),
@@ -1306,26 +1489,33 @@ async def analyze_existing_mobile_app(
         filename=asset.filename,
         surface_action=payload.surface_action,
     )
-    selected_document_ids = payload.document_asset_ids or []
+    baseline_id, baseline_asset_ids, baseline_context = await _document_analysis_baseline(
+        db, user, settings, payload.document_analysis_run_id, project_id
+    )
+    selected_document_ids = _merge_document_asset_ids(baseline_asset_ids, payload.document_asset_ids)
     selected_document_ids, document_excerpt = await _document_context(
         db, user, project_id, selected_document_ids, settings
     )
+    analysis_context = _context_with_documents(
+        payload.context,
+        canonical_profile,
+        document_excerpt,
+        target_kind="ios" if asset.extension == "ipa" else "android",
+        application_name=asset.filename.rsplit(".", 1)[0],
+    )
+    if baseline_context:
+        analysis_context = f"{baseline_context}\n\n{analysis_context}"[:8000]
     return await _start_analysis_from_asset(
         background_tasks=background_tasks,
         db=db,
         settings=settings,
         user=user,
         asset=asset,
-        context=_context_with_documents(
-            payload.context,
-            canonical_profile,
-            document_excerpt,
-            target_kind="ios" if asset.extension == "ipa" else "android",
-            application_name=asset.filename.rsplit(".", 1)[0],
-        ),
+        context=analysis_context,
         profile_id=canonical_profile,
         project_id=project_id,
         document_asset_ids=selected_document_ids,
+        document_analysis_run_id=baseline_id,
         canonical_profile_id=canonical_profile,
         surface_key=surface_key,
         surface_identity=surface_identity,
@@ -1359,8 +1549,18 @@ async def rerun_autopilot_analysis(
             continue
         if asset_id not in original_document_ids:
             original_document_ids.append(asset_id)
+    original_baseline_id: UUID | None = None
+    raw_baseline_id = original.get("document_analysis_run_id")
+    if not raw_baseline_id and original_record is not None:
+        raw_baseline_id = getattr(original_record, "document_analysis_run_id", None)
+    if raw_baseline_id and _is_uuid(raw_baseline_id):
+        original_baseline_id = UUID(str(raw_baseline_id))
+    baseline_id = payload.document_analysis_run_id or original_baseline_id
+    baseline_id, baseline_asset_ids, baseline_context = await _document_analysis_baseline(
+        db, user, settings, baseline_id, effective_project_id
+    )
     if payload.document_asset_ids is None:
-        selected_document_ids = original_document_ids
+        selected_document_ids = _merge_document_asset_ids(baseline_asset_ids, original_document_ids)
         selected_document_ids, document_excerpt = await _document_context(
             db, user, effective_project_id, selected_document_ids, settings
         )
@@ -1373,8 +1573,9 @@ async def rerun_autopilot_analysis(
             application_name=Path(str(original.get("filename", ""))).stem or None,
         )
     else:
+        selected_document_ids = _merge_document_asset_ids(baseline_asset_ids, payload.document_asset_ids)
         selected_document_ids, document_excerpt = await _document_context(
-            db, user, effective_project_id, payload.document_asset_ids, settings
+            db, user, effective_project_id, selected_document_ids, settings
         )
         rerun_context = _context_with_documents(
             payload.context if payload.context is not None else str(original.get("context", "")),
@@ -1384,6 +1585,8 @@ async def rerun_autopilot_analysis(
             target_url=original.get("target_url"),
             application_name=Path(str(original.get("filename", ""))).stem or None,
         )
+    if baseline_context:
+        rerun_context = f"{baseline_context}\n\n{rerun_context}"[:8000]
     if original_target_kind == "web" and payload.upload_id is None:
         target_url = payload.target_url or str(original.get("target_url") or "")
         try:
@@ -1406,6 +1609,7 @@ async def rerun_autopilot_analysis(
                 context=rerun_context,
                 project_id=str(effective_project_id) if effective_project_id else None,
                 document_asset_ids=[str(value) for value in selected_document_ids],
+                document_analysis_run_id=str(baseline_id) if baseline_id else None,
                 profile_id=canonical_profile_id,
                 surface_key=surface_key,
                 surface_identity=surface_identity,
@@ -1441,6 +1645,7 @@ async def rerun_autopilot_analysis(
             profile_id=canonical_profile_id,
             project_id=effective_project_id,
             document_asset_ids=selected_document_ids,
+            document_analysis_run_id=baseline_id,
             canonical_profile_id=canonical_profile_id,
             surface_key=surface_key,
             surface_identity=surface_identity,
@@ -1489,6 +1694,7 @@ async def rerun_autopilot_analysis(
         profile_id=canonical_profile_id,
         project_id=effective_project_id,
         document_asset_ids=selected_document_ids,
+        document_analysis_run_id=baseline_id,
         canonical_profile_id=canonical_profile_id,
         surface_key=surface_key,
         surface_identity=surface_identity,
@@ -1563,8 +1769,16 @@ async def get_latest_autopilot_job(
         and record.repository_asset_id is not None
         and (not local_path or not Path(local_path).is_file())
     ):
-        await _ensure_local_artifact(db, service, record.job_id, user)
-        background_tasks.add_task(service.analyze_safely, record.job_id)
+        # Never block a status request on an R2/DB download. This also makes
+        # recovery after a Render restart asynchronous for legacy jobs whose
+        # queued/materializing marker was only present on the old filesystem.
+        _queue_repository_materialization(
+            background_tasks,
+            settings,
+            record.job_id,
+            record.repository_asset_id,
+            user.id,
+        )
 
     result = await service.get_job_status(record.job_id)
     return await _mark_repository_available(db, result, user.id)
@@ -1589,8 +1803,13 @@ async def get_autopilot_job_status(
         and record.repository_asset_id is not None
         and (not local_path or not Path(local_path).is_file())
     ):
-        await _ensure_local_artifact(db, service, job_id, user)
-        background_tasks.add_task(service.analyze_safely, job_id)
+        _queue_repository_materialization(
+            background_tasks,
+            settings,
+            job_id,
+            record.repository_asset_id,
+            user.id,
+        )
 
     result = await service.get_job_status(job_id)
     return await _mark_repository_available(db, result, user.id)

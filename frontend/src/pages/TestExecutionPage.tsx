@@ -10,6 +10,10 @@ import {
   Checkbox,
   Chip,
   Divider,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   FormControlLabel,
   InputLabel,
@@ -30,13 +34,24 @@ import AddTaskOutlinedIcon from "@mui/icons-material/AddTaskOutlined";
 import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import RuleOutlinedIcon from "@mui/icons-material/RuleOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
+import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
 import OpenInNewOutlinedIcon from "@mui/icons-material/OpenInNewOutlined";
 import SearchOutlinedIcon from "@mui/icons-material/SearchOutlined";
+import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import { AxiosError } from "axios";
 import { executionPlansApi, executionsApi, testCasesApi, uploadsApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
+import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
+import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
 import type { ExecutionPlan, ExecutionPlanCase, ExecutionProvider, ExecutionRun, ExecutionTargetKind, UploadedAsset } from "@/types/domain";
+
+type CaseExecutionUpdate = {
+  id: string;
+  steps?: string[];
+  expected_result?: string;
+  test_data?: Record<string, unknown> | null;
+};
 
 const STEPS = ["Import from Test Design", "Select cases", "Preflight and run", "Review evidence"];
 
@@ -99,13 +114,6 @@ function sourceRunTitle(run: { title?: string | null; requirement_summary: strin
   return compactTitle(run.title || run.requirement_summary || `${run.generation_profile} test set`);
 }
 
-function mobileAssetExtension(asset: UploadedAsset) {
-  const declared = (asset.extension || "").trim().toLowerCase();
-  if (declared) return declared;
-  const fromFilename = asset.filename.split(".").pop()?.trim().toLowerCase();
-  return fromFilename || (asset.category || "").trim().toLowerCase();
-}
-
 function readinessColor(readiness: string): "success" | "error" | "warning" | "info" | "default" {
   if (readiness === "ready") return "success";
   if (readiness === "blocked") return "error";
@@ -158,6 +166,15 @@ export default function TestExecutionPage() {
   const [selection, setSelection] = useState<Record<string, boolean>>({});
   const [modes, setModes] = useState<Record<string, "automated" | "manual">>({});
   const [selectionDirty, setSelectionDirty] = useState(false);
+  const [inputDraft, setInputDraft] = useState<Record<string, string>>({});
+  const [inputDirty, setInputDirty] = useState(false);
+  const [caseEditor, setCaseEditor] = useState<{
+    id: string;
+    steps: string;
+    expectedResult: string;
+    testData: string;
+  } | null>(null);
+  const [caseEditorError, setCaseEditorError] = useState("");
   const [uploadError, setUploadError] = useState("");
 
   const history = useQuery({
@@ -165,10 +182,12 @@ export default function TestExecutionPage() {
     queryFn: () => testCasesApi.historySummaries(selectedProjectId!, 200, 0).then((response) => response.data),
     enabled: Boolean(selectedProjectId),
   });
-  const mobileAssets = useQuery({
-    queryKey: ["execution-mobile-assets", selectedProjectId],
-    queryFn: () => uploadsApi.list({ project_id: selectedProjectId! }).then((response) => response.data),
-    enabled: Boolean(selectedProjectId),
+  const mobileAssets = useRepositoryAssets({
+    projectId: selectedProjectId,
+    extensions: ["apk", "ipa"],
+    excludeCategories: ["autopilot_evidence", "execution_evidence"],
+    excludeSourceModules: ["autopilot_evidence", "execution_report"],
+    cacheKey: "execution-mobile-assets",
   });
   const plans = useQuery({
     queryKey: ["execution-plans", selectedProjectId],
@@ -208,12 +227,15 @@ export default function TestExecutionPage() {
   );
   const currentPlan = plan.data;
   const currentCases = useMemo(() => currentPlan?.cases ?? [], [currentPlan]);
-  const availableMobileAssets = useMemo(
-    () => (mobileAssets.data ?? []).filter((asset) =>
-      (targetKind === "android" ? mobileAssetExtension(asset) === "apk" : targetKind === "ios" ? mobileAssetExtension(asset) === "ipa" : false)
-      && !["autopilot_evidence", "execution_evidence"].includes(asset.category),
-    ),
-    [mobileAssets.data, targetKind],
+  const sourceRun = useMemo(
+    () => currentPlan?.source_generation_run_id
+      ? (history.data ?? []).find((item) => item.id === currentPlan.source_generation_run_id)
+      : undefined,
+    [currentPlan?.source_generation_run_id, history.data],
+  );
+  const selectedMobileAsset = useMemo(
+    () => mobileAssets.assets.find((asset) => asset.id === appAssetId) ?? null,
+    [appAssetId, mobileAssets.assets],
   );
   const targetPayload = useMemo(() => ({
     target_kind: targetKind,
@@ -248,6 +270,8 @@ export default function TestExecutionPage() {
     setSelection(nextSelection);
     setModes(nextModes);
     setSelectionDirty(false);
+    setInputDraft(currentPlan.input_references ?? {});
+    setInputDirty(false);
     setRunName((value) => value || `${currentPlan.name} run`);
   }, [currentPlan]);
 
@@ -259,12 +283,12 @@ export default function TestExecutionPage() {
       return;
     }
     setProvider((value) => value === "playwright" ? "browserstack" : value);
-    const selected = (mobileAssets.data ?? []).find((asset) => asset.id === appAssetId);
-    if (selected && mobileAssetExtension(selected) !== (targetKind === "android" ? "apk" : "ipa")) {
+    const selected = mobileAssets.assets.find((asset) => asset.id === appAssetId);
+    if (selected && repositoryAssetExtension(selected) !== (targetKind === "android" ? "apk" : "ipa")) {
       setAppAssetId("");
     }
     setPreflightSignature("");
-  }, [appAssetId, mobileAssets.data, targetKind]);
+  }, [appAssetId, mobileAssets.assets, targetKind]);
 
   const importPlan = useMutation({
     mutationFn: () => executionPlansApi.import({
@@ -282,12 +306,17 @@ export default function TestExecutionPage() {
   });
 
   const saveSelection = useMutation({
-    mutationFn: () => executionPlansApi.updateCases(
+    mutationFn: (override?: CaseExecutionUpdate) => executionPlansApi.updateCases(
       planId,
       currentCases.map((item) => ({
         id: item.id,
         selected: Boolean(selection[item.id]),
         execution_mode: modes[item.id] ?? item.execution_mode,
+        ...(override?.id === item.id ? {
+          steps: override.steps,
+          expected_result: override.expected_result,
+          test_data: override.test_data,
+        } : {}),
       })),
     ).then((response) => response.data),
     onSuccess: (updated) => {
@@ -295,6 +324,16 @@ export default function TestExecutionPage() {
       queryClient.invalidateQueries({ queryKey: ["execution-plans", selectedProjectId] });
       setPreflightSignature("");
       setSelectionDirty(false);
+    },
+  });
+
+  const saveInputs = useMutation({
+    mutationFn: () => executionPlansApi.updateInputs(planId, inputDraft).then((response) => response.data),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["execution-plan", updated.id], updated);
+      queryClient.invalidateQueries({ queryKey: ["execution-plans", selectedProjectId] });
+      setPreflightSignature("");
+      setInputDirty(false);
     },
   });
 
@@ -327,6 +366,51 @@ export default function TestExecutionPage() {
       return;
     }
     appUpload.mutate(file);
+  };
+
+  const openCaseEditor = (item: ExecutionPlanCase) => {
+    setCaseEditorError("");
+    setCaseEditor({
+      id: item.id,
+      steps: (item.steps ?? []).join("\n"),
+      expectedResult: item.expected_result ?? "",
+      testData: item.test_data ? JSON.stringify(item.test_data, null, 2) : "",
+    });
+  };
+
+  const saveCaseEditor = () => {
+    if (!caseEditor) return;
+    const steps = caseEditor.steps.split("\n").map((step) => step.trim()).filter(Boolean);
+    if (!steps.length) {
+      setCaseEditorError("Add at least one explicit automation step before saving.");
+      return;
+    }
+    if (!caseEditor.expectedResult.trim()) {
+      setCaseEditorError("Add the expected result so the runner knows what to verify.");
+      return;
+    }
+    let testData: Record<string, unknown> | null = null;
+    if (caseEditor.testData.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(caseEditor.testData);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          setCaseEditorError("Test data must be a JSON object, for example { \"account_reference\": \"qa-001\" }.");
+          return;
+        }
+        testData = parsed as Record<string, unknown>;
+      } catch {
+        setCaseEditorError("Test data must be valid JSON, or leave it empty when no data is needed.");
+        return;
+      }
+    }
+    setCaseEditorError("");
+    saveSelection.mutate(
+      { id: caseEditor.id, steps, expected_result: caseEditor.expectedResult.trim(), test_data: testData },
+      {
+        onSuccess: () => setCaseEditor(null),
+        onError: (reason) => setCaseEditorError(apiErrorMessage(reason, "The execution case could not be saved.")),
+      },
+    );
   };
 
   const filteredCases = useMemo(() => {
@@ -363,12 +447,24 @@ export default function TestExecutionPage() {
   const selectedAutomated = currentCases.filter((item) => selection[item.id] && (modes[item.id] ?? item.execution_mode) === "automated");
   const readyCount = currentPlan?.ready_cases ?? 0;
   const needsAttentionCount = currentPlan ? Math.max(0, currentPlan.total_cases - currentPlan.ready_cases) : 0;
+  const inputRequirements = currentPlan?.input_requirements ?? [];
+  const globalInputRequirements = inputRequirements.filter((item) => !item.key.startsWith("case:"));
+  const caseInputRequirements = inputRequirements.filter((item) => item.key.startsWith("case:"));
+  const unresolvedRequirements = inputRequirements.filter((item) => !item.provided);
+  const selectedAttention = currentCases.filter((item) => (
+    selection[item.id]
+    && (modes[item.id] ?? item.execution_mode) === "automated"
+    && item.readiness !== "ready"
+  ));
   const canExecute = Boolean(
     currentPlan
     && selectedAutomated.length > 0
     && readyCount > 0
+    && selectedAttention.length === 0
+    && unresolvedRequirements.length === 0
     && preflightSignature === targetSignature
     && !selectionDirty
+    && !inputDirty
     && !execute.isPending,
   );
   const planRuns = (runs.data ?? []).filter((run) => !planId || run.execution_plan_id === planId);
@@ -468,6 +564,7 @@ export default function TestExecutionPage() {
                   <Typography variant="body2" color="text.secondary">
                     Imported from <strong>{currentPlan.source_title || "Test Design"}</strong>{currentPlan.source_created_at ? ` · ${new Date(currentPlan.source_created_at).toLocaleString()}` : ""}. The snapshot is independent of later Design edits.
                   </Typography>
+                  {sourceRun?.source_document_analysis_id && <Chip size="small" label="Document Intelligence baseline" variant="outlined" clickable onClick={() => navigate("/documents")} sx={{ mt: 0.75 }} />}
                 </Box>
                 <Chip label={currentPlan.status} color={currentPlan.status === "ready" ? "success" : currentPlan.status === "blocked" ? "warning" : "info"} />
               </Stack>
@@ -528,6 +625,15 @@ export default function TestExecutionPage() {
                             </Select>
                           </FormControl>}
                           <Chip size="small" label={selected ? item.readiness : "not selected"} color={selected ? readinessColor(item.readiness) : "default"} variant="outlined" />
+                          {selected && <Button
+                            size="small"
+                            variant="text"
+                            startIcon={<EditOutlinedIcon />}
+                            onClick={() => openCaseEditor(item)}
+                            sx={{ whiteSpace: "nowrap" }}
+                          >
+                            Edit steps/data
+                          </Button>}
                         </Stack>
                       </Box>;
                     })}
@@ -558,13 +664,21 @@ export default function TestExecutionPage() {
                 ) : (
                   <>
                     <Grid size={{ xs: 12, md: 4 }}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel id="mobile-asset-label">APK / IPA package</InputLabel>
-                        <Select labelId="mobile-asset-label" label="APK / IPA package" value={appAssetId} onChange={(event) => { setAppAssetId(event.target.value); setPreflightSignature(""); }}>
-                          <MenuItem value=""><em>Select a stored {targetKind === "ios" ? "IPA" : "APK"}</em></MenuItem>
-                          {availableMobileAssets.map((asset) => <MenuItem key={asset.id} value={asset.id} title={asset.filename}><Box sx={{ maxWidth: { xs: 260, md: 380 }, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{asset.filename} · {(asset.size_bytes / 1024 / 1024).toFixed(1)} MB</Box></MenuItem>)}
-                        </Select>
-                      </FormControl>
+                      <RepositoryAssetPicker
+                        projectId={selectedProjectId}
+                        value={appAssetId}
+                        assets={mobileAssets.assets}
+                        assetsLoading={mobileAssets.isLoading || mobileAssets.isFetching}
+                        assetsError={mobileAssets.isError}
+                        extensions={[targetKind === "ios" ? "ipa" : "apk"]}
+                        cacheKey="execution-mobile-assets"
+                        label={`Existing ${targetKind === "ios" ? "IPA" : "APK"} from repository`}
+                        emptyLabel={`Upload a new ${targetKind === "ios" ? "IPA" : "APK"}`}
+                        helperText="Select a reusable build from this project, or upload a new package beside it."
+                        selectedAsset={selectedMobileAsset}
+                        onChange={(value) => { setAppAssetId(value); setPreflightSignature(""); }}
+                        onOpenRepository={() => navigate("/test-data/documents")}
+                      />
                     </Grid>
                     <Grid size={{ xs: 12, md: 2 }}>
                       <Button component="label" fullWidth size="small" variant="outlined" startIcon={<CloudUploadOutlinedIcon />} disabled={appUpload.isPending}>
@@ -611,12 +725,72 @@ export default function TestExecutionPage() {
                 <Chip label={`${currentPlan.blocked_cases} blocked/approval`} color={currentPlan.blocked_cases ? "warning" : "default"} variant="outlined" />
                 {preflightSignature && <Chip label="Preflight matches target" color="success" variant="outlined" />}
               </Stack>
+              {inputRequirements.length > 0 && <Box sx={{ mt: 2, p: 1.75, border: "1px solid", borderColor: "warning.light", borderRadius: 2, bgcolor: "rgba(237, 108, 2, 0.04)" }}>
+                <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={1} sx={{ mb: 1 }}>
+                  <Box>
+                    <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Guided setup before execution</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Preflight has walked the selected cases and found {inputRequirements.length} setup item{inputRequirements.length === 1 ? "" : "s"}. Provide safe references or edit the case; it will re-check every dependency before a run is enabled.
+                    </Typography>
+                  </Box>
+                  <Chip size="small" label={`${unresolvedRequirements.length} unresolved`} color={unresolvedRequirements.length ? "warning" : "success"} variant="outlined" />
+                </Stack>
+                <Alert severity="info" sx={{ mb: 1.5 }}>
+                  Use non-production references such as <strong>vault://qa/investor</strong> or <strong>dataset://seeded-customer-01</strong>. QTXpert never stores raw passwords, tokens, or OTPs.
+                </Alert>
+                {globalInputRequirements.length > 0 && <Stack spacing={1.25}>
+                  {globalInputRequirements.map((requirement) => <TextField
+                    key={requirement.key}
+                    fullWidth
+                    size="small"
+                    label={requirement.label}
+                    value={inputDraft[requirement.key] ?? ""}
+                    onChange={(event) => {
+                      setInputDraft((previous) => ({ ...previous, [requirement.key]: event.target.value }));
+                      setInputDirty(true);
+                      setPreflightSignature("");
+                    }}
+                    placeholder={requirement.category === "authentication" ? "vault://qa/role-or-credential" : requirement.category === "test_data" ? "dataset://seeded/non-production" : "reference://..."}
+                    helperText={`${requirement.description}${requirement.case_keys.length ? ` Affects ${requirement.case_keys.join(", ")}.` : ""}`}
+                  />)}
+                  <Box>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<SaveOutlinedIcon />}
+                      disabled={!inputDirty || saveInputs.isPending}
+                      onClick={() => saveInputs.mutate()}
+                    >
+                      {saveInputs.isPending ? "Saving…" : "Save inputs"}
+                    </Button>
+                  </Box>
+                </Stack>}
+                {caseInputRequirements.length > 0 && <Stack spacing={0.8} sx={{ mt: globalInputRequirements.length ? 1.5 : 0 }}>
+                  <Typography variant="caption" sx={{ fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em" }}>Case actions</Typography>
+                  {caseInputRequirements.map((requirement) => {
+                    const caseToEdit = currentCases.find((item) => requirement.case_ids.includes(item.id));
+                    return <Stack key={requirement.key} direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ p: 1, borderRadius: 1.5, bgcolor: "background.paper" }}>
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Typography variant="body2" fontWeight={800}>{requirement.label} · {requirement.case_keys.join(", ") || "selected case"}</Typography>
+                        <Typography variant="caption" color="text.secondary">{requirement.description}</Typography>
+                      </Box>
+                      {caseToEdit && <Button size="small" variant="outlined" startIcon={<EditOutlinedIcon />} onClick={() => openCaseEditor(caseToEdit)}>Edit case</Button>}
+                    </Stack>;
+                  })}
+                </Stack>}
+              </Box>}
+              {saveInputs.isError && <Alert severity="error" sx={{ mt: 2 }}>{apiErrorMessage(saveInputs.error, "The setup references could not be saved.")}</Alert>}
+              {preflight.isSuccess && preflight.data && preflightSignature === targetSignature && <Alert severity="success" sx={{ mt: 2 }}>
+                Preflight completed: {preflight.data.ready_cases} case{preflight.data.ready_cases === 1 ? " is" : "s are"} ready. {(preflight.data.input_requirements ?? []).filter((item) => !item.provided).length} setup item{(preflight.data.input_requirements ?? []).filter((item) => !item.provided).length === 1 ? " remains" : "s remain"} unresolved.
+              </Alert>}
               {targetKind !== "web" && <Alert severity="info" sx={{ mt: 2 }}>Mobile results, device metadata and captured evidence are saved with the run in Test reports. The selected APK/IPA remains reusable in the project repository.</Alert>}
               {uploadError && <Alert severity="error" sx={{ mt: 2 }}>{uploadError}</Alert>}
               {mobileAssets.isError && <Alert severity="warning" sx={{ mt: 2 }}>Stored mobile packages could not be loaded. You can retry the page or upload a new package.</Alert>}
               {preflight.isError && <Alert severity="error" sx={{ mt: 2 }}>{apiErrorMessage(preflight.error, "The execution preflight failed.")}</Alert>}
               {execute.isError && <Alert severity="error" sx={{ mt: 2 }}>{apiErrorMessage(execute.error, "The execution could not be queued.")}</Alert>}
-              {currentPlan.blocked_cases > 0 && <Alert severity="warning" sx={{ mt: 2 }}>Some selected cases need conversion, runtime discovery, or approval. They will not be silently executed.</Alert>}
+              {(currentPlan.blocked_cases > 0 || selectedAttention.length > 0) && <Alert severity="warning" sx={{ mt: 2 }}>
+                Resolve {selectedAttention.length || currentPlan.blocked_cases} selected case{(selectedAttention.length || currentPlan.blocked_cases) === 1 ? "" : "s"} above. Preflight will re-check conversions, runtime discovery, approval, and data before execution is enabled.
+              </Alert>}
             </CardContent>
           </Card>
         </>
@@ -662,6 +836,51 @@ export default function TestExecutionPage() {
           {!runs.isLoading && !filteredExecutionRuns.length && planRuns.length === 0 && <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>Runs will appear here after a successful preflight and execution.</Typography>}
         </CardContent>
       </Card>
+      <Dialog open={Boolean(caseEditor)} onClose={() => { if (!saveSelection.isPending) setCaseEditor(null); }} fullWidth maxWidth="md">
+        <DialogTitle>Edit case for execution</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Convert the generated journey into explicit safe commands. One command per line; unsupported prose is blocked instead of guessed.
+          </Typography>
+          <Stack spacing={2}>
+            <TextField
+              autoFocus
+              fullWidth
+              multiline
+              minRows={5}
+              label="Automation steps"
+              value={caseEditor?.steps ?? ""}
+              onChange={(event) => setCaseEditor((previous) => previous ? { ...previous, steps: event.target.value } : previous)}
+              helperText="Web: navigate / click / fill locator :: value / assert-text / assert-url. Mobile also supports launch, tap, back, and assert-visible."
+            />
+            <TextField
+              fullWidth
+              multiline
+              minRows={2}
+              label="Expected result"
+              value={caseEditor?.expectedResult ?? ""}
+              onChange={(event) => setCaseEditor((previous) => previous ? { ...previous, expectedResult: event.target.value } : previous)}
+            />
+            <TextField
+              fullWidth
+              multiline
+              minRows={3}
+              label="Synthetic test data JSON (optional)"
+              value={caseEditor?.testData ?? ""}
+              onChange={(event) => setCaseEditor((previous) => previous ? { ...previous, testData: event.target.value } : previous)}
+              placeholder={'{\n  "account_reference": "qa-customer-01"\n}'}
+              helperText="Use references or synthetic values only. Passwords, tokens, and OTPs are rejected and never stored."
+            />
+            {caseEditorError && <Alert severity="error">{caseEditorError}</Alert>}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCaseEditor(null)} disabled={saveSelection.isPending}>Cancel</Button>
+          <Button variant="contained" startIcon={<SaveOutlinedIcon />} onClick={saveCaseEditor} disabled={saveSelection.isPending}>
+            {saveSelection.isPending ? "Saving…" : "Save and recheck"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
