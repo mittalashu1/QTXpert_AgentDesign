@@ -588,7 +588,7 @@ export default function TestExecutionPage() {
                 }}>Select candidates</Button>
                 <Button size="small" onClick={() => { setSelection(Object.fromEntries(currentCases.map((item) => [item.id, false]))); setSelectionDirty(true); }}>Clear selection</Button>
                 <Box sx={{ flex: 1 }} />
-                <Button variant="outlined" startIcon={<RuleOutlinedIcon />} disabled={saveSelection.isPending} onClick={() => saveSelection.mutate()}>
+                <Button variant="outlined" startIcon={<RuleOutlinedIcon />} disabled={saveSelection.isPending} onClick={() => saveSelection.mutate(undefined)}>
                   {saveSelection.isPending ? "Saving…" : "Save selection"}
                 </Button>
               </Stack>

@@ -110,6 +110,41 @@ def _case_has_test_data(case: ExecutionPlanCase) -> bool:
     return bool(case.test_data) and not _has_placeholder(case.test_data)
 
 
+def _case_requires_authentication(case: ExecutionPlanCase) -> bool:
+    """Detect an authenticated journey without treating a sign-in button as a credential need.
+
+    Generated journeys often contain a harmless ``tap ... Sign in`` or
+    ``assert-visible ... login`` step.  Those controls do not prove that the
+    run needs credentials, while narrative instructions (or a credential
+    entry step) do.  Keeping this distinction makes guided setup actionable
+    and avoids blocking deterministic smoke checks unnecessarily.
+    """
+    narrative = " ".join(
+        str(value or "")
+        for value in (
+            case.scenario,
+            case.objective,
+            case.preconditions,
+            case.expected_result,
+            *(f"{key} {value}" for key, value in (case.test_data or {}).items()),
+        )
+    )
+    if _AUTHENTICATION_TEXT.search(narrative):
+        return True
+    for raw in case.steps or []:
+        step = str(raw or "").strip()
+        lower = step.lower()
+        if lower.startswith("fill ") and re.search(r"\b(user(?:name)?|email|pass(?:word|code)?|credential|mfa|otp)\b", lower):
+            return True
+        # Navigation, tap/click, and assertion labels may mention sign-in or
+        # login without requiring an authenticated account.
+        if lower.startswith(("navigate ", "tap ", "click ", "assert-text ", "assert-visible ", "assert-url ")):
+            continue
+        if _AUTHENTICATION_TEXT.search(step):
+            return True
+    return False
+
+
 def _unsupported_step(case: ExecutionPlanCase) -> str | None:
     """Find generated prose that needs a user conversion before execution."""
     for raw in case.steps or []:
@@ -175,7 +210,7 @@ def _input_requirements(plan: ExecutionPlan) -> list[dict]:
     ]
     for case in selected:
         text = _case_text(case)
-        if _AUTHENTICATION_TEXT.search(text):
+        if _case_requires_authentication(case):
             add(
                 "authentication_reference",
                 "Authentication reference",
@@ -230,11 +265,11 @@ def _input_requirements(plan: ExecutionPlan) -> list[dict]:
     return sorted(requirements.values(), key=lambda item: (item["category"], item["label"], item["key"]))
 
 
-def _setup_blockers(plan: ExecutionPlan, case: ExecutionPlanCase) -> list[str]:
+def _setup_blockers(plan: ExecutionPlan, case: ExecutionPlanCase, target_kind: str = "web") -> list[str]:
     refs = plan.runtime_inputs or {}
     text = _case_text(case)
     blockers: list[str] = []
-    if _AUTHENTICATION_TEXT.search(text) and not str(refs.get("authentication_reference", "")).strip():
+    if _case_requires_authentication(case) and not str(refs.get("authentication_reference", "")).strip():
         blockers.append("Authentication setup is required; add a non-production credential reference in Guided setup")
     if _TEST_DATA_TEXT.search(text) and not _case_has_test_data(case) and not str(refs.get("test_data_reference", "")).strip():
         blockers.append("Synthetic test data is required; add a dataset/account reference in Guided setup")
@@ -244,7 +279,8 @@ def _setup_blockers(plan: ExecutionPlan, case: ExecutionPlanCase) -> list[str]:
         blockers.append("Approval is required for business-impacting actions; add an approval reference in Guided setup")
     unsupported = _unsupported_step(case)
     if unsupported:
-        blockers.append(f"Automation conversion is required for step: {unsupported!r}")
+        label = "Unsupported mobile automation step" if target_kind in {"android", "ios"} else "Unsupported automation step"
+        blockers.append(f"{label}: {unsupported!r}. Convert it to an explicit supported command")
     return blockers
 
 
@@ -355,7 +391,7 @@ async def _preflight_plan(
             case.readiness = "blocked"
             case.blocker_reason = "The source Test Design case is no longer available. Re-import the Design run."
             continue
-        setup_blockers = _setup_blockers(plan, case)
+        setup_blockers = _setup_blockers(plan, case, target_kind)
         impact = next((str(step).strip() for step in case.steps if _HIGH_IMPACT_STEP.search(str(step))), None)
         if setup_blockers:
             # Keep the explicit approval state for a sole approval blocker so
