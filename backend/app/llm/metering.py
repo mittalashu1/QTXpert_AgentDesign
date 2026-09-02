@@ -23,6 +23,18 @@ class UsageEvent:
 UsageHook = Callable[[UsageEvent], None]
 
 
+def load_cost_rates(settings: Settings) -> dict[str, dict[str, float]]:
+    """Load explicit model rates for recording and legacy cost repricing."""
+    try:
+        raw_rates = (settings.LLM_COST_RATES_JSON or "").strip() or DEFAULT_LLM_COST_RATES_JSON
+        parsed = json.loads(raw_rates)
+    except json.JSONDecodeError as exc:
+        raise ValueError("LLM_COST_RATES_JSON must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM_COST_RATES_JSON must be a JSON object")
+    return parsed
+
+
 class UsageMeter:
     def __init__(
         self,
@@ -31,11 +43,7 @@ class UsageMeter:
         *,
         persist: bool = False,
     ):
-        try:
-            raw_rates = (settings.LLM_COST_RATES_JSON or "").strip() or DEFAULT_LLM_COST_RATES_JSON
-            self._rates = json.loads(raw_rates)
-        except json.JSONDecodeError as exc:
-            raise ValueError("LLM_COST_RATES_JSON must be valid JSON") from exc
+        self._rates = load_cost_rates(settings)
         self._hook = hook
         self._persist = persist
 
