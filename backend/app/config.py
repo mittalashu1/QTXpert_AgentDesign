@@ -12,6 +12,12 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+DEFAULT_LLM_COST_RATES_JSON = (
+    '{"gemini:gemini-3.5-flash-lite":{"input":0.30,"output":2.50},'
+    '"gemini:gemini-3.5-flash":{"input":1.50,"output":9.00}}'
+)
+
+
 class Settings(BaseSettings):
     """Strongly-typed application settings."""
 
@@ -98,7 +104,11 @@ class Settings(BaseSettings):
     LLM_ROUTER_COMPLEX: str = "azure_openai:configured"
     LLM_ROUTER_FALLBACK: str = "azure_openai:configured"
     LLM_ROUTER_COMPLEX_INPUT_CHARS: int = 30000
-    LLM_COST_RATES_JSON: str = "{}"
+    # Keep the cost meter useful even when a deployment has not yet copied
+    # the optional Blueprint value into its environment.  These are the same
+    # documented Gemini rates used by ``render.yaml``; provider-specific rates
+    # that are not known remain unpriced instead of being guessed.
+    LLM_COST_RATES_JSON: str = DEFAULT_LLM_COST_RATES_JSON
 
     OPENAI_API_KEY: Optional[str] = None
     AZURE_OPENAI_API_KEY: Optional[str] = None
