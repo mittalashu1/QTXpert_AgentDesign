@@ -230,3 +230,4 @@ class DashboardSummary(BaseModel):
     blocked_tests: int = 0
     skipped_tests: int = 0
     pending_tests: int = 0
+

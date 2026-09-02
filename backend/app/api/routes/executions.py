@@ -911,3 +911,4 @@ async def dashboard(project_id: UUID, db: Annotated[AsyncSession, Depends(get_db
         skipped_tests=skipped,
         pending_tests=pending,
     )
+

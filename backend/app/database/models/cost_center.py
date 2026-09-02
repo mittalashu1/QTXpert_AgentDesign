@@ -36,3 +36,4 @@ class CostCenterSnapshot(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         DateTime(timezone=True), nullable=True, default=_utcnow
     )
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+

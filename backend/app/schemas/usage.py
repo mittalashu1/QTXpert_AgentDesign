@@ -72,3 +72,4 @@ class AICostSummary(BaseModel):
     cost_surfaces: list[CostSurface] = Field(default_factory=list)
     untracked_surface_count: int = 0
     catalog: CostCatalogInfo = Field(default_factory=CostCatalogInfo)
+

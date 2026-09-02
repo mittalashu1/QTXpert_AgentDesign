@@ -67,3 +67,4 @@ def downgrade() -> None:
     op.drop_index("ix_generation_runs_source_document_analysis_id", table_name="generation_runs")
     op.drop_constraint("fk_generation_runs_document_analysis", "generation_runs", type_="foreignkey")
     op.drop_column("generation_runs", "source_document_analysis_id")
+

@@ -20,3 +20,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_column("execution_plans", "runtime_inputs")
+

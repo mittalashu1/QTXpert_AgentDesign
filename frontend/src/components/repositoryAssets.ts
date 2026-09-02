@@ -85,3 +85,4 @@ export function useRepositoryAssets({
   [normalizedCategories, normalizedExcludedCategories, normalizedExcludedSources, normalizedExtensions, query.data]);
   return { ...query, assets };
 }
+

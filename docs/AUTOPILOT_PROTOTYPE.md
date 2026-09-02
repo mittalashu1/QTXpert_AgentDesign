@@ -279,3 +279,4 @@ Persist in PostgreSQL/graph storage:
 ## Production architecture changes before customer pilot
 
 Before treating Autopilot as customer-production ready, move uploaded binaries and evidence from local service storage to durable object storage, persist jobs/Application Genome in PostgreSQL, introduce a secrets vault, execute long-running work in a worker/workflow system, implement retention/expiry rules, and add tenant-level RBAC/auditing.
+

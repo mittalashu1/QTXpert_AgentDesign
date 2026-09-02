@@ -25,6 +25,35 @@ AutopilotTargetKind = Literal["android", "ios", "web"]
 AutopilotProvider = Literal["browserstack", "appium", "playwright"]
 
 
+AutopilotInputCategory = Literal[
+    "credential",
+    "environment",
+    "test_data",
+    "approval",
+    "acceptance",
+    "integration",
+]
+AutopilotInputStatus = Literal["pending", "provided", "validated"]
+
+
+class AutopilotInputRequest(BaseModel):
+    """A safe, auditable request for a non-secret setup reference.
+
+    Autopilot never accepts the secret itself.  The UI can therefore explain
+    exactly why a run is paused while the value remains in the customer's
+    vault or external test-data provider.
+    """
+
+    key: str
+    label: str
+    category: AutopilotInputCategory
+    reason: str
+    required_for: List[str] = Field(default_factory=list)
+    sensitive: bool = False
+    status: AutopilotInputStatus = "pending"
+    reference_present: bool = False
+
+
 class AutopilotTest(BaseModel):
     id: str
     suite: str
@@ -85,6 +114,10 @@ class AutopilotAnalysis(BaseModel):
     # of the context auditable without copying document contents into reports.
     document_asset_ids: List[UUID] = Field(default_factory=list)
     document_analysis_run_id: Optional[UUID] = None
+    # Input collection is a first-class checkpoint.  It is populated from the
+    # generated plan without exposing credentials or test-data values.
+    checkpoint_stage: str = "complete"
+    input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
 
 
 ReportCheckStatus = Literal["pass", "fail", "warning", "pending", "not_assessed"]
@@ -234,7 +267,7 @@ class AutopilotSurface(BaseModel):
 class AutopilotJobStatus(BaseModel):
     job_id: str
     filename: str
-    status: Literal["uploaded", "analyzing", "analyzed", "failed", "superseded"]
+    status: Literal["uploaded", "analyzing", "waiting_for_input", "analyzed", "failed", "superseded"]
     target_kind: AutopilotTargetKind = "android"
     target_url: Optional[str] = None
     profile_id: str = "uae_fintech"
@@ -253,6 +286,9 @@ class AutopilotJobStatus(BaseModel):
     artifact_available: bool = True
     error: Optional[str] = None
     analysis: Optional[AutopilotAnalysis] = None
+    checkpoint_stage: str = "queued"
+    checkpoint_message: Optional[str] = None
+    input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
 
 
 class AutopilotProviderStatus(BaseModel):
@@ -287,6 +323,17 @@ class AutopilotSetupProfile(AutopilotSetupUpdateRequest):
     updated_at: Optional[str] = None
     provided_fields: List[str] = Field(default_factory=list)
     missing_fields: List[str] = Field(default_factory=list)
+    input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
+    checkpoint_stage: str = "input_collection"
+    checkpoint_message: Optional[str] = None
+    last_validated_at: Optional[str] = None
+
+
+class AutopilotResumeRequest(BaseModel):
+    """Continue a paused analysis after setup references were confirmed."""
+
+    confirm_saved_inputs: bool = True
+    run_runtime_discovery: bool = False
 
 
 class QTXIRStep(BaseModel):
@@ -401,6 +448,9 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     context: Optional[str] = Field(default=None, max_length=8000)
     profile_id: str = Field(default="uae_fintech", max_length=80)
     surface_action: Literal["ask", "new", "override"] = "new"
+    # A rerun must not silently reuse credentials or seeded data.  The UI asks
+    # the user to confirm ``reuse`` (or choose ``fresh``) before submitting.
+    setup_action: Literal["ask", "reuse", "fresh"] = "ask"
     document_asset_ids: Optional[List[UUID]] = Field(default=None, max_length=20)
     document_analysis_run_id: Optional[UUID] = Field(
         default=None,
@@ -525,3 +575,4 @@ class AutopilotSuiteResult(BaseModel):
     bucket_counts: Dict[str, int] = Field(default_factory=dict)
     error: Optional[str] = None
     tests: List[AutopilotSuiteTestResult] = Field(default_factory=list)
+

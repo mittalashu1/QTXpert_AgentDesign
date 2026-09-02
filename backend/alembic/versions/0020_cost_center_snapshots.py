@@ -36,3 +36,4 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_cost_center_snapshots_scope", table_name="cost_center_snapshots")
     op.drop_table("cost_center_snapshots")
+
