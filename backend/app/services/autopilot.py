@@ -834,10 +834,25 @@ class AutopilotPrototypeService:
             temporary = path.with_suffix(".tmp")
             await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
             await asyncio.to_thread(temporary.replace, path)
+        # The JSON manifest and analysis snapshot are both local fallbacks in
+        # degraded mode.  Whenever a caller supplies a replacement analysis,
+        # update the snapshot atomically as well; otherwise a resumed input
+        # checkpoint can be overwritten by the older pending analysis after a
+        # process restart even though the job status is already analyzed.
+        persisted_analysis = changes.get("analysis", _MISSING)
+        if persisted_analysis is not _MISSING:
+            if hasattr(persisted_analysis, "model_dump_json"):
+                analysis_json = persisted_analysis.model_dump_json(indent=2)
+            else:
+                analysis_json = json.dumps(persisted_analysis, indent=2)
+            metadata_path = self._metadata_path(job_id)
+            if metadata_path.parent.exists():
+                temporary_metadata = metadata_path.with_suffix(".tmp")
+                await asyncio.to_thread(temporary_metadata.write_text, analysis_json, "utf-8")
+                await asyncio.to_thread(temporary_metadata.replace, metadata_path)
         # Keep the JSON analysis and setup checkpoint in sync with the durable
         # job row.  This matters after a Render restart, where the local
         # manifest is intentionally disposable.
-        persisted_analysis = changes.get("analysis", _MISSING)
         await self._persist_job(job, analysis=persisted_analysis)
         return job
 
