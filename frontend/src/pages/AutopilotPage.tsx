@@ -47,11 +47,13 @@ type Analysis = {
   warnings: string[]; capabilities: Record<string, boolean>;
   context_considered?: boolean; ai_enrichment_used?: boolean; analysis_basis?: string[];
   document_asset_ids?: string[]; document_analysis_run_id?: string | null;
+  checkpoint_stage?: string; input_requests?: AutopilotInputRequest[];
 };
 type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; playwright_available?: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: Provider };
 type AnalysisJob = {
-  job_id: string; filename: string; status: "uploaded" | "analyzing" | "analyzed" | "failed" | "superseded";
+  job_id: string; filename: string; status: "uploaded" | "analyzing" | "waiting_for_input" | "analyzed" | "failed" | "superseded";
   target_kind?: TargetKind; target_url?: string | null; profile_id?: string; report_tab_key?: string; surface_key?: string; surface_identity?: string; surface_version?: number; repository_asset_id?: string | null; stage: string; progress: number; context?: string; document_asset_ids?: string[]; document_analysis_run_id?: string | null; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
+  checkpoint_stage?: string; checkpoint_message?: string | null; input_requests?: AutopilotInputRequest[];
 };
 type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
 type ReportCheck = {
@@ -143,12 +145,17 @@ type ReportTab = {
   target_url?: string | null; filename: string; latest_job_id: string; latest_status: string;
   surface_version?: number; version_count?: number; latest_created_at: string; latest_updated_at: string; is_current: boolean;
 };
+type AutopilotInputRequest = {
+  key: string; label: string; category: "credential" | "environment" | "test_data" | "approval" | "acceptance" | "integration";
+  reason: string; required_for: string[]; sensitive: boolean; status: "pending" | "provided" | "validated"; reference_present: boolean;
+};
 type SetupProfile = {
   job_id: string; credential_reference: string; account_role: string; environment_name: string;
   environment_url: string; test_data_reference: string; reset_hook_reference: string;
   acceptance_criteria_reference: string; api_oracle_reference: string; navigation_notes: string;
   safe_authentication_approved: boolean; approved_test_ids: string[]; updated_at?: string | null;
-  provided_fields: string[]; missing_fields: string[];
+  provided_fields: string[]; missing_fields: string[]; input_requests: AutopilotInputRequest[];
+  checkpoint_stage: string; checkpoint_message?: string | null; last_validated_at?: string | null;
 };
 
 function emptySetup(jobId = ""): SetupProfile {
@@ -156,7 +163,8 @@ function emptySetup(jobId = ""): SetupProfile {
     job_id: jobId, credential_reference: "", account_role: "", environment_name: "",
     environment_url: "", test_data_reference: "", reset_hook_reference: "",
     acceptance_criteria_reference: "", api_oracle_reference: "", navigation_notes: "",
-    safe_authentication_approved: false, approved_test_ids: [], provided_fields: [], missing_fields: [],
+    safe_authentication_approved: false, approved_test_ids: [], provided_fields: [], missing_fields: [], input_requests: [],
+    checkpoint_stage: "input_collection", checkpoint_message: null, last_validated_at: null,
   };
 }
 
@@ -460,11 +468,13 @@ export default function AutopilotPage() {
   const [setupDraft, setSetupDraft] = useState<SetupProfile>(emptySetup());
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
+  const [resumeBusy, setResumeBusy] = useState(false);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
   const [reportTabs, setReportTabs] = useState<ReportTab[]>([]);
   const [reportTabsLoading, setReportTabsLoading] = useState(false);
   const [activeReportTabKey, setActiveReportTabKey] = useState("");
   const [duplicatePrompt, setDuplicatePrompt] = useState<{ message: string; existingJobId: string; createdAt: string } | null>(null);
+  const [rerunSetupPrompt, setRerunSetupPrompt] = useState(false);
   const [provider, setProvider] = useState<Provider>("browserstack");
   const [busy, setBusy] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
@@ -641,7 +651,7 @@ export default function AutopilotPage() {
     if (job.document_analysis_run_id) setDocumentAnalysisRunId(job.document_analysis_run_id);
     else if (job.analysis?.document_analysis_run_id) setDocumentAnalysisRunId(job.analysis.document_analysis_run_id);
     setArtifactAvailable(job.artifact_available !== false);
-    if (job.status === "analyzed" && job.analysis) {
+    if (["analyzed", "waiting_for_input", "superseded"].includes(job.status) && job.analysis) {
       setAnalysis(job.analysis);
       void refreshExecutionHistory(job.analysis.job_id);
       void refreshReport(job.analysis.job_id);
@@ -661,7 +671,7 @@ export default function AutopilotPage() {
         setError("");
         applyJob(job);
         if (job.status === "failed") throw new TerminalAutopilotJobError(job.error || "Autopilot analysis failed");
-        if (job.status === "analyzed" && job.analysis) return job.analysis;
+        if (["analyzed", "waiting_for_input", "superseded"].includes(job.status) && job.analysis) return job.analysis;
       } catch (err) {
         if (err instanceof TerminalAutopilotJobError) throw err;
         const status = (err as { response?: { status?: number } })?.response?.status;
@@ -912,8 +922,32 @@ export default function AutopilotPage() {
       };
       const response = await apiClient.put<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", payload, { timeout: 20000 });
       setSetup(response.data);
+      const pending = response.data.input_requests || [];
+      if (pending.length > 0) {
+        // Keep the checkpoint open when only part of the requested setup was
+        // supplied, so the user can see exactly what remains and why.
+        setSetupDraft((current) => ({ ...current, input_requests: pending, missing_fields: response.data.missing_fields }));
+        setContextNotice(`${pending.length} setup item${pending.length === 1 ? "" : "s"} still required. Complete the highlighted checkpoint inputs to continue.`);
+        return;
+      }
       setSetupOpen(false);
       await refreshAutomation(analysis.job_id);
+      setResumeBusy(true);
+      try {
+        const resumeResponse = await apiClient.post<AnalysisJob>(
+          `/autopilot/${analysis.job_id}/resume`,
+          { confirm_saved_inputs: true },
+          { timeout: 20000 },
+        );
+        applyJob(resumeResponse.data);
+        if (resumeResponse.data.status === "uploaded" || resumeResponse.data.status === "analyzing") {
+          await pollAnalysis(analysis.job_id);
+        }
+        await refreshAutomation(analysis.job_id);
+        await refreshReport(analysis.job_id);
+      } finally {
+        setResumeBusy(false);
+      }
     } catch (err) { setError(readableError(err, "Test setup could not be saved")); }
     finally { setSetupBusy(false); }
   };
@@ -979,14 +1013,14 @@ export default function AutopilotPage() {
     finally { setSmokeBusy(false); }
   };
 
-  const rerunAnalysis = async () => {
+  const rerunAnalysis = async (setupAction: "reuse" | "fresh" = "fresh") => {
     if (!analysis || !selectedProjectId) return;
     setAnalysisProgress(3); setAnalysisStage("queued");
     setBusy(true); setError(""); setExecution(null); setExecutionHistory([]); setReport(null);
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
-        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, surface_action: "new", target_url: targetKind === "web" ? targetUrl.trim() || undefined : undefined, document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined },
+        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, surface_action: "new", setup_action: setupAction, target_url: targetKind === "web" ? targetUrl.trim() || undefined : undefined, document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined },
         { timeout: 300000 },
       );
       // Keep the last completed analysis visible while the replacement job
@@ -998,6 +1032,14 @@ export default function AutopilotPage() {
       await refreshReportTabs(selectedProjectId);
     } catch (err) { setError(readableError(err, "Autopilot rerun failed")); }
     finally { setBusy(false); }
+  };
+
+  const startRerun = () => {
+    if (setup?.provided_fields.length) {
+      setRerunSetupPrompt(true);
+      return;
+    }
+    void rerunAnalysis("fresh");
   };
 
   const activeTargetKind = analysis?.target_kind || targetKind;
@@ -1109,7 +1151,7 @@ export default function AutopilotPage() {
           <Alert severity="info" sx={{ mt: 1.5 }}>The selected target and brief guide coverage. Claims stay separate from observed evidence; missing metrics remain pending.</Alert>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
             <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || !selectedProjectId} onClick={() => void analyze()} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{busy ? "Inspecting target…" : selectedStoredApk ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}` : "Start analysis"}</Button>
-            {analysis && <Button disabled={busy || !selectedProjectId} onClick={rerunAnalysis} variant="outlined" size="large">Rerun this analysis</Button>}
+            {analysis && <Button disabled={busy || resumeBusy || !selectedProjectId} onClick={startRerun} variant="outlined" size="large">Rerun this analysis</Button>}
           </Stack>
         </Grid>
       </Grid>
@@ -1300,13 +1342,16 @@ export default function AutopilotPage() {
         </Stack>
         <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
-            <Box><Typography variant="subtitle2" fontWeight={800}>Resolve test dependencies</Typography><Typography variant="caption" color="text.secondary">Add non-secret credential, role, data, reset and acceptance references. Passwords, tokens and OTPs are never stored here.</Typography></Box>
-            <Button size="small" variant="outlined" onClick={openSetup}>{setup?.provided_fields.length ? "Update inputs" : "Provide inputs"}</Button>
+            <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">Confirm approved non-production references before authenticated or data-dependent cases continue. Passwords, tokens and OTPs are never stored here.</Typography></Box>
+            <Button size="small" variant="outlined" onClick={openSetup} disabled={resumeBusy}>{setup?.provided_fields.length ? "Review inputs" : "Provide inputs"}</Button>
           </Stack>
+          {setup?.checkpoint_message && <Alert severity={setup.input_requests?.length ? "warning" : "info"} sx={{ mt: 1.25 }}>{setup.checkpoint_message}</Alert>}
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
             <Chip size="small" label={(setup?.provided_fields.length || 0) + " setup items provided"} color={setup?.provided_fields.length ? "success" : "default"} variant="outlined" />
             {(automation?.setup_missing_fields || []).slice(0, 6).map((field) => <Chip key={field} size="small" label={"Pending: " + field} color="warning" variant="outlined" />)}
           </Stack>
+          {(setup?.input_requests || []).slice(0, 6).map((request) => <Box key={request.key} sx={{ mt: 1, p: 1, borderRadius: 1.5, bgcolor: "warning.lighter", border: "1px solid", borderColor: "warning.light" }}><Typography variant="body2" fontWeight={700}>{request.label}</Typography><Typography variant="caption" color="text.secondary">{request.reason} · {request.required_for.length} dependent case{request.required_for.length === 1 ? "" : "s"}</Typography></Box>)}
+          {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · full plan buckets are listed above</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 80).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
         {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe subset: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / result</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || "Evidence captured"}</Typography></TableCell></TableRow>)}</TableBody></Table></TableContainer>}</>}
@@ -1348,10 +1393,33 @@ export default function AutopilotPage() {
       </DialogActions>
     </Dialog>
 
-    <Dialog open={setupOpen} onClose={() => !setupBusy && setSetupOpen(false)} fullWidth maxWidth="md">
-      <DialogTitle>Resolve Autopilot test dependencies</DialogTitle>
+    <Dialog open={rerunSetupPrompt} onClose={() => !busy && setRerunSetupPrompt(false)} fullWidth maxWidth="sm">
+      <DialogTitle>Validate saved setup before rerun</DialogTitle>
       <DialogContent>
-        <Alert severity="info" sx={{ mb: 2 }}>Enter references to approved non-production resources. Do not paste passwords, access tokens or OTPs; keep secrets in the configured vault/provider.</Alert>
+        <Alert severity="info" sx={{ mb: 2 }}>
+          This target already has saved setup references. They are shown only as references and never contain passwords, tokens or OTPs. Confirm they still point to the correct non-production resources, or start with a fresh checkpoint.
+        </Alert>
+        <Stack spacing={.75}>
+          {(setup?.provided_fields || []).map((field) => <Chip key={field} size="small" label={`Saved: ${field.replaceAll("_", " ")}`} variant="outlined" sx={{ justifyContent: "flex-start" }} />)}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setRerunSetupPrompt(false)} disabled={busy}>Cancel</Button>
+        <Button variant="outlined" onClick={() => { setRerunSetupPrompt(false); void rerunAnalysis("fresh"); }} disabled={busy}>Start fresh checkpoint</Button>
+        <Button variant="contained" onClick={() => { setRerunSetupPrompt(false); void rerunAnalysis("reuse"); }} disabled={busy}>Reuse after confirmation</Button>
+      </DialogActions>
+    </Dialog>
+
+    <Dialog open={setupOpen} onClose={() => !setupBusy && !resumeBusy && setSetupOpen(false)} fullWidth maxWidth="md">
+      <DialogTitle>Autopilot checkpoint · confirm inputs</DialogTitle>
+      <DialogContent>
+        <Alert severity={setupDraft.input_requests?.length ? "warning" : "success"} sx={{ mb: 2 }}>
+          {setupDraft.input_requests?.length
+            ? `${setupDraft.input_requests.length} input${setupDraft.input_requests.length === 1 ? "" : "s"} is required before this run can continue.`
+            : "All setup references are present. Save to validate them and continue to Runtime Discovery."}
+          {" "}Enter references to approved non-production resources. Do not paste passwords, access tokens or OTPs; keep secrets in the configured vault/provider.
+        </Alert>
+        {setupDraft.input_requests?.length > 0 && <Stack spacing={.75} sx={{ mb: 2 }}>{setupDraft.input_requests.map((request) => <Box key={request.key} sx={{ p: 1, bgcolor: "action.hover", borderRadius: 1.5 }}><Typography variant="body2" fontWeight={700}>{request.label}</Typography><Typography variant="caption" color="text.secondary">{request.reason} Required for {request.required_for.join(", ")}.</Typography></Box>)}</Stack>}
         <Grid container spacing={2}>
           <Grid item xs={12} md={6}><TextField fullWidth label="Credential set reference" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Test account role" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>
@@ -1365,7 +1433,8 @@ export default function AutopilotPage() {
           <Grid item xs={12}><FormControlLabel control={<Switch checked={setupDraft.safe_authentication_approved} onChange={(event) => updateSetup("safe_authentication_approved", event.target.checked)} />} label="Approve safe non-transactional authentication in this UAT environment" /></Grid>
         </Grid>
       </DialogContent>
-      <DialogActions><Button onClick={() => setSetupOpen(false)} disabled={setupBusy}>Cancel</Button><Button variant="contained" onClick={saveSetup} disabled={setupBusy}>{setupBusy ? "Saving…" : "Save and recheck readiness"}</Button></DialogActions>
+      <DialogActions><Button onClick={() => setSetupOpen(false)} disabled={setupBusy || resumeBusy}>Cancel</Button><Button variant="contained" onClick={saveSetup} disabled={setupBusy || resumeBusy}>{setupBusy ? "Saving…" : resumeBusy ? "Continuing…" : "Save and continue"}</Button></DialogActions>
     </Dialog>
   </Stack>;
 }
+

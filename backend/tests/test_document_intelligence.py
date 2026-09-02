@@ -141,3 +141,4 @@ def test_document_text_redacts_credentials_before_evidence_or_ai():
     assert "json-secret" not in safe
     assert "Password: [REDACTED]" in safe
     assert "Bearer [REDACTED]" in safe
+

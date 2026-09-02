@@ -482,6 +482,65 @@ async def test_completed_background_analysis_returns_saved_result(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_analysis_pauses_for_inputs_and_resumes_after_references(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    job_id, _ = await service.save_upload("investnation.apk", b"x" * 2048, "owner")
+
+    async def checkpoint_analysis(_job_id):
+        from app.schemas.autopilot import AutopilotAnalysis, AutopilotTest
+
+        result = AutopilotAnalysis(
+            job_id=job_id,
+            filename="investnation.apk",
+            sha256="a" * 64,
+            tests=[
+                AutopilotTest(
+                    id="QT-AUTO-FUNC-001",
+                    suite="Functional",
+                    title="Authenticate investor",
+                    objective="Validate a safe sign-in",
+                    requires_auth=True,
+                    requires_test_data=True,
+                )
+            ],
+        )
+        service._metadata_path(job_id).write_text(result.model_dump_json(), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(service, "analyze", checkpoint_analysis)
+    await service.analyze_safely(job_id)
+
+    pending = await service.get_job_status(job_id)
+    assert pending.status == "waiting_for_input"
+    assert pending.analysis is not None
+    assert {item.key for item in pending.input_requests} == {
+        "credential_reference",
+        "account_role",
+        "safe_authentication_approved",
+        "test_data_reference",
+        "reset_hook_reference",
+    }
+
+    await service.update_job(
+        job_id,
+        setup_profile={
+            "job_id": job_id,
+            "credential_reference": "qtxpert://credentials/investnation-uat",
+            "account_role": "UAT investor",
+            "environment_name": "UAT",
+            "test_data_reference": "qtxpert://data/investnation-synthetic",
+            "reset_hook_reference": "qtxpert://hooks/investnation-reset",
+            "safe_authentication_approved": True,
+        },
+    )
+    await service.resume_analysis(job_id)
+    resumed = await service.get_job_status(job_id)
+    assert resumed.status == "analyzed"
+    assert resumed.checkpoint_stage == "ready_for_discovery"
+    assert resumed.input_requests == []
+
+
+@pytest.mark.asyncio
 async def test_large_upload_stream_is_written_incrementally(tmp_path):
     service = _service(tmp_path)
 
@@ -599,4 +658,5 @@ async def test_execution_history_files_are_per_run_and_reusable(tmp_path):
     restored = _execution_record_from_file(records[0], job_id)
     assert restored is not None
     assert restored.execution_id == result.execution_id
+
 

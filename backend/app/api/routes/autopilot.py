@@ -38,6 +38,7 @@ from app.schemas.autopilot import (
     AutopilotJobStatus,
     AutopilotProviderStatus,
     AutopilotProfileOption,
+    AutopilotResumeRequest,
     AutopilotSurface,
     AutopilotSetupProfile,
     AutopilotSetupUpdateRequest,
@@ -58,7 +59,7 @@ from app.services.autopilot import (
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_web import AutopilotWebService
 from app.services.autopilot_context import default_context, get_profile, list_profiles
-from app.services.autopilot_ir import AutopilotIRCompiler
+from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
@@ -718,7 +719,12 @@ def _record_discovery(record: Optional[AutopilotJob]):
         return None
 
 
-def _setup_profile(job_id: str, value: Optional[dict]) -> AutopilotSetupProfile:
+def _setup_profile(
+    job_id: str,
+    value: Optional[dict],
+    analysis: Optional[AutopilotAnalysis] = None,
+    discovery: Optional[AutopilotDiscoveryResult] = None,
+) -> AutopilotSetupProfile:
     """Normalize stored non-secret setup references and expose completion metadata."""
     raw = dict(value or {})
     raw["job_id"] = job_id
@@ -740,17 +746,42 @@ def _setup_profile(job_id: str, value: Optional[dict]) -> AutopilotSetupProfile:
     if raw.get("approved_test_ids"):
         provided.append("approved_test_ids")
     raw["provided_fields"] = provided
-    raw.setdefault("missing_fields", [])
+    if analysis is not None:
+        requests = build_input_requests(analysis, AutopilotSetupProfile.model_validate({**raw, "job_id": job_id}))
+        raw["input_requests"] = [item.model_dump(mode="json") for item in requests]
+        raw["missing_fields"] = [item.label for item in requests]
+        if requests:
+            raw["checkpoint_stage"] = "input_collection"
+            raw["checkpoint_message"] = (
+                "Provide approved non-production references before authenticated, data-dependent or UAT cases continue."
+            )
+        elif discovery is None or not discovery.screens:
+            raw["checkpoint_stage"] = "runtime_discovery"
+            raw["checkpoint_message"] = (
+                "Setup references are complete. Run Runtime Discovery to map screens and controls before semantic execution."
+            )
+        else:
+            raw["checkpoint_stage"] = "ready"
+            raw["checkpoint_message"] = "Setup and runtime discovery are available for safe execution."
+    else:
+        raw.setdefault("missing_fields", [])
+        raw.setdefault("input_requests", [])
+        raw.setdefault("checkpoint_stage", "input_collection")
     return AutopilotSetupProfile.model_validate(raw)
 
 
-def _record_setup(record: Optional[AutopilotJob], job_id: str) -> AutopilotSetupProfile:
+def _record_setup(
+    record: Optional[AutopilotJob],
+    job_id: str,
+    analysis: Optional[AutopilotAnalysis] = None,
+    discovery: Optional[AutopilotDiscoveryResult] = None,
+) -> AutopilotSetupProfile:
     if record is None:
-        return _setup_profile(job_id, None)
+        return _setup_profile(job_id, None, analysis, discovery)
     try:
-        return _setup_profile(job_id, record.setup_profile)
+        return _setup_profile(job_id, record.setup_profile, analysis, discovery)
     except Exception:
-        return _setup_profile(job_id, None)
+        return _setup_profile(job_id, None, analysis, discovery)
 
 
 async def _start_analysis_from_asset(
@@ -769,6 +800,7 @@ async def _start_analysis_from_asset(
     surface_key: str = "",
     surface_identity: str = "",
     surface_version: int = 1,
+    setup_profile: Optional[dict] = None,
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
 
@@ -799,6 +831,8 @@ async def _start_analysis_from_asset(
     )
 
     await _link_repository_asset(db, service, job_id, asset.id)
+    if setup_profile:
+        await service.update_job(job_id, setup_profile=setup_profile)
     _queue_repository_materialization(background_tasks, settings, job_id, asset.id, user.id)
     result = await service.get_job_status(job_id)
     return await _mark_repository_available(db, result, user.id)
@@ -820,6 +854,7 @@ async def _start_analysis_from_local_path(
     surface_key: str = "",
     surface_identity: str = "",
     surface_version: int = 1,
+    setup_profile: Optional[dict] = None,
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -852,6 +887,8 @@ async def _start_analysis_from_local_path(
         )
     finally:
         await reader.close()
+    if setup_profile:
+        await service.update_job(job_id, setup_profile=setup_profile)
     background_tasks.add_task(service.analyze_safely, job_id)
     return await service.get_job_status(job_id)
 
@@ -1537,6 +1574,14 @@ async def rerun_autopilot_analysis(
     service = _service(settings)
     original = await _require_owned_job(service, job_id, user)
     original_record = await _safe_job_record(db, job_id, user.id)
+    # Reusing setup is opt-in.  The default ``ask`` behaves like a fresh setup
+    # for older clients, while the current UI presents the saved references and
+    # sends ``reuse`` only after the user confirms them.
+    setup_profile_to_copy = (
+        dict(original_record.setup_profile)
+        if payload.setup_action == "reuse" and original_record is not None and original_record.setup_profile
+        else None
+    )
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     effective_project_id = project_id or (UUID(str(original["project_id"])) if original.get("project_id") and _is_uuid(original.get("project_id")) else None)
     canonical_profile_id = _canonical_profile_id(payload.profile_id)
@@ -1615,6 +1660,8 @@ async def rerun_autopilot_analysis(
                 surface_identity=surface_identity,
                 surface_version=surface_version,
             )
+            if setup_profile_to_copy:
+                await service.update_job(new_job_id, setup_profile=setup_profile_to_copy)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         background_tasks.add_task(service.analyze_safely, new_job_id)
@@ -1650,6 +1697,7 @@ async def rerun_autopilot_analysis(
             surface_key=surface_key,
             surface_identity=surface_identity,
             surface_version=surface_version,
+            setup_profile=setup_profile_to_copy,
         )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
@@ -1699,6 +1747,7 @@ async def rerun_autopilot_analysis(
         surface_key=surface_key,
         surface_identity=surface_identity,
         surface_version=surface_version,
+        setup_profile=setup_profile_to_copy,
     )
 
 
@@ -1861,7 +1910,12 @@ async def get_autopilot_setup(
     """Return only non-secret references used to resolve deferred tests."""
     service = _service(settings)
     await _require_owned_job(service, job_id, user)
-    return _record_setup(await _safe_job_record(db, job_id, user.id), job_id)
+    record = await _safe_job_record(db, job_id, user.id)
+    try:
+        analysis = await service.load_analysis(job_id)
+    except FileNotFoundError:
+        analysis = None
+    return _record_setup(record, job_id, analysis, _record_discovery(record))
 
 
 @router.put("/{job_id}/setup", response_model=AutopilotSetupProfile)
@@ -1891,7 +1945,11 @@ async def update_autopilot_setup(
     stored = payload.model_dump()
     stored["credential_reference"] = credential_reference
     stored["updated_at"] = datetime.now(timezone.utc).isoformat()
-    profile = _setup_profile(job_id, stored)
+    try:
+        analysis = await service.load_analysis(job_id)
+    except FileNotFoundError:
+        analysis = None
+    profile = _setup_profile(job_id, stored, analysis, _record_discovery(record))
     try:
         record.setup_profile = profile.model_dump(mode="json")
         await db.commit()
@@ -1902,7 +1960,58 @@ async def update_autopilot_setup(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Autopilot setup could not be saved; retry after storage is available.",
         ) from exc
+    # Mirror the checkpoint into the job manifest as well as the ORM row.  The
+    # manifest makes a same-instance retry immediate; the row is the durable
+    # source of truth after a Render restart.
+    try:
+        await service.update_job(job_id, setup_profile=profile.model_dump(mode="json"))
+    except Exception:
+        logger.warning("Autopilot setup manifest update skipped job_id=%s", job_id, exc_info=True)
     return profile
+
+
+@router.post("/{job_id}/resume", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
+async def resume_autopilot_checkpoint(
+    job_id: str,
+    payload: AutopilotResumeRequest,
+    background_tasks: BackgroundTasks,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Continue a run only after its checkpoint references are confirmed."""
+
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    record = await _safe_job_record(db, job_id, user.id)
+    try:
+        analysis = await service.load_analysis(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Autopilot analysis is not ready for input validation yet.",
+        ) from exc
+    setup = _record_setup(record, job_id, analysis, _record_discovery(record))
+    if not payload.confirm_saved_inputs:
+        return await service.get_job_status(job_id)
+    if setup.input_requests:
+        current = await service.get_job_status(job_id)
+        current.checkpoint_stage = "input_collection"
+        current.checkpoint_message = "Complete the listed setup references before continuing."
+        current.input_requests = setup.input_requests
+        return current
+    await service.update_job(
+        job_id,
+        status="analyzing",
+        stage="validating_inputs",
+        progress=85,
+        checkpoint_stage="validating_inputs",
+        checkpoint_message="Validating approved setup references before continuing.",
+        input_requests=[],
+        error=None,
+    )
+    background_tasks.add_task(service.resume_analysis, job_id)
+    return await service.get_job_status(job_id)
 
 
 @router.post("/{job_id}/discover", response_model=AutopilotDiscoveryResult)
@@ -2242,3 +2351,4 @@ async def rerun_autopilot_smoke(
         job_id=job_id,
         request=request,
     )
+

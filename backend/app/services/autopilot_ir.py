@@ -17,6 +17,7 @@ from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotAutomationBundle,
     AutopilotDiscoveryResult,
+    AutopilotInputRequest,
     AutopilotSetupProfile,
     AutopilotTest,
     DiscoveredControl,
@@ -24,6 +25,98 @@ from app.schemas.autopilot import (
     QTXIRStep,
     QTXTestIR,
 )
+
+
+_INPUT_REQUEST_METADATA: dict[str, tuple[str, str, str, bool]] = {
+    "credential reference": (
+        "credential_reference",
+        "Approved credential-set reference",
+        "credential",
+        True,
+    ),
+    "test account role": (
+        "account_role",
+        "Test account role",
+        "credential",
+        False,
+    ),
+    "safe authentication approval": (
+        "safe_authentication_approved",
+        "Safe authentication approval",
+        "approval",
+        False,
+    ),
+    "synthetic test-data reference": (
+        "test_data_reference",
+        "Synthetic test-data reference",
+        "test_data",
+        False,
+    ),
+    "reset/cleanup reference": (
+        "reset_hook_reference",
+        "Reset/cleanup reference",
+        "test_data",
+        False,
+    ),
+    "signed-off acceptance criteria reference": (
+        "acceptance_criteria_reference",
+        "Signed-off acceptance criteria reference",
+        "acceptance",
+        False,
+    ),
+    "API/oracle reference": (
+        "api_oracle_reference",
+        "API/oracle reference",
+        "integration",
+        False,
+    ),
+}
+
+
+def build_input_requests(
+    analysis: AutopilotAnalysis,
+    setup: Optional[AutopilotSetupProfile] = None,
+) -> list[AutopilotInputRequest]:
+    """Group deferred dependencies into a user-facing checkpoint.
+
+    The compiler remains the single source of truth for readiness rules.  The
+    UI gets one request per missing reference, including the exact test cases
+    that depend on it, instead of a long opaque error string.
+    """
+
+    compiler = AutopilotIRCompiler()
+    dependents: dict[str, list[str]] = {}
+    for test in analysis.tests:
+        for field in compiler._missing_setup(test, setup):
+            dependents.setdefault(field, []).append(test.id)
+    requests: list[AutopilotInputRequest] = []
+    for field in sorted(dependents):
+        metadata = _INPUT_REQUEST_METADATA.get(field)
+        if metadata is None:
+            key, label, category, sensitive = field.replace(" ", "_"), field.title(), "environment", False
+        else:
+            key, label, category, sensitive = metadata
+        reason = {
+            "credential": "A non-production credential-set reference is needed for an approved authenticated journey. Store the secret in the configured vault; provide only its reference here.",
+            "approval": "Explicit approval is required before Autopilot can enter an authenticated non-transactional flow.",
+            "test_data": "Seeded synthetic data and a reset/cleanup hook keep repeated runs isolated and reversible.",
+            "acceptance": "UAT assertions need signed-off acceptance criteria so business outcomes are not inferred.",
+            "integration": "An API contract, oracle or observable backend reference is needed to validate integration outcomes.",
+            "environment": "The target environment must be identified before this case can be executed.",
+        }[category]
+        requests.append(
+            AutopilotInputRequest(
+                key=key,
+                label=label,
+                category=category,
+                reason=reason,
+                required_for=sorted(set(dependents[field])),
+                sensitive=sensitive,
+                status="pending",
+                reference_present=False,
+            )
+        )
+    return requests
 
 
 class AutopilotIRCompiler:
@@ -519,4 +612,5 @@ class AutopilotIRCompiler:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in test_id)
         safe = "_".join(part for part in safe.split("_") if part)
         return f"test_{safe}"
+
 

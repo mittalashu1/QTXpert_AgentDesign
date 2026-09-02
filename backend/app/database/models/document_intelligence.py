@@ -95,3 +95,4 @@ class DocumentFinding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     resolution_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     run: Mapped[DocumentAnalysisRun] = relationship(back_populates="findings")
+

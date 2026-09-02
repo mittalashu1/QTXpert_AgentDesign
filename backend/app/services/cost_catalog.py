@@ -506,3 +506,4 @@ async def refresh_cost_catalog_if_due(
     ):
         return await refresh_cost_catalog(db, settings, force=True)
     return view
+

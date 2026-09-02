@@ -463,6 +463,8 @@ class AutopilotPrototypeService:
                 record.stage = str(job.get("stage", "queued"))
                 record.progress = int(job.get("progress", 0))
                 record.error = job.get("error")
+                if "setup_profile" in job:
+                    record.setup_profile = job.get("setup_profile")
                 if analysis is not _MISSING:
                     record.analysis = analysis
                 await session.commit()
@@ -506,6 +508,8 @@ class AutopilotPrototypeService:
                     "created_at": record.created_at.isoformat(),
                     "updated_at": record.updated_at.isoformat(),
                 }
+                if getattr(record, "setup_profile", None) is not None:
+                    result["setup_profile"] = record.setup_profile
                 if record.analysis is not None:
                     result["analysis"] = record.analysis
                 return result
@@ -830,14 +834,18 @@ class AutopilotPrototypeService:
             temporary = path.with_suffix(".tmp")
             await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
             await asyncio.to_thread(temporary.replace, path)
-        await self._persist_job(job)
+        # Keep the JSON analysis and setup checkpoint in sync with the durable
+        # job row.  This matters after a Render restart, where the local
+        # manifest is intentionally disposable.
+        persisted_analysis = changes.get("analysis", _MISSING)
+        await self._persist_job(job, analysis=persisted_analysis)
         return job
 
     async def get_job_status(self, job_id: str) -> AutopilotJobStatus:
         job = await self.load_job(job_id)
         target_kind = str(job.get("target_kind") or ("ios" if str(job.get("filename", "")).lower().endswith(".ipa") else "android"))
         analysis = None
-        if job.get("status") in {"analyzed", "superseded"}:
+        if job.get("status") in {"analyzed", "waiting_for_input", "superseded"}:
             try:
                 analysis = await self.load_analysis(job_id)
             except FileNotFoundError:
@@ -906,6 +914,18 @@ class AutopilotPrototypeService:
             ),
             error=job.get("error"),
             analysis=analysis,
+            checkpoint_stage=str(job.get("checkpoint_stage") or (analysis.checkpoint_stage if analysis else "queued")),
+            checkpoint_message=job.get("checkpoint_message"),
+            input_requests=(
+                [
+                    item
+                    for item in (analysis.input_requests if analysis else [])
+                ]
+                or [
+                    item
+                    for item in (job.get("input_requests") or [])
+                ]
+            ),
         )
 
     async def get_latest_job_status(self, owner_id: str) -> AutopilotJobStatus | None:
@@ -990,8 +1010,102 @@ class AutopilotPrototypeService:
                 error=None,
             )
             await asyncio.wait_for(self.analyze(job_id), timeout=self.settings.AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS)
-            await self.update_job(job_id, status="analyzed", stage="complete", progress=100)
-            logger.info("Autopilot analysis completed job_id=%s duration_seconds=%.2f", job_id, time.perf_counter() - started)
+            analysis = await self.load_analysis(job_id)
+            # The first pass deliberately stops at a durable checkpoint when
+            # any generated case needs credentials, seeded data, acceptance
+            # criteria or an API oracle.  This prevents an apparently complete
+            # report from being produced without the customer's approval.
+            if any(
+                test.requires_auth
+                or test.requires_test_data
+                or test.bucket in {"uat", "integration"}
+                for test in analysis.tests
+            ):
+                from app.schemas.autopilot import AutopilotSetupProfile
+                from app.services.autopilot_ir import build_input_requests
+
+                raw_setup = dict(job.get("setup_profile") or {})
+                setup = None
+                if raw_setup:
+                    raw_setup["job_id"] = job_id
+                    setup = AutopilotSetupProfile.model_validate(raw_setup)
+                requests = build_input_requests(analysis, setup)
+                if not requests and setup is not None:
+                    ready_analysis = analysis.model_copy(
+                        update={"checkpoint_stage": "ready_for_discovery", "input_requests": []}
+                    )
+                    await asyncio.to_thread(
+                        self._metadata_path(job_id).write_text,
+                        ready_analysis.model_dump_json(indent=2),
+                        "utf-8",
+                    )
+                    await self.update_job(
+                        job_id,
+                        status="analyzed",
+                        stage="ready_for_discovery",
+                        progress=100,
+                        checkpoint_stage="ready_for_discovery",
+                        checkpoint_message=(
+                            "Saved setup references confirmed. Run Runtime Discovery to map screens and controls before semantic execution."
+                        ),
+                        input_requests=[],
+                        setup_profile=setup.model_copy(
+                            update={
+                                "last_validated_at": datetime.now(timezone.utc).isoformat(),
+                                "checkpoint_stage": "ready_for_discovery",
+                                "checkpoint_message": "Saved setup references confirmed. Runtime Discovery is the next step.",
+                                "input_requests": [],
+                                "missing_fields": [],
+                            }
+                        ).model_dump(mode="json"),
+                        analysis=ready_analysis.model_dump(mode="json"),
+                    )
+                    logger.info(
+                        "Autopilot analysis resumed with saved setup job_id=%s duration_seconds=%.2f",
+                        job_id,
+                        time.perf_counter() - started,
+                    )
+                    return
+                checkpoint_analysis = analysis.model_copy(
+                    update={
+                        "checkpoint_stage": "input_collection",
+                        "input_requests": requests,
+                    }
+                )
+                await asyncio.to_thread(
+                    self._metadata_path(job_id).write_text,
+                    checkpoint_analysis.model_dump_json(indent=2),
+                    "utf-8",
+                )
+                await self.update_job(
+                    job_id,
+                    status="waiting_for_input",
+                    stage="input_collection",
+                    progress=75,
+                    checkpoint_stage="input_collection",
+                    checkpoint_message=(
+                        "Analysis paused safely. Confirm approved non-production references "
+                        "before authenticated, data-dependent or UAT cases continue."
+                    ),
+                    input_requests=[item.model_dump(mode="json") for item in requests],
+                    analysis=checkpoint_analysis.model_dump(mode="json"),
+                )
+                logger.info(
+                    "Autopilot analysis paused for setup job_id=%s requests=%s duration_seconds=%.2f",
+                    job_id,
+                    len(requests),
+                    time.perf_counter() - started,
+                )
+            else:
+                await self.update_job(
+                    job_id,
+                    status="analyzed",
+                    stage="complete",
+                    progress=100,
+                    checkpoint_stage="complete",
+                    checkpoint_message=None,
+                )
+                logger.info("Autopilot analysis completed job_id=%s duration_seconds=%.2f", job_id, time.perf_counter() - started)
         except asyncio.TimeoutError:
             message = (
                 f"Autopilot analysis exceeded {self.settings.AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS}s. "
@@ -1001,6 +1115,91 @@ class AutopilotPrototypeService:
             await self.update_job(job_id, status="failed", stage="failed", progress=100, error=message)
         except Exception as exc:
             logger.exception("Autopilot analysis failed job_id=%s", job_id)
+            await self.update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                progress=100,
+                error=f"{type(exc).__name__}: {exc}"[:1000],
+            )
+        finally:
+            if acquired:
+                _ANALYSIS_SLOT.release()
+
+    async def resume_analysis(self, job_id: str) -> None:
+        """Resume a checkpointed analysis after setup references are confirmed.
+
+        References are checked against the same IR readiness rules used by the
+        automation compiler.  No secret is read or copied into the job; the
+        next explicit action is Runtime Discovery or safe execution.
+        """
+
+        started = time.perf_counter()
+        acquired = False
+        try:
+            await asyncio.to_thread(_ANALYSIS_SLOT.acquire)
+            acquired = True
+            job = await self.load_job(job_id)
+            analysis = await self.load_analysis(job_id)
+            from app.schemas.autopilot import AutopilotSetupProfile
+            from app.services.autopilot_ir import build_input_requests
+
+            raw_setup = dict(job.get("setup_profile") or {})
+            raw_setup["job_id"] = job_id
+            setup = AutopilotSetupProfile.model_validate(raw_setup)
+            requests = build_input_requests(analysis, setup)
+            if requests:
+                checkpoint_analysis = analysis.model_copy(
+                    update={"checkpoint_stage": "input_collection", "input_requests": requests}
+                )
+                await asyncio.to_thread(
+                    self._metadata_path(job_id).write_text,
+                    checkpoint_analysis.model_dump_json(indent=2),
+                    "utf-8",
+                )
+                await self.update_job(
+                    job_id,
+                    status="waiting_for_input",
+                    stage="input_collection",
+                    progress=75,
+                    checkpoint_stage="input_collection",
+                    checkpoint_message="Additional approved setup references are still required before continuation.",
+                    input_requests=[item.model_dump(mode="json") for item in requests],
+                    analysis=checkpoint_analysis.model_dump(mode="json"),
+                )
+                return
+
+            await self.update_job(
+                job_id,
+                status="analyzed",
+                stage="ready_for_discovery",
+                progress=100,
+                checkpoint_stage="ready_for_discovery",
+                checkpoint_message=(
+                    "Setup references confirmed. Run Runtime Discovery to map screens and controls, "
+                    "then execute the safe deterministic suite."
+                ),
+                input_requests=[],
+                setup_profile=setup.model_copy(
+                    update={
+                        "last_validated_at": datetime.now(timezone.utc).isoformat(),
+                        "checkpoint_stage": "ready_for_discovery",
+                        "checkpoint_message": "Setup references confirmed. Runtime Discovery is the next step.",
+                        "input_requests": [],
+                        "missing_fields": [],
+                    }
+                ).model_dump(mode="json"),
+                analysis=analysis.model_copy(
+                    update={"checkpoint_stage": "ready_for_discovery", "input_requests": []}
+                ).model_dump(mode="json"),
+            )
+            logger.info(
+                "Autopilot checkpoint resumed job_id=%s duration_seconds=%.2f",
+                job_id,
+                time.perf_counter() - started,
+            )
+        except Exception as exc:
+            logger.exception("Autopilot checkpoint resume failed job_id=%s", job_id)
             await self.update_job(
                 job_id,
                 status="failed",
@@ -2237,3 +2436,4 @@ class AutopilotPrototypeService:
                 "authentication",
             )
         )
+

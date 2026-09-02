@@ -8,7 +8,7 @@ from app.schemas.autopilot import (
     DiscoveredTransition,
     DiscoveryLocator,
 )
-from app.services.autopilot_ir import AutopilotIRCompiler
+from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests
 
 
 def _analysis(tests):
@@ -283,3 +283,43 @@ def test_setup_references_resolve_data_gate_before_discovery_promotion():
     assert ready.tests[0].readiness == "executable"
     assert ready.tests[0].promoted_by_discovery is True
     assert ready.setup_missing_fields == []
+
+
+def test_input_checkpoint_groups_dependencies_by_safe_reference():
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AI-AUTH",
+            suite="Functional",
+            title="Authenticate customer",
+            priority="high",
+            objective="Validate a non-production sign-in",
+            requires_auth=True,
+            requires_test_data=True,
+        ),
+        AutopilotTest(
+            id="QT-AI-UAT",
+            suite="UAT",
+            title="Confirm customer acceptance journey",
+            priority="high",
+            objective="Validate signed-off acceptance criteria",
+            bucket="uat",
+            requires_auth=True,
+            requires_test_data=True,
+        ),
+    ])
+
+    requests = build_input_requests(analysis)
+
+    by_key = {request.key: request for request in requests}
+    assert set(by_key) == {
+        "credential_reference",
+        "account_role",
+        "safe_authentication_approved",
+        "test_data_reference",
+        "reset_hook_reference",
+        "acceptance_criteria_reference",
+    }
+    assert by_key["credential_reference"].sensitive is True
+    assert set(by_key["credential_reference"].required_for) == {"QT-AI-AUTH", "QT-AI-UAT"}
+    assert all(request.status == "pending" for request in requests)
+

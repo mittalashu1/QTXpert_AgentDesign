@@ -140,3 +140,4 @@ class DocumentGenerateTestsResponse(BaseModel):
     status: str
     title: Optional[str] = None
     message: str
+

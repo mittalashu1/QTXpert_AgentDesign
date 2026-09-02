@@ -133,3 +133,4 @@ def test_failed_provider_refresh_keeps_last_known_usage_and_surfaces_error():
     assert merged["browserstack"]["live_usage"] == {"parallel_max": 5}
     assert merged["browserstack"]["error"].startswith("BrowserStack")
     assert merged["cloudflare_r2"]["live_usage"] == {"objects": 18}
+

@@ -132,3 +132,4 @@ class GenerationRunRepository:
         )
         if result.rowcount:
             await self._db.commit()
+

@@ -476,3 +476,4 @@ function RefinementsTable({ run, onReview }: { run?: DocumentAnalysisRun | null;
     </TableContainer>
   );
 }
+

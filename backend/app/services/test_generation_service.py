@@ -477,3 +477,4 @@ class TestGenerationService:
                 ))
             except Exception as case_exc:  # noqa: BLE001
                 warnings.append(f"Skipped test case #{index}: {case_exc}")
+

@@ -121,3 +121,4 @@ def test_azure_actual_cost_is_marked_authoritative_when_connected():
     assert azure.actual_cost == 20.0
     assert azure.currency == "USD"
     assert azure.portal_url == "https://portal.azure.com/"
+

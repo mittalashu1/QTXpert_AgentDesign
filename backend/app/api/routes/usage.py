@@ -447,3 +447,4 @@ async def refresh_cost_catalog_endpoint(
         next_refresh_at=snapshot.next_refresh_at,
         error=snapshot.error,
     )
+

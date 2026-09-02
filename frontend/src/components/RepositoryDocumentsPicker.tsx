@@ -220,3 +220,4 @@ export default function RepositoryDocumentsPicker({
 function LinearDocumentPlaceholder() {
   return <Stack direction="row" spacing={1} alignItems="center" sx={{ py: 1 }}><CircularProgress size={16} /><Typography variant="body2" color="text.secondary">Checking the project repository…</Typography></Stack>;
 }
+

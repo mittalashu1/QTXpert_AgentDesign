@@ -226,3 +226,4 @@ async def publish_document_intelligence(
         title=requirement.title,
         message="Document Intelligence baseline is now available to Test Design.",
     )
+
