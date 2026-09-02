@@ -13,6 +13,16 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Alembic's default version table uses VARCHAR(32).  This revision name
+    # is intentionally descriptive and is longer than that legacy column,
+    # which caused the migration transaction to roll back after applying the
+    # schema changes and left production running in degraded mode.  Widen the
+    # bookkeeping column before Alembic records this revision so upgrades are
+    # durable on existing Neon/Postgres databases as well as fresh installs.
+    op.execute(
+        "ALTER TABLE alembic_version "
+        "ALTER COLUMN version_num TYPE VARCHAR(64)"
+    )
     op.add_column(
         "generation_runs",
         sa.Column("source_document_analysis_id", postgresql.UUID(as_uuid=True), nullable=True),

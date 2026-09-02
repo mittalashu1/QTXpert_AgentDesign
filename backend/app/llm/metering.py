@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, List, Optional
 
-from app.config import Settings
+from app.config import DEFAULT_LLM_COST_RATES_JSON, Settings
 from app.llm.base import LLMMessage, LLMProvider, LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,8 @@ class UsageMeter:
         persist: bool = False,
     ):
         try:
-            self._rates = json.loads(settings.LLM_COST_RATES_JSON or "{}")
+            raw_rates = (settings.LLM_COST_RATES_JSON or "").strip() or DEFAULT_LLM_COST_RATES_JSON
+            self._rates = json.loads(raw_rates)
         except json.JSONDecodeError as exc:
             raise ValueError("LLM_COST_RATES_JSON must be valid JSON") from exc
         self._hook = hook
