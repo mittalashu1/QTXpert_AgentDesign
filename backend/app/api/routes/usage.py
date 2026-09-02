@@ -12,6 +12,7 @@ from app.config import Settings, get_settings
 from app.database.models.llm_usage import LLMUsageEvent
 from app.database.models.user import User, UserRole
 from app.database.session import get_db_session
+from app.llm.metering import load_cost_rates
 from app.schemas.usage import (
     AICostBreakdown,
     AICostSummary,
@@ -56,16 +57,36 @@ def _external_service_url(value: str | None) -> bool:
     return bool(text) and not any(token in text for token in ("localhost", "127.0.0.1", "@postgres:", "@redis:"))
 
 
-def _provider_estimates(model_rows) -> dict[str, dict[str, float | int]]:
+def _provider_estimates(
+    model_rows,
+    rates: dict[str, dict[str, float]] | None = None,
+) -> dict[str, dict[str, float | int]]:
     providers: dict[str, dict[str, float | int]] = defaultdict(
         lambda: {"requests": 0, "estimated_cost_usd": 0.0, "unpriced": 0}
     )
     for row in model_rows:
         key = str(row.provider or "unknown").lower()
+        estimated_cost, unpriced = _reprice_usage_row(row, rates or {})
         providers[key]["requests"] += int(row.request_count or 0)
-        providers[key]["estimated_cost_usd"] += _as_float(row.estimated_cost_usd)
-        providers[key]["unpriced"] += int(row.unpriced_requests or 0)
+        providers[key]["estimated_cost_usd"] += estimated_cost
+        providers[key]["unpriced"] += unpriced
     return dict(providers)
+
+
+def _reprice_usage_row(row, rates: dict[str, dict[str, float]]) -> tuple[float, int]:
+    """Re-price legacy NULL estimates when an explicit model rate is known."""
+    persisted_cost = _as_float(row.estimated_cost_usd)
+    unpriced_requests = int(row.unpriced_requests or 0)
+    rate = rates.get(f"{str(row.provider or '').lower()}:{row.model}")
+    if not rate or not unpriced_requests:
+        return persisted_cost, unpriced_requests
+    input_tokens = int(getattr(row, "unpriced_input_tokens", 0) or 0)
+    output_tokens = int(getattr(row, "unpriced_output_tokens", 0) or 0)
+    repriced = (
+        input_tokens * float(rate.get("input", 0) or 0)
+        + output_tokens * float(rate.get("output", 0) or 0)
+    ) / 1_000_000
+    return persisted_cost + repriced, 0
 
 
 def _build_cost_surfaces(
@@ -73,9 +94,10 @@ def _build_cost_surfaces(
     model_rows,
     azure_snapshot,
     catalog_snapshot: CostCatalogSnapshotView | None = None,
+    rates: dict[str, dict[str, float]] | None = None,
 ) -> list[CostSurface]:
     """Describe every known QTXpert billing surface without inventing zero-cost values."""
-    providers = _provider_estimates(model_rows)
+    providers = _provider_estimates(model_rows, rates or load_cost_rates(settings))
 
     def surface(**values) -> CostSurface:
         """Build a row and enrich it with safe portal/limit metadata."""
@@ -324,6 +346,14 @@ async def get_ai_costs(
     totals = totals_result.one()
 
     model_cost = func.coalesce(func.sum(LLMUsageEvent.estimated_cost_usd), 0).label("estimated_cost_usd")
+    unpriced_input = func.coalesce(
+        func.sum(LLMUsageEvent.input_tokens).filter(LLMUsageEvent.estimated_cost_usd.is_(None)),
+        0,
+    ).label("unpriced_input_tokens")
+    unpriced_output = func.coalesce(
+        func.sum(LLMUsageEvent.output_tokens).filter(LLMUsageEvent.estimated_cost_usd.is_(None)),
+        0,
+    ).label("unpriced_output_tokens")
     model_rows = (
         await db.execute(
             select(
@@ -335,6 +365,8 @@ async def get_ai_costs(
                 func.coalesce(func.sum(LLMUsageEvent.output_tokens), 0).label("output_tokens"),
                 model_cost,
                 func.count(LLMUsageEvent.id).filter(LLMUsageEvent.estimated_cost_usd.is_(None)).label("unpriced_requests"),
+                unpriced_input,
+                unpriced_output,
             )
             .where(LLMUsageEvent.created_at >= since)
             .group_by(LLMUsageEvent.provider, LLMUsageEvent.model, LLMUsageEvent.tier)
@@ -342,7 +374,13 @@ async def get_ai_costs(
         )
     ).all()
 
-    estimated_cost = _as_float(totals.estimated_cost_usd)
+    rates = load_cost_rates(settings)
+    priced_rows: list[tuple[object, float, int]] = []
+    for row in model_rows:
+        row_cost, row_unpriced = _reprice_usage_row(row, rates)
+        priced_rows.append((row, row_cost, row_unpriced))
+    estimated_cost = sum(row_cost for _row, row_cost, _unpriced in priced_rows)
+    unpriced_requests = sum(row_unpriced for _row, _row_cost, row_unpriced in priced_rows)
     azure_snapshot = await AzureCostService(settings).query(days)
     variance_usd = None
     if azure_snapshot.connected and azure_snapshot.actual_cost is not None and (azure_snapshot.currency or "").upper() == "USD":
@@ -351,7 +389,7 @@ async def get_ai_costs(
     # Provider probes are cached in Neon and refreshed at most monthly.  A
     # missing connector never prevents the static catalog from rendering.
     catalog_snapshot = await refresh_cost_catalog_if_due(db, settings)
-    surfaces = _build_cost_surfaces(settings, model_rows, azure_snapshot, catalog_snapshot)
+    surfaces = _build_cost_surfaces(settings, model_rows, azure_snapshot, catalog_snapshot, rates)
     return AICostSummary(
         period_days=days,
         since=since,
@@ -359,7 +397,7 @@ async def get_ai_costs(
         input_tokens=int(totals.input_tokens or 0),
         output_tokens=int(totals.output_tokens or 0),
         estimated_cost_usd=estimated_cost,
-        unpriced_requests=int(totals.unpriced_requests or 0),
+        unpriced_requests=unpriced_requests,
         by_model=[
             AICostBreakdown(
                 provider=row.provider,
@@ -368,10 +406,10 @@ async def get_ai_costs(
                 request_count=int(row.request_count or 0),
                 input_tokens=int(row.input_tokens or 0),
                 output_tokens=int(row.output_tokens or 0),
-                estimated_cost_usd=_as_float(row.estimated_cost_usd),
-                unpriced_requests=int(row.unpriced_requests or 0),
+                estimated_cost_usd=row_cost,
+                unpriced_requests=row_unpriced,
             )
-            for row in model_rows
+            for row, row_cost, row_unpriced in priced_rows
         ],
         azure=AzureActualCost(
             configured=azure_snapshot.configured,

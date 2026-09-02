@@ -1,6 +1,13 @@
 from types import SimpleNamespace
 
-from app.api.routes.usage import COST_ADMIN_EMAIL, _build_cost_surfaces, _is_cost_admin_email
+import pytest
+
+from app.api.routes.usage import (
+    COST_ADMIN_EMAIL,
+    _build_cost_surfaces,
+    _is_cost_admin_email,
+    _reprice_usage_row,
+)
 from app.config import Settings
 
 
@@ -25,6 +32,30 @@ def test_cost_center_owner_email_is_exact_and_case_insensitive():
     assert _is_cost_admin_email(" ADMIN@QTXPERT.COM ") is True
     assert _is_cost_admin_email("other-admin@qtxpert.com") is False
     assert _is_cost_admin_email(None) is False
+
+
+def test_legacy_unpriced_usage_is_repriced_only_when_rate_is_configured():
+    row = SimpleNamespace(
+        provider="gemini",
+        model="gemini-3.5-flash-lite",
+        estimated_cost_usd=None,
+        unpriced_requests=2,
+        unpriced_input_tokens=1_000,
+        unpriced_output_tokens=2_000,
+    )
+    cost, unpriced = _reprice_usage_row(
+        row,
+        {"gemini:gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50}},
+    )
+    assert cost == pytest.approx(0.0053)
+    assert unpriced == 0
+
+    unknown_cost, unknown_unpriced = _reprice_usage_row(
+        row,
+        {"azure_openai:gpt-5.6-terra": {"input": 1, "output": 2}},
+    )
+    assert unknown_cost == 0
+    assert unknown_unpriced == 2
 
 
 def test_cost_inventory_lists_unmetered_ecosystem_surfaces_without_fake_zeroes():
