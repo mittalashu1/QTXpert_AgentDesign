@@ -23,12 +23,14 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 RUN chmod -R a+rX /ms-playwright
 
 COPY . .
+COPY entrypoint.sh /app/entrypoint.sh
 
 # Fail the image build before deployment if any application module has invalid Python syntax.
 RUN python -m compileall -q app alembic
 
 RUN useradd --create-home --shell /bin/bash appuser \
     && mkdir -p /app/storage/uploads /app/storage/autopilot \
+    && chmod 0555 /app/entrypoint.sh \
     && chown -R appuser:appuser /app
 USER appuser
 
@@ -41,4 +43,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # /api/v1/health can report the degraded dependency and the Autopilot local
 # fallback remains inspectable.  Migrations still run on every healthy start;
 # a failed attempt is logged and retried by the next deploy/restart.
-CMD ["sh", "-c", "if [ \"${RUN_MIGRATIONS:-true}\" = \"true\" ]; then alembic upgrade head || echo 'WARNING: database migrations were deferred; continuing in degraded mode' >&2; fi; exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["/app/entrypoint.sh"]
