@@ -27,7 +27,7 @@ aioboto3==13.3.0
 # Optional, opt-in AWS CloudWatch Application Signals/X-Ray APM. The
 # container entrypoint enables the auto-instrumenter only when
 # AWS_APM_ENABLED=true, so normal deployments do not export telemetry.
-aws-opentelemetry-distro==0.19.0
+aws-opentelemetry-distro==0.14.1
 
 pinecone-client==5.0.1
 
