@@ -110,6 +110,21 @@ services:
         value: azure_openai:configured
       - key: LLM_COST_RATES_JSON
         value: '{"gemini:gemini-3.5-flash-lite":{"input":0.30,"output":2.50},"gemini:gemini-3.5-flash":{"input":1.50,"output":9.00}}'
+      # Optional AWS CloudWatch Application Signals/X-Ray APM. The backend
+      # keeps this disabled until a scoped AWS telemetry role and pre-created
+      # CloudWatch log group/stream are supplied in Render secrets.
+      - key: AWS_APM_ENABLED
+        value: "false"
+      - key: AWS_APM_SERVICE_NAME
+        value: qtxpert-backend
+      - key: AWS_APM_ENVIRONMENT
+        value: production
+      - key: AWS_APM_TRACE_SAMPLE_RATIO
+        value: "0.05"
+      - key: AWS_APM_LOG_GROUP
+        sync: false
+      - key: AWS_APM_LOG_STREAM
+        sync: false
       - key: CORS_ORIGINS
         value: https://qtxpert-agentdesign.onrender.com,https://design.qtxpert.com,https://qtxpert-frontend.onrender.com
       # Set the remaining provider/integration keys (AZURE_OPENAI_API_KEY,
