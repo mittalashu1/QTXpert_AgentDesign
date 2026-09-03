@@ -31,6 +31,15 @@ a managed Redis instance.
 6. Update `CORS_ORIGINS` on the backend service, and
    `VITE_API_BASE_URL` on the frontend service, once you know your final
    Render service URLs (or custom domains).
+## Optional AWS APM
+
+QTXpert can export backend traces to AWS X-Ray and optionally correlated logs
+to CloudWatch Application Signals through AWS Distro for OpenTelemetry. The
+feature is deliberately off by default. Follow [`AWS_APM.md`](AWS_APM.md),
+pre-create the CloudWatch log group/stream, add the scoped AWS credentials as
+Render secrets, and set `AWS_APM_ENABLED=true`. A Render deployment is outside
+AWS, so the AWS SDK credential chain must be configured explicitly; do not
+embed credentials in the image or repository.
 
 ## Rolling back
 
