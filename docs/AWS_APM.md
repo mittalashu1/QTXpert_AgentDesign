@@ -44,14 +44,19 @@ pre-created CloudWatch log group:
       "Resource": "*"
     },
     {
-      "Sid": "CloudWatchLogWrite",
+      "Sid": "CloudWatchLogGroupDiscovery",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogStreamWrite",
       "Effect": "Allow",
       "Action": [
-        "logs:DescribeLogGroups",
         "logs:DescribeLogStreams",
         "logs:PutLogEvents"
       ],
-      "Resource": "arn:aws:logs:<REGION>:<ACCOUNT_ID>:log-group:/qtxpert/apm:*"
+      "Resource": "arn:aws:logs:<REGION>:<ACCOUNT_ID>:log-group:/qtxpert/apm:log-stream:render-backend"
     }
   ]
 }
