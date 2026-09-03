@@ -47,6 +47,26 @@ Per-provider credentials (only the active provider's keys are required):
 | Anthropic | `ANTHROPIC_API_KEY` |
 | Gemini | `GOOGLE_API_KEY` |
 | Bedrock | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `BEDROCK_MODEL_ID` |
+## AWS Application Performance Monitoring (optional)
+
+The Render backend includes opt-in AWS Distro for OpenTelemetry support for
+CloudWatch Application Signals and X-Ray. It is disabled by default and does
+not change the normal startup path until `AWS_APM_ENABLED=true` is set.
+
+| Variable | Default | Description |
+|---|---|---|
+| `AWS_APM_ENABLED` | `false` | Starts the ADOT Python auto-instrumenter when `true`. |
+| `AWS_APM_SERVICE_NAME` | `qtxpert-backend` | Service name shown in CloudWatch Application Signals. |
+| `AWS_APM_ENVIRONMENT` | `production` | Deployment environment dimension. |
+| `AWS_APM_TRACE_SAMPLE_RATIO` | `0.05` | Trace sampling ratio; keep bounded to control ingestion cost. |
+| `AWS_APM_LOG_GROUP` / `AWS_APM_LOG_STREAM` | unset | Existing CloudWatch Logs group/stream for correlated logs. If either is unset, log export stays off while traces continue. |
+| `OTEL_METRICS_EXPORTER` | `none` | Metrics are off by default to avoid duplicate Application Signals ingestion; Render native metrics remain available. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | derived | Optional X-Ray OTLP endpoint override; otherwise `https://xray.$AWS_REGION.amazonaws.com/v1/traces`. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | derived | Optional CloudWatch OTLP logs endpoint override. |
+
+See [`docs/AWS_APM.md`](AWS_APM.md) for the IAM policy, Render secret setup,
+and validation checklist. Do not reuse an unrestricted Bedrock or root key for
+telemetry; use a dedicated least-privilege role/key and rotate it.
 
 Successful model calls are persisted for the admin-only Dashboard AI spend card.
 Run the database migration (`alembic upgrade head`) before enabling production
