@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-labelledby="title">
+  <title id="title">QTXpert icon</title>
+  <defs>
+    <linearGradient id="qg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#028ed1"/>
+      <stop offset="1" stop-color="#072b5c"/>
+    </linearGradient>
+    <linearGradient id="tg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#18c8c8"/>
+      <stop offset="1" stop-color="#06aeb5"/>
+    </linearGradient>
+  </defs>
+  <circle cx="72" cy="70" r="48" fill="none" stroke="url(#qg)" stroke-width="22"/>
+  <path d="M67 82h25l38 50H103z" fill="url(#tg)"/>
+</svg>
