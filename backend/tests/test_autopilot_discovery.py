@@ -17,6 +17,20 @@ SAMPLE_XML = '''
 </hierarchy>
 '''
 
+LABELLED_LOGIN_XML = '''
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" clickable="false" enabled="true">
+    <node index="0" text="User ID" class="android.view.View" clickable="false" enabled="true" />
+    <node index="1" text="(Email address)" class="android.view.View" clickable="false" enabled="true" />
+    <node index="2" text="*" class="android.view.View" clickable="false" enabled="true" />
+    <node index="3" text="" class="android.widget.EditText" clickable="true" enabled="true" bounds="[10,100][300,150]" />
+    <node index="4" text="Password" class="android.view.View" clickable="false" enabled="true" />
+    <node index="5" text="*" class="android.view.View" clickable="false" enabled="true" />
+    <node index="6" text="" class="android.widget.EditText" clickable="true" enabled="true" bounds="[10,200][300,250]" />
+  </node>
+</hierarchy>
+'''
+
 
 def test_parse_controls_builds_semantics_and_locator_candidates():
     controls = AutopilotDiscoveryService.parse_controls(SAMPLE_XML)
@@ -50,6 +64,19 @@ def test_runtime_input_requests_are_reference_only():
     assert requests[0].field_type == "credential"
     assert requests[0].reference_present is False
     assert "username" in requests[0].label.lower()
+
+
+def test_runtime_input_requests_use_accessibility_sibling_labels():
+    controls = AutopilotDiscoveryService.parse_controls(LABELLED_LOGIN_XML)
+
+    assert [control.semantic_label for control in controls if control.input_capable] == [
+        "(Email address)",
+        "Password",
+    ]
+    assert [control.input_kind for control in controls if control.input_capable] == [
+        "credential",
+        "credential",
+    ]
 
 
 def test_loading_screen_detection_is_conservative():

@@ -53,6 +53,13 @@ _ACTIONABLE_CLASSES = {
     "android.widget.Button", "android.widget.ImageButton", "android.widget.TextView",
     "android.view.View", "android.widget.CheckedTextView", "android.widget.Switch",
 }
+_GENERIC_INPUT_LABELS = {
+    "edittext", "autocompletetextview", "textfield", "securetextfield",
+    "searchfield", "textview", "control", "input",
+}
+_GENERIC_STATIC_LABELS = {
+    "view", "imageview", "button", "control", "checkedtextview", "switch", "*",
+}
 
 
 class AutopilotDiscoveryService:
@@ -95,6 +102,29 @@ class AutopilotDiscoveryService:
                 return re.sub(r"\s+", " ", value).strip()[:160]
         class_name = (attrs.get("class") or "control").rsplit(".", 1)[-1]
         return class_name[:160]
+
+    @classmethod
+    def _input_context_label(cls, labels: Iterable[str]) -> Optional[str]:
+        """Return the nearest meaningful label rendered before an input.
+
+        Android and iOS accessibility trees commonly render a field label as a
+        sibling node rather than exposing it as the input's hint.  Keeping a
+        short, local label window lets us classify ``User ID``/``Password``
+        fields without reading or storing the field value.
+        """
+        for value in reversed(list(labels)[-8:]):
+            candidate = re.sub(r"\s+", " ", (value or "").strip())
+            normalized = cls._normalize(candidate).replace(" ", "")
+            if not candidate or normalized in _GENERIC_STATIC_LABELS or not re.search(r"[a-zA-Z]", candidate):
+                continue
+            return candidate[:160]
+        return None
+
+    @classmethod
+    def _is_generic_input_label(cls, label: str, class_name: str) -> bool:
+        normalized = cls._normalize(label).replace(" ", "")
+        class_short = (class_name or "").rsplit(".", 1)[-1].lower().replace(" ", "")
+        return normalized in _GENERIC_INPUT_LABELS or normalized == class_short
 
     @classmethod
     def _input_kind(cls, attrs: Dict[str, str], label: str) -> str:
@@ -236,6 +266,7 @@ class AutopilotDiscoveryService:
             return []
         controls: list[DiscoveredControl] = []
         seen: set[str] = set()
+        recent_static_labels: list[str] = []
         for index, node in enumerate(root.iter()):
             attrs = {str(k): str(v) for k, v in node.attrib.items()}
             class_name = attrs.get("class", "")
@@ -251,10 +282,29 @@ class AutopilotDiscoveryService:
                 "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeSearchField",
             }
             actionable = clickable or input_capable or class_name in _ACTIONABLE_CLASSES
+            raw_label = cls._semantic_label(attrs)
+            # Field labels are often separate, non-clickable sibling nodes.
+            # Retain only a short local window of meaningful labels; never
+            # retain text from an input widget because it could be user data.
+            if (
+                not input_capable
+                and not clickable
+                and raw_label
+                and cls._normalize(raw_label).replace(" ", "") not in _GENERIC_STATIC_LABELS
+                and re.search(r"[a-zA-Z]", raw_label)
+            ):
+                recent_static_labels.append(raw_label)
+                recent_static_labels = recent_static_labels[-8:]
             if not actionable:
                 continue
-            label = cls._semantic_label(attrs)
-            input_kind = cls._input_kind(attrs, label) if input_capable else None
+            label = raw_label
+            nearby_label = cls._input_context_label(recent_static_labels) if input_capable else None
+            if input_capable and nearby_label and cls._is_generic_input_label(label, class_name):
+                label = nearby_label
+            kind_attrs = {**attrs}
+            if nearby_label:
+                kind_attrs["hint"] = " ".join(filter(None, [attrs.get("hint", ""), nearby_label]))
+            input_kind = cls._input_kind(kind_attrs, " ".join(filter(None, [label, nearby_label or ""]))) if input_capable else None
             # Do not create a text XPath from a value in an input widget.
             locator_attrs = {**attrs, "text": ""} if input_capable else attrs
             locators = cls._locators(locator_attrs)
