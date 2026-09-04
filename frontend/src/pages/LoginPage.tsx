@@ -20,7 +20,6 @@ import {
 import {
   AlternateEmailRounded,
   AutoAwesomeRounded,
-  CheckCircleRounded,
   InsightsRounded,
   LockOutlined,
   PlayCircleOutlineRounded,
@@ -166,25 +165,21 @@ export default function LoginPage() {
         />
 
         <Stack spacing={1} sx={{ position: "relative" }}>
-          <Stack direction="row" spacing={1.25} alignItems="center">
-            <Box
-              sx={{
-                width: 38,
-                height: 38,
-                borderRadius: 2.25,
-                display: "grid",
-                placeItems: "center",
-                bgcolor: "rgba(255,255,255,.12)",
-                border: "1px solid rgba(255,255,255,.22)",
-              }}
-            >
-              <CheckCircleRounded sx={{ color: "#67E8F9" }} />
-            </Box>
-            <Typography variant="h5" sx={{ fontWeight: 800, letterSpacing: "-0.03em" }}>
-              QTXpert
-            </Typography>
-          </Stack>
-          <Typography variant="caption" sx={{ color: "rgba(255,255,255,.62)", pl: 6.25, letterSpacing: ".08em" }}>
+          <Box
+            sx={{
+              display: "inline-flex",
+              alignSelf: "flex-start",
+              alignItems: "center",
+              bgcolor: "rgba(255,255,255,.96)",
+              px: 1.5,
+              py: 0.8,
+              borderRadius: 2.25,
+              boxShadow: "0 8px 28px rgba(0,0,0,.15)",
+            }}
+          >
+            <Box component="img" src="/qtxpert-logo.svg" alt="QTXpert" sx={{ display: "block", width: 165, height: "auto" }} />
+          </Box>
+          <Typography variant="caption" sx={{ color: "rgba(255,255,255,.62)", pl: 0.5, letterSpacing: ".08em" }}>
             QUALITY ENGINEERING INTELLIGENCE
           </Typography>
         </Stack>
@@ -249,14 +244,9 @@ export default function LoginPage() {
         }}
       >
         <Box sx={{ width: "100%", maxWidth: 470 }}>
-          <Stack direction="row" spacing={1.25} alignItems="center" sx={{ display: { xs: "flex", md: "none" }, mb: 4 }}>
-            <Box sx={{ width: 36, height: 36, borderRadius: 2, display: "grid", placeItems: "center", bgcolor: "#EEF2FF" }}>
-              <CheckCircleRounded color="primary" />
-            </Box>
-            <Typography variant="h5" sx={{ color: "#101828", fontWeight: 800, letterSpacing: "-0.03em" }}>
-              QTXpert
-            </Typography>
-          </Stack>
+          <Box sx={{ display: { xs: "block", md: "none" }, mb: 4 }}>
+            <Box component="img" src="/qtxpert-logo.svg" alt="QTXpert" sx={{ display: "block", width: 155, height: "auto" }} />
+          </Box>
 
           <Card
             elevation={0}
