@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 160" role="img" aria-labelledby="title desc">
+  <title id="title">QTXpert</title>
+  <desc id="desc">QTXpert navy and teal technology wordmark</desc>
+  <defs>
+    <linearGradient id="qg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#028ed1"/>
+      <stop offset="1" stop-color="#072b5c"/>
+    </linearGradient>
+    <linearGradient id="tg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#18c8c8"/>
+      <stop offset="1" stop-color="#06aeb5"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(8 8)">
+    <circle cx="66" cy="66" r="49" fill="none" stroke="url(#qg)" stroke-width="22"/>
+    <path d="M62 77h24l35 45H95z" fill="url(#tg)"/>
+    <text x="133" y="107" font-family="Arial, Helvetica, sans-serif" font-size="91" font-weight="800" fill="#062b5b">T</text>
+    <path d="M222 27h34l36 50-22 30z" fill="url(#tg)"/>
+    <path d="M291 27h34l-37 50 38 51h-35l-37-51z" fill="#062b5b"/>
+    <text x="324" y="107" font-family="Arial, Helvetica, sans-serif" font-size="82" font-weight="800" letter-spacing="-4" fill="#062b5b">pert</text>
+  </g>
+</svg>
