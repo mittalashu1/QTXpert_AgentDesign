@@ -199,7 +199,11 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Mobile Autopilot prototype
     # ------------------------------------------------------------------ #
-    AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=250, ge=1, le=2048)
+    # Mobile packages are streamed to object storage and analysed in bounded
+    # stages. Keep the product limit aligned with the deep manifest ceiling
+    # so a 300 MB release build can be inspected instead of being accepted
+    # only for execution.
+    AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=300, ge=1, le=2048)
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
     AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
     # Startup recovery can replay a large APK analysis after a process restart.
@@ -223,10 +227,14 @@ class Settings(BaseSettings):
     AUTOPILOT_SUITE_TIMEOUT_SECONDS: int = Field(default=900, ge=60, le=3600)
     AUTOPILOT_BROWSERSTACK_UPLOAD_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
     # Androguard can allocate a very large resource table for some release
-    # APKs. Above this size Autopilot deliberately uses bounded ZIP metadata
-    # inspection so a small Render instance cannot be taken down by a parser
-    # timeout. The binary remains available for BrowserStack/Appium execution.
-    AUTOPILOT_DEEP_PARSE_MAX_MB: int = Field(default=64, ge=1, le=512)
+    # APKs. Up to 300 MB is inspected by the manifest parser; the parser is
+    # still isolated behind the analysis timeout and falls back to bounded ZIP
+    # metadata if a malformed or highly-compressed package exhausts the
+    # worker budget. The binary always remains available for
+    # BrowserStack/Appium execution.
+    AUTOPILOT_DEEP_PARSE_MAX_MB: int = Field(default=300, ge=1, le=512)
+    AUTOPILOT_DISCOVERY_SETTLE_SECONDS: int = Field(default=4, ge=1, le=30)
+    AUTOPILOT_DISCOVERY_SETTLE_RETRIES: int = Field(default=3, ge=0, le=6)
     AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS: int = Field(default=300, ge=30, le=1800)
     # Website exploration is intentionally bounded until an approved
     # non-production credential reference and test data are supplied.

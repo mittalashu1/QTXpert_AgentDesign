@@ -96,7 +96,7 @@ type Locator = { strategy: "accessibility_id" | "id" | "xpath" | "css"; value: s
 type DiscoveredControl = {
   control_id: string; semantic_label: string; class_name: string; text: string;
   content_description: string; resource_id: string; bounds: string; clickable: boolean;
-  enabled: boolean; input_capable: boolean; risk: "safe" | "review" | "blocked";
+  enabled: boolean; input_capable: boolean; input_kind?: string | null; risk: "safe" | "review" | "blocked";
   risk_reason?: string | null; locators: Locator[];
 };
 type DiscoveredScreen = {
@@ -110,7 +110,7 @@ type Discovery = {
   target_kind?: TargetKind; target_url?: string | null; provider: Provider; duration_seconds: number; device_name: string;
   observe_only: boolean; screen_count: number; control_count: number; safe_control_count: number;
   blocked_control_count: number; actions_attempted: number; stop_reason: string;
-  screens: DiscoveredScreen[]; warnings: string[]; error?: string | null;
+  screens: DiscoveredScreen[]; transitions?: unknown[]; input_requests?: AutopilotInputRequest[]; warnings: string[]; error?: string | null;
 };
 type AutomationTest = {
   test_id: string; title: string; suite: string; priority: "critical" | "high" | "medium" | "low";
@@ -148,13 +148,14 @@ type ReportTab = {
 type AutopilotInputRequest = {
   key: string; label: string; category: "credential" | "environment" | "test_data" | "approval" | "acceptance" | "integration";
   reason: string; required_for: string[]; sensitive: boolean; status: "pending" | "provided" | "validated"; reference_present: boolean;
+  source?: "plan" | "runtime"; screen_id?: string | null; control_id?: string | null; field_type?: string | null; locator?: string | null;
 };
 type SetupProfile = {
   job_id: string; credential_reference: string; account_role: string; environment_name: string;
   environment_url: string; test_data_reference: string; reset_hook_reference: string;
   acceptance_criteria_reference: string; api_oracle_reference: string; navigation_notes: string;
-  safe_authentication_approved: boolean; approved_test_ids: string[]; updated_at?: string | null;
-  provided_fields: string[]; missing_fields: string[]; input_requests: AutopilotInputRequest[];
+  safe_authentication_approved: boolean; approved_test_ids: string[]; runtime_input_references: Record<string, string>; updated_at?: string | null;
+  provided_fields: string[]; missing_fields: string[]; input_requests: AutopilotInputRequest[]; runtime_input_requests?: AutopilotInputRequest[];
   checkpoint_stage: string; checkpoint_message?: string | null; last_validated_at?: string | null;
 };
 
@@ -163,7 +164,7 @@ function emptySetup(jobId = ""): SetupProfile {
     job_id: jobId, credential_reference: "", account_role: "", environment_name: "",
     environment_url: "", test_data_reference: "", reset_hook_reference: "",
     acceptance_criteria_reference: "", api_oracle_reference: "", navigation_notes: "",
-    safe_authentication_approved: false, approved_test_ids: [], provided_fields: [], missing_fields: [], input_requests: [],
+    safe_authentication_approved: false, approved_test_ids: [], runtime_input_references: {}, provided_fields: [], missing_fields: [], input_requests: [], runtime_input_requests: [],
     checkpoint_stage: "input_collection", checkpoint_message: null, last_validated_at: null,
   };
 }
@@ -904,7 +905,15 @@ export default function AutopilotPage() {
   });
   const openSetup = () => {
     if (!analysis) return;
-    setSetupDraft(setup ? { ...setup, approved_test_ids: [...setup.approved_test_ids], provided_fields: [...setup.provided_fields], missing_fields: [...setup.missing_fields] } : emptySetup(analysis.job_id));
+    setSetupDraft(setup ? {
+      ...setup,
+      approved_test_ids: [...setup.approved_test_ids],
+      runtime_input_references: { ...(setup.runtime_input_references || {}) },
+      provided_fields: [...setup.provided_fields],
+      missing_fields: [...setup.missing_fields],
+      input_requests: [...setup.input_requests],
+      runtime_input_requests: [...(setup.runtime_input_requests || [])],
+    } : emptySetup(analysis.job_id));
     setSetupOpen(true);
   };
   const saveSetup = async () => {
@@ -923,6 +932,7 @@ export default function AutopilotPage() {
         navigation_notes: setupDraft.navigation_notes,
         safe_authentication_approved: setupDraft.safe_authentication_approved,
         approved_test_ids: setupDraft.approved_test_ids,
+        runtime_input_references: setupDraft.runtime_input_references || {},
       };
       const response = await apiClient.put<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", payload, { timeout: 20000 });
       setSetup(response.data);
@@ -940,15 +950,41 @@ export default function AutopilotPage() {
       try {
         const resumeResponse = await apiClient.post<AnalysisJob>(
           `/autopilot/${analysis.job_id}/resume`,
-          { confirm_saved_inputs: true },
+          {
+            confirm_saved_inputs: true,
+            run_runtime_discovery: true,
+            discovery_provider: executionPayload().provider,
+            discovery_device_name: deviceName,
+            discovery_platform_version: platformVersion || null,
+            discovery_appium_url: provider === "appium" ? appiumUrl || null : null,
+            discovery_appium_app: provider === "appium" ? appiumApp || null : null,
+          },
           { timeout: 20000 },
         );
         applyJob(resumeResponse.data);
         if (resumeResponse.data.status === "uploaded" || resumeResponse.data.status === "analyzing") {
           await pollAnalysis(analysis.job_id);
         }
+        // The server continues discovery in the background. Give it a short
+        // foreground window so the user gets the map immediately when the
+        // provider is warm, then leave slower runs safely resumable.
+        const discoveryDeadline = Date.now() + 60000;
+        let discoveryReady = false;
+        while (Date.now() < discoveryDeadline) {
+          try {
+            const discoveryResponse = await apiClient.get<Discovery | null>(`/autopilot/${analysis.job_id}/discovery`, { timeout: 15000 });
+            if (discoveryResponse.data) {
+              setDiscovery(discoveryResponse.data);
+              discoveryReady = true;
+              break;
+            }
+          } catch { /* background job is still running; retry */ }
+          await new Promise((resolve) => window.setTimeout(resolve, 3000));
+        }
+        try { setSetup((await apiClient.get<SetupProfile>(`/autopilot/${analysis.job_id}/setup`, { timeout: 15000 })).data); } catch { /* keep the saved checkpoint visible */ }
         await refreshAutomation(analysis.job_id);
         await refreshReport(analysis.job_id);
+        if (!discoveryReady) setContextNotice("Setup validated. Runtime Discovery is continuing in the background; refresh this tab to see its evidence.");
       } finally {
         setResumeBusy(false);
       }
@@ -956,6 +992,10 @@ export default function AutopilotPage() {
     finally { setSetupBusy(false); }
   };
   const updateSetup = (field: keyof SetupProfile, value: string | boolean) => setSetupDraft((current) => ({ ...current, [field]: value }));
+  const updateRuntimeReference = (key: string, value: string) => setSetupDraft((current) => ({
+    ...current,
+    runtime_input_references: { ...(current.runtime_input_references || {}), [key]: value },
+  }));
 
   const runDiscovery = async () => {
     if (!analysis) return;
@@ -968,6 +1008,7 @@ export default function AutopilotPage() {
         max_actions: discoveryMode === "observe" ? 0 : 10,
       }, { timeout: 660000 });
       setDiscovery(response.data);
+      try { setSetup((await apiClient.get<SetupProfile>(`/autopilot/${analysis.job_id}/setup`, { timeout: 15000 })).data); } catch { /* discovery evidence remains visible */ }
       await refreshAutomation(analysis.job_id);
       await refreshReport(analysis.job_id);
     } catch (err) { setError(readableError(err, "Runtime discovery failed")); }
@@ -1360,6 +1401,7 @@ export default function AutopilotPage() {
             {(automation?.setup_missing_fields || []).slice(0, 6).map((field) => <Chip key={field} size="small" label={"Pending: " + field} color="warning" variant="outlined" />)}
           </Stack>
           {(setup?.input_requests || []).slice(0, 6).map((request) => <Box key={request.key} sx={{ mt: 1, p: 1, borderRadius: 1.5, bgcolor: "warning.lighter", border: "1px solid", borderColor: "warning.light" }}><Typography variant="body2" fontWeight={700}>{request.label}</Typography><Typography variant="caption" color="text.secondary">{request.reason} · {request.required_for.length} dependent case{request.required_for.length === 1 ? "" : "s"}</Typography></Box>)}
+          {(setup?.runtime_input_requests || []).length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: "info.lighter", border: "1px solid", borderColor: "info.light" }}><Typography variant="body2" fontWeight={700}>Runtime entry points discovered</Typography><Typography variant="caption" color="text.secondary">{(setup?.runtime_input_requests || []).length} field{(setup?.runtime_input_requests || []).length === 1 ? "" : "s"} can be mapped to approved credential or synthetic-data references. Values are never captured.</Typography></Box>}
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · full plan buckets are listed above</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 80).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
@@ -1429,6 +1471,7 @@ export default function AutopilotPage() {
           {" "}Enter references to approved non-production resources. Do not paste passwords, access tokens or OTPs; keep secrets in the configured vault/provider.
         </Alert>
         {setupDraft.input_requests?.length > 0 && <Stack spacing={.75} sx={{ mb: 2 }}>{setupDraft.input_requests.map((request) => <Box key={request.key} sx={{ p: 1, bgcolor: "action.hover", borderRadius: 1.5 }}><Typography variant="body2" fontWeight={700}>{request.label}</Typography><Typography variant="caption" color="text.secondary">{request.reason} Required for {request.required_for.join(", ")}.</Typography></Box>)}</Stack>}
+        {(setupDraft.runtime_input_requests || []).length > 0 && <Box sx={{ mb: 2, p: 1.25, border: "1px solid", borderColor: "info.light", borderRadius: 2, bgcolor: "info.lighter" }}><Typography variant="subtitle2" fontWeight={800}>Runtime field references (optional mapping)</Typography><Typography variant="caption" color="text.secondary">Discovery identified these entry points. Supply a vault or synthetic-fixture reference when a field needs a dedicated value; never paste the value itself.</Typography><Grid container spacing={1.5} sx={{ mt: .25 }}>{(setupDraft.runtime_input_requests || []).slice(0, 40).map((request) => <Grid item xs={12} md={6} key={request.key}><TextField fullWidth size="small" label={request.label} value={setupDraft.runtime_input_references?.[request.key] || ""} onChange={(event) => updateRuntimeReference(request.key, event.target.value)} helperText={`${request.screen_id || "Runtime screen"} · ${request.field_type || "input"}${request.reference_present ? " · generic reference covers this field" : ""}`} /></Grid>)}</Grid></Box>}
         <Grid container spacing={2}>
           <Grid item xs={12} md={6}><TextField fullWidth label="Credential set reference" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Test account role" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>

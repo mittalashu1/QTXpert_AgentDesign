@@ -27,6 +27,45 @@ def test_parse_controls_builds_semantics_and_locator_candidates():
     assert by_label["Sign in"].locators[0].strategy == "id"
     assert by_label["Settings"].locators[0].strategy == "accessibility_id"
     assert by_label["Username"].input_capable is True
+    assert by_label["Username"].input_kind == "credential"
+    assert by_label["Username"].text == ""
+
+
+def test_runtime_input_requests_are_reference_only():
+    controls = AutopilotDiscoveryService.parse_controls(SAMPLE_XML)
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="fp",
+        package_name="com.qtx",
+        activity_name=".MainActivity",
+        controls=controls,
+    )
+    requests = AutopilotDiscoveryService.runtime_input_requests([screen])
+    assert len(requests) == 1
+    assert requests[0].source == "runtime"
+    assert requests[0].category == "credential"
+    assert requests[0].sensitive is True
+    assert requests[0].field_type == "credential"
+    assert requests[0].reference_present is False
+    assert "username" in requests[0].label.lower()
+
+
+def test_loading_screen_detection_is_conservative():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    loading = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="fp",
+        activity_name="LaunchScreen",
+        controls=[],
+    )
+    assert AutopilotDiscoveryService._looks_like_loading_screen(loading) is True
+
+    controls = AutopilotDiscoveryService.parse_controls(SAMPLE_XML)
+    ready = DiscoveredScreen(screen_id="screen-002", fingerprint="fp2", controls=controls)
+    assert AutopilotDiscoveryService._looks_like_loading_screen(ready) is False
 
 
 def test_transactional_control_is_blocked_before_navigation():

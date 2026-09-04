@@ -52,6 +52,14 @@ class AutopilotInputRequest(BaseModel):
     sensitive: bool = False
     status: AutopilotInputStatus = "pending"
     reference_present: bool = False
+    # Runtime discovery may add an exact field/control without ever exposing
+    # the value entered into it. These fields are references only (for
+    # example, a vault key or synthetic-data fixture name).
+    source: Literal["plan", "runtime"] = "plan"
+    screen_id: Optional[str] = None
+    control_id: Optional[str] = None
+    field_type: Optional[str] = None
+    locator: Optional[str] = None
 
 
 class AutopilotTest(BaseModel):
@@ -314,6 +322,10 @@ class AutopilotSetupUpdateRequest(BaseModel):
     navigation_notes: str = Field(default="", max_length=4000)
     safe_authentication_approved: bool = False
     approved_test_ids: List[str] = Field(default_factory=list, max_length=100)
+    # Optional per-control references let a user map a discovered username,
+    # password, search or test-data field to a vault/fixture without sending
+    # the actual value to QTXpert.
+    runtime_input_references: Dict[str, str] = Field(default_factory=dict)
 
 
 class AutopilotSetupProfile(AutopilotSetupUpdateRequest):
@@ -324,6 +336,7 @@ class AutopilotSetupProfile(AutopilotSetupUpdateRequest):
     provided_fields: List[str] = Field(default_factory=list)
     missing_fields: List[str] = Field(default_factory=list)
     input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
+    runtime_input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
     checkpoint_stage: str = "input_collection"
     checkpoint_message: Optional[str] = None
     last_validated_at: Optional[str] = None
@@ -334,6 +347,13 @@ class AutopilotResumeRequest(BaseModel):
 
     confirm_saved_inputs: bool = True
     run_runtime_discovery: bool = False
+    # Optional safe-discovery preferences used when the server chains resume
+    # directly into discovery. They contain no credentials or field values.
+    discovery_provider: Optional[AutopilotProvider] = None
+    discovery_device_name: Optional[str] = Field(default=None, max_length=160)
+    discovery_platform_version: Optional[str] = Field(default=None, max_length=80)
+    discovery_appium_url: Optional[str] = Field(default=None, max_length=2048)
+    discovery_appium_app: Optional[str] = Field(default=None, max_length=2048)
 
 
 class QTXIRStep(BaseModel):
@@ -483,6 +503,7 @@ class DiscoveredControl(BaseModel):
     clickable: bool = False
     enabled: bool = True
     input_capable: bool = False
+    input_kind: Optional[str] = None
     risk: Literal["safe", "review", "blocked"] = "review"
     risk_reason: Optional[str] = None
     locators: List[DiscoveryLocator] = Field(default_factory=list)
@@ -530,6 +551,10 @@ class AutopilotDiscoveryResult(BaseModel):
     stop_reason: str = ""
     screens: List[DiscoveredScreen] = Field(default_factory=list)
     transitions: List[DiscoveredTransition] = Field(default_factory=list)
+    # Field-specific, non-secret setup references inferred from the live UI.
+    # These are informational until the generic credential/data checkpoint is
+    # satisfied; values are never captured from the device.
+    input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[str] = None
 

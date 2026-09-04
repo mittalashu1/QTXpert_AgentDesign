@@ -43,7 +43,7 @@ const MOBILE_EXTENSIONS = new Set(["apk", "ipa"]);
 const DOCUMENT_ACCEPT = ".pdf,.docx,.pptx,.txt,.md,.json,.csv,.xlsx,.xls,.xml,.yaml,.yml,.html,.htm,.apk,.ipa";
 const TEST_DATA_ACCEPT = ".csv,.json,.xlsx,.xls,.xml,.yaml,.yml,.txt";
 const DOCUMENT_MAX_UPLOAD_MB = 25;
-const MOBILE_PACKAGE_MAX_UPLOAD_MB = 250;
+const MOBILE_PACKAGE_MAX_UPLOAD_MB = 300;
 
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`;

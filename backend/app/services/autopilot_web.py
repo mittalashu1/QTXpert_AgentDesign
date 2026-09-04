@@ -266,6 +266,7 @@ class AutopilotWebService:
             stop_reason=stop_reason,
             screens=screens,
             transitions=transitions,
+            input_requests=self._runtime_input_requests(screens),
             warnings=warnings,
             error=None if screens else "No website page could be inspected.",
         )
@@ -383,8 +384,11 @@ class AutopilotWebService:
                 name = await element.get_attribute("name") or ""
                 aria = await element.get_attribute("aria-label") or ""
                 title = await element.get_attribute("title") or ""
-                text = (await element.inner_text())[:200] if tag not in {"input", "textarea"} else ""
-                label = (aria or text or title or name or element_id or tag).strip()[:160]
+                placeholder = await element.get_attribute("placeholder") or ""
+                # Select/input values can be user data; use only labels and
+                # metadata when classifying a runtime entry point.
+                text = (await element.inner_text())[:200] if tag not in {"input", "textarea", "select"} else ""
+                label = (aria or placeholder or text or title or name or element_id or tag).strip()[:160]
                 href = await element.get_attribute("href") or ""
                 signature = f"{tag}|{element_id}|{name}|{aria}|{text}|{href}"
                 control_id = hashlib.sha1(signature.encode("utf-8", errors="ignore")).hexdigest()[:16]
@@ -404,6 +408,19 @@ class AutopilotWebService:
                         clickable=tag in {"a", "button"} or await element.get_attribute("role") == "button",
                         enabled=(await element.is_enabled()),
                         input_capable=tag in {"input", "select", "textarea"},
+                        input_kind=(
+                            self._runtime_input_kind(
+                                tag,
+                                label,
+                                name,
+                                element_id,
+                                aria,
+                                placeholder,
+                                await element.get_attribute("type") or "",
+                            )
+                            if tag in {"input", "select", "textarea"}
+                            else None
+                        ),
                         risk=risk,
                         risk_reason=reason,
                         locators=[DiscoveryLocator(strategy="css", value=locator_value, confidence=0.95 if element_id else 0.72)],
@@ -412,6 +429,41 @@ class AutopilotWebService:
             except Exception:
                 continue
         return controls
+
+    @staticmethod
+    def _runtime_input_kind(
+        tag: str,
+        label: str,
+        name: str,
+        element_id: str,
+        aria: str,
+        placeholder: str,
+        input_type: str,
+    ) -> str:
+        # Import lazily to keep the web adapter's import graph lightweight and
+        # to share exactly the same credential/test-data classification as
+        # mobile discovery.
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        return AutopilotDiscoveryService._input_kind(
+            {
+                "class": tag,
+                "name": name,
+                "id": element_id,
+                "resource-id": element_id,
+                "aria-label": aria,
+                "content-desc": aria,
+                "hint": placeholder,
+                "type": input_type,
+            },
+            label,
+        )
+
+    @staticmethod
+    def _runtime_input_requests(screens: Iterable[DiscoveredScreen]):
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        return AutopilotDiscoveryService.runtime_input_requests(screens)
 
     async def _safe_route(self, route: Any) -> None:
         """Abort navigation/resource requests to private hosts.

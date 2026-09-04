@@ -89,7 +89,10 @@ still shown when a model has no configured rate.
 | Variable | Default | Description |
 |---|---|---|
 | `MAX_UPLOAD_SIZE_MB` | 25 | Per-file readable document limit (BRD/export/test-data text inputs) |
-| `AUTOPILOT_MAX_UPLOAD_SIZE_MB` | 250 | Per-file APK/IPA limit shared by Autopilot and Design app-source uploads |
+| `AUTOPILOT_MAX_UPLOAD_SIZE_MB` | 300 | Per-file APK/IPA limit shared by Autopilot and Design app-source uploads |
+| `AUTOPILOT_DEEP_PARSE_MAX_MB` | 300 | Maximum APK size sent to the deep manifest parser; oversized/malformed archives fall back to bounded metadata |
+| `AUTOPILOT_DISCOVERY_SETTLE_SECONDS` | 4 | Initial/retry wait for a mobile launch screen to become interactive |
+| `AUTOPILOT_DISCOVERY_SETTLE_RETRIES` | 3 | Maximum bounded splash-settle retries before retaining launch evidence |
 | `ALLOWED_UPLOAD_EXTENSIONS` | pdf,docx,txt,md,json,csv,… | Accepted document, test-data, media and APK/IPA formats |
 | `UPLOAD_STORAGE_BACKEND` | postgres_chunks | Shared Upload Repository backend (`postgres_chunks` for compatibility or `object_store` for R2/S3-compatible storage) |
 | `UPLOAD_STORAGE_PATH` | ./storage/uploads | Local working path used by the repository fallback; repository metadata and bytes remain project-scoped and reusable |

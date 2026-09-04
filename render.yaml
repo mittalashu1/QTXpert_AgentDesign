@@ -34,7 +34,15 @@ services:
         # Shared by Autopilot and Design when an APK/IPA is supplied as the
         # product under test. Keep this explicit so Blueprint syncs cannot
         # accidentally restore the old 25 MB document limit.
-        value: "250"
+        value: "300"
+      - key: AUTOPILOT_DEEP_PARSE_MAX_MB
+        # Parse APK manifests up to the same 300 MB product limit. The
+        # backend still falls back to bounded ZIP metadata on parser failure.
+        value: "300"
+      - key: AUTOPILOT_DISCOVERY_SETTLE_SECONDS
+        value: "4"
+      - key: AUTOPILOT_DISCOVERY_SETTLE_RETRIES
+        value: "3"
       - key: OBJECT_STORAGE_ENDPOINT_URL
         sync: false
       - key: OBJECT_STORAGE_BUCKET

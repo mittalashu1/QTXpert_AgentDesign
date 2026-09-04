@@ -20,6 +20,7 @@ from app.config import Settings
 from app.schemas.autopilot import (
     AutopilotDiscoveryRequest,
     AutopilotDiscoveryResult,
+    AutopilotInputRequest,
     DiscoveredControl,
     DiscoveredScreen,
     DiscoveredTransition,
@@ -65,7 +66,28 @@ class AutopilotDiscoveryService:
 
     @classmethod
     def _semantic_label(cls, attrs: Dict[str, str]) -> str:
-        for key in ("content-desc", "text", "label", "name", "resource-id", "identifier"):
+        # Hints/labels identify an input without copying a value typed into it.
+        # Text remains a fallback for buttons and static controls.
+        input_like = (attrs.get("class") or "") in _INPUT_CLASSES or (attrs.get("class") or "").startswith("XCUIElementTypeText")
+        input_text = (attrs.get("text") or "").strip()
+        input_label_words = (
+            "user", "username", "email", "password", "passcode", "search", "query", "account",
+            "amount", "address", "date", "code", "reference", "phone", "otp",
+        )
+        looks_like_label = (
+            input_like
+            and 1 < len(input_text) <= 80
+            and not any(char in input_text for char in ("@", "=", "\n", "\r"))
+            and any(re.search(rf"\b{re.escape(word)}\b", input_text.lower()) for word in input_label_words)
+        )
+        keys = (
+            ("content-desc", "hint", "label", "name", "text", "resource-id", "identifier")
+            if input_like and looks_like_label
+            else ("content-desc", "hint", "label", "name", "resource-id", "identifier")
+            if input_like
+            else ("content-desc", "text", "label", "name", "resource-id", "identifier")
+        )
+        for key in keys:
             value = (attrs.get(key) or "").strip()
             if value:
                 if key in {"resource-id", "identifier"}:
@@ -73,6 +95,105 @@ class AutopilotDiscoveryService:
                 return re.sub(r"\s+", " ", value).strip()[:160]
         class_name = (attrs.get("class") or "control").rsplit(".", 1)[-1]
         return class_name[:160]
+
+    @classmethod
+    def _input_kind(cls, attrs: Dict[str, str], label: str) -> str:
+        """Classify an input by purpose without inspecting its value."""
+        haystack = " ".join(
+            [
+                label,
+                attrs.get("hint", ""),
+                attrs.get("resource-id", ""),
+                attrs.get("content-desc", ""),
+                attrs.get("identifier", ""),
+                attrs.get("inputType", ""),
+                attrs.get("type", ""),
+                attrs.get("class", ""),
+            ]
+        ).lower().replace("_", " ").replace("-", " ")
+        if any(term in haystack for term in ("password", "passcode", "secret", "username", "user name", "email", "login", "otp", "one time", "mfa")):
+            return "credential"
+        if any(term in haystack for term in ("search", "query", "account", "customer", "amount", "address", "date", "code", "reference", "id")):
+            return "test_data"
+        return "text"
+
+    @classmethod
+    def runtime_input_requests(cls, screens: Iterable[DiscoveredScreen]) -> list[AutopilotInputRequest]:
+        """Build field-level, reference-only questions from discovered UI.
+
+        Runtime discovery never fills a field and never returns its value. A
+        user can optionally map each entry point to a vault or synthetic-data
+        fixture after the generic checkpoint has been validated.
+        """
+        requests: list[AutopilotInputRequest] = []
+        seen: set[str] = set()
+        for screen in screens:
+            for control in screen.controls:
+                if not control.input_capable:
+                    continue
+                field_type = control.input_kind or "text"
+                raw_key = f"{screen.screen_id}:{control.control_id}:{field_type}"
+                key = f"runtime_{hashlib.sha1(raw_key.encode('utf-8', errors='ignore')).hexdigest()[:14]}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                credential = field_type == "credential"
+                category = "credential" if credential else "test_data"
+                display_label = control.semantic_label or f"{field_type} field"
+                label = (
+                    f"Credential reference for {display_label}"
+                    if credential
+                    else f"Synthetic data reference for {display_label}"
+                )[:240]
+                reason = (
+                    "This live entry point may require an approved non-production credential reference. "
+                    "Provide only a vault/provider reference; Autopilot never captures or stores the value."
+                    if credential
+                    else "This live entry point accepts data during the journey. Provide a synthetic fixture/reference so repeated runs remain isolated and reversible."
+                )
+                locator = control.locators[0].value if control.locators else None
+                requests.append(
+                    AutopilotInputRequest(
+                        key=key,
+                        label=label,
+                        category=category,
+                        reason=reason,
+                        required_for=[f"{screen.screen_id}: {display_label}"],
+                        sensitive=credential,
+                        status="pending",
+                        reference_present=False,
+                        source="runtime",
+                        screen_id=screen.screen_id,
+                        control_id=control.control_id,
+                        field_type=field_type,
+                        locator=locator,
+                    )
+                )
+                if len(requests) >= 40:
+                    return requests
+        return requests
+
+    @staticmethod
+    def _looks_like_loading_screen(screen: DiscoveredScreen) -> bool:
+        """Identify splash/blank states that deserve a bounded settle retry."""
+        marker_text = " ".join(
+            [
+                screen.activity_name or "",
+                screen.title or "",
+                *(control.semantic_label for control in screen.controls),
+                *(control.class_name for control in screen.controls),
+            ]
+        ).lower()
+        if any(term in marker_text for term in ("splash", "loading", "progressbar", "launchscreen", "please wait")):
+            return True
+        interactive = [
+            control for control in screen.controls
+            if control.enabled and (control.clickable or control.input_capable)
+        ]
+        # A small non-interactive hierarchy is characteristic of an Android
+        # splash/launch view. This is deliberately conservative and is only
+        # retried a few times before the state is retained as evidence.
+        return len(interactive) == 0 and len(screen.controls) <= 4
 
     @classmethod
     def _risk(cls, label: str, attrs: Dict[str, str]) -> tuple[str, Optional[str]]:
@@ -133,7 +254,10 @@ class AutopilotDiscoveryService:
             if not actionable:
                 continue
             label = cls._semantic_label(attrs)
-            locators = cls._locators(attrs)
+            input_kind = cls._input_kind(attrs, label) if input_capable else None
+            # Do not create a text XPath from a value in an input widget.
+            locator_attrs = {**attrs, "text": ""} if input_capable else attrs
+            locators = cls._locators(locator_attrs)
             if not label and not locators:
                 continue
             signature = "|".join([
@@ -153,13 +277,15 @@ class AutopilotDiscoveryService:
                     control_id=control_id,
                     semantic_label=label or f"Control {index + 1}",
                     class_name=class_name,
-                    text=attrs.get("text", "")[:300],
+                    # Input values are never returned as discovery metadata.
+                    text="" if input_capable else attrs.get("text", "")[:300],
                     content_description=attrs.get("content-desc", "")[:300],
                     resource_id=attrs.get("resource-id", "")[:500],
                     bounds=attrs.get("bounds", "")[:100],
                     clickable=clickable,
                     enabled=enabled,
                     input_capable=input_capable,
+                    input_kind=input_kind,
                     risk=risk,
                     risk_reason=reason,
                     locators=locators,
@@ -180,8 +306,9 @@ class AutopilotDiscoveryService:
     def _select_safe_control(controls: list[DiscoveredControl], visited: set[str]) -> Optional[DiscoveredControl]:
         candidates = [
             control for control in controls
-            if control.enabled and control.clickable and control.risk == "safe"
+            if control.enabled and control.clickable and not control.input_capable and control.risk == "safe"
             and control.locators and control.control_id not in visited
+            and max(locator.confidence for locator in control.locators) >= 0.90
         ]
         if not candidates:
             return None
@@ -274,6 +401,7 @@ class AutopilotDiscoveryService:
             stop_reason=str(payload["stop_reason"]),
             screens=screens,
             transitions=payload["transitions"],
+            input_requests=self.runtime_input_requests(screens),
             warnings=payload["warnings"],
             error=error,
         )
@@ -385,8 +513,28 @@ class AutopilotDiscoveryService:
             return screen, False
 
         try:
-            time.sleep(2)
+            # Appium sessions can report the launch/splash hierarchy before
+            # the first real screen is ready. Settle it with a bounded retry
+            # instead of treating the splash as the complete app map.
+            initial_wait = max(1, min(5, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_SECONDS", 4))))
+            retry_wait = max(1, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_SECONDS", 4)))
+            retry_limit = max(0, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_RETRIES", 3)))
+            time.sleep(initial_wait)
             current, _ = capture()
+            retries = 0
+            while self._looks_like_loading_screen(current) and retries < retry_limit:
+                retries += 1
+                time.sleep(retry_wait)
+                candidate, duplicate = capture()
+                current_score = sum(1 for item in current.controls if item.enabled and (item.clickable or item.input_capable))
+                candidate_score = sum(1 for item in candidate.controls if item.enabled and (item.clickable or item.input_capable))
+                if not duplicate or candidate_score >= current_score:
+                    current = candidate
+            if self._looks_like_loading_screen(current):
+                warnings.append(
+                    f"Initial app screen remained non-interactive after {retries} bounded settle attempt(s); "
+                    "the launch state was retained as evidence and no controls were auto-clicked."
+                )
             if request.observe_only:
                 stop_reason = "Observe-only discovery captured the current screen"
                 return {

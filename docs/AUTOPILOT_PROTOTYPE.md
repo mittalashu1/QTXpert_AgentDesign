@@ -6,13 +6,13 @@ QTXpert Autopilot is the autonomous mobile Quality Engineering entry point for Q
 
 `APK/IPA → application understanding → minimal context → test strategy → test cases → QTX Test IR → automation → device execution → evidence → RCA → healing → coverage learning → release confidence`
 
-The current prototype establishes the Android/iOS vertical slices and safe execution boundary. APK and IPA uploads up to the configured `AUTOPILOT_MAX_UPLOAD_SIZE_MB` (250 MB by default) are streamed into the repository and remain eligible for runtime execution. For packages above `AUTOPILOT_DEEP_PARSE_MAX_MB` (64 MB by default), Autopilot deliberately avoids memory-heavy resource-table parsing, records SHA-256 and bounded ZIP metadata, and continues with deterministic coverage; this is a safe metadata-only analysis state, not an upload or execution failure.
+The current prototype establishes the Android/iOS vertical slices and safe execution boundary. APK and IPA uploads up to the configured `AUTOPILOT_MAX_UPLOAD_SIZE_MB` (300 MB by default) are streamed into the repository and remain eligible for runtime execution. Packages up to `AUTOPILOT_DEEP_PARSE_MAX_MB` (300 MB by default) can use deep manifest parsing; if a malformed or highly-compressed package exceeds the parser's bounded archive safety budget, Autopilot records SHA-256 and bounded ZIP metadata and continues with deterministic coverage. This is a safe partial-analysis state, not an upload or execution failure.
 
 ## What is implemented
 
 ### 1. APK intake and application intelligence
 
-Authenticated users can upload an Android APK or iOS IPA (250 MB by default). QTXpert stores an owner-bound job, computes SHA-256, and uses bounded archive inspection for every package. Android packages under the deep-parse safety threshold additionally use Androguard to extract:
+Authenticated users can upload an Android APK or iOS IPA (300 MB by default). QTXpert stores an owner-bound job, computes SHA-256, and uses bounded archive inspection for every package. Android packages under the deep-parse safety threshold additionally use Androguard to extract:
 
 - application/package/version information
 - min/target SDK

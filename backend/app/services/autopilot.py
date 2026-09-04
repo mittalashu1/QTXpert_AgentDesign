@@ -114,6 +114,8 @@ def build_report_tab_key(surface_key: str | None, surface_version: int | None, j
 # at process scope and is acquired from a worker thread so it never blocks the
 # async event loop.
 _ANALYSIS_SLOT = threading.BoundedSemaphore(1)
+_MAX_ARCHIVE_ENTRIES = 200_000
+_MAX_ARCHIVE_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
 
 
 class _WebSurfaceParser(html.parser.HTMLParser):
@@ -666,7 +668,7 @@ class AutopilotPrototypeService:
 
         Starlette already spools large multipart bodies to a temporary file, so
         reading one bounded chunk at a time and writing directly to the job file
-        keeps the process memory stable even for the 250 MB prototype limit.
+        keeps the process memory stable even for the 300 MB product limit.
         """
         job_id = str(uuid4())
         job_dir = self._job_dir(job_id)
@@ -1485,7 +1487,21 @@ class AutopilotPrototypeService:
         """
         try:
             with zipfile.ZipFile(artifact_path) as archive:
-                return len(archive.infolist()), None
+                infos = archive.infolist()
+                if len(infos) > _MAX_ARCHIVE_ENTRIES:
+                    return len(infos), (
+                        f"{artifact_label} archive exceeds the {_MAX_ARCHIVE_ENTRIES:,}-entry safety budget; "
+                        "bounded metadata was retained without deep parsing."
+                    )
+                uncompressed_bytes = 0
+                for info in infos:
+                    uncompressed_bytes += max(0, int(info.file_size or 0))
+                    if uncompressed_bytes > _MAX_ARCHIVE_UNCOMPRESSED_BYTES:
+                        return len(infos), (
+                            f"{artifact_label} archive exceeds the 4 GB uncompressed safety budget; "
+                            "bounded metadata was retained without deep parsing."
+                        )
+                return len(infos), None
         except Exception as exc:  # pragma: no cover - corrupt archives/provider files
             return 0, f"{artifact_label} ZIP inventory was unavailable: {type(exc).__name__}"
 
@@ -1517,6 +1533,14 @@ class AutopilotPrototypeService:
             result["file_count"] = file_count
             if warning:
                 result["warnings"].append(warning)
+            return result
+        # Inspect the central directory before invoking Androguard. This is
+        # cheap compared with resource-table parsing and prevents a crafted
+        # ZIP bomb from bypassing the 300 MB product-size guard.
+        inventory_count, inventory_warning = self._safe_zip_inventory(apk_path, "APK")
+        result["file_count"] = inventory_count
+        if inventory_warning and "safety budget" in inventory_warning:
+            result["warnings"].append(inventory_warning)
             return result
         try:
             # Androguard 4.x uses Loguru for resource-table diagnostics. Its

@@ -745,11 +745,36 @@ def _setup_profile(
         provided.append("safe_authentication_approved")
     if raw.get("approved_test_ids"):
         provided.append("approved_test_ids")
+    if raw.get("runtime_input_references"):
+        provided.append("runtime_input_references")
     raw["provided_fields"] = provided
     if analysis is not None:
-        requests = build_input_requests(analysis, AutopilotSetupProfile.model_validate({**raw, "job_id": job_id}))
+        normalized_setup = AutopilotSetupProfile.model_validate({**raw, "job_id": job_id})
+        requests = build_input_requests(analysis, normalized_setup)
         raw["input_requests"] = [item.model_dump(mode="json") for item in requests]
         raw["missing_fields"] = [item.label for item in requests]
+        runtime_requests = []
+        if discovery is not None:
+            category_provided = {
+                "credential": bool(normalized_setup.credential_reference.strip()),
+                "test_data": bool(normalized_setup.test_data_reference.strip()),
+            }
+            for item in discovery.input_requests:
+                reference_present = bool(
+                    str(normalized_setup.runtime_input_references.get(item.key) or "").strip()
+                    or category_provided.get(item.category, False)
+                )
+                runtime_requests.append(
+                    item.model_copy(
+                        update={
+                            "reference_present": reference_present,
+                            "status": "provided" if reference_present else "pending",
+                        }
+                    )
+                )
+        elif raw.get("runtime_input_requests"):
+            runtime_requests = list(normalized_setup.runtime_input_requests)
+        raw["runtime_input_requests"] = [item.model_dump(mode="json") for item in runtime_requests]
         if requests:
             raw["checkpoint_stage"] = "input_collection"
             raw["checkpoint_message"] = (
@@ -766,6 +791,7 @@ def _setup_profile(
     else:
         raw.setdefault("missing_fields", [])
         raw.setdefault("input_requests", [])
+        raw.setdefault("runtime_input_requests", [])
         raw.setdefault("checkpoint_stage", "input_collection")
     return AutopilotSetupProfile.model_validate(raw)
 
@@ -782,6 +808,140 @@ def _record_setup(
         return _setup_profile(job_id, record.setup_profile, analysis, discovery)
     except Exception:
         return _setup_profile(job_id, None, analysis, discovery)
+
+
+async def _resume_and_discover_background(
+    job_id: str,
+    owner_id: UUID,
+    settings: Settings,
+    resume_payload: AutopilotResumeRequest,
+) -> None:
+    """Resume a validated checkpoint and immediately map the target safely.
+
+    This runs in a background task so the resume endpoint remains responsive.
+    A fresh database session is deliberately used because the request-scoped
+    session is closed before BackgroundTasks execute. The same helper is used
+    for web and mobile targets and persists discovery plus the updated,
+    field-level checkpoint when it completes.
+    """
+    service = _service(settings)
+    try:
+        await service.resume_analysis(job_id)
+        current = await service.get_job_status(job_id)
+        if current.status != "analyzed":
+            logger.info(
+                "Autopilot chained discovery skipped job_id=%s status=%s",
+                job_id,
+                current.status,
+            )
+            return
+        await service.update_job(
+            job_id,
+            stage="runtime_discovery",
+            checkpoint_stage="runtime_discovery",
+            checkpoint_message="Setup references validated. Runtime Discovery is mapping safe screens and controls.",
+            error=None,
+        )
+        async with AsyncSessionLocal() as db:
+            user = await db.scalar(select(User).where(User.id == owner_id))
+            if user is None:
+                logger.warning("Autopilot chained discovery owner was not found job_id=%s", job_id)
+                return
+            job = await _require_owned_job(service, job_id, user)
+            target_kind = str(job.get("target_kind") or "android")
+            provider = resume_payload.discovery_provider
+            if target_kind == "web":
+                provider = "playwright"
+            elif provider is None:
+                provider = "browserstack" if settings.browserstack_configured else "appium"
+            request = AutopilotDiscoveryRequest(
+                target_kind=target_kind,
+                target_url=job.get("target_url"),
+                provider=provider,
+                appium_url=resume_payload.discovery_appium_url,
+                appium_app=resume_payload.discovery_appium_app,
+                device_name=resume_payload.discovery_device_name or "Google Pixel 8",
+                platform_version=resume_payload.discovery_platform_version or "14.0",
+                observe_only=False,
+                max_screens=12,
+                max_actions=10,
+            )
+            if target_kind == "web":
+                result = await AutopilotWebService(settings, service).discover(job_id, request)
+            else:
+                await _ensure_local_artifact(db, service, job_id, user)
+                result = await AutopilotDiscoveryService(settings, service).run(job_id, request)
+            record = await _safe_job_record(db, job_id, user.id)
+            if record is not None:
+                repository_asset_id = record.repository_asset_id
+                for screen in result.screens:
+                    screen.screenshot_asset_id = await _persist_evidence_asset(
+                        db,
+                        user,
+                        record,
+                        settings,
+                        screen.screenshot_path,
+                        filename=f"discovery-{job_id[:8]}-{screen.screen_id}.png",
+                        content_type="image/png",
+                        repository_asset_id=repository_asset_id,
+                    )
+                    screen.page_source_asset_id = await _persist_evidence_asset(
+                        db,
+                        user,
+                        record,
+                        settings,
+                        screen.page_source_path,
+                        filename=f"discovery-{job_id[:8]}-{screen.screen_id}.{'html' if result.target_kind == 'web' else 'xml'}",
+                        content_type="text/html" if result.target_kind == "web" else "application/xml",
+                        repository_asset_id=repository_asset_id,
+                    )
+                record = await _safe_job_record(db, job_id, user.id)
+                if record is not None:
+                    record.discovery = result.model_dump(mode="json")
+                    try:
+                        analysis = await service.load_analysis(job_id)
+                        record.setup_profile = _setup_profile(
+                            job_id,
+                            record.setup_profile,
+                            analysis,
+                            result,
+                        ).model_dump(mode="json")
+                    except FileNotFoundError:
+                        pass
+                    await db.commit()
+            job_changes: dict[str, object] = {"discovery": result.model_dump(mode="json")}
+            if record is not None and getattr(record, "setup_profile", None) is not None:
+                job_changes["setup_profile"] = record.setup_profile
+            await service.update_job(
+                job_id,
+                **job_changes,
+                stage="ready_for_execution" if result.screens else "runtime_discovery",
+                checkpoint_stage="ready" if result.screens else "runtime_discovery",
+                checkpoint_message=(
+                    "Runtime Discovery completed. Review the discovered map and run safe execution."
+                    if result.screens
+                    else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+                ),
+            )
+            logger.info(
+                "Autopilot chained discovery finished job_id=%s status=%s screens=%s inputs=%s",
+                job_id,
+                result.status,
+                result.screen_count,
+                len(result.input_requests),
+            )
+    except Exception as exc:  # pragma: no cover - provider-specific background path
+        logger.exception("Autopilot chained resume/discovery failed job_id=%s", job_id)
+        try:
+            await service.update_job(
+                job_id,
+                stage="runtime_discovery",
+                checkpoint_stage="runtime_discovery",
+                checkpoint_message="Runtime Discovery could not complete; review the error and retry safely.",
+                error=f"{type(exc).__name__}: {str(exc)[:800]}",
+            )
+        except Exception:
+            logger.exception("Autopilot chained discovery failure could not be recorded job_id=%s", job_id)
 
 
 async def _start_analysis_from_asset(
@@ -1929,12 +2089,43 @@ async def update_autopilot_setup(
     """Persist dependency references without accepting passwords, tokens or OTPs."""
     service = _service(settings)
     await _require_owned_job(service, job_id, user)
-    credential_reference = payload.credential_reference.strip()
-    lowered = credential_reference.lower()
-    if any(marker in lowered for marker in ("password=", "token=", "secret=", "bearer ")):
+    reference_fields = (
+        "credential_reference",
+        "environment_url",
+        "test_data_reference",
+        "reset_hook_reference",
+        "acceptance_criteria_reference",
+        "api_oracle_reference",
+    )
+    normalized_references: dict[str, str] = {}
+    secret_markers = ("password=", "passwd=", "token=", "secret=", "bearer ", "otp=")
+    for field_name in reference_fields:
+        value = str(getattr(payload, field_name, "") or "").strip()
+        if any(marker in value.lower() for marker in secret_markers):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Enter vault/fixture references only; passwords, tokens and OTPs are not stored here.",
+            )
+        normalized_references[field_name] = value
+    runtime_references: dict[str, str] = {}
+    for key, raw_value in (payload.runtime_input_references or {}).items():
+        normalized_key = str(key).strip()
+        value = str(raw_value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,100}", normalized_key):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A runtime input reference key is invalid.")
+        if len(value) > 500:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="A runtime input reference is too long.")
+        if any(marker in value.lower() for marker in secret_markers):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Enter vault/fixture references only; passwords, tokens and OTPs are not stored here.",
+            )
+        if value:
+            runtime_references[normalized_key] = value
+    if len(runtime_references) > 50:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Enter a vault/credential reference only; passwords and tokens are not stored here.",
+            detail="At most 50 runtime input references may be saved per checkpoint.",
         )
     record = await _safe_job_record(db, job_id, user.id)
     if record is None:
@@ -1943,7 +2134,8 @@ async def update_autopilot_setup(
             detail="Autopilot setup storage is temporarily unavailable.",
         )
     stored = payload.model_dump()
-    stored["credential_reference"] = credential_reference
+    stored.update(normalized_references)
+    stored["runtime_input_references"] = runtime_references
     stored["updated_at"] = datetime.now(timezone.utc).isoformat()
     try:
         analysis = await service.load_analysis(job_id)
@@ -2010,7 +2202,16 @@ async def resume_autopilot_checkpoint(
         input_requests=[],
         error=None,
     )
-    background_tasks.add_task(service.resume_analysis, job_id)
+    if payload.run_runtime_discovery:
+        background_tasks.add_task(
+            _resume_and_discover_background,
+            job_id,
+            user.id,
+            settings,
+            payload,
+        )
+    else:
+        background_tasks.add_task(service.resume_analysis, job_id)
     return await service.get_job_status(job_id)
 
 
@@ -2071,10 +2272,26 @@ async def run_autopilot_discovery(
     if record is not None:
         try:
             record.discovery = result.model_dump(mode="json")
+            # Runtime discovery is also the source for field-level setup
+            # prompts. Refresh the durable checkpoint immediately so a page
+            # refresh (or another worker) sees the same entry points.
+            try:
+                analysis = await service.load_analysis(job_id)
+                profile = _setup_profile(job_id, record.setup_profile, analysis, result)
+                record.setup_profile = profile.model_dump(mode="json")
+            except FileNotFoundError:
+                pass
             await db.commit()
         except Exception:
             await db.rollback()
             logger.warning("Autopilot discovery durable write skipped", exc_info=True)
+    try:
+        job_changes: dict[str, object] = {"discovery": result.model_dump(mode="json")}
+        if record is not None and getattr(record, "setup_profile", None) is not None:
+            job_changes["setup_profile"] = record.setup_profile
+        await service.update_job(job_id, **job_changes)
+    except Exception:
+        logger.warning("Autopilot discovery manifest update skipped job_id=%s", job_id, exc_info=True)
     return result
 
 

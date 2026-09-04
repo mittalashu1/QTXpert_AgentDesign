@@ -34,7 +34,7 @@ const FILE_EXTENSIONS = ".pdf,.docx,.txt,.md,.json,.csv";
 // Keep the client hint aligned with the backend defaults. Documents remain
 // intentionally small; mobile packages use the larger Autopilot allowance.
 const DOCUMENT_MAX_UPLOAD_MB = 25;
-const MOBILE_PACKAGE_MAX_UPLOAD_MB = 250;
+const MOBILE_PACKAGE_MAX_UPLOAD_MB = 300;
 const LOCAL_CHAT_STORAGE_KEY = "qtxpert-saved-chats";
 const RUN_RAIL_RENDER_LIMIT = 100;
 const MAX_TITLE_WORDS = 20;
@@ -48,7 +48,7 @@ function apiErrorMessage(reason: unknown, fallback: string): string {
 }
 
 const SOURCES: InputSource[] = [
-  { id: "app", label: "App / APK / IPA", description: "Upload a product package (up to 250 MB)", kind: "file", accept: ".apk,.ipa,.zip" },
+  { id: "app", label: "App / APK / IPA", description: "Upload a product package (up to 300 MB)", kind: "file", accept: ".apk,.ipa,.zip" },
   { id: "document", label: "Documents", description: "PDF, DOCX, TXT, CSV", kind: "file", accept: FILE_EXTENSIONS },
   { id: "video", label: "Video walkthrough", description: "MP4, MOV, WEBM", kind: "file", accept: ".mp4,.mov,.webm" },
   { id: "jira", label: "Jira", description: "Paste a story or export URL", kind: "link", placeholder: "https://company.atlassian.net/browse/QA-123" },

@@ -127,7 +127,7 @@ class UploadRepositoryService:
     ) -> UploadedAsset:
         # For object storage, spool the incoming body to a short-lived local
         # file and upload it from there.  This avoids ever inserting binary
-        # chunks into Neon while keeping memory bounded for 250MB APKs.  A
+        # chunks into Neon while keeping memory bounded for 300MB APKs.  A
         # future direct-upload UI can use the adapter's presigned URL methods
         # to bypass the API hop entirely.
         storage = cls._object_storage(settings)
