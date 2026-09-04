@@ -68,7 +68,12 @@ export default function AppLayout() {
     <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
       <AppBar position="fixed" elevation={0} sx={{ zIndex: (theme) => theme.zIndex.drawer + 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "background.paper", color: "text.primary" }}>
         <Toolbar sx={{ gap: 3 }}>
-          <Typography variant="h6" sx={{ fontWeight: 800, minWidth: designRunFocused ? 40 : drawerWidth - 40 }}>QTXpert<Box component="span" sx={{ color: "primary.main" }}>AI</Box></Typography>
+          <Box
+            component="img"
+            src="/qtxpert-logo.svg"
+            alt="QTXpert"
+            sx={{ display: "block", width: designRunFocused ? 128 : 150, height: "auto", maxHeight: 40, flexShrink: 0 }}
+          />
           <Box sx={{ flex: 1, maxWidth: 440 }}><ProjectSelector topLevel /></Box>
           <Tooltip title={mode === "dark" ? "Use light theme" : "Use dark theme"}><IconButton onClick={toggleMode}>{mode === "dark" ? <LightModeOutlinedIcon /> : <DarkModeOutlinedIcon />}</IconButton></Tooltip>
           <IconButton onClick={(event) => setAnchorEl(event.currentTarget)}><Avatar sx={{ width: 34, height: 34, bgcolor: "primary.main", fontSize: 14 }}>{user?.full_name?.charAt(0).toUpperCase() ?? "U"}</Avatar></IconButton>
@@ -142,4 +147,3 @@ export default function AppLayout() {
     </Box>
   );
 }
-
