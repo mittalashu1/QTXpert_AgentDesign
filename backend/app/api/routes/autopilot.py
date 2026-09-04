@@ -719,6 +719,73 @@ def _record_discovery(record: Optional[AutopilotJob]):
         return None
 
 
+async def _available_evidence_asset_ids(
+    db: AsyncSession,
+    user: User,
+    record: Optional[AutopilotJob],
+    asset_ids: set[UUID],
+) -> set[UUID]:
+    """Return evidence assets that can still be downloaded in this project.
+
+    Retention and older deployments may leave an evidence UUID in a JSON
+    snapshot after its upload row was removed.  Validate references at the
+    read boundary so a stale report cannot cause a cascade of 404 requests in
+    the browser.  The ownership and project predicates also preserve the same
+    isolation enforced by ``GET /uploads/{id}/content``.
+    """
+    if not asset_ids:
+        return set()
+    query = select(UploadedAsset.id).where(
+        UploadedAsset.id.in_(asset_ids),
+        UploadedAsset.owner_id == user.id,
+        UploadedAsset.status == "ready",
+    )
+    if record is not None and record.project_id is not None:
+        query = query.where(UploadedAsset.project_id == record.project_id)
+    try:
+        return set((await db.scalars(query)).all())
+    except Exception:
+        # Evidence is supplementary.  A degraded database must not turn an
+        # otherwise readable analysis into a 500; leave the original payload
+        # for the caller's normal fallback handling.
+        logger.info("Autopilot evidence availability check skipped", exc_info=True)
+        return asset_ids
+
+
+async def _sanitize_discovery_assets(
+    db: AsyncSession,
+    user: User,
+    record: Optional[AutopilotJob],
+    discovery: Optional[AutopilotDiscoveryResult],
+) -> Optional[AutopilotDiscoveryResult]:
+    """Remove stale screenshot/page-source IDs from a discovery response."""
+    if discovery is None:
+        return None
+    asset_ids = {
+        asset_id
+        for screen in discovery.screens
+        for asset_id in (screen.screenshot_asset_id, screen.page_source_asset_id)
+        if asset_id is not None
+    }
+    available = await _available_evidence_asset_ids(db, user, record, asset_ids)
+    changed = False
+    screens = []
+    for screen in discovery.screens:
+        screenshot_asset_id = screen.screenshot_asset_id
+        page_source_asset_id = screen.page_source_asset_id
+        if screenshot_asset_id is not None and screenshot_asset_id not in available:
+            screenshot_asset_id = None
+            changed = True
+        if page_source_asset_id is not None and page_source_asset_id not in available:
+            page_source_asset_id = None
+            changed = True
+        screens.append(screen.model_copy(update={
+            "screenshot_asset_id": screenshot_asset_id,
+            "page_source_asset_id": page_source_asset_id,
+        }))
+    return discovery.model_copy(update={"screens": screens}) if changed else discovery
+
+
 def _setup_profile(
     job_id: str,
     value: Optional[dict],
@@ -2305,7 +2372,8 @@ async def get_autopilot_discovery(
     """Restore the latest durable runtime discovery result for this job."""
     service = _service(settings)
     await _require_owned_job(service, job_id, user)
-    return _record_discovery(await _safe_job_record(db, job_id, user.id))
+    record = await _safe_job_record(db, job_id, user.id)
+    return await _sanitize_discovery_assets(db, user, record, _record_discovery(record))
 
 
 @router.post("/{job_id}/suite", response_model=AutopilotSuiteResult)
@@ -2467,7 +2535,7 @@ async def get_autopilot_report(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
 
     record = await _safe_job_record(db, job_id, user.id)
-    discovery = _record_discovery(record)
+    discovery = await _sanitize_discovery_assets(db, user, record, _record_discovery(record))
     suite = None
     if record is not None and record.suite_execution is not None:
         try:

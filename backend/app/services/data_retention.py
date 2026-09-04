@@ -245,6 +245,14 @@ async def _retained_asset_references(
         if parsed:
             references.add(parsed)
         references.update(_ids_from_json(row.document_asset_ids))
+        # Runtime discovery and safe-suite results are stored as JSON on the
+        # job.  They contain screenshot/page-source evidence IDs, so a
+        # retained job must keep those generated assets as well.  Omitting
+        # these fields leaves report tabs pointing at deleted evidence after a
+        # retention sweep and causes noisy 404s when the UI renders them.
+        references.update(_ids_from_json(row.discovery))
+        references.update(_ids_from_json(row.suite_execution))
+        references.update(_ids_from_json(row.analysis))
 
     run_query = select(ExecutionRun).where(
         ~ExecutionRun.id.in_(execution_run_candidates)

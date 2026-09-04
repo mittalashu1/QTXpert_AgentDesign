@@ -1,12 +1,19 @@
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
 from app.config import Settings
-from app.schemas.autopilot import AutopilotAnalysis, AutopilotExecutionRequest
+from app.schemas.autopilot import (
+    AutopilotAnalysis,
+    AutopilotDiscoveryResult,
+    AutopilotExecutionRequest,
+    DiscoveredScreen,
+)
+from app.api.routes.autopilot import _sanitize_discovery_assets
 from app.services.autopilot import (
     AutopilotPrototypeService,
     AutopilotUploadTooLarge,
@@ -443,6 +450,48 @@ def test_report_never_claims_runtime_pass_rate_without_execution():
     assert report.application_overview.name == "Investnation"
     assert all(check.status == "pending" for check in report.compliance_verification)
     assert all(check.dependency for check in report.compliance_verification)
+
+
+@pytest.mark.asyncio
+async def test_stale_discovery_evidence_ids_are_removed_at_read_boundary():
+    available = UUID("11111111-1111-4111-8111-111111111111")
+    stale = UUID("22222222-2222-4222-8222-222222222222")
+
+    class FakeScalars:
+        def all(self):
+            return [available]
+
+    class FakeDb:
+        async def scalars(self, _query):
+            return FakeScalars()
+
+    discovery = AutopilotDiscoveryResult(
+        job_id="33333333-3333-4333-8333-333333333333",
+        status="completed",
+        provider="playwright",
+        started_at="2026-09-04T00:00:00+00:00",
+        finished_at="2026-09-04T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Chromium",
+        screens=[
+            DiscoveredScreen(
+                screen_id="screen-001",
+                fingerprint="fingerprint",
+                screenshot_asset_id=available,
+                page_source_asset_id=stale,
+            )
+        ],
+    )
+    sanitized = await _sanitize_discovery_assets(
+        FakeDb(),
+        SimpleNamespace(id=UUID("44444444-4444-4444-8444-444444444444")),
+        SimpleNamespace(project_id=UUID("55555555-5555-4555-8555-555555555555")),
+        discovery,
+    )
+
+    assert sanitized is not None
+    assert sanitized.screens[0].screenshot_asset_id == available
+    assert sanitized.screens[0].page_source_asset_id is None
 
 
 @pytest.mark.asyncio
