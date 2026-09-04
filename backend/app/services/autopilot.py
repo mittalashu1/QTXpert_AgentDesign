@@ -1046,7 +1046,11 @@ class AutopilotPrototypeService:
                 if raw_setup:
                     raw_setup["job_id"] = job_id
                     setup = AutopilotSetupProfile.model_validate(raw_setup)
-                requests = build_input_requests(analysis, setup)
+                requests = [
+                    item
+                    for item in build_input_requests(analysis, setup)
+                    if not setup or (setup.input_decisions or {}).get(item.key) != "skip"
+                ]
                 if not requests and setup is not None:
                     ready_analysis = analysis.model_copy(
                         update={"checkpoint_stage": "ready_for_discovery", "input_requests": []}
@@ -1164,7 +1168,11 @@ class AutopilotPrototypeService:
             raw_setup = dict(job.get("setup_profile") or {})
             raw_setup["job_id"] = job_id
             setup = AutopilotSetupProfile.model_validate(raw_setup)
-            requests = build_input_requests(analysis, setup)
+            requests = [
+                item
+                for item in build_input_requests(analysis, setup)
+                if not setup or (setup.input_decisions or {}).get(item.key) != "skip"
+            ]
             if requests:
                 checkpoint_analysis = analysis.model_copy(
                     update={"checkpoint_stage": "input_collection", "input_requests": requests}

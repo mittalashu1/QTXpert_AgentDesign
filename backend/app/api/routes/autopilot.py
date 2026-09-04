@@ -2356,9 +2356,26 @@ async def resume_autopilot_checkpoint(
     try:
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError as exc:
+        # A Render restart can remove the local analysis snapshot while the
+        # uploaded APK remains durable in the repository. Rehydrate the
+        # artifact and restart the bounded analysis instead of turning a safe
+        # checkpoint confirmation into a failed run.
+        if record is not None and record.repository_asset_id is not None and str((await service.load_job(job_id)).get("target_kind") or "android") != "web":
+            await _ensure_local_artifact(db, service, job_id, user)
+            await service.update_job(
+                job_id,
+                status="uploaded",
+                stage="queued",
+                progress=5,
+                checkpoint_stage="input_collection",
+                checkpoint_message="Rehydrating the stored mobile build before validating checkpoint inputs.",
+                error=None,
+            )
+            background_tasks.add_task(service.analyze_safely, job_id)
+            return await service.get_job_status(job_id)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Autopilot analysis is not ready for input validation yet.",
+            detail="Autopilot analysis is not ready for input validation yet. Re-run analysis from the stored target.",
         ) from exc
     setup = _record_setup(record, job_id, analysis, _record_discovery(record))
     if not payload.confirm_saved_inputs:
