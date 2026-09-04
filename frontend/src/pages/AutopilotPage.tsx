@@ -147,15 +147,20 @@ type ReportTab = {
 };
 type AutopilotInputRequest = {
   key: string; label: string; category: "credential" | "environment" | "test_data" | "approval" | "acceptance" | "integration";
-  reason: string; required_for: string[]; sensitive: boolean; status: "pending" | "provided" | "validated"; reference_present: boolean;
-  source?: "plan" | "runtime"; screen_id?: string | null; control_id?: string | null; field_type?: string | null; locator?: string | null;
+  reason: string; required_for: string[]; sensitive: boolean; status: "pending" | "provided" | "validated" | "skipped" | "saved" | "random"; reference_present: boolean;
+  source?: "plan" | "runtime"; screen_id?: string | null; control_id?: string | null; field_type?: string | null; input_hint?: "username" | "password" | "otp" | "text" | null; locator?: string | null;
 };
+type InputDecision = "provide" | "skip" | "reuse" | "random";
+type RandomSpec = { kind: "number" | "digits" | "text" | "email" | "phone" | "date" | "amount"; length: number; minimum?: number; maximum?: number; seed?: string };
+type InputDraft = { decision: InputDecision; value: string; save_for_reuse: boolean; random_spec: RandomSpec };
+type SavedInput = { key: string; label: string; category: AutopilotInputRequest["category"]; decision: InputDecision; save_for_reuse: boolean; has_value: boolean; generator_kind?: RandomSpec["kind"] | null; source?: "plan" | "runtime" | "user"; created_at?: string | null; updated_at?: string | null; expires_at?: string | null };
 type SetupProfile = {
   job_id: string; credential_reference: string; account_role: string; environment_name: string;
   environment_url: string; test_data_reference: string; reset_hook_reference: string;
   acceptance_criteria_reference: string; api_oracle_reference: string; navigation_notes: string;
   safe_authentication_approved: boolean; approved_test_ids: string[]; runtime_input_references: Record<string, string>; updated_at?: string | null;
   provided_fields: string[]; missing_fields: string[]; input_requests: AutopilotInputRequest[]; runtime_input_requests?: AutopilotInputRequest[];
+  input_decisions?: Record<string, InputDecision>; saved_inputs?: SavedInput[]; skipped_input_keys?: string[]; random_input_keys?: string[];
   checkpoint_stage: string; checkpoint_message?: string | null; last_validated_at?: string | null;
 };
 
@@ -164,9 +169,32 @@ function emptySetup(jobId = ""): SetupProfile {
     job_id: jobId, credential_reference: "", account_role: "", environment_name: "",
     environment_url: "", test_data_reference: "", reset_hook_reference: "",
     acceptance_criteria_reference: "", api_oracle_reference: "", navigation_notes: "",
-    safe_authentication_approved: false, approved_test_ids: [], runtime_input_references: {}, provided_fields: [], missing_fields: [], input_requests: [], runtime_input_requests: [],
+    safe_authentication_approved: false, approved_test_ids: [], runtime_input_references: {}, input_decisions: {}, saved_inputs: [], skipped_input_keys: [], random_input_keys: [], provided_fields: [], missing_fields: [], input_requests: [], runtime_input_requests: [],
     checkpoint_stage: "input_collection", checkpoint_message: null, last_validated_at: null,
   };
+}
+
+const DEFAULT_RANDOM_SPEC: RandomSpec = { kind: "text", length: 12, minimum: 0, maximum: 100000, seed: "" };
+
+function buildInputDrafts(profile: SetupProfile | null | undefined): Record<string, InputDraft> {
+  const requests = [...(profile?.input_requests || []), ...(profile?.runtime_input_requests || [])];
+  const decisions = profile?.input_decisions || {};
+  const saved = new Map((profile?.saved_inputs || []).map((item) => [item.key, item]));
+  return Object.fromEntries(requests.map((request) => {
+    const prior = decisions[request.key];
+    const savedRecord = saved.get(request.key);
+    const decision: InputDecision = prior === "skip"
+      ? "skip"
+      : prior === "random"
+        ? "random"
+        : (prior === "reuse" || savedRecord?.save_for_reuse ? "reuse" : "provide");
+    return [request.key, {
+      decision,
+      value: "",
+      save_for_reuse: Boolean(savedRecord?.save_for_reuse),
+      random_spec: { ...DEFAULT_RANDOM_SPEC, kind: savedRecord?.generator_kind || "text" },
+    } satisfies InputDraft];
+  }));
 }
 
 const DEFAULT_PROFILE_ID = "uae_fintech";
@@ -467,6 +495,7 @@ export default function AutopilotPage() {
   const [suite, setSuite] = useState<SuiteResult | null>(null);
   const [setup, setSetup] = useState<SetupProfile | null>(null);
   const [setupDraft, setSetupDraft] = useState<SetupProfile>(emptySetup());
+  const [inputDrafts, setInputDrafts] = useState<Record<string, InputDraft>>({});
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
@@ -905,7 +934,7 @@ export default function AutopilotPage() {
   });
   const openSetup = () => {
     if (!analysis) return;
-    setSetupDraft(setup ? {
+    const nextSetup = setup ? {
       ...setup,
       approved_test_ids: [...setup.approved_test_ids],
       runtime_input_references: { ...(setup.runtime_input_references || {}) },
@@ -913,7 +942,9 @@ export default function AutopilotPage() {
       missing_fields: [...setup.missing_fields],
       input_requests: [...setup.input_requests],
       runtime_input_requests: [...(setup.runtime_input_requests || [])],
-    } : emptySetup(analysis.job_id));
+    } : emptySetup(analysis.job_id);
+    setSetupDraft(nextSetup);
+    setInputDrafts(buildInputDrafts(nextSetup));
     setSetupOpen(true);
   };
   const saveSetup = async () => {
@@ -933,14 +964,23 @@ export default function AutopilotPage() {
         safe_authentication_approved: setupDraft.safe_authentication_approved,
         approved_test_ids: setupDraft.approved_test_ids,
         runtime_input_references: setupDraft.runtime_input_references || {},
+        input_submissions: Object.entries(inputDrafts).filter(([, draft]) => draft.decision !== "provide" || Boolean(draft.value.trim())).map(([key, draft]) => ({
+          key,
+          decision: draft.decision,
+          ...(draft.decision === "provide" && draft.value ? { value: draft.value } : {}),
+          save_for_reuse: draft.decision === "provide" || draft.decision === "random" ? draft.save_for_reuse : false,
+          ...(draft.decision === "random" ? { random_spec: draft.random_spec } : {}),
+        })),
       };
       const response = await apiClient.put<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", payload, { timeout: 20000 });
       setSetup(response.data);
-      const pending = response.data.input_requests || [];
+      const pending = (response.data.input_requests || []).filter((item) => item.status === "pending");
+      setSetupDraft(response.data);
+      setInputDrafts(buildInputDrafts(response.data));
       if (pending.length > 0) {
         // Keep the checkpoint open when only part of the requested setup was
         // supplied, so the user can see exactly what remains and why.
-        setSetupDraft((current) => ({ ...current, input_requests: pending, missing_fields: response.data.missing_fields }));
+        setSetupDraft((current) => ({ ...current, input_requests: response.data.input_requests || [], missing_fields: response.data.missing_fields }));
         setContextNotice(`${pending.length} setup item${pending.length === 1 ? "" : "s"} still required. Complete the highlighted checkpoint inputs to continue.`);
         return;
       }
@@ -995,6 +1035,10 @@ export default function AutopilotPage() {
   const updateRuntimeReference = (key: string, value: string) => setSetupDraft((current) => ({
     ...current,
     runtime_input_references: { ...(current.runtime_input_references || {}), [key]: value },
+  }));
+  const updateInputDraft = (key: string, patch: Partial<InputDraft>) => setInputDrafts((current) => ({
+    ...current,
+    [key]: { ...(current[key] || { decision: "provide", value: "", save_for_reuse: false, random_spec: { ...DEFAULT_RANDOM_SPEC } }), ...patch },
   }));
 
   const runDiscovery = async () => {
@@ -1105,6 +1149,7 @@ export default function AutopilotPage() {
     : analysis?.ai_enrichment_used === false
       ? { label: "Deterministic fallback", color: "default" as const }
       : { label: "AI provenance unavailable", color: "default" as const };
+  const checkpointRequests = [...(setupDraft.input_requests || []), ...(setupDraft.runtime_input_requests || [])];
 
   return <Stack spacing={3}>
     <Box>
@@ -1392,16 +1437,16 @@ export default function AutopilotPage() {
         </Stack>
         <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
-            <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">Confirm approved non-production references before authenticated or data-dependent cases continue. Passwords, tokens and OTPs are never stored here.</Typography></Box>
+            <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">Provide, skip, reuse or generate the non-production inputs needed by dependent cases. Saved values are encrypted under Test Data and never shown again.</Typography></Box>
             <Button size="small" variant="outlined" onClick={openSetup} disabled={resumeBusy}>{setup?.provided_fields.length ? "Review inputs" : "Provide inputs"}</Button>
           </Stack>
-          {setup?.checkpoint_message && <Alert severity={setup.input_requests?.length ? "warning" : "info"} sx={{ mt: 1.25 }}>{setup.checkpoint_message}</Alert>}
+          {setup?.checkpoint_message && <Alert severity={setup.input_requests?.some((item) => item.status === "pending") ? "warning" : "info"} sx={{ mt: 1.25 }}>{setup.checkpoint_message}</Alert>}
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
             <Chip size="small" label={(setup?.provided_fields.length || 0) + " setup items provided"} color={setup?.provided_fields.length ? "success" : "default"} variant="outlined" />
             {(automation?.setup_missing_fields || []).slice(0, 6).map((field) => <Chip key={field} size="small" label={"Pending: " + field} color="warning" variant="outlined" />)}
           </Stack>
           {(setup?.input_requests || []).slice(0, 6).map((request) => <Box key={request.key} sx={{ mt: 1, p: 1, borderRadius: 1.5, bgcolor: "warning.lighter", border: "1px solid", borderColor: "warning.light" }}><Typography variant="body2" fontWeight={700}>{request.label}</Typography><Typography variant="caption" color="text.secondary">{request.reason} · {request.required_for.length} dependent case{request.required_for.length === 1 ? "" : "s"}</Typography></Box>)}
-          {(setup?.runtime_input_requests || []).length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: "info.lighter", border: "1px solid", borderColor: "info.light" }}><Typography variant="body2" fontWeight={700}>Runtime entry points discovered</Typography><Typography variant="caption" color="text.secondary">{(setup?.runtime_input_requests || []).length} field{(setup?.runtime_input_requests || []).length === 1 ? "" : "s"} can be mapped to approved credential or synthetic-data references. Values are never captured.</Typography></Box>}
+          {(setup?.runtime_input_requests || []).length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: "info.lighter", border: "1px solid", borderColor: "info.light" }}><Typography variant="body2" fontWeight={700}>Runtime entry points discovered</Typography><Typography variant="caption" color="text.secondary">{(setup?.runtime_input_requests || []).length} field{(setup?.runtime_input_requests || []).length === 1 ? "" : "s"} can be entered for this run, skipped, reused, or generated with bounded synthetic data. Saved values are encrypted and masked.</Typography></Box>}
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · full plan buckets are listed above</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 80).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
@@ -1464,14 +1509,30 @@ export default function AutopilotPage() {
     <Dialog open={setupOpen} onClose={() => !setupBusy && !resumeBusy && setSetupOpen(false)} fullWidth maxWidth="md">
       <DialogTitle>Autopilot checkpoint · confirm inputs</DialogTitle>
       <DialogContent>
-        <Alert severity={setupDraft.input_requests?.length ? "warning" : "success"} sx={{ mb: 2 }}>
-          {setupDraft.input_requests?.length
-            ? `${setupDraft.input_requests.length} input${setupDraft.input_requests.length === 1 ? "" : "s"} is required before this run can continue.`
-            : "All setup references are present. Save to validate them and continue to Runtime Discovery."}
-          {" "}Enter references to approved non-production resources. Do not paste passwords, access tokens or OTPs; keep secrets in the configured vault/provider.
+        <Alert severity={checkpointRequests.some((item) => item.status === "pending") ? "warning" : "info"} sx={{ mb: 2 }}>
+          {checkpointRequests.length
+            ? `${checkpointRequests.length} checkpoint input${checkpointRequests.length === 1 ? "" : "s"}. Choose how each should be handled before continuing.`
+            : "No additional checkpoint inputs are required. Save to continue to Runtime Discovery."}
+          {" "}Enter values only in non-production environments. Saved values are encrypted under Test Data, never echoed or written to logs. Save is optional; Skip keeps the dependent case blocked safely.
         </Alert>
-        {setupDraft.input_requests?.length > 0 && <Stack spacing={.75} sx={{ mb: 2 }}>{setupDraft.input_requests.map((request) => <Box key={request.key} sx={{ p: 1, bgcolor: "action.hover", borderRadius: 1.5 }}><Typography variant="body2" fontWeight={700}>{request.label}</Typography><Typography variant="caption" color="text.secondary">{request.reason} Required for {request.required_for.join(", ")}.</Typography></Box>)}</Stack>}
-        {(setupDraft.runtime_input_requests || []).length > 0 && <Box sx={{ mb: 2, p: 1.25, border: "1px solid", borderColor: "info.light", borderRadius: 2, bgcolor: "info.lighter" }}><Typography variant="subtitle2" fontWeight={800}>Runtime field references (optional mapping)</Typography><Typography variant="caption" color="text.secondary">Discovery identified these entry points. Supply a vault or synthetic-fixture reference when a field needs a dedicated value; never paste the value itself.</Typography><Grid container spacing={1.5} sx={{ mt: .25 }}>{(setupDraft.runtime_input_requests || []).slice(0, 40).map((request) => <Grid item xs={12} md={6} key={request.key}><TextField fullWidth size="small" label={request.label} value={setupDraft.runtime_input_references?.[request.key] || ""} onChange={(event) => updateRuntimeReference(request.key, event.target.value)} helperText={`${request.screen_id || "Runtime screen"} · ${request.field_type || "input"}${request.reference_present ? " · generic reference covers this field" : ""}`} /></Grid>)}</Grid></Box>}
+        {checkpointRequests.length > 0 && <Stack spacing={1.25} sx={{ mb: 2 }}>
+          {checkpointRequests.slice(0, 50).map((request) => {
+            const draft = inputDrafts[request.key] || { decision: "provide" as InputDecision, value: "", save_for_reuse: false, random_spec: { ...DEFAULT_RANDOM_SPEC } };
+            const saved = (setupDraft.saved_inputs || []).find((item) => item.key === request.key);
+            const sensitiveValue = request.input_hint === "password" || request.input_hint === "otp";
+            const canRandomize = request.category === "test_data" && !sensitiveValue;
+            return <Box key={request.key} sx={{ p: 1.5, border: "1px solid", borderColor: draft.decision === "skip" ? "divider" : "info.light", bgcolor: draft.decision === "skip" ? "action.hover" : "info.lighter", borderRadius: 2 }}>
+              <Stack direction={{ xs: "column", md: "row" }} spacing={1.25} alignItems={{ md: "flex-start" }} justifyContent="space-between">
+                <Box sx={{ flex: 1 }}><Stack direction="row" spacing={.75} alignItems="center"><Typography variant="body2" fontWeight={800}>{request.label}</Typography>{request.status !== "pending" && <Chip size="small" label={request.status} color={request.status === "skipped" ? "warning" : "success"} variant="outlined" />}</Stack><Typography variant="caption" color="text.secondary">{request.reason} · {request.required_for.join(", ") || "checkpoint"}</Typography>{saved?.save_for_reuse && <Typography variant="caption" display="block" color="success.main" sx={{ mt: .25 }}>Saved encrypted · value is masked and can be reused for this target.</Typography>}</Box>
+                <FormControl size="small" sx={{ minWidth: 170 }}><InputLabel>Input action</InputLabel><Select label="Input action" value={draft.decision} onChange={(event) => updateInputDraft(request.key, { decision: event.target.value as InputDecision, value: event.target.value === "provide" ? draft.value : "" })}><MenuItem value="provide">Enter value</MenuItem><MenuItem value="skip">Skip this run</MenuItem><MenuItem value="reuse" disabled={!saved?.save_for_reuse}>Reuse saved</MenuItem>{canRandomize && <MenuItem value="random">Generate random</MenuItem>}</Select></FormControl>
+              </Stack>
+              {draft.decision === "provide" && <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1 }}><TextField fullWidth size="small" type={sensitiveValue ? "password" : "text"} label={sensitiveValue ? (request.input_hint === "password" ? "Password" : "One-time code") : request.input_hint === "username" ? "Username / email" : "Value or reference"} value={draft.value} onChange={(event) => updateInputDraft(request.key, { value: event.target.value })} autoComplete="off" helperText={sensitiveValue ? "Encrypted immediately; never shown again." : "Use synthetic/non-production data only."} /><FormControlLabel control={<Switch size="small" checked={draft.save_for_reuse} onChange={(event) => updateInputDraft(request.key, { save_for_reuse: event.target.checked })} />} label="Save encrypted" /></Stack>}
+              {draft.decision === "random" && <Grid container spacing={1} sx={{ mt: .25 }}><Grid item xs={12} sm={4}><FormControl fullWidth size="small"><InputLabel>Generator</InputLabel><Select label="Generator" value={draft.random_spec.kind} onChange={(event) => updateInputDraft(request.key, { random_spec: { ...draft.random_spec, kind: event.target.value as RandomSpec["kind"] } })}>{["text", "digits", "number", "amount", "email", "phone", "date"].map((kind) => <MenuItem key={kind} value={kind}>{kind}</MenuItem>)}</Select></FormControl></Grid><Grid item xs={6} sm={2}><TextField fullWidth size="small" type="number" label="Length" value={draft.random_spec.length} onChange={(event) => updateInputDraft(request.key, { random_spec: { ...draft.random_spec, length: Math.max(1, Number(event.target.value) || 1) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Minimum" value={draft.random_spec.minimum ?? ""} onChange={(event) => updateInputDraft(request.key, { random_spec: { ...draft.random_spec, minimum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Maximum" value={draft.random_spec.maximum ?? ""} onChange={(event) => updateInputDraft(request.key, { random_spec: { ...draft.random_spec, maximum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={draft.save_for_reuse} onChange={(event) => updateInputDraft(request.key, { save_for_reuse: event.target.checked })} />} label="Save generated value encrypted" /><Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>Generated data is bounded synthetic input; it never uses production data.</Typography></Grid></Grid>}
+              {draft.decision !== "skip" && draft.decision !== "reuse" && <Button size="small" sx={{ mt: .5 }} onClick={() => updateInputDraft(request.key, { decision: "skip", value: "", save_for_reuse: false })}>Skip</Button>}
+              {draft.decision === "skip" && <Button size="small" sx={{ mt: .5 }} onClick={() => updateInputDraft(request.key, { decision: saved?.save_for_reuse ? "reuse" : "provide" })}>Undo skip</Button>}
+            </Box>;
+          })}
+        </Stack>}
         <Grid container spacing={2}>
           <Grid item xs={12} md={6}><TextField fullWidth label="Credential set reference" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Test account role" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>

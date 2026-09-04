@@ -33,15 +33,58 @@ AutopilotInputCategory = Literal[
     "acceptance",
     "integration",
 ]
-AutopilotInputStatus = Literal["pending", "provided", "validated"]
+AutopilotInputStatus = Literal["pending", "provided", "validated", "skipped", "saved", "random"]
+AutopilotInputDecision = Literal["provide", "skip", "reuse", "random"]
+AutopilotRandomKind = Literal["number", "digits", "text", "email", "phone", "date", "amount"]
+
+
+class AutopilotRandomSpec(BaseModel):
+    """A bounded, non-secret recipe for generating synthetic test data."""
+
+    kind: AutopilotRandomKind = "text"
+    length: int = Field(default=12, ge=1, le=256)
+    minimum: Optional[float] = Field(default=None, ge=-1_000_000_000_000, le=1_000_000_000_000)
+    maximum: Optional[float] = Field(default=None, ge=-1_000_000_000_000, le=1_000_000_000_000)
+    seed: Optional[str] = Field(default=None, max_length=128)
+
+
+class AutopilotInputSubmission(BaseModel):
+    """One user decision for a checkpoint input.
+
+    ``value`` is accepted only on this write boundary.  The API encrypts it
+    immediately and never includes it in a response, log message or job
+    snapshot.
+    """
+
+    key: str = Field(min_length=1, max_length=120)
+    decision: AutopilotInputDecision = "provide"
+    value: Optional[str] = Field(default=None, max_length=4000)
+    save_for_reuse: bool = False
+    random_spec: Optional[AutopilotRandomSpec] = None
+
+
+class AutopilotSavedInput(BaseModel):
+    """Safe metadata for a saved encrypted input; never contains its value."""
+
+    key: str
+    label: str
+    category: AutopilotInputCategory
+    decision: AutopilotInputDecision
+    save_for_reuse: bool = True
+    has_value: bool = False
+    generator_kind: Optional[AutopilotRandomKind] = None
+    source: Literal["plan", "runtime", "user"] = "user"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    expires_at: Optional[str] = None
 
 
 class AutopilotInputRequest(BaseModel):
-    """A safe, auditable request for a non-secret setup reference.
+    """A safe, auditable checkpoint request.
 
-    Autopilot never accepts the secret itself.  The UI can therefore explain
-    exactly why a run is paused while the value remains in the customer's
-    vault or external test-data provider.
+    Direct values may be submitted only through the write-only checkpoint
+    boundary and are encrypted immediately; this response model contains no
+    value, token, password or OTP.
     """
 
     key: str
@@ -59,6 +102,7 @@ class AutopilotInputRequest(BaseModel):
     screen_id: Optional[str] = None
     control_id: Optional[str] = None
     field_type: Optional[str] = None
+    input_hint: Optional[Literal["username", "password", "otp", "text"]] = None
     locator: Optional[str] = None
 
 
@@ -326,10 +370,14 @@ class AutopilotSetupUpdateRequest(BaseModel):
     # password, search or test-data field to a vault/fixture without sending
     # the actual value to QTXpert.
     runtime_input_references: Dict[str, str] = Field(default_factory=dict)
+    # Direct values are accepted only for this request and are encrypted by
+    # the API before persistence. They are intentionally excluded from all
+    # response schemas and job manifests.
+    input_submissions: List[AutopilotInputSubmission] = Field(default_factory=list, max_length=50)
 
 
 class AutopilotSetupProfile(AutopilotSetupUpdateRequest):
-    """Durable setup references; passwords and tokens are intentionally excluded."""
+    """Durable setup metadata; passwords and tokens are intentionally excluded."""
 
     job_id: str
     updated_at: Optional[str] = None
@@ -337,6 +385,10 @@ class AutopilotSetupProfile(AutopilotSetupUpdateRequest):
     missing_fields: List[str] = Field(default_factory=list)
     input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
     runtime_input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
+    input_decisions: Dict[str, AutopilotInputDecision] = Field(default_factory=dict)
+    saved_inputs: List[AutopilotSavedInput] = Field(default_factory=list)
+    skipped_input_keys: List[str] = Field(default_factory=list)
+    random_input_keys: List[str] = Field(default_factory=list)
     checkpoint_stage: str = "input_collection"
     checkpoint_message: Optional[str] = None
     last_validated_at: Optional[str] = None

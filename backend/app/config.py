@@ -245,6 +245,13 @@ class Settings(BaseSettings):
     # unset unless Appium is exposed through an authenticated TLS tunnel or a
     # private network endpoint.
     AUTOPILOT_CUSTOM_APPIUM_URL: Optional[str] = None
+    # Input checkpoints accept direct values only on the write boundary. They
+    # are encrypted with Fernet before persistence. Set an explicit key in
+    # production; the JWT secret is a backwards-compatible derivation fallback
+    # so existing deployments remain safe during rollout.
+    AUTOPILOT_INPUT_ENCRYPTION_KEY: Optional[str] = None
+    AUTOPILOT_INPUT_SESSION_TTL_SECONDS: int = Field(default=3600, ge=300, le=86400)
+    AUTOPILOT_INPUT_SAVED_TTL_DAYS: int = Field(default=90, ge=1, le=3650)
 
     # ------------------------------------------------------------------ #
     # Generated data retention

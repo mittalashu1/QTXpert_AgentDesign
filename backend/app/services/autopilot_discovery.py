@@ -148,6 +148,20 @@ class AutopilotDiscoveryService:
         return "text"
 
     @classmethod
+    def _input_hint(cls, attrs: Dict[str, str], label: str) -> str:
+        """Provide a UI hint without changing the conservative input kind."""
+        haystack = " ".join(
+            [label, attrs.get("hint", ""), attrs.get("resource-id", ""), attrs.get("content-desc", ""), attrs.get("identifier", "")]
+        ).lower().replace("_", " ").replace("-", " ")
+        if any(term in haystack for term in ("password", "passcode", "secret")):
+            return "password"
+        if any(term in haystack for term in ("otp", "one time", "mfa", "verification code")):
+            return "otp"
+        if any(term in haystack for term in ("username", "user name", "user id", "email", "login")):
+            return "username"
+        return "text"
+
+    @classmethod
     def runtime_input_requests(cls, screens: Iterable[DiscoveredScreen]) -> list[AutopilotInputRequest]:
         """Build field-level, reference-only questions from discovered UI.
 
@@ -170,16 +184,17 @@ class AutopilotDiscoveryService:
                 credential = field_type == "credential"
                 category = "credential" if credential else "test_data"
                 display_label = control.semantic_label or f"{field_type} field"
+                input_hint = cls._input_hint({}, display_label)
                 label = (
-                    f"Credential reference for {display_label}"
+                    f"Credential input for {display_label}"
                     if credential
-                    else f"Synthetic data reference for {display_label}"
+                    else f"Test data for {display_label}"
                 )[:240]
                 reason = (
-                    "This live entry point may require an approved non-production credential reference. "
-                    "Provide only a vault/provider reference; Autopilot never captures or stores the value."
+                    "This live entry point may require a non-production credential. Enter it for this run, save it encrypted for reuse, or skip it. "
+                    "Autopilot never returns the value or writes it to logs."
                     if credential
-                    else "This live entry point accepts data during the journey. Provide a synthetic fixture/reference so repeated runs remain isolated and reversible."
+                    else "This live entry point accepts data during the journey. Enter synthetic data, save it encrypted for reuse, generate a bounded random value, or skip it."
                 )
                 locator = control.locators[0].value if control.locators else None
                 requests.append(
@@ -196,6 +211,7 @@ class AutopilotDiscoveryService:
                         screen_id=screen.screen_id,
                         control_id=control.control_id,
                         field_type=field_type,
+                        input_hint=input_hint,  # type: ignore[arg-type]
                         locator=locator,
                     )
                 )

@@ -238,22 +238,37 @@ class AutopilotIRCompiler:
         test: AutopilotTest,
         setup: Optional[AutopilotSetupProfile],
     ) -> list[str]:
+        def has_value(field: str, category: Optional[str] = None) -> bool:
+            if setup is None:
+                return False
+            if str(getattr(setup, field, "") or "").strip():
+                return True
+            decisions = getattr(setup, "input_decisions", {}) or {}
+            accepted = {"provide", "reuse", "random"}
+            if decisions.get(field) in accepted:
+                return True
+            if category:
+                for request in [*(getattr(setup, "input_requests", []) or []), *(getattr(setup, "runtime_input_requests", []) or [])]:
+                    if request.category == category and decisions.get(request.key) in accepted:
+                        return True
+            return False
+
         missing: list[str] = []
         if test.requires_auth:
-            if not setup or not setup.credential_reference.strip():
+            if not has_value("credential_reference", "credential"):
                 missing.append("credential reference")
-            if not setup or not setup.account_role.strip():
+            if not has_value("account_role"):
                 missing.append("test account role")
             if not setup or not setup.safe_authentication_approved:
                 missing.append("safe authentication approval")
         if test.requires_test_data:
-            if not setup or not setup.test_data_reference.strip():
+            if not has_value("test_data_reference", "test_data"):
                 missing.append("synthetic test-data reference")
-            if not setup or not setup.reset_hook_reference.strip():
+            if not has_value("reset_hook_reference"):
                 missing.append("reset/cleanup reference")
-        if test.bucket == "uat" and (not setup or not setup.acceptance_criteria_reference.strip()):
+        if test.bucket == "uat" and not has_value("acceptance_criteria_reference"):
             missing.append("signed-off acceptance criteria reference")
-        if test.bucket == "integration" and (not setup or not setup.api_oracle_reference.strip()):
+        if test.bucket == "integration" and not has_value("api_oracle_reference"):
             missing.append("API/oracle reference")
         return missing
 

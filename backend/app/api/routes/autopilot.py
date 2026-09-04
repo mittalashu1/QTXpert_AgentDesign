@@ -62,6 +62,7 @@ from app.services.autopilot_context import default_context, get_profile, list_pr
 from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
+from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
 from app.services.document_intelligence import DocumentIntelligenceService
 from app.services.upload_repository import (
@@ -792,10 +793,20 @@ def _setup_profile(
     analysis: Optional[AutopilotAnalysis] = None,
     discovery: Optional[AutopilotDiscoveryResult] = None,
 ) -> AutopilotSetupProfile:
-    """Normalize stored non-secret setup references and expose completion metadata."""
+    """Normalize setup references and expose safe input-decision metadata.
+
+    Raw input values are deliberately absent here.  They live only as
+    encrypted records managed by ``autopilot_input_store``; this JSON snapshot
+    contains decisions and masked metadata so it is safe to copy on reruns.
+    """
     raw = dict(value or {})
     raw["job_id"] = job_id
     raw.setdefault("updated_at", None)
+    raw.setdefault("input_decisions", {})
+    raw.setdefault("saved_inputs", [])
+    raw.setdefault("skipped_input_keys", [])
+    raw.setdefault("random_input_keys", [])
+    raw.pop("input_submissions", None)
     reference_fields = (
         "credential_reference",
         "account_role",
@@ -818,35 +829,61 @@ def _setup_profile(
     if analysis is not None:
         normalized_setup = AutopilotSetupProfile.model_validate({**raw, "job_id": job_id})
         requests = build_input_requests(analysis, normalized_setup)
-        raw["input_requests"] = [item.model_dump(mode="json") for item in requests]
-        raw["missing_fields"] = [item.label for item in requests]
+        decisions = normalized_setup.input_decisions or {}
+        normalized_requests = []
+        for item in requests:
+            decision = decisions.get(item.key)
+            if decision == "skip":
+                item = item.model_copy(update={"status": "skipped", "reference_present": False})
+            elif decision in {"provide", "reuse", "random"}:
+                item = item.model_copy(update={"status": "random" if decision == "random" else "provided", "reference_present": True})
+            normalized_requests.append(item)
+        raw["input_requests"] = [item.model_dump(mode="json") for item in normalized_requests]
+        raw["missing_fields"] = [item.label for item in normalized_requests if item.status == "pending"]
         runtime_requests = []
         if discovery is not None:
+            accepted_decisions = {"provide", "reuse", "random"}
             category_provided = {
-                "credential": bool(normalized_setup.credential_reference.strip()),
-                "test_data": bool(normalized_setup.test_data_reference.strip()),
+                "credential": bool(normalized_setup.credential_reference.strip())
+                or any(
+                    decisions.get(item.key) in accepted_decisions
+                    for item in discovery.input_requests
+                    if item.category == "credential"
+                ),
+                "test_data": bool(normalized_setup.test_data_reference.strip())
+                or any(
+                    decisions.get(item.key) in accepted_decisions
+                    for item in discovery.input_requests
+                    if item.category == "test_data"
+                ),
             }
             for item in discovery.input_requests:
                 reference_present = bool(
                     str(normalized_setup.runtime_input_references.get(item.key) or "").strip()
                     or category_provided.get(item.category, False)
+                    or decisions.get(item.key) in {"provide", "reuse", "random"}
                 )
+                decision = decisions.get(item.key)
                 runtime_requests.append(
                     item.model_copy(
                         update={
                             "reference_present": reference_present,
-                            "status": "provided" if reference_present else "pending",
+                            "status": "skipped" if decision == "skip" else "random" if decision == "random" else "provided" if reference_present else "pending",
                         }
                     )
                 )
         elif raw.get("runtime_input_requests"):
             runtime_requests = list(normalized_setup.runtime_input_requests)
         raw["runtime_input_requests"] = [item.model_dump(mode="json") for item in runtime_requests]
-        if requests:
+        pending_requests = [item for item in normalized_requests if item.status == "pending"]
+        if pending_requests:
             raw["checkpoint_stage"] = "input_collection"
             raw["checkpoint_message"] = (
-                "Provide approved non-production references before authenticated, data-dependent or UAT cases continue."
+                "Choose Enter, Skip, Reuse or Random for each checkpoint input before dependent cases continue."
             )
+        elif normalized_requests and any(item.status == "skipped" for item in normalized_requests):
+            raw["checkpoint_stage"] = "ready"
+            raw["checkpoint_message"] = "Skipped inputs remain blocked; safe, independent checks can continue."
         elif discovery is None or not discovery.screens:
             raw["checkpoint_stage"] = "runtime_discovery"
             raw["checkpoint_message"] = (
@@ -1809,6 +1846,23 @@ async def rerun_autopilot_analysis(
         if payload.setup_action == "reuse" and original_record is not None and original_record.setup_profile
         else None
     )
+    if setup_profile_to_copy is not None:
+        # A rerun must never silently carry forward values that the user chose
+        # not to save.  Keep only encrypted repository-backed metadata and
+        # turn those entries into an explicit ``reuse`` decision; the setup
+        # checkpoint will ask for every other input again.
+        saved_inputs = [
+            item
+            for item in (setup_profile_to_copy.get("saved_inputs") or [])
+            if isinstance(item, dict) and item.get("save_for_reuse") and item.get("key")
+        ]
+        saved_keys = {str(item["key"]) for item in saved_inputs}
+        setup_profile_to_copy["saved_inputs"] = saved_inputs
+        setup_profile_to_copy["input_decisions"] = {
+            key: "reuse" for key in saved_keys
+        }
+        setup_profile_to_copy["skipped_input_keys"] = []
+        setup_profile_to_copy["random_input_keys"] = []
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     effective_project_id = project_id or (UUID(str(original["project_id"])) if original.get("project_id") and _is_uuid(original.get("project_id")) else None)
     canonical_profile_id = _canonical_profile_id(payload.profile_id)
@@ -2142,7 +2196,29 @@ async def get_autopilot_setup(
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError:
         analysis = None
-    return _record_setup(record, job_id, analysis, _record_discovery(record))
+    discovery = _record_discovery(record)
+    profile = _record_setup(record, job_id, analysis, discovery)
+    if record is not None:
+        try:
+            metadata = await list_metadata(
+                db,
+                user.id,
+                record.project_id,
+                (record.surface_key or job_id)[:128],
+            )
+            if metadata:
+                raw = profile.model_dump(mode="json")
+                raw["saved_inputs"] = [item.model_dump(mode="json") for item in metadata]
+                decisions = dict(raw.get("input_decisions") or {})
+                for item in metadata:
+                    decisions[item.key] = item.decision
+                raw["input_decisions"] = decisions
+                profile = _setup_profile(job_id, raw, analysis, discovery)
+        except Exception:
+            # The checkpoint remains readable during a migration/degraded DB;
+            # the durable setup snapshot is still the safe fallback.
+            logger.info("Autopilot input metadata read skipped job_id=%s", job_id, exc_info=True)
+    return profile
 
 
 @router.put("/{job_id}/setup", response_model=AutopilotSetupProfile)
@@ -2200,15 +2276,44 @@ async def update_autopilot_setup(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Autopilot setup storage is temporarily unavailable.",
         )
-    stored = payload.model_dump()
-    stored.update(normalized_references)
-    stored["runtime_input_references"] = runtime_references
-    stored["updated_at"] = datetime.now(timezone.utc).isoformat()
     try:
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError:
         analysis = None
-    profile = _setup_profile(job_id, stored, analysis, _record_discovery(record))
+    discovery = _record_discovery(record)
+    current_profile = _record_setup(record, job_id, analysis, discovery)
+    request_map = {
+        item.key: item
+        for item in [*(current_profile.input_requests or []), *(current_profile.runtime_input_requests or [])]
+    }
+    if payload.input_submissions and not request_map:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Input checkpoints are not available until the analysis has produced its plan.",
+        )
+    try:
+        decisions, saved_inputs = await apply_submissions(
+            db,
+            settings,
+            record,
+            payload.input_submissions,
+            request_map,
+        )
+    except AutopilotInputStoreError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    stored = payload.model_dump(exclude={"input_submissions"})
+    stored.update(normalized_references)
+    stored["runtime_input_references"] = runtime_references
+    prior_decisions = dict(current_profile.input_decisions or {})
+    prior_decisions.update(decisions)
+    stored["input_decisions"] = prior_decisions
+    stored["saved_inputs"] = [item.model_dump(mode="json") for item in saved_inputs]
+    stored["skipped_input_keys"] = sorted(key for key, value in prior_decisions.items() if value == "skip")
+    stored["random_input_keys"] = sorted(key for key, value in prior_decisions.items() if value == "random")
+    stored["updated_at"] = datetime.now(timezone.utc).isoformat()
+    profile = _setup_profile(job_id, stored, analysis, discovery)
     try:
         record.setup_profile = profile.model_dump(mode="json")
         await db.commit()
@@ -2253,11 +2358,12 @@ async def resume_autopilot_checkpoint(
     setup = _record_setup(record, job_id, analysis, _record_discovery(record))
     if not payload.confirm_saved_inputs:
         return await service.get_job_status(job_id)
-    if setup.input_requests:
+    pending_inputs = [item for item in setup.input_requests if item.status == "pending"]
+    if pending_inputs:
         current = await service.get_job_status(job_id)
         current.checkpoint_stage = "input_collection"
-        current.checkpoint_message = "Complete the listed setup references before continuing."
-        current.input_requests = setup.input_requests
+        current.checkpoint_message = "Choose Enter, Skip, Reuse or Random for each pending input before continuing."
+        current.input_requests = pending_inputs
         return current
     await service.update_job(
         job_id,
