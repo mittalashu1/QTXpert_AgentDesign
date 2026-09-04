@@ -163,11 +163,11 @@ class AutopilotDiscoveryService:
 
     @classmethod
     def runtime_input_requests(cls, screens: Iterable[DiscoveredScreen]) -> list[AutopilotInputRequest]:
-        """Build field-level, reference-only questions from discovered UI.
+        """Build field-level checkpoint questions from discovered UI.
 
-        Runtime discovery never fills a field and never returns its value. A
-        user can optionally map each entry point to a vault or synthetic-data
-        fixture after the generic checkpoint has been validated.
+        Runtime discovery never fills a field or returns its value. The user
+        can enter a non-production value for this run, save it encrypted for
+        reuse, generate bounded synthetic data, or skip the dependent case.
         """
         requests: list[AutopilotInputRequest] = []
         seen: set[str] = set()

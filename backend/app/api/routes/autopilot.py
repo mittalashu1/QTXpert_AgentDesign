@@ -842,22 +842,27 @@ def _setup_profile(
         raw["missing_fields"] = [item.label for item in normalized_requests if item.status == "pending"]
         runtime_requests = []
         if discovery is not None:
+            # Rebuild field-level requests from the current screen map so a
+            # discovery captured by an older deployment receives the current
+            # direct-input labels, password/OTP hints and safe actions.
+            discovered_requests = AutopilotDiscoveryService.runtime_input_requests(discovery.screens)
+            source_requests = discovered_requests or list(discovery.input_requests)
             accepted_decisions = {"provide", "reuse", "random"}
             category_provided = {
                 "credential": bool(normalized_setup.credential_reference.strip())
                 or any(
                     decisions.get(item.key) in accepted_decisions
-                    for item in discovery.input_requests
+                    for item in source_requests
                     if item.category == "credential"
                 ),
                 "test_data": bool(normalized_setup.test_data_reference.strip())
                 or any(
                     decisions.get(item.key) in accepted_decisions
-                    for item in discovery.input_requests
+                    for item in source_requests
                     if item.category == "test_data"
                 ),
             }
-            for item in discovery.input_requests:
+            for item in source_requests:
                 reference_present = bool(
                     str(normalized_setup.runtime_input_references.get(item.key) or "").strip()
                     or category_provided.get(item.category, False)
