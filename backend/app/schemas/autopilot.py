@@ -170,6 +170,11 @@ class AutopilotAnalysis(BaseModel):
     release_risks: List[str] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     capabilities: Dict[str, bool] = Field(default_factory=dict)
+    # Generation provenance is kept next to the plan so clients can explain
+    # what was produced without reverse-engineering the test list.
+    coverage_counts: Dict[str, int] = Field(default_factory=dict)
+    generation_policy: List[str] = Field(default_factory=list)
+    input_summary: List[str] = Field(default_factory=list)
     # Provenance is explicit so the UI/report can distinguish target evidence,
     # the selected business context and optional LLM enrichment.
     context_considered: Optional[bool] = None
@@ -264,6 +269,18 @@ class AutopilotReportMetrics(BaseModel):
     evidence_state: str = "Runtime execution has not been recorded."
 
 
+class AutopilotReportEvidenceAsset(BaseModel):
+    """A durable evidence link surfaced by the Test and Audit Report."""
+
+    asset_id: UUID
+    filename: str
+    kind: Literal["screenshot", "page_source", "video", "other"] = "other"
+    bucket: Optional[AutopilotTestBucket] = None
+    test_id: Optional[str] = None
+    title: Optional[str] = None
+    scope: Literal["test", "suite", "smoke"] = "test"
+
+
 class AutopilotTestAuditReport(BaseModel):
     """Executive release-readiness report derived from evidence and context."""
 
@@ -285,6 +302,7 @@ class AutopilotTestAuditReport(BaseModel):
     risk_matrix: List[AutopilotReportRisk] = Field(default_factory=list)
     recommendations: List[str] = Field(default_factory=list)
     evidence: List[str] = Field(default_factory=list)
+    evidence_assets: List[AutopilotReportEvidenceAsset] = Field(default_factory=list)
 
 
 class AutopilotReportDeletionResult(BaseModel):

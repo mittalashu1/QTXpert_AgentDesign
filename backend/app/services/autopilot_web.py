@@ -84,9 +84,20 @@ async def _capture_screenshot(page: Any, path: Path) -> tuple[str | None, str | 
 
 
 class AutopilotWebService:
+    VIDEO_BUCKETS = frozenset({
+        "functional",
+        "functional_positive",
+        "functional_negative",
+        "uat",
+    })
+
     def __init__(self, settings: Settings, prototype: AutopilotPrototypeService):
         self.settings = settings
         self.prototype = prototype
+
+    @classmethod
+    def _is_video_case(cls, test: QTXTestIR) -> bool:
+        return test.bucket in cls.VIDEO_BUCKETS
 
     async def _browser(self, manager: Any, browser_name: str):
         browser_type = getattr(manager, browser_name, None)
@@ -284,81 +295,140 @@ class AutopilotWebService:
         started = time.perf_counter()
         results: list[AutopilotSuiteTestResult] = []
         async with self._playwright_context() as (manager, browser):
-            context = await browser.new_context(ignore_https_errors=False)
-            await context.route("**/*", self._safe_route)
-            page = await context.new_page()
-            try:
-                for test in tests:
-                    test_started = time.perf_counter()
-                    status_value = "passed"
-                    error = None
-                    evidence: dict[str, Any] = {"provider": "playwright", "target_url": target_url, "read_only": True}
-                    try:
-                        response = await page.goto(
-                            target_url,
-                            wait_until="domcontentloaded",
-                            timeout=self.settings.AUTOPILOT_WEB_TIMEOUT_SECONDS * 1000,
-                        )
-                        status_code = response.status if response is not None else None
-                        evidence.update({"status_code": status_code, "url": page.url, "title": (await page.title())[:300]})
-                        # Every executed web case gets its own screenshot and
-                        # HTML snapshot.  The API replaces these temporary
-                        # paths with repository asset IDs before returning the
-                        # result, so the report remains useful after a
-                        # Render restart without leaking local filesystem
-                        # locations.
-                        safe_test_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", test.test_id)[:100]
-                        evidence_root = self.prototype._job_dir(job_id) / "evidence" / "web-suite"
-                        evidence_root.mkdir(parents=True, exist_ok=True)
-                        screenshot_path = evidence_root / f"{safe_test_id}.png"
-                        page_source_path = evidence_root / f"{safe_test_id}.html"
-                        captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
-                        if captured_screenshot:
-                            evidence["screenshot_path"] = captured_screenshot
-                        if screenshot_warning:
-                            evidence["screenshot_warning"] = screenshot_warning
-                        page_source_path.write_text(await page.content(), encoding="utf-8")
-                        evidence["page_source_path"] = str(page_source_path)
-                        if status_code is not None and status_code >= 400:
-                            raise AssertionError(f"Website returned HTTP {status_code}")
-                        if test.bucket == "accessibility":
-                            unnamed = await page.locator("a,button,input,select,textarea,[role=button]").evaluate_all(
-                                "els => els.filter(el => !(el.getAttribute('aria-label') || el.innerText || el.getAttribute('name') || el.getAttribute('title'))).length"
-                            )
-                            evidence["unnamed_controls"] = int(unnamed)
-                            if unnamed:
-                                raise AssertionError(f"{unnamed} interactive control(s) have no accessible name")
-                        if test.bucket == "security":
-                            evidence["security_headers"] = {
-                                key: response.headers.get(key)
-                                for key in (
-                                    "strict-transport-security",
-                                    "content-security-policy",
-                                    "x-frame-options",
-                                    "x-content-type-options",
-                                    "referrer-policy",
-                                    "permissions-policy",
-                                )
+            for test in tests:
+                test_started = time.perf_counter()
+                status_value = "passed"
+                error = None
+                safe_test_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", test.test_id)[:100]
+                evidence_root = self.prototype._job_dir(job_id) / "evidence" / "web-suite"
+                evidence_dir = evidence_root / safe_test_id
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                evidence: dict[str, Any] = {
+                    "provider": "playwright",
+                    "target_url": target_url,
+                    "read_only": True,
+                    "evidence_dir": str(evidence_dir),
+                }
+                video_requested = self._is_video_case(test)
+                # Safe web execution currently does not submit forms, but keep
+                # the privacy boundary ready for future authenticated steps.
+                sensitive_case = bool(test.requires_auth or any(step.action == "fill" for step in test.steps))
+                video_status: str | None = None
+                context = None
+                page = None
+                try:
+                    context_options: dict[str, Any] = {"ignore_https_errors": False}
+                    if video_requested:
+                        video_dir = evidence_dir / "video"
+                        video_dir.mkdir(parents=True, exist_ok=True)
+                        context_options.update(
+                            {
+                                "record_video_dir": str(video_dir),
+                                "record_video_size": {
+                                    "width": min(1024, self.settings.AUTOPILOT_VIDEO_WIDTH),
+                                    "height": min(768, self.settings.AUTOPILOT_VIDEO_HEIGHT),
+                                },
                             }
-                    except AssertionError as exc:
-                        status_value, error = "failed", str(exc)[:1200]
-                    except Exception as exc:
-                        status_value, error = "failed", f"{type(exc).__name__}: {str(exc)[:1200]}"
-                    results.append(
-                        AutopilotSuiteTestResult(
-                            test_id=test.test_id,
-                            title=test.title,
-                            status=status_value,
-                            bucket=test.bucket,
-                            readiness=test.readiness,
-                            dependency=test.dependency,
-                            duration_seconds=round(time.perf_counter() - test_started, 2),
-                            error=error,
-                            evidence=evidence,
                         )
+                    try:
+                        context = await browser.new_context(**context_options)
+                    except Exception:
+                        if not video_requested:
+                            raise
+                        # Recording support is provider/version dependent. Fall
+                        # back to the normal read-only context rather than
+                        # failing a functional check solely because video is
+                        # unavailable.
+                        video_status = "unsupported"
+                        context = await browser.new_context(ignore_https_errors=False)
+                    await context.route("**/*", self._safe_route)
+                    page = await context.new_page()
+                    response = await page.goto(
+                        target_url,
+                        wait_until="domcontentloaded",
+                        timeout=self.settings.AUTOPILOT_WEB_TIMEOUT_SECONDS * 1000,
                     )
-            finally:
-                await context.close()
+                    status_code = response.status if response is not None else None
+                    evidence.update({"status_code": status_code, "url": page.url, "title": (await page.title())[:300]})
+                    # Every executed web case gets its own screenshot and HTML
+                    # snapshot.  The API replaces these temporary paths with
+                    # repository asset IDs before returning the result.
+                    screenshot_path = evidence_dir / "screenshot.png"
+                    page_source_path = evidence_dir / "page-source.html"
+                    captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
+                    if captured_screenshot:
+                        evidence["screenshot_path"] = captured_screenshot
+                    if screenshot_warning:
+                        evidence["screenshot_warning"] = screenshot_warning
+                    page_source_path.write_text(await page.content(), encoding="utf-8")
+                    evidence["page_source_path"] = str(page_source_path)
+                    if status_code is not None and status_code >= 400:
+                        raise AssertionError(f"Website returned HTTP {status_code}")
+                    if test.bucket == "accessibility":
+                        unnamed = await page.locator("a,button,input,select,textarea,[role=button]").evaluate_all(
+                            "els => els.filter(el => !(el.getAttribute('aria-label') || el.innerText || el.getAttribute('name') || el.getAttribute('title'))).length"
+                        )
+                        evidence["unnamed_controls"] = int(unnamed)
+                        if unnamed:
+                            raise AssertionError(f"{unnamed} interactive control(s) have no accessible name")
+                    if test.bucket == "security":
+                        evidence["security_headers"] = {
+                            key: response.headers.get(key)
+                            for key in (
+                                "strict-transport-security",
+                                "content-security-policy",
+                                "x-frame-options",
+                                "x-content-type-options",
+                                "referrer-policy",
+                                "permissions-policy",
+                            )
+                        }
+                except AssertionError as exc:
+                    status_value, error = "failed", str(exc)[:1200]
+                except Exception as exc:
+                    status_value, error = "failed", f"{type(exc).__name__}: {str(exc)[:1200]}"
+                finally:
+                    if context is not None:
+                        try:
+                            # Playwright finalizes the WebM only when its
+                            # context closes. Resolve the path afterwards.
+                            await context.close()
+                        except Exception:
+                            if video_requested and video_status is None:
+                                video_status = "close_failed"
+                    if video_requested and video_status != "unsupported":
+                        if sensitive_case:
+                            video_status = "suppressed_sensitive_input"
+                        elif page is not None and getattr(page, "video", None) is not None:
+                            try:
+                                raw_path = await page.video.path()
+                                video_path = Path(str(raw_path))
+                                if video_path.is_file() and video_path.stat().st_size <= self.settings.AUTOPILOT_VIDEO_MAX_BYTES:
+                                    evidence["video_path"] = str(video_path)
+                                    video_status = "captured"
+                                else:
+                                    try:
+                                        video_path.unlink(missing_ok=True)
+                                    except OSError:
+                                        pass
+                                    video_status = "too_large"
+                            except Exception:
+                                video_status = video_status or "unavailable"
+                    if video_requested and video_status:
+                        evidence["video_status"] = video_status
+                results.append(
+                    AutopilotSuiteTestResult(
+                        test_id=test.test_id,
+                        title=test.title,
+                        status=status_value,
+                        bucket=test.bucket,
+                        readiness=test.readiness,
+                        dependency=test.dependency,
+                        duration_seconds=round(time.perf_counter() - test_started, 2),
+                        error=error,
+                        evidence=evidence,
+                    )
+                )
         passed = sum(item.status == "passed" for item in results)
         failed = sum(item.status == "failed" for item in results)
         finished_at = datetime.now(timezone.utc)

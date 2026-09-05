@@ -67,6 +67,19 @@ supports:
 
 The smoke runner starts an Android session, launches the uploaded build, waits for the session to expose a UI hierarchy, captures screenshot and UI hierarchy, records package/activity/orientation, validates that the expected application (rather than a launcher, permission screen, crash or ANR dialog) is foregrounded, and closes the session. It does not execute a business transaction. Unattended safe smoke enables Appium's runtime-permission auto-grant by default; the form can turn it off when permission prompts themselves are under test.
 
+### 5a. Functional evidence recordings
+
+The safe suite requests a short screen recording for functional, functional-positive,
+functional-negative and UAT cases on both Appium and Playwright providers. Recordings
+are bounded by duration and size, downsampled/low-bitrate where the provider supports
+those controls, and capped to a small number per run. A case that fills a sensitive
+credential/OTP input never persists a recording. Provider recording incompatibility is
+reported as non-blocking evidence metadata; it does not turn an otherwise safe test
+into a failure. Persisted recordings are uploaded to the same private evidence
+repository as screenshots and UI hierarchies and are linked from the Test and Audit
+Report. Local staging files are removed after a successful copy, while the existing
+retention policy removes old ephemeral evidence.
+
 ### 6. Durable results and reruns
 
 Autopilot now keeps the complete run chain traceable across page refreshes and Render restarts:

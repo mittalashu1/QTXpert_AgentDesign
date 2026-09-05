@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Iterable, Optional
+from uuid import UUID
 
 from app.schemas.autopilot import (
     AutopilotAnalysis,
@@ -16,6 +17,7 @@ from app.schemas.autopilot import (
     AutopilotDiscoveryResult,
     AutopilotExecutionRecord,
     AutopilotReportCheck,
+    AutopilotReportEvidenceAsset,
     AutopilotReportMetrics,
     AutopilotReportRisk,
     AutopilotSuiteResult,
@@ -34,6 +36,87 @@ def _unique(values: Iterable[str]) -> list[str]:
         if value and value not in result:
             result.append(value)
     return result
+
+
+def _report_evidence_assets(
+    suite: Optional[AutopilotSuiteResult],
+    executions: list[AutopilotExecutionRecord],
+) -> list[AutopilotReportEvidenceAsset]:
+    """Collect opaque, durable evidence links for the report view.
+
+    Worker-local paths are intentionally ignored. Only UUID-shaped repository
+    references created by the evidence persistence boundary are exposed.
+    """
+
+    assets: list[AutopilotReportEvidenceAsset] = []
+    seen: set[str] = set()
+
+    def add(
+        raw: object,
+        *,
+        filename: object,
+        kind: object,
+        bucket: object = None,
+        test_id: object = None,
+        title: object = None,
+        scope: str = "test",
+    ) -> None:
+        if not raw:
+            return
+        try:
+            asset_id = UUID(str(raw))
+        except (TypeError, ValueError, AttributeError):
+            return
+        key = str(asset_id)
+        if key in seen:
+            return
+        seen.add(key)
+        normalized_kind = str(kind or "other")
+        if normalized_kind not in {"screenshot", "page_source", "video", "other"}:
+            normalized_kind = "other"
+        normalized_scope = scope if scope in {"test", "suite", "smoke"} else "test"
+        assets.append(
+            AutopilotReportEvidenceAsset(
+                asset_id=asset_id,
+                filename=str(filename or f"evidence-{key}"),
+                kind=normalized_kind,
+                bucket=str(bucket) if bucket else None,
+                test_id=str(test_id) if test_id else None,
+                title=str(title) if title else None,
+                scope=normalized_scope,
+            )
+        )
+
+    if suite is not None:
+        for test in suite.tests:
+            raw_assets = (test.evidence or {}).get("evidence_assets")
+            if not isinstance(raw_assets, list):
+                continue
+            for item in raw_assets:
+                if not isinstance(item, dict):
+                    continue
+                add(
+                    item.get("asset_id"),
+                    filename=item.get("filename"),
+                    kind=item.get("kind"),
+                    bucket=test.bucket,
+                    test_id=test.test_id,
+                    title=test.title,
+                    scope="test",
+                )
+    for execution in executions:
+        evidence = execution.evidence or {}
+        for key, kind, fallback in (
+            ("screenshot_asset_id", "screenshot", "launch.png"),
+            ("page_source_asset_id", "page_source", "page-source"),
+        ):
+            add(
+                evidence.get(key),
+                filename=fallback,
+                kind=kind,
+                scope="smoke",
+            )
+    return assets
 
 
 def _context_application_name(context: str) -> Optional[str]:
@@ -351,6 +434,7 @@ def build_test_audit_report(
 ) -> AutopilotTestAuditReport:
     executions = executions or []
     metrics = _metrics(analysis, suite, executions)
+    evidence_assets = _report_evidence_assets(suite, executions)
     # A smoke execution is runtime evidence even when a previously attempted
     # suite contains zero executable cases. Keep the report from reverting to
     # its pre-run placeholder state in that situation.
@@ -493,6 +577,12 @@ def build_test_audit_report(
         else:
             static_evidence = [f"Website target analysis: {analysis.target_url or 'URL not recorded'}", f"HTML surface inventory: {analysis.file_count} resource(s)"]
         evidence = [*static_evidence, metrics.evidence_state]
+        if evidence_assets:
+            video_count = sum(asset.kind == "video" for asset in evidence_assets)
+            evidence.append(
+                f"Durable evidence assets: {len(evidence_assets)}"
+                + (f" ({video_count} functional video)" if video_count else "")
+            )
 
     return AutopilotTestAuditReport(
         generated_at=datetime.now(timezone.utc).isoformat(),
@@ -509,5 +599,6 @@ def build_test_audit_report(
         risk_matrix=risks,
         recommendations=recommendations,
         evidence=evidence,
+        evidence_assets=evidence_assets,
     )
 

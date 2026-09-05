@@ -47,6 +47,7 @@ type Analysis = {
   debuggable?: boolean; inferred_domain: string; app_summary: string; critical_journeys: string[];
   clarification_questions: string[]; tests: TestCase[]; release_risks: string[];
   warnings: string[]; capabilities: Record<string, boolean>;
+  coverage_counts?: Record<string, number>; generation_policy?: string[]; input_summary?: string[];
   context_considered?: boolean; ai_enrichment_used?: boolean; analysis_basis?: string[];
   document_asset_ids?: string[]; document_analysis_run_id?: string | null;
   checkpoint_stage?: string; input_requests?: AutopilotInputRequest[];
@@ -82,6 +83,7 @@ type AuditReport = {
   };
   functional_testing: ReportCheck[]; non_functional_testing: ReportCheck[]; compliance_verification: ReportCheck[];
   risk_matrix: ReportRisk[]; recommendations: string[]; evidence: string[];
+  evidence_assets?: Array<{ asset_id: string; filename: string; kind: "screenshot" | "page_source" | "video" | "other"; bucket?: TestBucket | null; test_id?: string | null; title?: string | null; scope?: "test" | "suite" | "smoke" }>;
 };
 type Execution = {
   execution_id?: string; job_id?: string; device_name?: string; started_at?: string; finished_at?: string;
@@ -496,6 +498,13 @@ function RuntimeScreenPreview({ screen }: { screen: DiscoveredScreen }) {
 }
 
 type SuiteEvidenceAsset = { asset_id: string; filename?: string; kind?: string };
+
+function evidenceAssetLabel(kind?: string) {
+  if (kind === "video") return "Functional video";
+  if (kind === "screenshot") return "Screenshot";
+  if (kind === "page_source") return "UI hierarchy";
+  return "Evidence";
+}
 
 function suiteEvidenceAssets(test: SuiteTestResult): SuiteEvidenceAsset[] {
   const raw = test.evidence?.evidence_assets;
@@ -955,6 +964,16 @@ export default function AutopilotPage() {
     }
     return counts;
   }, [analysis]);
+  const testPlanSummary = useMemo(() => {
+    const counts = bucketCounts;
+    const sum = (buckets: TestBucket[]) => buckets.reduce((total, bucket) => total + (counts[bucket] || 0), 0);
+    return [
+      { label: "Functional journeys", value: sum(["functional", "functional_positive", "functional_negative"]), detail: "Core flows and positive/negative paths" },
+      { label: "UAT / SIT", value: sum(["uat", "sit", "integration"]), detail: "Business acceptance and service boundaries" },
+      { label: "UI & accessibility", value: sum(["ui", "ui_positive", "ui_negative", "accessibility"]), detail: "Visual, interaction and inclusive behavior" },
+      { label: "Runtime & guardrails", value: sum(["installation", "page_level", "performance", "security", "compatibility", "resilience", "permissions", "regression"]), detail: "Platform, resilience, security and regression checks" },
+    ];
+  }, [bucketCounts]);
   const visibleTests = useMemo(
     () => analysis?.tests.filter((test) => testBucketFilter === "all" || normalizedBucket(test) === testBucketFilter) ?? [],
     [analysis, testBucketFilter],
@@ -1655,6 +1674,17 @@ export default function AutopilotPage() {
           <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Open risks</Typography><Typography variant="h5" fontWeight={800}>{report.risk_matrix.filter((risk) => risk.status === "open" || risk.status === "pending_validation").length}</Typography></Box></Grid>
         </Grid>}
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>{report.metrics.evidence_state}</Typography>
+        {(report.evidence_assets || []).length > 0 && <Box sx={{ mt: 1.5, p: 1.25, border: "1px solid", borderColor: "divider", borderRadius: 2, bgcolor: "action.hover" }}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}>
+            <Box><Typography variant="subtitle2" fontWeight={800}>Evidence in this report</Typography><Typography variant="caption" color="text.secondary">Durable assets are retained with this report and excluded from the general repository list.</Typography></Box>
+            <Chip size="small" label={`${(report.evidence_assets || []).length} asset${(report.evidence_assets || []).length === 1 ? "" : "s"}`} variant="outlined" />
+          </Stack>
+          <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .75 }}>
+            {(report.evidence_assets || []).map((asset) => <Button key={asset.asset_id} size="small" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }} title={asset.title || asset.filename}>
+              {evidenceAssetLabel(asset.kind)}{asset.bucket ? ` · ${testBucketLabel[asset.bucket]}` : ""}
+            </Button>)}
+          </Stack>
+        </Box>}
         {!reportPending && report.executive_findings.length > 0 && <Stack spacing={.5} sx={{ mt: 1.5 }}>{report.executive_findings.map((finding) => <Typography key={finding} variant="body2">• {finding}</Typography>)}</Stack>}
         {!reportPending && report.reported_issues.length > 0 && <Alert severity="warning" sx={{ mt: 1.5 }}><b>Context-reported status (unverified):</b><Stack spacing={.25} sx={{ mt: .5 }}>{report.reported_issues.map((issue) => <Typography key={issue} variant="body2">• {issue}</Typography>)}</Stack></Alert>}
         {reportPending ? <Grid container spacing={1.25} sx={{ mt: 2 }}>
@@ -1724,6 +1754,34 @@ export default function AutopilotPage() {
           A generated case is a plan, not a pass. Authenticated journeys require a non-production User ID/email and Password
           (or a secure vault reference), approved test data and an oracle/reset hook; no password is stored in the context or sent to the model.
         </Alert>
+        <Box sx={{ mt: 1.5, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2, bgcolor: "action.hover" }}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}>
+            <Box>
+              <Typography variant="subtitle2" fontWeight={800}>Plan at a glance</Typography>
+              <Typography variant="caption" color="text.secondary">The plan is generated from the selected profile, target evidence and optional documents. Execution status is reported separately.</Typography>
+            </Box>
+            <Chip size="small" label={analysis.ai_enrichment_used ? "AI-enriched plan" : "Evidence/rules baseline"} color={analysis.ai_enrichment_used ? "primary" : "default"} variant="outlined" />
+          </Stack>
+          <Grid container spacing={1} sx={{ mt: .25 }}>
+            {testPlanSummary.map((item) => <Grid item xs={6} md={3} key={item.label}>
+              <Box sx={{ p: 1, height: "100%", borderRadius: 1.5, bgcolor: "background.paper" }}>
+                <Typography variant="caption" color="text.secondary" display="block">{item.label}</Typography>
+                <Typography variant="h6" fontWeight={800}>{item.value}</Typography>
+                <Typography variant="caption" color="text.secondary">{item.detail}</Typography>
+              </Box>
+            </Grid>)}
+          </Grid>
+          {analysis.input_summary && analysis.input_summary.length > 0 && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+            Inputs inferred from this plan: {analysis.input_summary.join(" · ")}
+          </Typography>}
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
+            <Typography variant="caption" color="text.secondary">
+              Input checkpoint: {pendingCheckpointRequests.length ? `${pendingCheckpointRequests.length} item${pendingCheckpointRequests.length === 1 ? "" : "s"} pending` : "no pending items"}.
+              {pendingCheckpointRequests.length ? ` ${pendingCheckpointRequests.slice(0, 3).map((item) => item.label).join(" · ")}${pendingCheckpointRequests.length > 3 ? " · …" : ""}` : " Safe deterministic cases can be run now."}
+            </Typography>
+            {pendingCheckpointRequests.length > 0 && <Button size="small" variant="text" onClick={openSetup}>Review inputs</Button>}
+          </Stack>
+        </Box>
         <TableContainer sx={{ mt: 1.5, maxHeight: 460 }}>
           <Table stickyHeader size="small">
             <TableHead><TableRow>
@@ -1803,7 +1861,7 @@ export default function AutopilotPage() {
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · plan capped at 100 cases</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 100).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
-        {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe batch: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The evidence-scoped plan is capped at 100 cases. This run can include up to {suiteMaxTests} eligible deterministic cases; setup-gated or unsupported cases remain visible and never count as passed.</Typography>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{asset.kind === "screenshot" ? "Screenshot" : "UI hierarchy"}</Button>)}</Stack>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+        {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe batch: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The evidence-scoped plan is capped at 100 cases. This run can include up to {suiteMaxTests} eligible deterministic cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>

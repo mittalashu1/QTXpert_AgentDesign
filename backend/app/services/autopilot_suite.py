@@ -7,6 +7,7 @@ Only tests already classified as ``executable`` by the IR compiler are eligible.
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,14 @@ class AutopilotSuiteService:
         "fill",
         "assert_visible",
     }
+    # Record only user-journey coverage.  Installation, discovery, security
+    # and performance checks keep their lighter screenshot/XML evidence.
+    VIDEO_BUCKETS = frozenset({
+        "functional",
+        "functional_positive",
+        "functional_negative",
+        "uat",
+    })
 
     def __init__(self, settings: Settings, prototype: AutopilotPrototypeService):
         self.settings = settings
@@ -269,6 +278,109 @@ class AutopilotSuiteService:
     def _supported(self, test: QTXTestIR) -> bool:
         return bool(test.steps) and all(step.action in self.SUPPORTED_ACTIONS for step in test.steps)
 
+    @classmethod
+    def _is_video_case(cls, test: QTXTestIR) -> bool:
+        """Return whether a case belongs to the functional journey evidence scope."""
+
+        return test.bucket in cls.VIDEO_BUCKETS
+
+    @staticmethod
+    def _test_touches_sensitive_input(
+        test: QTXTestIR,
+        input_values: Dict[str, str],
+        sensitive_input_keys: set[str],
+    ) -> bool:
+        """Conservatively identify a case that could render a secret on screen."""
+
+        return any(
+            step.action == "fill"
+            and step.input_key in sensitive_input_keys
+            and step.input_key in input_values
+            for step in test.steps
+        )
+
+    def _start_video_recording(self, driver) -> tuple[bool, str]:
+        """Start Appium screen recording without making it a test failure.
+
+        Appium and hosted device providers expose slightly different method
+        signatures. Try the bounded form first, then progressively simpler
+        calls. An unsupported recording endpoint is reported as metadata only;
+        the functional test itself continues to run.
+        """
+
+        starter = getattr(driver, "start_recording_screen", None)
+        if not callable(starter):
+            return False, "unsupported"
+        bounded = {
+            "time_limit": self.settings.AUTOPILOT_VIDEO_MAX_SECONDS * 1000,
+            "video_size": f"{self.settings.AUTOPILOT_VIDEO_WIDTH}x{self.settings.AUTOPILOT_VIDEO_HEIGHT}",
+            "bit_rate": self.settings.AUTOPILOT_VIDEO_BIT_RATE,
+            "video_fps": self.settings.AUTOPILOT_VIDEO_FPS,
+        }
+        for kwargs in (bounded, {"time_limit": bounded["time_limit"]}, {}):
+            try:
+                starter(**kwargs)
+                return True, "recording"
+            except TypeError:
+                continue
+            except Exception:
+                # A provider may reject one optional capability while still
+                # accepting a simpler form. Never echo the provider message,
+                # which can contain command arguments.
+                continue
+        return False, "unsupported"
+
+    def _stop_video_recording(
+        self,
+        driver,
+        path: Path,
+        *,
+        suppress: bool,
+    ) -> tuple[Path | None, str]:
+        """Stop and materialize a bounded Appium recording, if available."""
+
+        stopper = getattr(driver, "stop_recording_screen", None)
+        if not callable(stopper):
+            return None, "unsupported"
+        try:
+            payload = stopper()
+        except Exception:
+            return None, "stop_failed"
+        if suppress:
+            return None, "suppressed_sensitive_input"
+        if not payload:
+            return None, "empty"
+        if isinstance(payload, bytes):
+            # The Appium client normally returns an ASCII base64 string, but a
+            # few custom endpoints return decoded bytes.  Decode only when the
+            # byte payload is valid base64; otherwise preserve the bytes as-is.
+            raw = payload
+            try:
+                encoded = b"".join(payload.split()).decode("ascii")
+                decoded = base64.b64decode(encoded.encode("ascii"), validate=True)
+                if decoded:
+                    raw = decoded
+            except Exception:
+                pass
+        else:
+            try:
+                encoded = str(payload).strip()
+                if "," in encoded and encoded.lower().startswith("data:"):
+                    encoded = encoded.split(",", 1)[1]
+                raw = base64.b64decode(encoded.encode("ascii"), validate=False)
+            except Exception:
+                raw = b""
+        if not raw:
+            return None, "invalid"
+        if len(raw) > self.settings.AUTOPILOT_VIDEO_MAX_BYTES:
+            return None, "too_large"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        except OSError:
+            return None, "write_failed"
+        return path, "captured"
+
     def _run_sync(
         self,
         job_id: str,
@@ -346,7 +458,18 @@ class AutopilotSuiteService:
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
                 evidence_dir.mkdir(parents=True, exist_ok=True)
+                evidence: Dict[str, Any] = {}
+                video_requested = self._is_video_case(test)
+                video_started = False
+                video_status: str | None = None
+                sensitive_touched = self._test_touches_sensitive_input(
+                    test,
+                    input_values,
+                    sensitive_input_keys,
+                )
                 try:
+                    if video_requested:
+                        video_started, video_status = self._start_video_recording(driver)
                     self._reset_to_application(driver, package)
                     evidence = self._execute_test(
                         driver,
@@ -386,17 +509,26 @@ class AutopilotSuiteService:
                     # A password/OTP may be rendered in the native hierarchy
                     # while a failure screenshot is captured. Suppress that
                     # artifact whenever this test touched a sensitive input.
-                    sensitive_touched = any(
-                        step.action == "fill"
-                        and step.input_key in sensitive_input_keys
-                        and step.input_key in input_values
-                        for step in test.steps
-                    )
                     if not sensitive_touched:
                         try:
                             driver.get_screenshot_as_file(str(evidence_dir / "failure.png"))
                         except Exception:
                             pass
+                finally:
+                    if video_requested:
+                        if video_started:
+                            video_path, stopped_status = self._stop_video_recording(
+                                driver,
+                                evidence_dir / "functional-journey.mp4",
+                                suppress=sensitive_touched,
+                            )
+                            video_status = stopped_status
+                            if video_path is not None:
+                                evidence["video_path"] = str(video_path)
+                        if video_status and video_status != "captured":
+                            evidence["video_status"] = video_status
+                        elif video_status == "captured":
+                            evidence["video_status"] = "captured"
                 results.append(
                     AutopilotSuiteTestResult(
                         test_id=test.test_id,

@@ -1418,8 +1418,9 @@ async def _persist_evidence_asset(
     filename: str,
     content_type: str,
     repository_asset_id: Optional[UUID] = None,
+    max_bytes: Optional[int] = None,
 ) -> Optional[UUID]:
-    """Copy small smoke evidence files into the durable Upload Repository.
+    """Copy bounded execution evidence into the durable Upload Repository.
 
     Evidence is best-effort: a storage outage must never turn a completed
     device run into an HTTP 500.  Snapshot the repository asset id before any
@@ -1458,7 +1459,7 @@ async def _persist_evidence_asset(
             project_id=project_id,
             source_module="autopilot",
             category="autopilot_evidence",
-            max_bytes=25 * 1024 * 1024,
+            max_bytes=max_bytes or 25 * 1024 * 1024,
             minimum_bytes=1,
             settings=settings,
         )
@@ -2774,7 +2775,7 @@ def _strip_suite_evidence_paths(result: AutopilotSuiteResult) -> AutopilotSuiteR
     changed = False
     for test in result.tests:
         evidence = dict(test.evidence or {})
-        for path_key in ("evidence_dir", "screenshot_path", "page_source_path"):
+        for path_key in ("evidence_dir", "screenshot_path", "page_source_path", "video_path"):
             if path_key in evidence:
                 evidence.pop(path_key, None)
                 changed = True
@@ -2789,26 +2790,29 @@ async def _persist_suite_evidence(
     settings: Settings,
     result: AutopilotSuiteResult,
 ) -> AutopilotSuiteResult:
-    """Make bounded safe-suite screenshots and hierarchies report-downloadable.
+    """Make bounded safe-suite screenshots, hierarchies and videos report-downloadable.
 
     The suite runner deliberately writes evidence into a per-test temporary
     directory so one Appium session can execute a batch efficiently.  Those
     local paths are not useful after a Render restart and must never be
     exposed to the browser.  Copy at most a small, deterministic evidence
     set for each executed case into the same repository used by discovery and
-    smoke, then replace the path with opaque asset metadata in the result.
+    smoke, then replace the path with opaque asset metadata in the result. A
+    functional recording is short and size-capped so it does not become a
+    second artifact archive.
     Deferred cases have no evidence directory and remain untouched.
     """
     repository_asset_id = job_record.repository_asset_id
     persisted = []
     total_assets = 0
+    video_assets = 0
     max_assets = 120
     for test in result.tests:
         evidence = dict(test.evidence or {})
         raw_directory = evidence.pop("evidence_dir", None)
         directory = Path(str(raw_directory)) if raw_directory else None
         direct_paths: list[Path] = []
-        for path_key in ("screenshot_path", "page_source_path"):
+        for path_key in ("screenshot_path", "page_source_path", "video_path"):
             raw_path = evidence.pop(path_key, None)
             if raw_path:
                 direct_paths.append(Path(str(raw_path)))
@@ -2819,17 +2823,47 @@ async def _persist_suite_evidence(
                 candidates = sorted(
                     path
                     for path in directory.iterdir()
-                    if path.is_file() and path.suffix.lower() in {".png", ".xml", ".html"}
+                    if path.is_file() and path.suffix.lower() in {".png", ".xml", ".html", ".mp4", ".webm", ".mov"}
                 )[:8]
             except OSError:
                 candidates = []
+        seen_paths: set[str] = set()
+        persistence_failed = False
         for path in [*direct_paths, *candidates[:8]]:
             if total_assets >= max_assets or not path.is_file():
                 break
-            suffix = path.suffix.lower()
-            if suffix not in {".png", ".xml", ".html"}:
+            resolved_path = str(path.resolve())
+            if resolved_path in seen_paths:
                 continue
-            content_type = "image/png" if suffix == ".png" else "text/html" if suffix == ".html" else "application/xml"
+            seen_paths.add(resolved_path)
+            suffix = path.suffix.lower()
+            if suffix not in {".png", ".xml", ".html", ".mp4", ".webm", ".mov"}:
+                continue
+            is_video = suffix in {".mp4", ".webm", ".mov"}
+            if is_video and video_assets >= settings.AUTOPILOT_VIDEO_MAX_ASSETS:
+                # Keep the run bounded even when a large plan contains many
+                # functional/UAT cases. The user can still see that recording
+                # was intentionally omitted from this case.
+                evidence["video_status"] = "not_persisted_limit"
+                continue
+            if is_video:
+                # Reject an over-sized recording before handing it to the
+                # repository adapter.  This avoids a second read of a large
+                # file and lets the normal staging cleanup remove it.
+                try:
+                    if path.stat().st_size > settings.AUTOPILOT_VIDEO_MAX_BYTES:
+                        evidence["video_status"] = "too_large"
+                        continue
+                except OSError:
+                    continue
+            content_type = (
+                "video/mp4" if suffix == ".mp4"
+                else "video/webm" if suffix == ".webm"
+                else "video/quicktime" if suffix == ".mov"
+                else "image/png" if suffix == ".png"
+                else "text/html" if suffix == ".html"
+                else "application/xml"
+            )
             asset_id = await _persist_evidence_asset(
                 db,
                 user,
@@ -2839,16 +2873,29 @@ async def _persist_suite_evidence(
                 filename=f"suite-{result.job_id[:8]}-{test.test_id}-{path.name}",
                 content_type=content_type,
                 repository_asset_id=repository_asset_id,
+                max_bytes=settings.AUTOPILOT_VIDEO_MAX_BYTES if is_video else None,
             )
             if asset_id is not None:
                 assets.append({
                     "asset_id": str(asset_id),
                     "filename": path.name,
-                    "kind": "screenshot" if suffix == ".png" else "page_source",
+                    "kind": "video" if is_video else "screenshot" if suffix == ".png" else "page_source",
                 })
                 total_assets += 1
+                if is_video:
+                    video_assets += 1
+            else:
+                persistence_failed = True
         if assets:
             evidence["evidence_assets"] = assets
+        # Evidence is staged locally only long enough to copy it into the
+        # configured repository. Leave it for the retention sweep if an upload
+        # failed so a transient storage outage does not destroy the only copy.
+        if directory is not None and directory.is_dir() and not persistence_failed:
+            try:
+                await asyncio.to_thread(shutil.rmtree, directory)
+            except OSError:
+                logger.debug("Autopilot suite evidence cleanup skipped path=%s", directory)
         updated = test.model_copy(update={"evidence": evidence})
         persisted.append(updated)
     if not persisted:

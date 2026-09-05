@@ -240,6 +240,17 @@ class Settings(BaseSettings):
     AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
     AUTOPILOT_SUITE_TIMEOUT_SECONDS: int = Field(default=900, ge=60, le=3600)
     AUTOPILOT_BROWSERSTACK_UPLOAD_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
+    # Functional journeys may optionally capture one short, low-bitrate
+    # recording.  Keep the cap deliberately small so evidence does not turn
+    # the Render instance or Neon-backed fallback into an artifact archive.
+    # The object-store backend is still recommended for durable media.
+    AUTOPILOT_VIDEO_MAX_BYTES: int = Field(default=20 * 1024 * 1024, ge=1 * 1024 * 1024, le=100 * 1024 * 1024)
+    AUTOPILOT_VIDEO_MAX_SECONDS: int = Field(default=90, ge=15, le=300)
+    AUTOPILOT_VIDEO_MAX_ASSETS: int = Field(default=8, ge=1, le=50)
+    AUTOPILOT_VIDEO_BIT_RATE: int = Field(default=1_000_000, ge=128_000, le=10_000_000)
+    AUTOPILOT_VIDEO_FPS: int = Field(default=8, ge=1, le=30)
+    AUTOPILOT_VIDEO_WIDTH: int = Field(default=720, ge=320, le=1440)
+    AUTOPILOT_VIDEO_HEIGHT: int = Field(default=1280, ge=320, le=2560)
     # Androguard can allocate a very large resource table for some release
     # APKs. Keep deep parsing conservative on the Render web instance; the
     # binary always remains available for BrowserStack/Appium execution.

@@ -652,6 +652,53 @@ def test_report_never_claims_runtime_pass_rate_without_execution():
     assert all(check.dependency for check in report.compliance_verification)
 
 
+def test_report_exposes_durable_functional_video_assets():
+    analysis = AutopilotAnalysis(
+        job_id="11111111-1111-4111-8111-111111111111",
+        filename="investnation.apk",
+        sha256="a" * 64,
+        app_name="Investnation",
+        package_name="com.example.investnation",
+        tests=[],
+    )
+    suite = AutopilotSuiteResult(
+        job_id=analysis.job_id,
+        status="passed",
+        provider="appium",
+        started_at="2026-09-04T00:00:00+00:00",
+        finished_at="2026-09-04T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Test device",
+        selected_count=1,
+        executed_count=1,
+        passed_count=1,
+        tests=[
+            AutopilotSuiteTestResult(
+                test_id="QT-FUNC-001",
+                title="Complete the safe login journey",
+                status="passed",
+                bucket="functional",
+                evidence={
+                    "evidence_assets": [
+                        {
+                            "asset_id": "22222222-2222-4222-8222-222222222222",
+                            "filename": "functional-journey.mp4",
+                            "kind": "video",
+                        }
+                    ]
+                },
+            )
+        ],
+    )
+
+    report = build_test_audit_report(analysis, DEFAULT_AUTOPILOT_CONTEXT, suite=suite)
+
+    assert len(report.evidence_assets) == 1
+    assert report.evidence_assets[0].kind == "video"
+    assert report.evidence_assets[0].bucket == "functional"
+    assert "functional video" in " ".join(report.evidence)
+
+
 @pytest.mark.asyncio
 async def test_stale_discovery_evidence_ids_are_removed_at_read_boundary():
     available = UUID("11111111-1111-4111-8111-111111111111")

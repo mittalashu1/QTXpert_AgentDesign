@@ -91,6 +91,11 @@ still shown when a model has no configured rate.
 | `MAX_UPLOAD_SIZE_MB` | 25 | Per-file readable document limit (BRD/export/test-data text inputs) |
 | `AUTOPILOT_MAX_UPLOAD_SIZE_MB` | 300 | Per-file APK/IPA limit shared by Autopilot and Design app-source uploads |
 | `AUTOPILOT_DEEP_PARSE_MAX_MB` | 64 | Maximum APK size sent to the in-process deep manifest parser on the web instance; larger builds fall back to bounded metadata while remaining executable |
+| `AUTOPILOT_VIDEO_MAX_BYTES` | 20 MiB | Maximum size of one functional/UAT video evidence asset |
+| `AUTOPILOT_VIDEO_MAX_SECONDS` | 90 | Maximum duration requested from Appium/Playwright for one functional/UAT recording |
+| `AUTOPILOT_VIDEO_MAX_ASSETS` | 8 | Maximum functional/UAT recordings retained per safe-suite run |
+| `AUTOPILOT_VIDEO_BIT_RATE`, `AUTOPILOT_VIDEO_FPS` | 1,000,000 / 8 | Low-bitrate recording controls used when the device provider accepts them |
+| `AUTOPILOT_VIDEO_WIDTH`, `AUTOPILOT_VIDEO_HEIGHT` | 720 / 1280 | Recording dimensions; web capture is additionally capped to 1024×768 |
 | `AUTOPILOT_LOCAL_STAGING_TTL_SECONDS` | 3600 | Age after which abandoned `.part`/`.tmp` atomic-write files may be removed; durable job data is retained |
 | `DB_POOL_RECYCLE_SECONDS` | 300 | Recycle idle Neon connections before provider sleep/failover leaves stale sockets |
 | `DB_CLOSE_TIMEOUT_SECONDS` | 5 | Maximum rollback/close budget so dead Neon sessions cannot mask the original request error |

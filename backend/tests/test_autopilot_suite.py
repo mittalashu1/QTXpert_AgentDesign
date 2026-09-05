@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 
 import pytest
 
@@ -51,6 +52,20 @@ class _Driver:
 
     def activate_app(self, package):
         self.current_package = package
+
+
+class _RecordingDriver(_Driver):
+    def __init__(self):
+        super().__init__()
+        self.recording_calls = []
+        self.stopped = False
+
+    def start_recording_screen(self, **kwargs):
+        self.recording_calls.append(kwargs)
+
+    def stop_recording_screen(self):
+        self.stopped = True
+        return base64.b64encode(b"bounded-video").decode("ascii")
 
 
 def _test_ir(actions):
@@ -135,3 +150,31 @@ def test_suite_interpreter_fills_input_and_suppresses_sensitive_evidence(tmp_pat
     assert evidence["sensitive_input_evidence_suppressed"] is True
     assert not any(path.suffix in {".png", ".xml"} for path in tmp_path.iterdir())
     assert "do-not-log" not in str(evidence)
+
+
+def test_functional_video_recording_is_bounded_and_optional(tmp_path):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _RecordingDriver()
+    test = _test_ir([QTXIRStep(action="inspect_ui", description="Inspect the current screen")])
+
+    assert service._is_video_case(test) is True
+    started, status = service._start_video_recording(driver)
+    assert started is True
+    assert status == "recording"
+    assert driver.recording_calls[0]["time_limit"] == Settings().AUTOPILOT_VIDEO_MAX_SECONDS * 1000
+
+    path, status = service._stop_video_recording(driver, tmp_path / "journey.mp4", suppress=False)
+    assert path == tmp_path / "journey.mp4"
+    assert status == "captured"
+    assert path.read_bytes() == b"bounded-video"
+    assert driver.stopped is True
+
+
+def test_sensitive_functional_video_is_discarded(tmp_path):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _RecordingDriver()
+    path, status = service._stop_video_recording(driver, tmp_path / "journey.mp4", suppress=True)
+
+    assert path is None
+    assert status == "suppressed_sensitive_input"
+    assert not (tmp_path / "journey.mp4").exists()

@@ -1375,6 +1375,22 @@ class AutopilotPrototypeService:
                 deduped.append(test)
                 seen.add(key)
 
+        coverage_counts: dict[str, int] = {}
+        for test in deduped[:_MAX_GENERATED_AUTOPILOT_TESTS]:
+            coverage_counts[test.bucket] = coverage_counts.get(test.bucket, 0) + 1
+        input_summary: list[str] = []
+        auth_cases = sum(test.requires_auth for test in deduped)
+        data_cases = sum(test.requires_test_data for test in deduped)
+        approval_cases = sum(test.destructive for test in deduped)
+        if auth_cases:
+            input_summary.append(f"{auth_cases} case(s) need an approved non-production User ID/email and Password or secure vault reference")
+        if data_cases:
+            input_summary.append(f"{data_cases} case(s) need named synthetic/seeded test data")
+        if approval_cases:
+            input_summary.append(f"{approval_cases} case(s) remain approval-gated because they may be destructive or financial")
+        if not input_summary:
+            input_summary.append("No additional checkpoint input was inferred from the static target evidence")
+
         document_asset_ids = [
             uuid.UUID(str(value))
             for value in (job.get("document_asset_ids", []) or [])
@@ -1437,6 +1453,13 @@ class AutopilotPrototypeService:
             release_risks=enrichment.get("release_risks") or self._fallback_risks(metadata),
             warnings=metadata.get("warnings", []),
             capabilities=self._capabilities(metadata),
+            coverage_counts=coverage_counts,
+            generation_policy=[
+                f"Generate a bounded plan of at most {_MAX_GENERATED_AUTOPILOT_TESTS} cases",
+                "Cover functional positive/negative, UAT/SIT, UI/accessibility, platform and security guardrails when target evidence supports them",
+                "Keep setup-gated, destructive and unobserved behavior pending until the checkpoint and runtime evidence are supplied",
+            ],
+            input_summary=input_summary,
             context_considered=bool(context_text),
             ai_enrichment_used=ai_enrichment_used,
             analysis_basis=analysis_basis,
