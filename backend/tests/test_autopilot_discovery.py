@@ -64,6 +64,10 @@ def test_runtime_input_requests_are_reference_only():
     assert requests[0].field_type == "credential"
     assert requests[0].reference_present is False
     assert "username" in requests[0].label.lower()
+    assert requests[0].question
+    assert "user id" in requests[0].question.lower()
+    assert requests[0].placeholder
+    assert requests[0].format_hint
 
 
 def test_runtime_input_requests_use_accessibility_sibling_labels():

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import random
 import string
 from datetime import datetime, timedelta, timezone
@@ -172,6 +173,20 @@ async def apply_submissions(
                 raise AutopilotInputStoreError(f"Enter a value for {request.label}, or choose Skip.")
             if len(item.value) > 4000:
                 raise AutopilotInputStoreError(f"The value for {request.label} is too long.")
+            if request.credential_bundle and item.value.lstrip().startswith("{"):
+                # The UI submits the User ID and password as one encrypted
+                # bundle so neither value is ever returned in a response. Keep
+                # accepting a vault reference string for older API clients.
+                try:
+                    bundle = json.loads(item.value)
+                except json.JSONDecodeError as exc:
+                    raise AutopilotInputStoreError(
+                        "Enter both the UAT user ID/email and password, or provide a credential-set reference."
+                    ) from exc
+                if not isinstance(bundle, dict) or not str(bundle.get("username") or "").strip() or not str(bundle.get("password") or ""):
+                    raise AutopilotInputStoreError(
+                        "Enter both the UAT user ID/email and password before continuing."
+                    )
             encrypted = cipher.encrypt(item.value.encode("utf-8")).decode("ascii")
             generator_spec = None
         elif decision == "random":

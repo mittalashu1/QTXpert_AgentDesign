@@ -953,6 +953,27 @@ class AutopilotPrototypeService:
         document_analysis_run_id = None
         if job.get("document_analysis_run_id") and _is_uuid(job.get("document_analysis_run_id")):
             document_analysis_run_id = uuid.UUID(str(job["document_analysis_run_id"]))
+        manifest_requests = list(job.get("input_requests") or [])
+        input_requests = manifest_requests or list(analysis.input_requests if analysis else [])
+        # After Runtime Discovery the field-level requests live in the setup
+        # profile. Merge them into the status response as a fallback so a
+        # refresh or a transient setup read still exposes the input banner.
+        setup_snapshot = job.get("setup_profile") or {}
+        if isinstance(setup_snapshot, dict):
+            setup_requests = [
+                *list(setup_snapshot.get("input_requests") or []),
+                *list(setup_snapshot.get("runtime_input_requests") or []),
+            ]
+            known_keys = {
+                str(item.get("key"))
+                for item in input_requests
+                if isinstance(item, dict) and item.get("key")
+            }
+            for item in setup_requests:
+                key = str(item.get("key")) if isinstance(item, dict) and item.get("key") else ""
+                if key and key not in known_keys:
+                    input_requests.append(item)
+                    known_keys.add(key)
         return AutopilotJobStatus(
             job_id=job_id,
             filename=job["filename"],
@@ -985,16 +1006,7 @@ class AutopilotPrototypeService:
             analysis=analysis,
             checkpoint_stage=str(job.get("checkpoint_stage") or (analysis.checkpoint_stage if analysis else "queued")),
             checkpoint_message=job.get("checkpoint_message"),
-            input_requests=(
-                [
-                    item
-                    for item in (analysis.input_requests if analysis else [])
-                ]
-                or [
-                    item
-                    for item in (job.get("input_requests") or [])
-                ]
-            ),
+            input_requests=input_requests,
         )
 
     async def get_latest_job_status(self, owner_id: str) -> AutopilotJobStatus | None:

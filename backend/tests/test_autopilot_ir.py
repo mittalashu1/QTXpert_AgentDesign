@@ -320,6 +320,9 @@ def test_input_checkpoint_groups_dependencies_by_safe_reference():
         "acceptance_criteria_reference",
     }
     assert by_key["credential_reference"].sensitive is True
+    assert by_key["credential_reference"].credential_bundle is True
+    assert "sign in" in by_key["credential_reference"].question.lower()
+    assert "user id" in (by_key["credential_reference"].placeholder or "").lower()
     assert set(by_key["credential_reference"].required_for) == {"QT-AI-AUTH", "QT-AI-UAT"}
     assert all(request.status == "pending" for request in requests)
 

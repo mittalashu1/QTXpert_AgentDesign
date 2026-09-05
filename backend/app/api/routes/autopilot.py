@@ -887,7 +887,16 @@ def _setup_profile(
             runtime_requests = list(normalized_setup.runtime_input_requests)
         raw["runtime_input_requests"] = [item.model_dump(mode="json") for item in runtime_requests]
         pending_requests = [item for item in normalized_requests if item.status == "pending"]
-        if pending_requests:
+        pending_runtime_requests = [item for item in runtime_requests if item.status == "pending"]
+        # ``missing_fields`` drives the compact dashboard badge as well as the
+        # checkpoint dialog. Include field-level requests discovered at
+        # runtime; otherwise a post-discovery sign-in/address prompt can be
+        # present in the API response but appear as if setup were complete.
+        raw["missing_fields"] = [
+            *[item.label for item in pending_requests],
+            *[item.label for item in pending_runtime_requests],
+        ]
+        if pending_requests or pending_runtime_requests:
             raw["checkpoint_stage"] = "input_collection"
             raw["checkpoint_message"] = (
                 "Choose Enter, Skip, Reuse or Random for each checkpoint input before dependent cases continue."
@@ -2386,7 +2395,11 @@ async def resume_autopilot_checkpoint(
     setup = _record_setup(record, job_id, analysis, _record_discovery(record))
     if not payload.confirm_saved_inputs:
         return await service.get_job_status(job_id)
-    pending_inputs = [item for item in setup.input_requests if item.status == "pending"]
+    pending_inputs = [
+        item
+        for item in [*(setup.input_requests or []), *(setup.runtime_input_requests or [])]
+        if item.status == "pending"
+    ]
     if pending_inputs:
         current = await service.get_job_status(job_id)
         current.checkpoint_stage = "input_collection"

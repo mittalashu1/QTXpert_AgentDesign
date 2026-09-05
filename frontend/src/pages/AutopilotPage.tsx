@@ -150,10 +150,11 @@ type AutopilotInputRequest = {
   key: string; label: string; category: "credential" | "environment" | "test_data" | "approval" | "acceptance" | "integration";
   reason: string; required_for: string[]; sensitive: boolean; status: "pending" | "provided" | "validated" | "skipped" | "saved" | "random"; reference_present: boolean;
   source?: "plan" | "runtime"; screen_id?: string | null; control_id?: string | null; field_type?: string | null; input_hint?: "username" | "password" | "otp" | "text" | null; locator?: string | null;
+  question?: string | null; placeholder?: string | null; format_hint?: string | null; credential_bundle?: boolean;
 };
 type InputDecision = "provide" | "skip" | "reuse" | "random";
 type RandomSpec = { kind: "number" | "digits" | "text" | "email" | "phone" | "date" | "amount"; length: number; minimum?: number; maximum?: number; seed?: string };
-type InputDraft = { decision: InputDecision; value: string; save_for_reuse: boolean; random_spec: RandomSpec };
+type InputDraft = { decision: InputDecision; value: string; username: string; password: string; save_for_reuse: boolean; random_spec: RandomSpec };
 type SavedInput = { key: string; label: string; category: AutopilotInputRequest["category"]; decision: InputDecision; save_for_reuse: boolean; has_value: boolean; generator_kind?: RandomSpec["kind"] | null; source?: "plan" | "runtime" | "user"; created_at?: string | null; updated_at?: string | null; expires_at?: string | null };
 type SetupProfile = {
   job_id: string; credential_reference: string; account_role: string; environment_name: string;
@@ -192,6 +193,8 @@ function buildInputDrafts(profile: SetupProfile | null | undefined): Record<stri
     return [request.key, {
       decision,
       value: "",
+      username: "",
+      password: "",
       save_for_reuse: Boolean(savedRecord?.save_for_reuse),
       random_spec: { ...DEFAULT_RANDOM_SPEC, kind: savedRecord?.generator_kind || "text" },
     } satisfies InputDraft];
@@ -359,6 +362,24 @@ function contextForEditor(value: string) {
   return value.split("\n\nSelected repository documentation:")[0]?.trim() || value;
 }
 
+function inputCategoryLabel(category: AutopilotInputRequest["category"]) {
+  return {
+    credential: "Authentication",
+    environment: "Environment",
+    test_data: "Test data",
+    approval: "Approval",
+    acceptance: "UAT acceptance",
+    integration: "Integration oracle",
+  }[category];
+}
+
+function requestDependentTitles(request: AutopilotInputRequest, tests: TestCase[]) {
+  return request.required_for.map((id) => {
+    const test = tests.find((item) => item.id === id);
+    return test ? `${test.title} (${test.id})` : id;
+  });
+}
+
 class TerminalAutopilotJobError extends Error {
   readonly terminal = true;
 }
@@ -498,6 +519,7 @@ export default function AutopilotPage() {
   const [setupDraft, setSetupDraft] = useState<SetupProfile>(emptySetup());
   const [inputDrafts, setInputDrafts] = useState<Record<string, InputDraft>>({});
   const [setupOpen, setSetupOpen] = useState(false);
+  const [checkpointStep, setCheckpointStep] = useState(0);
   const [setupBusy, setSetupBusy] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
@@ -540,6 +562,7 @@ export default function AutopilotPage() {
     setSetup(null);
     setSetupDraft(emptySetup());
     setInputDrafts({});
+    setCheckpointStep(0);
     setArtifactAvailable(true);
     setAnalysisProgress(0);
     setAnalysisStage("");
@@ -676,8 +699,8 @@ export default function AutopilotPage() {
         // Keep the editable brief compact. The full, bounded baseline is
         // rebuilt server-side from document_analysis_run_id when analysis
         // starts, so shortening the preview never drops evidence.
-        const contextPreview = baseline.context.length > 2400
-          ? `${baseline.context.slice(0, 2399).trimEnd()}…`
+        const contextPreview = baseline.context.length > 8000
+          ? `${baseline.context.slice(0, 7999).trimEnd()}…`
           : baseline.context;
         setContext(contextPreview);
         const profileMap: Record<string, string> = {
@@ -708,8 +731,8 @@ export default function AutopilotPage() {
     if (job.repository_asset_id) setSelectedUploadId(job.repository_asset_id);
     if (job.context !== undefined && job.context.trim()) {
       const editableContext = contextForEditor(job.context);
-      const contextPreview = editableContext.length > 2400
-        ? `${editableContext.slice(0, 2399).trimEnd()}…`
+      const contextPreview = editableContext.length > 8000
+        ? `${editableContext.slice(0, 7999).trimEnd()}…`
         : editableContext;
       setContext(contextPreview);
       if (!job.profile_id) setProfileId(profileIdFromContext(contextPreview, profiles));
@@ -744,7 +767,8 @@ export default function AutopilotPage() {
       // the editable setup state immediately so a slow setup request cannot
       // leave the user looking at an empty checkpoint panel.
       if (job.status === "waiting_for_input") {
-        const requests = job.input_requests || job.analysis.input_requests || [];
+        const jobRequests = job.input_requests || [];
+        const requests = jobRequests.length > 0 ? jobRequests : (job.analysis.input_requests || []);
         if (requests.length > 0) {
           const checkpointSetup = {
             ...emptySetup(job.job_id),
@@ -849,19 +873,28 @@ export default function AutopilotPage() {
             checkpoint_message: "Analysis paused safely. Review the required inputs before continuing.",
             input_requests: analysis.input_requests || [],
           };
-      setSetup(resolvedSetup);
+      // Older jobs and a briefly unavailable setup read can return a valid
+      // profile shell without copying the request list from the job manifest.
+      // Keep the job's pending requests as a safe fallback so the banner and
+      // dialog never disappear while the durable setup is being rehydrated.
+      const resolvedWithFallback = resolvedSetup.input_requests.length > 0 || (resolvedSetup.runtime_input_requests || []).length > 0 || !(analysis.input_requests || []).length
+        ? resolvedSetup
+        : { ...resolvedSetup, input_requests: analysis.input_requests || [], missing_fields: (analysis.input_requests || []).map((item) => item.label) };
+      setSetup(resolvedWithFallback);
       // setupDraft drives both the banner and the dialog. Keep it in sync with
       // the durable setup response instead of leaving the initial empty form in
       // place (which previously hid all required inputs).
-      setSetupDraft(resolvedSetup);
-      setInputDrafts(buildInputDrafts(resolvedSetup));
-      const pending = [...(resolvedSetup.input_requests || []), ...(resolvedSetup.runtime_input_requests || [])]
+      setSetupDraft(resolvedWithFallback);
+      setInputDrafts(buildInputDrafts(resolvedWithFallback));
+      const pending = [...(resolvedWithFallback.input_requests || []), ...(resolvedWithFallback.runtime_input_requests || [])]
         .filter((item) => item.status === "pending");
       // A checkpoint can be returned as a terminal/analyzed job after a
       // restart or an older deployment has normalized its stage. The pending
       // request itself is the source of truth, so do not hide the dialog just
       // because the stage label was not persisted on that response.
       if (pending.length > 0) {
+        const firstPending = [...(resolvedWithFallback.input_requests || []), ...(resolvedWithFallback.runtime_input_requests || [])].findIndex((item) => item.status === "pending");
+        setCheckpointStep(firstPending >= 0 ? firstPending : 0);
         setSetupOpen(true);
       }
       setReport(reportResult.status === "fulfilled" ? reportResult.value.data : null);
@@ -879,7 +912,11 @@ export default function AutopilotPage() {
     if (!candidate) return;
     const pending = [...(candidate.input_requests || []), ...(candidate.runtime_input_requests || [])]
       .some((item) => item.status === "pending");
-    if (pending) setSetupOpen(true);
+    if (pending) {
+      const firstPending = [...(candidate.input_requests || []), ...(candidate.runtime_input_requests || [])].findIndex((item) => item.status === "pending");
+      setCheckpointStep(firstPending >= 0 ? firstPending : 0);
+      setSetupOpen(true);
+    }
   }, [analysis?.job_id, setup, setupDraft]);
 
   const stats = useMemo(() => analysis ? {
@@ -1059,21 +1096,51 @@ export default function AutopilotPage() {
       : setupDraft.job_id === analysis.job_id
         ? setupDraft
         : null;
-    const nextSetup = sourceSetup ? {
-      ...sourceSetup,
-      approved_test_ids: [...sourceSetup.approved_test_ids],
-      runtime_input_references: { ...(sourceSetup.runtime_input_references || {}) },
-      provided_fields: [...sourceSetup.provided_fields],
-      missing_fields: [...sourceSetup.missing_fields],
-      input_requests: [...sourceSetup.input_requests],
-      runtime_input_requests: [...(sourceSetup.runtime_input_requests || [])],
-    } : emptySetup(analysis.job_id);
+    const sourceRequests = sourceSetup
+      ? [...(sourceSetup.input_requests || []), ...(sourceSetup.runtime_input_requests || [])]
+      : [];
+    const baseSetup = sourceSetup && sourceRequests.length > 0 ? sourceSetup : {
+      ...emptySetup(analysis.job_id),
+      ...(sourceSetup || {}),
+      checkpoint_stage: analysis.checkpoint_stage || "input_collection",
+      checkpoint_message: "Analysis paused safely. Review the required inputs before continuing.",
+      input_requests: analysis.input_requests || [],
+      missing_fields: (analysis.input_requests || []).map((item) => item.label),
+      runtime_input_requests: [],
+    };
+    const nextSetup = {
+      ...baseSetup,
+      approved_test_ids: [...baseSetup.approved_test_ids],
+      runtime_input_references: { ...(baseSetup.runtime_input_references || {}) },
+      provided_fields: [...baseSetup.provided_fields],
+      missing_fields: [...baseSetup.missing_fields],
+      input_requests: [...baseSetup.input_requests],
+      runtime_input_requests: [...(baseSetup.runtime_input_requests || [])],
+    };
     setSetupDraft(nextSetup);
     setInputDrafts(buildInputDrafts(nextSetup));
+    const nextRequests = [...(nextSetup.input_requests || []), ...(nextSetup.runtime_input_requests || [])];
+    const firstPending = nextRequests.findIndex((item) => item.status === "pending");
+    setCheckpointStep(firstPending >= 0 ? firstPending : 0);
     setSetupOpen(true);
   };
   const saveSetup = async () => {
     if (!analysis) return;
+    const checkpointRequestMap = new Map(
+      [...(setupDraft.input_requests || []), ...(setupDraft.runtime_input_requests || [])].map((item) => [item.key, item]),
+    );
+    const missingCredential = Object.entries(inputDrafts).find(([key, draft]) => {
+      const request = checkpointRequestMap.get(key);
+      return request?.credential_bundle && draft.decision === "provide" && (!draft.username.trim() || !draft.password);
+    });
+    if (missingCredential) {
+      const request = checkpointRequestMap.get(missingCredential[0]);
+      setError(`Enter both the UAT user ID/email and password for ${request?.label || "the sign-in account"}, or choose Skip.`);
+      const step = [...checkpointRequestMap.keys()].indexOf(missingCredential[0]);
+      if (step >= 0) setCheckpointStep(step);
+      setSetupOpen(true);
+      return;
+    }
     setSetupBusy(true); setError("");
     try {
       const payload = {
@@ -1089,22 +1156,33 @@ export default function AutopilotPage() {
         safe_authentication_approved: setupDraft.safe_authentication_approved,
         approved_test_ids: setupDraft.approved_test_ids,
         runtime_input_references: setupDraft.runtime_input_references || {},
-        input_submissions: Object.entries(inputDrafts).filter(([, draft]) => draft.decision !== "provide" || Boolean(draft.value.trim())).map(([key, draft]) => ({
+        input_submissions: Object.entries(inputDrafts).filter(([key, draft]) => {
+          const request = checkpointRequestMap.get(key);
+          return draft.decision !== "provide"
+            || Boolean(request?.credential_bundle ? draft.username.trim() && draft.password : draft.value.trim());
+        }).map(([key, draft]) => ({
           key,
           decision: draft.decision,
-          ...(draft.decision === "provide" && draft.value ? { value: draft.value } : {}),
+          ...(draft.decision === "provide" ? {
+            value: checkpointRequestMap.get(key)?.credential_bundle
+              ? JSON.stringify({ username: draft.username.trim(), password: draft.password })
+              : draft.value,
+          } : {}),
           save_for_reuse: draft.decision === "provide" || draft.decision === "random" ? draft.save_for_reuse : false,
           ...(draft.decision === "random" ? { random_spec: draft.random_spec } : {}),
         })),
       };
       const response = await apiClient.put<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", payload, { timeout: 20000 });
       setSetup(response.data);
-      const pending = (response.data.input_requests || []).filter((item) => item.status === "pending");
+      const pending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])]
+        .filter((item) => item.status === "pending");
       setSetupDraft(response.data);
       setInputDrafts(buildInputDrafts(response.data));
       if (pending.length > 0) {
         // Keep the checkpoint open when only part of the requested setup was
         // supplied, so the user can see exactly what remains and why.
+        const firstPending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])].findIndex((item) => item.status === "pending");
+        setCheckpointStep(firstPending >= 0 ? firstPending : 0);
         setSetupDraft((current) => ({ ...current, input_requests: response.data.input_requests || [], missing_fields: response.data.missing_fields }));
         setContextNotice(`${pending.length} setup item${pending.length === 1 ? "" : "s"} still required. Complete the highlighted checkpoint inputs to continue.`);
         return;
@@ -1117,7 +1195,10 @@ export default function AutopilotPage() {
           `/autopilot/${analysis.job_id}/resume`,
           {
             confirm_saved_inputs: true,
-            run_runtime_discovery: true,
+            // The first checkpoint chains into discovery. Once a screen map
+            // already exists, keep it and validate the newly supplied field
+            // inputs instead of launching a duplicate discovery run.
+            run_runtime_discovery: !discovery,
             discovery_provider: executionPayload().provider,
             discovery_device_name: deviceName,
             discovery_platform_version: platformVersion || null,
@@ -1146,7 +1227,12 @@ export default function AutopilotPage() {
           } catch { /* background job is still running; retry */ }
           await new Promise((resolve) => window.setTimeout(resolve, 3000));
         }
-        try { setSetup((await apiClient.get<SetupProfile>(`/autopilot/${analysis.job_id}/setup`, { timeout: 15000 })).data); } catch { /* keep the saved checkpoint visible */ }
+        try {
+          const latestSetup = (await apiClient.get<SetupProfile>(`/autopilot/${analysis.job_id}/setup`, { timeout: 15000 })).data;
+          setSetup(latestSetup);
+          setSetupDraft(latestSetup);
+          setInputDrafts(buildInputDrafts(latestSetup));
+        } catch { /* keep the saved checkpoint visible */ }
         await refreshAutomation(analysis.job_id);
         await refreshReport(analysis.job_id);
         if (!discoveryReady) setContextNotice("Setup validated. Runtime Discovery is continuing in the background; refresh this tab to see its evidence.");
@@ -1163,7 +1249,7 @@ export default function AutopilotPage() {
   }));
   const updateInputDraft = (key: string, patch: Partial<InputDraft>) => setInputDrafts((current) => ({
     ...current,
-    [key]: { ...(current[key] || { decision: "provide", value: "", save_for_reuse: false, random_spec: { ...DEFAULT_RANDOM_SPEC } }), ...patch },
+    [key]: { ...(current[key] || { decision: "provide", value: "", username: "", password: "", save_for_reuse: false, random_spec: { ...DEFAULT_RANDOM_SPEC } }), ...patch },
   }));
 
   const runDiscovery = async () => {
@@ -1177,7 +1263,15 @@ export default function AutopilotPage() {
         max_actions: discoveryMode === "observe" ? 0 : 10,
       }, { timeout: 660000 });
       setDiscovery(response.data);
-      try { setSetup((await apiClient.get<SetupProfile>(`/autopilot/${analysis.job_id}/setup`, { timeout: 15000 })).data); } catch { /* discovery evidence remains visible */ }
+      try {
+        const nextSetup = (await apiClient.get<SetupProfile>(`/autopilot/${analysis.job_id}/setup`, { timeout: 15000 })).data;
+        setSetup(nextSetup);
+        setSetupDraft(nextSetup);
+        setInputDrafts(buildInputDrafts(nextSetup));
+        const nextRequests = [...(nextSetup.input_requests || []), ...(nextSetup.runtime_input_requests || [])];
+        const firstPending = nextRequests.findIndex((item) => item.status === "pending");
+        if (firstPending >= 0) setCheckpointStep(firstPending);
+      } catch { /* discovery evidence remains visible */ }
       await refreshAutomation(analysis.job_id);
       await refreshReport(analysis.job_id);
     } catch (err) { setError(readableError(err, "Runtime discovery failed")); }
@@ -1289,13 +1383,27 @@ export default function AutopilotPage() {
     : analysis?.ai_enrichment_used === false
       ? { label: "Deterministic fallback", color: "default" as const }
       : { label: "AI provenance unavailable", color: "default" as const };
-  const activeSetup = analysis && setup?.job_id === analysis.job_id
-    ? setup
-    : analysis && setupDraft.job_id === analysis.job_id
-      ? setupDraft
-      : emptySetup(analysis?.job_id || "");
-  const checkpointRequests = [...(activeSetup.input_requests || []), ...(activeSetup.runtime_input_requests || [])];
+  const setupCandidates = analysis
+    ? [setup, setupDraft].filter((candidate): candidate is SetupProfile => candidate?.job_id === analysis.job_id)
+    : [];
+  const activeSetup = setupCandidates.find((candidate) => (candidate.input_requests || []).length > 0 || (candidate.runtime_input_requests || []).length > 0)
+    || setupCandidates[0]
+    || emptySetup(analysis?.job_id || "");
+  const checkpointRequests = [
+    ...((activeSetup.input_requests || []).length > 0 ? activeSetup.input_requests : analysis?.input_requests || []),
+    ...(activeSetup.runtime_input_requests || []),
+  ];
   const pendingCheckpointRequests = checkpointRequests.filter((item) => item.status === "pending");
+  const activeCheckpointIndex = checkpointRequests.length > 0
+    ? Math.min(Math.max(checkpointStep, 0), checkpointRequests.length - 1)
+    : 0;
+  const activeCheckpointRequest = checkpointRequests[activeCheckpointIndex] || null;
+  const activeCheckpointDraft = activeCheckpointRequest
+    ? inputDrafts[activeCheckpointRequest.key] || { decision: "provide" as InputDecision, value: "", username: "", password: "", save_for_reuse: false, random_spec: { ...DEFAULT_RANDOM_SPEC } }
+    : null;
+  const activeCheckpointSaved = activeCheckpointRequest
+    ? (setupDraft.saved_inputs || []).find((item) => item.key === activeCheckpointRequest.key)
+    : null;
 
   return <Stack spacing={3}>
     <Box>
@@ -1382,7 +1490,7 @@ export default function AutopilotPage() {
           : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || `Choose a ${targetKind === "ios" ? "iOS IPA" : "Android APK"}`}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>Choose build<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
-          <TextField fullWidth multiline minRows={5} maxRows={9} inputProps={{ maxLength: 2400 }} label="Brief context" placeholder="Select a profile or add a short product-specific scope." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText="Used to scope analysis and reporting. Never paste passwords, tokens or OTPs." />
+          <TextField fullWidth multiline minRows={5} maxRows={12} inputProps={{ maxLength: 8000 }} label="Testing context" placeholder="Select a profile or add product, audience, workflow and expected-outcome details." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText={`${context.length.toLocaleString()} / 8,000 characters · Stored with this report; never paste passwords, tokens or OTPs.`} />
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
             <Button size="small" variant="outlined" onClick={() => void generateContext("default")} disabled={contextBusy}>Reset to profile brief</Button>
             <Button size="small" variant="outlined" onClick={() => void generateContext(context.trim() ? "improve" : "generate")} disabled={contextBusy} startIcon={contextBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon />}>{contextBusy ? "Writing context…" : context.trim() ? "Improve with AI" : "Generate with AI"}</Button>
@@ -1604,16 +1712,17 @@ export default function AutopilotPage() {
         </Stack>
         <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
-            <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">Provide, skip, reuse or generate the non-production inputs needed by dependent cases. Saved values are encrypted under Test Data and never shown again.</Typography></Box>
-            <Button size="small" variant="outlined" onClick={openSetup} disabled={resumeBusy}>{setup?.provided_fields.length ? "Review inputs" : "Provide inputs"}</Button>
+            <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">One guided input at a time: sign-in fields, test data and references are explained in plain language. Saved values are encrypted under Test Data and never shown again.</Typography></Box>
+            <Button size="small" variant="outlined" onClick={openSetup} disabled={resumeBusy}>{pendingCheckpointRequests.length ? "Review required inputs" : activeSetup.provided_fields.length ? "Review inputs" : "Open checkpoint"}</Button>
           </Stack>
-          {setup?.checkpoint_message && <Alert severity={setup.input_requests?.some((item) => item.status === "pending") ? "warning" : "info"} sx={{ mt: 1.25 }}>{setup.checkpoint_message}</Alert>}
+          {activeSetup.checkpoint_message && <Alert severity={pendingCheckpointRequests.length ? "warning" : "info"} sx={{ mt: 1.25 }}>{activeSetup.checkpoint_message}</Alert>}
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
-            <Chip size="small" label={(setup?.provided_fields.length || 0) + " setup items provided"} color={setup?.provided_fields.length ? "success" : "default"} variant="outlined" />
+            <Chip size="small" label={(activeSetup.provided_fields.length || 0) + " setup items provided"} color={activeSetup.provided_fields.length ? "success" : "default"} variant="outlined" />
+            {pendingCheckpointRequests.length > 0 && <Chip size="small" label={`${pendingCheckpointRequests.length} input${pendingCheckpointRequests.length === 1 ? "" : "s"} still required`} color="warning" variant="outlined" />}
             {(automation?.setup_missing_fields || []).slice(0, 6).map((field) => <Chip key={field} size="small" label={"Pending: " + field} color="warning" variant="outlined" />)}
           </Stack>
-          {(setup?.input_requests || []).slice(0, 6).map((request) => <Box key={request.key} sx={{ mt: 1, p: 1, borderRadius: 1.5, bgcolor: "warning.lighter", border: "1px solid", borderColor: "warning.light" }}><Typography variant="body2" fontWeight={700}>{request.label}</Typography><Typography variant="caption" color="text.secondary">{request.reason} · {request.required_for.length} dependent case{request.required_for.length === 1 ? "" : "s"}</Typography></Box>)}
-          {(setup?.runtime_input_requests || []).length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: "info.lighter", border: "1px solid", borderColor: "info.light" }}><Typography variant="body2" fontWeight={700}>Runtime entry points discovered</Typography><Typography variant="caption" color="text.secondary">{(setup?.runtime_input_requests || []).length} field{(setup?.runtime_input_requests || []).length === 1 ? "" : "s"} can be entered for this run, skipped, reused, or generated with bounded synthetic data. Saved values are encrypted and masked.</Typography></Box>}
+          {pendingCheckpointRequests.slice(0, 6).map((request) => <Box key={request.key} sx={{ mt: 1, p: 1, borderRadius: 1.5, bgcolor: "warning.lighter", border: "1px solid", borderColor: "warning.light" }}><Stack direction="row" spacing={.75} alignItems="center"><Chip size="small" label={inputCategoryLabel(request.category)} variant="outlined" /><Typography variant="body2" fontWeight={700}>{request.label}</Typography></Stack><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .35 }}>{request.question || request.reason}</Typography><Typography variant="caption" color="text.secondary">Needed for: {requestDependentTitles(request, analysis.tests).join(" · ") || "this checkpoint"}</Typography></Box>)}
+          {(activeSetup.runtime_input_requests || []).length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: "info.lighter", border: "1px solid", borderColor: "info.light" }}><Typography variant="body2" fontWeight={700}>Runtime fields mapped</Typography><Typography variant="caption" color="text.secondary">{(activeSetup.runtime_input_requests || []).length} field{(activeSetup.runtime_input_requests || []).length === 1 ? "" : "s"} were found on the live screen map. Click “Review required inputs” above to enter the exact User ID, Password, Address or other field value.</Typography></Box>}
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · full plan buckets are listed above</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 80).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
@@ -1692,41 +1801,67 @@ export default function AutopilotPage() {
     </Dialog>
 
     <Dialog open={setupOpen} onClose={() => !setupBusy && !resumeBusy && setSetupOpen(false)} fullWidth maxWidth="md">
-      <DialogTitle>Autopilot checkpoint · confirm inputs</DialogTitle>
+      <DialogTitle>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
+          <Box><Typography variant="h6" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">Confirm each input before the dependent tests continue.</Typography></Box>
+          {checkpointRequests.length > 0 && <Chip size="small" color="primary" variant="outlined" label={`Input ${activeCheckpointIndex + 1} of ${checkpointRequests.length}`} />}
+        </Stack>
+      </DialogTitle>
       <DialogContent>
-        <Alert severity={checkpointRequests.some((item) => item.status === "pending") ? "warning" : "info"} sx={{ mb: 2 }}>
-          {checkpointRequests.length
-            ? `${checkpointRequests.length} checkpoint input${checkpointRequests.length === 1 ? "" : "s"}. Choose how each should be handled before continuing.`
-            : "No additional checkpoint inputs are required. Save to continue to Runtime Discovery."}
-          {" "}Enter values only in non-production environments. Saved values are encrypted under Test Data, never echoed or written to logs. Save is optional; Skip keeps the dependent case blocked safely.
+        <Alert severity={pendingCheckpointRequests.length > 0 ? "warning" : "info"} sx={{ mb: 2 }}>
+          {pendingCheckpointRequests.length > 0
+            ? `${pendingCheckpointRequests.length} input${pendingCheckpointRequests.length === 1 ? "" : "s"} still need a decision.`
+            : "All checkpoint inputs have a decision. Save to continue to Runtime Discovery."}
+          {" "}Use only non-production data. Values are encrypted under Test Data, never returned, added to context, or written to logs. Choose Skip when the case is not in scope for this run.
         </Alert>
-        {checkpointRequests.length > 0 && <Stack spacing={1.25} sx={{ mb: 2 }}>
-          {checkpointRequests.slice(0, 50).map((request) => {
-            const draft = inputDrafts[request.key] || { decision: "provide" as InputDecision, value: "", save_for_reuse: false, random_spec: { ...DEFAULT_RANDOM_SPEC } };
-            const saved = (setupDraft.saved_inputs || []).find((item) => item.key === request.key);
-            const sensitiveValue = request.input_hint === "password" || request.input_hint === "otp";
-            const canRandomize = request.category === "test_data" && !sensitiveValue;
-            return <Box key={request.key} sx={{ p: 1.5, border: "1px solid", borderColor: draft.decision === "skip" ? "divider" : "info.light", bgcolor: draft.decision === "skip" ? "action.hover" : "info.lighter", borderRadius: 2 }}>
-              <Stack direction={{ xs: "column", md: "row" }} spacing={1.25} alignItems={{ md: "flex-start" }} justifyContent="space-between">
-                <Box sx={{ flex: 1 }}><Stack direction="row" spacing={.75} alignItems="center"><Typography variant="body2" fontWeight={800}>{request.label}</Typography>{request.status !== "pending" && <Chip size="small" label={request.status} color={request.status === "skipped" ? "warning" : "success"} variant="outlined" />}</Stack><Typography variant="caption" color="text.secondary">{request.reason} · {request.required_for.join(", ") || "checkpoint"}</Typography>{saved?.save_for_reuse && <Typography variant="caption" display="block" color="success.main" sx={{ mt: .25 }}>Saved encrypted · value is masked and can be reused for this target.</Typography>}</Box>
-                <FormControl size="small" sx={{ minWidth: 170 }}><InputLabel>Input action</InputLabel><Select label="Input action" value={draft.decision} onChange={(event) => updateInputDraft(request.key, { decision: event.target.value as InputDecision, value: event.target.value === "provide" ? draft.value : "" })}><MenuItem value="provide">Enter value</MenuItem><MenuItem value="skip">Skip this run</MenuItem><MenuItem value="reuse" disabled={!saved?.save_for_reuse}>Reuse saved</MenuItem>{canRandomize && <MenuItem value="random">Generate random</MenuItem>}</Select></FormControl>
-              </Stack>
-              {draft.decision === "provide" && <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1 }}><TextField fullWidth size="small" type={sensitiveValue ? "password" : "text"} label={sensitiveValue ? (request.input_hint === "password" ? "Password" : "One-time code") : request.input_hint === "username" ? "Username / email" : "Value or reference"} value={draft.value} onChange={(event) => updateInputDraft(request.key, { value: event.target.value })} autoComplete="off" helperText={sensitiveValue ? "Encrypted immediately; never shown again." : "Use synthetic/non-production data only."} /><FormControlLabel control={<Switch size="small" checked={draft.save_for_reuse} onChange={(event) => updateInputDraft(request.key, { save_for_reuse: event.target.checked })} />} label="Save encrypted" /></Stack>}
-              {draft.decision === "random" && <Grid container spacing={1} sx={{ mt: .25 }}><Grid item xs={12} sm={4}><FormControl fullWidth size="small"><InputLabel>Generator</InputLabel><Select label="Generator" value={draft.random_spec.kind} onChange={(event) => updateInputDraft(request.key, { random_spec: { ...draft.random_spec, kind: event.target.value as RandomSpec["kind"] } })}>{["text", "digits", "number", "amount", "email", "phone", "date"].map((kind) => <MenuItem key={kind} value={kind}>{kind}</MenuItem>)}</Select></FormControl></Grid><Grid item xs={6} sm={2}><TextField fullWidth size="small" type="number" label="Length" value={draft.random_spec.length} onChange={(event) => updateInputDraft(request.key, { random_spec: { ...draft.random_spec, length: Math.max(1, Number(event.target.value) || 1) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Minimum" value={draft.random_spec.minimum ?? ""} onChange={(event) => updateInputDraft(request.key, { random_spec: { ...draft.random_spec, minimum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Maximum" value={draft.random_spec.maximum ?? ""} onChange={(event) => updateInputDraft(request.key, { random_spec: { ...draft.random_spec, maximum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={draft.save_for_reuse} onChange={(event) => updateInputDraft(request.key, { save_for_reuse: event.target.checked })} />} label="Save generated value encrypted" /><Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>Generated data is bounded synthetic input; it never uses production data.</Typography></Grid></Grid>}
-              {draft.decision !== "skip" && draft.decision !== "reuse" && <Button size="small" sx={{ mt: .5 }} onClick={() => updateInputDraft(request.key, { decision: "skip", value: "", save_for_reuse: false })}>Skip</Button>}
-              {draft.decision === "skip" && <Button size="small" sx={{ mt: .5 }} onClick={() => updateInputDraft(request.key, { decision: saved?.save_for_reuse ? "reuse" : "provide" })}>Undo skip</Button>}
-            </Box>;
-          })}
-        </Stack>}
+        {activeCheckpointRequest && activeCheckpointDraft && <>
+          <Stack direction="row" spacing={.75} alignItems="center" sx={{ mb: 1 }}>
+            <Chip size="small" label={inputCategoryLabel(activeCheckpointRequest.category)} color="primary" variant="outlined" />
+            {activeCheckpointRequest.source === "runtime" && <Chip size="small" label="Found on live screen" color="info" variant="outlined" />}
+            {activeCheckpointRequest.status !== "pending" && <Chip size="small" label={activeCheckpointRequest.status} color={activeCheckpointRequest.status === "skipped" ? "warning" : "success"} variant="outlined" />}
+          </Stack>
+          <Box sx={{ p: 2, border: "1px solid", borderColor: activeCheckpointDraft.decision === "skip" ? "divider" : "info.light", bgcolor: activeCheckpointDraft.decision === "skip" ? "action.hover" : "info.lighter", borderRadius: 2 }}>
+            <Typography variant="subtitle1" fontWeight={800}>{activeCheckpointRequest.label}</Typography>
+            <Typography variant="body2" sx={{ mt: .5 }}>{activeCheckpointRequest.question || "What should Autopilot use for this setup item?"}</Typography>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{activeCheckpointRequest.format_hint || activeCheckpointRequest.reason}</Typography>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Needed for: {requestDependentTitles(activeCheckpointRequest, analysis?.tests || []).join(" · ") || "this checkpoint"}</Typography>
+            {activeCheckpointRequest.screen_id && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Screen: {activeCheckpointRequest.screen_id}{activeCheckpointRequest.locator ? ` · Control: ${activeCheckpointRequest.locator}` : ""}</Typography>}
+            {activeCheckpointSaved?.save_for_reuse && <Alert severity="success" sx={{ mt: 1.25 }}>A saved encrypted value exists for this field. Choose “Reuse saved” to use it without revealing it.</Alert>}
+            <FormControl size="small" fullWidth sx={{ mt: 1.5 }}>
+              <InputLabel>What should Autopilot do?</InputLabel>
+              <Select label="What should Autopilot do?" value={activeCheckpointDraft.decision} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { decision: event.target.value as InputDecision, value: event.target.value === "provide" ? activeCheckpointDraft.value : "", username: event.target.value === "provide" ? activeCheckpointDraft.username : "", password: event.target.value === "provide" ? activeCheckpointDraft.password : "" })}>
+                <MenuItem value="provide">Enter this value</MenuItem>
+                <MenuItem value="skip">Skip this case input</MenuItem>
+                <MenuItem value="reuse" disabled={!activeCheckpointSaved?.save_for_reuse}>Reuse saved encrypted value</MenuItem>
+                {activeCheckpointRequest.category === "test_data" && !activeCheckpointRequest.sensitive && <MenuItem value="random">Generate safe random data</MenuItem>}
+              </Select>
+            </FormControl>
+            {activeCheckpointDraft.decision === "provide" && activeCheckpointRequest.credential_bundle ? <Grid container spacing={1.25} sx={{ mt: .5 }}>
+              <Grid item xs={12} md={6}><TextField fullWidth size="small" label="User ID / email" placeholder="qa.investor@example.test" value={activeCheckpointDraft.username} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { username: event.target.value })} autoComplete="off" helperText="Use the non-production account ID or email." /></Grid>
+              <Grid item xs={12} md={6}><TextField fullWidth size="small" type="password" label="Password" placeholder="Password for this UAT account" value={activeCheckpointDraft.password} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { password: event.target.value })} autoComplete="new-password" helperText="Encrypted immediately; never echoed or sent to the model." /></Grid>
+              <Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save this sign-in securely for this target" /></Grid>
+            </Grid> : activeCheckpointDraft.decision === "provide" && <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1 }}><TextField fullWidth size="small" type={activeCheckpointRequest.input_hint === "password" || activeCheckpointRequest.input_hint === "otp" ? "password" : "text"} label={activeCheckpointRequest.input_hint === "password" ? "Password" : activeCheckpointRequest.input_hint === "otp" ? "One-time code" : activeCheckpointRequest.input_hint === "username" ? "User ID / email" : "Value or reference"} placeholder={activeCheckpointRequest.placeholder || undefined} value={activeCheckpointDraft.value} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { value: event.target.value })} autoComplete="off" helperText={activeCheckpointRequest.format_hint || "Use synthetic/non-production data only."} /><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save encrypted" /></Stack>}
+            {activeCheckpointDraft.decision === "random" && <Grid container spacing={1} sx={{ mt: .25 }}><Grid item xs={12} sm={4}><FormControl fullWidth size="small"><InputLabel>Generator</InputLabel><Select label="Generator" value={activeCheckpointDraft.random_spec.kind} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, kind: event.target.value as RandomSpec["kind"] } })}>{["text", "digits", "number", "amount", "email", "phone", "date"].map((kind) => <MenuItem key={kind} value={kind}>{kind}</MenuItem>)}</Select></FormControl></Grid><Grid item xs={6} sm={2}><TextField fullWidth size="small" type="number" label="Length" value={activeCheckpointDraft.random_spec.length} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, length: Math.max(1, Number(event.target.value) || 1) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Minimum" value={activeCheckpointDraft.random_spec.minimum ?? ""} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, minimum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Maximum" value={activeCheckpointDraft.random_spec.maximum ?? ""} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, maximum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save generated value encrypted" /><Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>Generated data is bounded synthetic input; it never uses production data.</Typography></Grid></Grid>}
+            {activeCheckpointDraft.decision !== "skip" && activeCheckpointDraft.decision !== "reuse" && <Button size="small" sx={{ mt: .75 }} onClick={() => updateInputDraft(activeCheckpointRequest.key, { decision: "skip", value: "", username: "", password: "", save_for_reuse: false })}>Skip this input</Button>}
+            {activeCheckpointDraft.decision === "skip" && <Button size="small" sx={{ mt: .75 }} onClick={() => updateInputDraft(activeCheckpointRequest.key, { decision: activeCheckpointSaved?.save_for_reuse ? "reuse" : "provide" })}>Undo skip</Button>}
+          </Box>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.25 }}>
+            <Button size="small" variant="outlined" disabled={activeCheckpointIndex === 0} onClick={() => setCheckpointStep((current) => Math.max(0, current - 1))}>Previous input</Button>
+            <Button size="small" variant="outlined" disabled={activeCheckpointIndex >= checkpointRequests.length - 1} onClick={() => setCheckpointStep((current) => Math.min(checkpointRequests.length - 1, current + 1))}>Next input</Button>
+            <Typography variant="caption" color="text.secondary">You can revisit any input before saving.</Typography>
+          </Stack>
+        </>}
+        <Typography variant="overline" color="text.secondary" fontWeight={800} display="block" sx={{ mt: 2 }}>Optional setup references</Typography>
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>Use these only when your team already has a vault, fixture, reset hook or oracle reference. Direct values entered above are enough for this checkpoint.</Typography>
         <Grid container spacing={2}>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Credential set reference" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat" /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Test account role" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Environment name" value={setupDraft.environment_name} onChange={(event) => updateSetup("environment_name", event.target.value)} placeholder="UAT" /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Environment URL / identifier" value={setupDraft.environment_url} onChange={(event) => updateSetup("environment_url", event.target.value)} /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Synthetic test-data reference" value={setupDraft.test_data_reference} onChange={(event) => updateSetup("test_data_reference", event.target.value)} /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Reset / cleanup reference" value={setupDraft.reset_hook_reference} onChange={(event) => updateSetup("reset_hook_reference", event.target.value)} /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Acceptance-criteria reference" value={setupDraft.acceptance_criteria_reference} onChange={(event) => updateSetup("acceptance_criteria_reference", event.target.value)} /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="API / oracle reference" value={setupDraft.api_oracle_reference} onChange={(event) => updateSetup("api_oracle_reference", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Credential-set reference (optional)" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat · never paste a password" /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Test account role (optional)" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Environment name (optional)" value={setupDraft.environment_name} onChange={(event) => updateSetup("environment_name", event.target.value)} placeholder="UAT" /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Environment URL / identifier (optional)" value={setupDraft.environment_url} onChange={(event) => updateSetup("environment_url", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Synthetic test-data reference (optional)" value={setupDraft.test_data_reference} onChange={(event) => updateSetup("test_data_reference", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Reset / cleanup reference (optional)" value={setupDraft.reset_hook_reference} onChange={(event) => updateSetup("reset_hook_reference", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Acceptance-criteria reference (optional)" value={setupDraft.acceptance_criteria_reference} onChange={(event) => updateSetup("acceptance_criteria_reference", event.target.value)} /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="API / oracle reference (optional)" value={setupDraft.api_oracle_reference} onChange={(event) => updateSetup("api_oracle_reference", event.target.value)} /></Grid>
           <Grid item xs={12}><TextField fullWidth multiline minRows={3} label="Safe navigation and data notes" value={setupDraft.navigation_notes} onChange={(event) => updateSetup("navigation_notes", event.target.value)} helperText="Describe seeded users, permitted paths and expected reset behavior. Never include secret values." /></Grid>
           <Grid item xs={12}><FormControlLabel control={<Switch checked={setupDraft.safe_authentication_approved} onChange={(event) => updateSetup("safe_authentication_approved", event.target.checked)} />} label="Approve safe non-transactional authentication in this UAT environment" /></Grid>
         </Grid>

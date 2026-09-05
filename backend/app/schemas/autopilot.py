@@ -104,6 +104,14 @@ class AutopilotInputRequest(BaseModel):
     field_type: Optional[str] = None
     input_hint: Optional[Literal["username", "password", "otp", "text"]] = None
     locator: Optional[str] = None
+    # Human-facing guidance is kept separate from the stable label/key so the
+    # checkpoint can explain exactly what the user should provide.  These are
+    # safe metadata only; submitted values still travel through the encrypted
+    # write-only input boundary.
+    question: Optional[str] = None
+    placeholder: Optional[str] = None
+    format_hint: Optional[str] = None
+    credential_bundle: bool = False
 
 
 class AutopilotTest(BaseModel):

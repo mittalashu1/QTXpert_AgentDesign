@@ -72,6 +72,48 @@ _INPUT_REQUEST_METADATA: dict[str, tuple[str, str, str, bool]] = {
     ),
 }
 
+# The checkpoint is a customer-facing workflow, not an implementation error
+# list. Keep the stable compiler field names above, but attach plain-language
+# prompts and safe examples so a user understands what belongs in each field.
+_INPUT_REQUEST_GUIDANCE: dict[str, dict[str, str | bool | None]] = {
+    "credential reference": {
+        "question": "Which non-production account should Autopilot use to sign in?",
+        "placeholder": "Enter the UAT user ID/email and password below",
+        "format_hint": "Use a test account only. The two values are encrypted together and never sent to the AI model or written to logs.",
+        "credential_bundle": True,
+        "input_hint": "username",
+    },
+    "test account role": {
+        "question": "What role should this account have during the journey?",
+        "placeholder": "e.g., Retail investor / UAT customer",
+        "format_hint": "Use the business role configured in the non-production environment.",
+    },
+    "safe authentication approval": {
+        "question": "May Autopilot sign in to the approved non-production environment?",
+        "format_hint": "This approval only permits safe, non-transactional authentication; payments, OTP and destructive actions remain gated.",
+    },
+    "synthetic test-data reference": {
+        "question": "Which synthetic fixture should the dependent cases use?",
+        "placeholder": "e.g., qtxpert://data/investnation-uat",
+        "format_hint": "Provide a fixture/vault reference, not raw production data.",
+    },
+    "reset/cleanup reference": {
+        "question": "How should the test data be reset after the run?",
+        "placeholder": "e.g., qtxpert://hooks/investnation-reset",
+        "format_hint": "Use a reversible reset hook or fixture reference.",
+    },
+    "signed-off acceptance criteria reference": {
+        "question": "Where are the signed-off acceptance criteria for this UAT case?",
+        "placeholder": "e.g., qtxpert://docs/investnation-uat-criteria",
+        "format_hint": "Link to an approved repository document or requirements record.",
+    },
+    "API/oracle reference": {
+        "question": "Which API, ledger or business oracle should validate the outcome?",
+        "placeholder": "e.g., qtxpert://oracles/investnation-ledger",
+        "format_hint": "Use a non-production endpoint/fixture reference; do not paste tokens.",
+    },
+}
+
 
 def build_input_requests(
     analysis: AutopilotAnalysis,
@@ -104,6 +146,7 @@ def build_input_requests(
             "integration": "An API contract, oracle or observable backend reference is needed to validate integration outcomes.",
             "environment": "The target environment must be identified before this case can be executed.",
         }[category]
+        guidance = _INPUT_REQUEST_GUIDANCE.get(field, {})
         requests.append(
             AutopilotInputRequest(
                 key=key,
@@ -114,6 +157,11 @@ def build_input_requests(
                 sensitive=sensitive,
                 status="pending",
                 reference_present=False,
+                question=str(guidance.get("question") or "What should Autopilot use for this setup item?"),
+                placeholder=str(guidance.get("placeholder")) if guidance.get("placeholder") else None,
+                format_hint=str(guidance.get("format_hint")) if guidance.get("format_hint") else None,
+                credential_bundle=bool(guidance.get("credential_bundle")),
+                input_hint=(guidance.get("input_hint") if guidance.get("input_hint") else None),  # type: ignore[arg-type]
             )
         )
     return requests

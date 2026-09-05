@@ -185,16 +185,56 @@ class AutopilotDiscoveryService:
                 category = "credential" if credential else "test_data"
                 display_label = control.semantic_label or f"{field_type} field"
                 input_hint = cls._input_hint({}, display_label)
+                normalized_label = re.sub(r"[_-]+", " ", display_label).strip()
+                normalized_label = re.sub(r"\s+", " ", normalized_label)
+                if input_hint == "username":
+                    # Keep the stable "username" wording in the human label
+                    # for API/client compatibility while making the requested
+                    # value explicit for non-technical users.
+                    friendly_label = "Username · User ID / email"
+                elif input_hint == "password":
+                    friendly_label = "Password"
+                elif input_hint == "otp":
+                    friendly_label = "One-time verification code"
+                else:
+                    friendly_label = normalized_label[:120].title() or "Text field"
                 label = (
-                    f"Credential input for {display_label}"
+                    f"Sign-in · {friendly_label}"
                     if credential
-                    else f"Test data for {display_label}"
+                    else f"Test data · {friendly_label}"
                 )[:240]
+                lower_label = friendly_label.lower()
+                if input_hint == "username":
+                    question = "What UAT user ID or email should Autopilot enter?"
+                    placeholder = "e.g., qa.investor@example.test"
+                elif input_hint == "password":
+                    question = "What password belongs to this UAT account?"
+                    placeholder = "Enter the non-production account password"
+                elif input_hint == "otp":
+                    question = "What approved non-production one-time code should be used?"
+                    placeholder = "e.g., 123456 (only when your test flow permits OTP)"
+                elif any(term in lower_label for term in ("address", "street", "city", "country", "postal", "zip")):
+                    question = f"What synthetic {friendly_label.lower()} should the test enter?"
+                    placeholder = "e.g., 12 Example Street, Dubai"
+                elif any(term in lower_label for term in ("email", "phone", "mobile")):
+                    question = f"What synthetic {friendly_label.lower()} should the test enter?"
+                    placeholder = "e.g., qtxpert+test@example.test"
+                elif any(term in lower_label for term in ("amount", "number", "quantity", "code", "reference", "date")):
+                    question = f"What synthetic {friendly_label.lower()} should the test enter?"
+                    placeholder = "Use the expected non-production format for this field"
+                else:
+                    question = f"What synthetic value should the test enter in the {friendly_label.lower()} field?"
+                    placeholder = "Enter a non-production value, or choose Generate random"
                 reason = (
-                    "This live entry point may require a non-production credential. Enter it for this run, save it encrypted for reuse, or skip it. "
+                    "This live sign-in field may require a non-production credential. Enter it for this run, save it encrypted for reuse, or skip it. "
                     "Autopilot never returns the value or writes it to logs."
                     if credential
-                    else "This live entry point accepts data during the journey. Enter synthetic data, save it encrypted for reuse, generate a bounded random value, or skip it."
+                    else "This live field accepts data during the journey. Enter synthetic data, save it encrypted for reuse, generate a bounded random value, or skip it."
+                )
+                format_hint = (
+                    "Password values are encrypted immediately and never included in context, reports or logs."
+                    if input_hint == "password"
+                    else "Use a non-production value matching the field format. The value is encrypted before persistence."
                 )
                 locator = control.locators[0].value if control.locators else None
                 requests.append(
@@ -213,6 +253,9 @@ class AutopilotDiscoveryService:
                         field_type=field_type,
                         input_hint=input_hint,  # type: ignore[arg-type]
                         locator=locator,
+                        question=question,
+                        placeholder=placeholder,
+                        format_hint=format_hint,
                     )
                 )
                 if len(requests) >= 40:
