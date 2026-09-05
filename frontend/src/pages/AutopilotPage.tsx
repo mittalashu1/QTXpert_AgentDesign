@@ -3,8 +3,8 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, FormControl, FormControlLabel, Grid, InputLabel,
-  MenuItem, Paper, Select, Stack, Switch, Table, TableBody, TableCell, TableContainer,
-  TableHead, TableRow, Tab, Tabs, TextField, Typography,
+  IconButton, MenuItem, Paper, Select, Stack, Switch, Table, TableBody, TableCell, TableContainer,
+  TableHead, TableRow, Tab, Tabs, TextField, Tooltip, Typography,
 } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
@@ -16,6 +16,7 @@ import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import TravelExploreOutlinedIcon from "@mui/icons-material/TravelExploreOutlined";
 import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
+import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import { apiClient } from "@/services/apiClient";
 import { documentIntelligenceApi, uploadsApi } from "@/services/api";
 import { DocumentContext } from "@/types/domain";
@@ -505,6 +506,8 @@ export default function AutopilotPage() {
   const [activeReportTabKey, setActiveReportTabKey] = useState("");
   const [duplicatePrompt, setDuplicatePrompt] = useState<{ message: string; existingJobId: string; createdAt: string } | null>(null);
   const [rerunSetupPrompt, setRerunSetupPrompt] = useState(false);
+  const [deleteReportOpen, setDeleteReportOpen] = useState(false);
+  const [deleteReportBusy, setDeleteReportBusy] = useState(false);
   const [provider, setProvider] = useState<Provider>("browserstack");
   const [busy, setBusy] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
@@ -737,6 +740,23 @@ export default function AutopilotPage() {
     }
     if (["analyzed", "waiting_for_input", "superseded"].includes(job.status) && job.analysis) {
       setAnalysis(job.analysis);
+      // The job-status response already carries the checkpoint requests. Seed
+      // the editable setup state immediately so a slow setup request cannot
+      // leave the user looking at an empty checkpoint panel.
+      if (job.status === "waiting_for_input") {
+        const requests = job.input_requests || job.analysis.input_requests || [];
+        if (requests.length > 0) {
+          const checkpointSetup = {
+            ...emptySetup(job.job_id),
+            checkpoint_stage: job.checkpoint_stage || "input_collection",
+            checkpoint_message: job.checkpoint_message || "Analysis paused safely. Review the required inputs before continuing.",
+            input_requests: requests,
+          };
+          setSetup((current) => current?.job_id === job.job_id && current.input_requests.length > 0 ? current : checkpointSetup);
+          setSetupDraft((current) => current.job_id === job.job_id && current.input_requests.length > 0 ? current : checkpointSetup);
+          setInputDrafts((current) => Object.keys(current).length > 0 ? current : buildInputDrafts(checkpointSetup));
+        }
+      }
       void refreshExecutionHistory(job.analysis.job_id);
       void refreshReport(job.analysis.job_id);
     }
@@ -818,11 +838,33 @@ export default function AutopilotPage() {
       setDiscovery(discoveryResult.status === "fulfilled" ? discoveryResult.value.data : null);
       setAutomation(automationResult.status === "fulfilled" ? automationResult.value.data : null);
       setSuite(suiteResult.status === "fulfilled" ? suiteResult.value.data : null);
-      setSetup(setupResult.status === "fulfilled" ? setupResult.value.data : emptySetup(analysis.job_id));
+      const resolvedSetup = setupResult.status === "fulfilled"
+        ? setupResult.value.data
+        : {
+            ...emptySetup(analysis.job_id),
+            checkpoint_stage: analysis.checkpoint_stage || "input_collection",
+            checkpoint_message: "Analysis paused safely. Review the required inputs before continuing.",
+            input_requests: analysis.input_requests || [],
+          };
+      setSetup(resolvedSetup);
+      // setupDraft drives both the banner and the dialog. Keep it in sync with
+      // the durable setup response instead of leaving the initial empty form in
+      // place (which previously hid all required inputs).
+      setSetupDraft(resolvedSetup);
+      setInputDrafts(buildInputDrafts(resolvedSetup));
+      const pending = [...(resolvedSetup.input_requests || []), ...(resolvedSetup.runtime_input_requests || [])]
+        .filter((item) => item.status === "pending");
+      // A checkpoint can be returned as a terminal/analyzed job after a
+      // restart or an older deployment has normalized its stage. The pending
+      // request itself is the source of truth, so do not hide the dialog just
+      // because the stage label was not persisted on that response.
+      if (pending.length > 0) {
+        setSetupOpen(true);
+      }
       setReport(reportResult.status === "fulfilled" ? reportResult.value.data : null);
     });
     return () => { active = false; };
-  }, [analysis?.job_id]);
+  }, [analysis?.job_id, analysis?.checkpoint_stage, analysis?.input_requests]);
 
   const stats = useMemo(() => analysis ? {
     tests: analysis.tests.length,
@@ -939,7 +981,7 @@ export default function AutopilotPage() {
     // value made a fresh analysis render as “complete · 100%” while the
     // background job was still being queued/read.
     setAnalysisProgress(3); setAnalysisStage("queued");
-    setBusy(true); setError(""); setContextNotice(""); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setReport(null);
+    setBusy(true); setError(""); setContextNotice(""); setSetupOpen(false); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setReport(null);
     try {
       let response;
       if (selectedUploadId && !isWebsite) {
@@ -996,14 +1038,19 @@ export default function AutopilotPage() {
   });
   const openSetup = () => {
     if (!analysis) return;
-    const nextSetup = setup ? {
-      ...setup,
-      approved_test_ids: [...setup.approved_test_ids],
-      runtime_input_references: { ...(setup.runtime_input_references || {}) },
-      provided_fields: [...setup.provided_fields],
-      missing_fields: [...setup.missing_fields],
-      input_requests: [...setup.input_requests],
-      runtime_input_requests: [...(setup.runtime_input_requests || [])],
+    const sourceSetup = setup?.job_id === analysis.job_id
+      ? setup
+      : setupDraft.job_id === analysis.job_id
+        ? setupDraft
+        : null;
+    const nextSetup = sourceSetup ? {
+      ...sourceSetup,
+      approved_test_ids: [...sourceSetup.approved_test_ids],
+      runtime_input_references: { ...(sourceSetup.runtime_input_references || {}) },
+      provided_fields: [...sourceSetup.provided_fields],
+      missing_fields: [...sourceSetup.missing_fields],
+      input_requests: [...sourceSetup.input_requests],
+      runtime_input_requests: [...(sourceSetup.runtime_input_requests || [])],
     } : emptySetup(analysis.job_id);
     setSetupDraft(nextSetup);
     setInputDrafts(buildInputDrafts(nextSetup));
@@ -1167,7 +1214,7 @@ export default function AutopilotPage() {
   const rerunAnalysis = async (setupAction: "reuse" | "fresh" = "fresh") => {
     if (!analysis || !selectedProjectId) return;
     setAnalysisProgress(3); setAnalysisStage("queued");
-    setBusy(true); setError(""); setExecution(null); setExecutionHistory([]); setReport(null);
+    setBusy(true); setError(""); setSetupOpen(false); setExecution(null); setExecutionHistory([]); setReport(null);
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
@@ -1193,6 +1240,21 @@ export default function AutopilotPage() {
     void rerunAnalysis("fresh");
   };
 
+  const deleteReport = async () => {
+    const jobId = analysis?.job_id;
+    if (!jobId || !selectedProjectId) return;
+    setDeleteReportBusy(true); setError("");
+    try {
+      await apiClient.delete(`/autopilot/${jobId}/report`, { timeout: 30000 });
+      setDeleteReportOpen(false);
+      clearRunState({ clearSurface: true });
+      setContextNotice("Report deleted. The original APK/IPA, documents and evidence uploads remain in the repository.");
+      await refreshReportTabs(selectedProjectId);
+    } catch (err) {
+      setError(readableError(err, "The Test & Audit Report could not be deleted"));
+    } finally { setDeleteReportBusy(false); }
+  };
+
   const activeTargetKind = analysis?.target_kind || targetKind;
   const activeProvider: Provider = activeTargetKind === "web" ? "playwright" : provider;
   const browserStackUnavailable = activeProvider === "browserstack" && providerStatus !== null && !providerStatus.browserstack_configured;
@@ -1212,6 +1274,7 @@ export default function AutopilotPage() {
       ? { label: "Deterministic fallback", color: "default" as const }
       : { label: "AI provenance unavailable", color: "default" as const };
   const checkpointRequests = [...(setupDraft.input_requests || []), ...(setupDraft.runtime_input_requests || [])];
+  const pendingCheckpointRequests = checkpointRequests.filter((item) => item.status === "pending");
 
   return <Stack spacing={3}>
     <Box>
@@ -1352,11 +1415,32 @@ export default function AutopilotPage() {
 
     {error && <Alert severity="error">{error}</Alert>}
 
+    {analysis && pendingCheckpointRequests.length > 0 && <Alert
+      severity="warning"
+      action={<Button color="inherit" size="small" onClick={openSetup} disabled={resumeBusy}>Review inputs</Button>}
+    >
+      Analysis is paused for {pendingCheckpointRequests.length} required input{pendingCheckpointRequests.length === 1 ? "" : "s"}.
+      Provide, skip, reuse or generate the non-production data before dependent tests continue.
+    </Alert>}
+
     {analysis && stats && <>
       {report && <Card variant="outlined" sx={{ borderRadius: 3, borderColor: report.recommendation === "NO_GO" ? "error.main" : reportPending ? "info.main" : "warning.main" }}><CardContent>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}>
           <Stack direction="row" spacing={1} alignItems="center"><FactCheckOutlinedIcon color="primary" /><Box><Typography variant="h6" fontWeight={800}>{report.report_title}</Typography><Typography variant="caption" color="text.secondary">{report.role} · {report.prepared_for}</Typography><Typography variant="caption" color="text.secondary" display="block">Last run: {report.last_run_at ? new Date(report.last_run_at).toLocaleString() : "Pending — execution is yet to be completed."}</Typography></Box></Stack>
-          <Chip label={`RELEASE: ${report.recommendation.replaceAll("_", "-")}`} color={report.recommendation === "NO_GO" ? "error" : reportPending ? "info" : "warning"} sx={{ fontWeight: 800 }} />
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Tooltip title="Delete this report">
+              <IconButton
+                size="small"
+                color="error"
+                aria-label="Delete this Test and Audit Report"
+                onClick={() => setDeleteReportOpen(true)}
+                disabled={busy || deleteReportBusy}
+              >
+                <CloseRoundedIcon />
+              </IconButton>
+            </Tooltip>
+            <Chip label={`RELEASE: ${report.recommendation.replaceAll("_", "-")}`} color={report.recommendation === "NO_GO" ? "error" : reportPending ? "info" : "warning"} sx={{ fontWeight: 800 }} />
+          </Stack>
         </Stack>
         <ReportTabs reportTabs={reportTabs} profiles={profiles} activeReportTabKey={activeReportTabKey} loading={reportTabsLoading} disabled={busy} onSelect={(reportTab) => { void selectReportTab(reportTab); }} />
         <Alert severity={report.recommendation === "NO_GO" ? "error" : reportPending ? "info" : "warning"} sx={{ mt: 2 }}><b>{report.recommendation.replaceAll("_", "-")}</b> — {report.rationale}</Alert>
@@ -1548,6 +1632,24 @@ export default function AutopilotPage() {
         <Button onClick={() => setDuplicatePrompt(null)} disabled={busy}>Cancel</Button>
         <Button variant="outlined" onClick={() => { setDuplicatePrompt(null); void analyze("new"); }} disabled={busy}>Create new report tab</Button>
         <Button variant="contained" color="warning" onClick={() => { setDuplicatePrompt(null); void analyze("override"); }} disabled={busy}>Override existing tab</Button>
+      </DialogActions>
+    </Dialog>
+
+    <Dialog open={deleteReportOpen} onClose={() => !deleteReportBusy && setDeleteReportOpen(false)} fullWidth maxWidth="sm">
+      <DialogTitle>Delete this Test &amp; Audit Report?</DialogTitle>
+      <DialogContent>
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          This permanently removes the selected report tab’s analysis, setup/checkpoint data, runtime discovery, safe-smoke history and generated report state.
+        </Alert>
+        <Typography variant="body2" color="text.secondary">
+          The original APK/IPA, uploaded documents and captured evidence assets remain in the project repository and can be reused for a new report. This action cannot be undone for the report data.
+        </Typography>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setDeleteReportOpen(false)} disabled={deleteReportBusy}>Cancel</Button>
+        <Button variant="contained" color="error" onClick={() => void deleteReport()} disabled={deleteReportBusy} startIcon={deleteReportBusy ? <CircularProgress size={16} color="inherit" /> : <CloseRoundedIcon />}>
+          {deleteReportBusy ? "Deleting…" : "Delete report"}
+        </Button>
       </DialogActions>
     </Dialog>
 

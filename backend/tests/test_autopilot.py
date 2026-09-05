@@ -15,7 +15,7 @@ from app.schemas.autopilot import (
     AutopilotExecutionRequest,
     DiscoveredScreen,
 )
-from app.api.routes.autopilot import _sanitize_discovery_assets
+from app.api.routes.autopilot import _remove_local_report_data, _sanitize_discovery_assets
 from app.services.autopilot import (
     AutopilotPrototypeService,
     AutopilotUploadTooLarge,
@@ -71,6 +71,56 @@ def test_autopilot_generates_core_and_permission_tests(tmp_path):
         "permissions",
         "regression",
     }.issubset({test.bucket for test in tests})
+
+
+@pytest.mark.asyncio
+async def test_report_cleanup_preserves_legacy_source_without_repository_asset(tmp_path):
+    service = _service(tmp_path)
+    job_id = "11111111-1111-1111-1111-111111111111"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    source = job_dir / "investnation.apk"
+    source.write_bytes(b"legacy source")
+    (job_dir / "job.json").write_text("{}", encoding="utf-8")
+    (job_dir / "analysis.json").write_text("{}", encoding="utf-8")
+    execution_dir = job_dir / "executions"
+    execution_dir.mkdir()
+    (execution_dir / "run.json").write_text("{}", encoding="utf-8")
+
+    removed, source_preserved = await _remove_local_report_data(
+        service,
+        job_id,
+        {"filename": source.name, "apk_path": str(source)},
+        preserve_source=True,
+    )
+
+    assert removed is True
+    assert source_preserved is True
+    assert source.exists()
+    assert not (job_dir / "job.json").exists()
+    assert not (job_dir / "analysis.json").exists()
+    assert not execution_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_report_cleanup_removes_repository_materialization(tmp_path):
+    service = _service(tmp_path)
+    job_id = "22222222-2222-2222-2222-222222222222"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    (job_dir / "investnation.apk").write_bytes(b"materialized source")
+    (job_dir / "job.json").write_text("{}", encoding="utf-8")
+
+    removed, source_preserved = await _remove_local_report_data(
+        service,
+        job_id,
+        {"filename": "investnation.apk", "apk_path": str(job_dir / "investnation.apk")},
+        preserve_source=False,
+    )
+
+    assert removed is True
+    assert source_preserved is False
+    assert not job_dir.exists()
 
 
 def test_autopilot_classifies_ai_suites_and_setup_dependencies(tmp_path):

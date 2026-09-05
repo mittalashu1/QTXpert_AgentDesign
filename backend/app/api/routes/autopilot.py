@@ -12,12 +12,13 @@ from uuid import UUID, uuid4
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
 from app.database.models.autopilot_execution import AutopilotExecution
+from app.database.models.autopilot_input import AutopilotInputRecord
 from app.database.models.autopilot_job import AutopilotJob
 from app.database.models.document_intelligence import DocumentAnalysisRun
 from app.database.models.uploaded_asset import UploadedAsset
@@ -38,6 +39,7 @@ from app.schemas.autopilot import (
     AutopilotJobStatus,
     AutopilotProviderStatus,
     AutopilotProfileOption,
+    AutopilotReportDeletionResult,
     AutopilotResumeRequest,
     AutopilotSurface,
     AutopilotSetupProfile,
@@ -2681,6 +2683,227 @@ async def get_autopilot_report(
         discovery=discovery,
         suite=suite,
         executions=executions,
+    )
+
+
+async def _remove_local_report_data(
+    service: AutopilotPrototypeService,
+    job_id: str,
+    job: dict,
+    *,
+    preserve_source: bool,
+) -> tuple[bool, bool]:
+    """Remove report derivatives without escaping the Autopilot storage root.
+
+    Repository-backed APK/IPA files are disposable materializations, so their
+    per-job copy can be removed.  A legacy/degraded job without a repository
+    asset keeps its source file while its manifest, analysis and execution
+    derivatives are removed.
+    """
+    try:
+        job_dir = service._job_dir(job_id).resolve()
+        root = service.root.resolve()
+        if job_dir.parent != root or not job_dir.exists():
+            return False, False
+
+        source_name = Path(str(job.get("apk_path") or job.get("filename") or "")).name
+        if not preserve_source:
+            await asyncio.to_thread(shutil.rmtree, job_dir)
+            return True, False
+
+        source_preserved = False
+        for child in await asyncio.to_thread(lambda: list(job_dir.iterdir())):
+            # Keep only the legacy source artifact.  Everything else is report
+            # state or generated evidence and is safe to remove.
+            if child.is_file() and source_name and child.name == source_name:
+                source_preserved = True
+                continue
+            try:
+                if child.is_dir():
+                    await asyncio.to_thread(shutil.rmtree, child)
+                else:
+                    await asyncio.to_thread(child.unlink)
+            except OSError:
+                logger.warning("Could not remove local Autopilot report path %s", child, exc_info=True)
+        try:
+            await asyncio.to_thread(job_dir.rmdir)
+        except OSError:
+            # The source artifact intentionally keeps the directory alive.
+            pass
+        return True, source_preserved
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        logger.warning("Local Autopilot report cleanup skipped job_id=%s: %s", job_id, exc)
+        return False, False
+
+
+def _uuid_values(values: object) -> set[UUID]:
+    """Extract UUID-shaped repository references from report metadata."""
+    if values is None:
+        return set()
+    if isinstance(values, (list, tuple, set)):
+        candidates = values
+    else:
+        candidates = [values]
+    result: set[UUID] = set()
+    for value in candidates:
+        try:
+            result.add(UUID(str(value)))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+@router.delete("/{job_id}/report", response_model=AutopilotReportDeletionResult)
+async def delete_autopilot_report(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Delete one Test & Audit Report while preserving repository uploads.
+
+    This endpoint never calls the Upload Repository delete path.  Original
+    APK/IPA, documents and captured evidence assets remain reusable; only the
+    selected report's job, setup/checkpoint metadata, smoke history and local
+    generated derivatives are removed.
+    """
+    service = _service(settings)
+    try:
+        job = await _require_owned_job(service, job_id, user)
+    except HTTPException:
+        raise
+
+    record: AutopilotJob | None = None
+    if service._durable_results_enabled:
+        try:
+            record = await _job_record(db, job_id, user.id)
+        except Exception as exc:
+            await db.rollback()
+            logger.exception("Autopilot report deletion could not read durable job job_id=%s", job_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Report storage is temporarily unavailable; retry the delete after storage recovers.",
+            ) from exc
+
+    current_status = str(getattr(record, "status", None) or job.get("status") or "")
+    if current_status in {"uploaded", "analyzing"}:
+        # A live analysis can still write its manifest/row after a delete. Do
+        # not race it; the UI can retry once the run reaches a terminal state.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This report is still running. Wait for analysis to finish before deleting it.",
+        )
+
+    preserved_upload_ids = _uuid_values(job.get("repository_asset_id"))
+    preserved_upload_ids.update(_uuid_values(job.get("document_asset_ids")))
+    execution_rows: list[AutopilotExecution] = []
+    deleted = {"autopilot_inputs": 0, "autopilot_executions": 0, "autopilot_job": 0}
+    preserved_shared_input_records = 0
+    if record is not None:
+        preserved_upload_ids.update(_uuid_values(record.repository_asset_id))
+        try:
+            execution_rows = list(
+                (
+                    await db.scalars(
+                        select(AutopilotExecution).where(
+                            AutopilotExecution.autopilot_job_id == record.id,
+                            AutopilotExecution.owner_id == user.id,
+                        )
+                    )
+                ).all()
+            )
+            for execution in execution_rows:
+                preserved_upload_ids.update(
+                    _uuid_values(
+                        [
+                            execution.repository_asset_id,
+                            execution.screenshot_asset_id,
+                            execution.page_source_asset_id,
+                        ]
+                    )
+                )
+
+            # Saved checkpoint values are surface-scoped so a second report
+            # version can reuse them. Do not erase those encrypted records when
+            # another non-superseded report for the same surface still exists.
+            shared_surface_job = None
+            if record.surface_key:
+                shared_surface_job = await db.scalar(
+                    select(AutopilotJob.id)
+                    .where(
+                        AutopilotJob.owner_id == user.id,
+                        AutopilotJob.surface_key == record.surface_key,
+                        AutopilotJob.id != record.id,
+                        AutopilotJob.status != "superseded",
+                    )
+                    .limit(1)
+                )
+            if shared_surface_job is not None:
+                input_rows = list(
+                    (
+                        await db.scalars(
+                            select(AutopilotInputRecord.id).where(
+                                AutopilotInputRecord.owner_id == user.id,
+                                AutopilotInputRecord.job_id == job_id,
+                            )
+                        )
+                    ).all()
+                )
+                preserved_shared_input_records = len(input_rows)
+            else:
+                input_result = await db.execute(
+                    delete(AutopilotInputRecord).where(
+                        AutopilotInputRecord.owner_id == user.id,
+                        AutopilotInputRecord.job_id == job_id,
+                    )
+                )
+                deleted["autopilot_inputs"] = max(0, int(input_result.rowcount or 0))
+            if execution_rows:
+                execution_result = await db.execute(
+                    delete(AutopilotExecution).where(
+                        AutopilotExecution.id.in_([item.id for item in execution_rows]),
+                        AutopilotExecution.owner_id == user.id,
+                    )
+                )
+                deleted["autopilot_executions"] = max(0, int(execution_result.rowcount or 0))
+            job_result = await db.execute(
+                delete(AutopilotJob).where(
+                    AutopilotJob.id == record.id,
+                    AutopilotJob.owner_id == user.id,
+                )
+            )
+            deleted["autopilot_job"] = max(0, int(job_result.rowcount or 0))
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            logger.exception("Autopilot report deletion failed job_id=%s", job_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The report could not be deleted because report storage is temporarily unavailable.",
+            ) from exc
+
+    preserve_source = not bool(job.get("repository_asset_id") or getattr(record, "repository_asset_id", None))
+    local_removed, local_source_preserved = await _remove_local_report_data(
+        service,
+        job_id,
+        job,
+        preserve_source=preserve_source,
+    )
+    logger.info(
+        "Autopilot report deleted job_id=%s owner_id=%s deleted=%s preserved_uploads=%d local_removed=%s",
+        job_id,
+        user.id,
+        deleted,
+        len(preserved_upload_ids),
+        local_removed,
+    )
+    return AutopilotReportDeletionResult(
+        job_id=job_id,
+        deleted=deleted,
+        preserved_upload_ids=sorted(preserved_upload_ids, key=str),
+        preserved_shared_input_records=preserved_shared_input_records,
+        local_report_data_removed=local_removed,
+        local_source_preserved=local_source_preserved,
     )
 
 

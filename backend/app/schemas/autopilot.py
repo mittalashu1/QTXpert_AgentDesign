@@ -274,6 +274,18 @@ class AutopilotTestAuditReport(BaseModel):
     evidence: List[str] = Field(default_factory=list)
 
 
+class AutopilotReportDeletionResult(BaseModel):
+    """Audit-safe result returned after deleting one report tab's data."""
+
+    job_id: str
+    deleted: Dict[str, int] = Field(default_factory=dict)
+    preserved_upload_ids: List[UUID] = Field(default_factory=list)
+    preserved_shared_input_records: int = 0
+    local_report_data_removed: bool = False
+    local_source_preserved: bool = False
+    message: str = "The report data was deleted; repository uploads were preserved."
+
+
 class AutopilotJobSummary(BaseModel):
     job_id: str
     filename: str
