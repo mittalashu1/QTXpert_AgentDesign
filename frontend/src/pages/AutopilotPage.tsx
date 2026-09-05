@@ -754,7 +754,10 @@ export default function AutopilotPage() {
           };
           setSetup((current) => current?.job_id === job.job_id && current.input_requests.length > 0 ? current : checkpointSetup);
           setSetupDraft((current) => current.job_id === job.job_id && current.input_requests.length > 0 ? current : checkpointSetup);
-          setInputDrafts((current) => Object.keys(current).length > 0 ? current : buildInputDrafts(checkpointSetup));
+          // A rerun can arrive while the previous report's draft values are
+          // still in memory. Replace them for this job instead of letting old
+          // keys suppress or contaminate the new checkpoint form.
+          setInputDrafts(buildInputDrafts(checkpointSetup));
         }
       }
       void refreshExecutionHistory(job.analysis.job_id);
@@ -865,6 +868,19 @@ export default function AutopilotPage() {
     });
     return () => { active = false; };
   }, [analysis?.job_id, analysis?.checkpoint_stage, analysis?.input_requests]);
+
+  useEffect(() => {
+    if (!analysis?.job_id) return;
+    const candidate = setup?.job_id === analysis.job_id
+      ? setup
+      : setupDraft.job_id === analysis.job_id
+        ? setupDraft
+        : null;
+    if (!candidate) return;
+    const pending = [...(candidate.input_requests || []), ...(candidate.runtime_input_requests || [])]
+      .some((item) => item.status === "pending");
+    if (pending) setSetupOpen(true);
+  }, [analysis?.job_id, setup, setupDraft]);
 
   const stats = useMemo(() => analysis ? {
     tests: analysis.tests.length,
@@ -1273,7 +1289,12 @@ export default function AutopilotPage() {
     : analysis?.ai_enrichment_used === false
       ? { label: "Deterministic fallback", color: "default" as const }
       : { label: "AI provenance unavailable", color: "default" as const };
-  const checkpointRequests = [...(setupDraft.input_requests || []), ...(setupDraft.runtime_input_requests || [])];
+  const activeSetup = analysis && setup?.job_id === analysis.job_id
+    ? setup
+    : analysis && setupDraft.job_id === analysis.job_id
+      ? setupDraft
+      : emptySetup(analysis?.job_id || "");
+  const checkpointRequests = [...(activeSetup.input_requests || []), ...(activeSetup.runtime_input_requests || [])];
   const pendingCheckpointRequests = checkpointRequests.filter((item) => item.status === "pending");
 
   return <Stack spacing={3}>
