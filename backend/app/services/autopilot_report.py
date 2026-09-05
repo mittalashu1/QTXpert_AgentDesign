@@ -158,6 +158,7 @@ def _metrics(
     analysis: AutopilotAnalysis,
     suite: Optional[AutopilotSuiteResult],
     executions: list[AutopilotExecutionRecord],
+    defect_count: int | None = None,
 ) -> AutopilotReportMetrics:
     designed = len(analysis.tests)
     executed: Optional[int] = None
@@ -189,9 +190,9 @@ def _metrics(
         if executions
         else "Runtime execution has not been recorded; release evidence is incomplete."
     )
-    # A failed test is not automatically a defect. Keep the defect metric
-    # empty until a defect record or an explicitly validated count is attached.
-    defect_count = None
+    # A failed test is not automatically a defect. The report route supplies
+    # the count of explicitly logged records; callers without persistence keep
+    # the metric unknown rather than inferring defects from failures.
     return AutopilotReportMetrics(
         designed_test_cases=designed,
         executed_test_cases=executed,
@@ -431,9 +432,10 @@ def build_test_audit_report(
     discovery: Optional[AutopilotDiscoveryResult] = None,
     suite: Optional[AutopilotSuiteResult] = None,
     executions: Optional[list[AutopilotExecutionRecord]] = None,
+    defect_count: int | None = None,
 ) -> AutopilotTestAuditReport:
     executions = executions or []
-    metrics = _metrics(analysis, suite, executions)
+    metrics = _metrics(analysis, suite, executions, defect_count)
     evidence_assets = _report_evidence_assets(suite, executions)
     # A smoke execution is runtime evidence even when a previously attempted
     # suite contains zero executable cases. Keep the report from reverting to
@@ -482,6 +484,18 @@ def build_test_audit_report(
                 impact="high",
                 evidence=f"{metrics.failed_count} executed test(s) reported failed.",
                 mitigation="Block release until failures are triaged, fixed or formally accepted by the release authority.",
+            )
+        )
+    if defect_count:
+        risks.append(
+            AutopilotReportRisk(
+                risk_id="R-AUTO-007",
+                title="Logged defects require triage",
+                severity="critical" if metrics.failed_count else "high",
+                likelihood="high" if metrics.failed_count else "medium",
+                impact="high",
+                evidence=f"{defect_count} defect record(s) were explicitly logged from execution evidence.",
+                mitigation="Assign each defect to an owner, link the external tracker issue when configured, and resolve or formally accept before release.",
             )
         )
     if metrics.blocked_count:
@@ -556,6 +570,8 @@ def build_test_audit_report(
             findings.append("Critical: the uploaded build is debuggable.")
         if metrics.failed_count:
             findings.append(f"{metrics.failed_count} failed execution result(s) require triage.")
+        if defect_count:
+            findings.append(f"{defect_count} defect record(s) are linked to execution evidence.")
         if discovery:
             findings.append(f"Runtime discovery observed {discovery.screen_count} screen(s) and {discovery.control_count} control(s).")
         if reported_issues:

@@ -31,6 +31,7 @@ import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import { dashboardApi, executionPlansApi, executionsApi, uploadsApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
+import DefectLogDialog, { DefectSubmission } from "@/components/DefectLogDialog";
 import type { ExecutionResult, ExecutionRun } from "@/types/domain";
 
 type RunFilter = "all" | ExecutionRun["status"];
@@ -94,6 +95,38 @@ function evidenceIds(run: ExecutionRun) {
   return [...ids];
 }
 
+function defectEvidenceLabels(result: ExecutionResult) {
+  const evidence = result.evidence;
+  if (!evidence) return [];
+  const labels: string[] = [];
+  if (typeof evidence.screenshot_asset_id === "string" && evidence.screenshot_asset_id) labels.push("Screenshot");
+  if (typeof evidence.page_source_asset_id === "string" && evidence.page_source_asset_id) labels.push("UI hierarchy");
+  if (typeof evidence.video_asset_id === "string" && evidence.video_asset_id) labels.push("Video");
+  if (Array.isArray(evidence.evidence_assets)) {
+    evidence.evidence_assets.forEach((asset) => {
+      if (asset && typeof asset === "object" && typeof (asset as Record<string, unknown>).kind === "string") {
+        const kind = String((asset as Record<string, unknown>).kind);
+        const label = kind === "page_source" ? "UI hierarchy" : kind[0]?.toUpperCase() + kind.slice(1);
+        if (label && !labels.includes(label)) labels.push(label);
+      }
+    });
+  }
+  return labels;
+}
+
+function defaultDefectDescription(run: ExecutionRun, result: ExecutionResult) {
+  const evidence = defectEvidenceLabels(result);
+  return [
+    `Observed failure in ${result.test_case_key}: ${result.scenario}`,
+    `Failure: ${result.error_message || "The execution runner returned a failed status without a message."}`,
+    `Target: ${targetLabel(run)}`,
+    `Provider: ${providerLabel(run)}`,
+    `Run: ${run.name || "Untitled run"} · ${runDate(run)}`,
+    `Duration: ${durationLabel(result.duration_ms)}`,
+    `Evidence captured: ${evidence.length ? evidence.join(", ") : "None"}.`,
+  ].join("\n");
+}
+
 function resultCounts(run: ExecutionRun) {
   const results = run.results ?? [];
   const fromResults = {
@@ -147,6 +180,8 @@ export default function TestReportsPage() {
   const [resultSearch, setResultSearch] = useState("");
   const [resultFilter, setResultFilter] = useState<ResultFilter>("all");
   const [downloadError, setDownloadError] = useState("");
+  const [defectTarget, setDefectTarget] = useState<{ run: ExecutionRun; result: ExecutionResult } | null>(null);
+  const [defectError, setDefectError] = useState("");
 
   const summary = useQuery({
     queryKey: ["dashboard", selectedProjectId],
@@ -203,6 +238,21 @@ export default function TestReportsPage() {
       queryClient.invalidateQueries({ queryKey: ["executions", selectedProjectId] });
       setSelectedRunId(created.id);
       setSearchParams({ run: created.id });
+    },
+  });
+
+  const createDefect = useMutation({
+    mutationFn: ({ result, payload }: { result: ExecutionResult; payload: DefectSubmission }) =>
+      executionsApi.createDefect(result.id, payload).then((response) => response.data),
+    onSuccess: () => {
+      setDefectTarget(null);
+      setDefectError("");
+      void queryClient.invalidateQueries({ queryKey: ["executions", selectedProjectId] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", selectedProjectId] });
+    },
+    onError: (reason: unknown) => {
+      const detail = (reason as AxiosError<{ detail?: string }>)?.response?.data?.detail;
+      setDefectError(typeof detail === "string" ? detail : reason instanceof Error ? reason.message : "The defect could not be saved.");
     },
   });
 
@@ -279,7 +329,7 @@ export default function TestReportsPage() {
               <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1.25 }}><TextField size="small" fullWidth value={resultSearch} onChange={(event) => setResultSearch(event.target.value)} placeholder="Search cases or errors" InputProps={{ startAdornment: <SearchOutlinedIcon sx={{ mr: 0.75, color: "text.secondary" }} /> }} /><FormControl size="small" sx={{ minWidth: 170 }}><InputLabel id="report-result-filter">Result status</InputLabel><Select labelId="report-result-filter" label="Result status" value={resultFilter} onChange={(event) => setResultFilter(event.target.value as ResultFilter)}><MenuItem value="all">All results</MenuItem><MenuItem value="passed">Passed</MenuItem><MenuItem value="failed">Failed</MenuItem><MenuItem value="blocked">Blocked</MenuItem><MenuItem value="skipped">Skipped</MenuItem><MenuItem value="pending">Pending</MenuItem></Select></FormControl></Stack>
               {selectedRun.results.length === 0 ? <Alert severity="info">This run has no per-case results yet. Refresh while the worker is running.</Alert> : !selectedResults.length ? <Alert severity="info">No results match the current filter.</Alert> : <Stack spacing={0.9} sx={{ maxHeight: { lg: "calc(100vh - 520px)" }, overflowY: { lg: "auto" }, pr: { lg: 0.5 } }}>
                 {selectedResults.map((result) => <Box key={result.id} sx={{ p: 1.1, border: "1px solid", borderColor: result.status === "failed" ? "error.light" : "divider", borderRadius: 1.75 }}>
-                  <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={0.75}><Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="body2" fontWeight={800}>{result.test_case_key} · {result.scenario}</Typography><Typography variant="caption" color={result.status === "failed" ? "error.main" : "text.secondary"}>{result.error_message || durationLabel(result.duration_ms)}</Typography></Box><Stack direction="row" spacing={0.6} alignItems="center" flexWrap="wrap" useFlexGap><Chip size="small" label={displayStatus(result.status)} color={resultColor(result.status)} />{result.defects.map((defect) => <Chip key={defect.id} size="small" label={defect.defect_key} variant="outlined" color="error" />)}</Stack></Stack>
+                  <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={0.75}><Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="body2" fontWeight={800}>{result.test_case_key} · {result.scenario}</Typography><Typography variant="caption" color={result.status === "failed" ? "error.main" : "text.secondary"}>{result.error_message || durationLabel(result.duration_ms)}</Typography></Box><Stack direction="row" spacing={0.6} alignItems="center" flexWrap="wrap" useFlexGap><Chip size="small" label={displayStatus(result.status)} color={resultColor(result.status)} />{(result.defects ?? []).map((defect) => <Chip key={defect.id} size="small" label={defect.defect_key} variant="outlined" color="error" />)}{result.status === "failed" && <Button size="small" color="error" variant="outlined" onClick={(event) => { event.stopPropagation(); setDefectError(""); setDefectTarget({ run: selectedRun, result }); }}>Log defect</Button>}</Stack></Stack>
                   {result.evidence && <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap sx={{ mt: 0.8 }}>{typeof result.evidence.final_url === "string" && <Chip size="small" variant="outlined" label={`URL: ${result.evidence.final_url}`} />}{typeof result.evidence.current_package === "string" && <Chip size="small" variant="outlined" label={`Package: ${result.evidence.current_package}`} />}{typeof result.evidence.screenshot_asset_id === "string" && <Button size="small" startIcon={<DownloadOutlinedIcon />} onClick={() => downloadEvidence(result.evidence!.screenshot_asset_id as string, `${selectedRun.name}-launch.png`)}>Screenshot</Button>}{typeof result.evidence.page_source_asset_id === "string" && <Button size="small" startIcon={<DownloadOutlinedIcon />} onClick={() => downloadEvidence(result.evidence!.page_source_asset_id as string, `${selectedRun.name}-page-source.xml`)}>Page source</Button>}</Stack>}
                 </Box>)}
               </Stack>}
@@ -291,5 +341,18 @@ export default function TestReportsPage() {
 
       <Grid size={{ xs: 12, lg: 3 }}>{selectedRun && selectedCounts ? <RunOverview run={selectedRun} counts={selectedCounts} /> : <Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack spacing={1}><VisibilityOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Run overview</Typography><Typography variant="body2" color="text.secondary">Choose a run to see status distribution, target metadata, duration and evidence context.</Typography></Stack></CardContent></Card>}</Grid>
     </Grid>
+    <DefectLogDialog
+      open={Boolean(defectTarget)}
+      testKey={defectTarget?.result.test_case_key || ""}
+      testTitle={defectTarget?.result.scenario || ""}
+      sourceLabel="execution result"
+      failure={defectTarget?.result.error_message || ""}
+      defaultDescription={defectTarget ? defaultDefectDescription(defectTarget.run, defectTarget.result) : ""}
+      evidenceLabels={defectTarget ? defectEvidenceLabels(defectTarget.result) : []}
+      busy={createDefect.isPending}
+      error={defectError}
+      onClose={() => { if (!createDefect.isPending) { setDefectTarget(null); setDefectError(""); } }}
+      onSubmit={(payload) => { if (defectTarget) createDefect.mutate({ result: defectTarget.result, payload }); }}
+    />
   </Box>;
 }

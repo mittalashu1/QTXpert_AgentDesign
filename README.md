@@ -105,6 +105,24 @@ AI spend card (last 30 days by default). The endpoint is
 models without a configured rate remain visible as unpriced usage so the rate
 configuration can be completed without losing the audit trail.
 
+### Evidence-linked defect logging
+
+Failed cases can be converted into one local defect record from either Test
+Reports (relational execution results) or the Autopilot safe-suite result
+table. The record keeps failed-case metadata, a bounded execution history, and
+opaque Upload Repository asset IDs for screenshots, UI hierarchies and
+functional videos. Worker-local paths, raw evidence bytes, credentials and
+tokens are not copied into the defect record. The UI also offers a Jira draft
+destination; it saves a local issue payload first and never creates a remote
+Jira issue until an authenticated connector/write scope is added.
+
+The Autopilot endpoints are `GET/POST /api/v1/autopilot/{job_id}/defects` and
+`GET /api/v1/autopilot/{job_id}/defects/{defect_id}/jira-draft`. Legacy
+execution results continue to use
+`POST /api/v1/execution-results/{result_id}/defects`. This is the integration
+boundary for a future Jira/ADO/Linear adapter and keeps evidence storage in
+the existing project repository.
+
 ## Deployment (Render + Neon)
 
 Render runs the frontend and backend web services. Production relational data

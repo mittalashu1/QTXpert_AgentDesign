@@ -19,12 +19,14 @@ import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import { apiClient } from "@/services/apiClient";
-import { documentIntelligenceApi, uploadsApi } from "@/services/api";
+import { autopilotDefectsApi, documentIntelligenceApi, uploadsApi } from "@/services/api";
 import { DocumentContext } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
 import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
+import DefectLogDialog, { type DefectSubmission } from "@/components/DefectLogDialog";
+import type { Defect } from "@/types/domain";
 
 type TestBucket =
   | "installation" | "page_level" | "functional" | "functional_positive" | "functional_negative"
@@ -521,6 +523,22 @@ function suiteEvidenceAssets(test: SuiteTestResult): SuiteEvidenceAsset[] {
   });
 }
 
+function suiteDefectEvidenceLabels(test: SuiteTestResult) {
+  return suiteEvidenceAssets(test).map((asset) => evidenceAssetLabel(asset.kind));
+}
+
+function suiteDefectDescription(test: SuiteTestResult, result: SuiteResult, target: TargetKind, provider: Provider) {
+  const assets = suiteDefectEvidenceLabels(test);
+  return [
+    `Observed failure in Autopilot test ${test.test_id}: ${test.title}`,
+    `Failure: ${test.error || "The safe-suite runner returned a failed status without a message."}`,
+    `Bucket: ${test.bucket ? testBucketLabel[test.bucket] : "Unspecified"}`,
+    `Target: ${target} · ${provider}`,
+    `Suite status: ${result.status.toUpperCase()} · ${result.duration_seconds}s`,
+    `Evidence captured: ${assets.length ? assets.join(", ") : "None"}.`,
+  ].join("\n");
+}
+
 export default function AutopilotPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -544,6 +562,10 @@ export default function AutopilotPage() {
   const [discovery, setDiscovery] = useState<Discovery | null>(null);
   const [automation, setAutomation] = useState<AutomationBundle | null>(null);
   const [suite, setSuite] = useState<SuiteResult | null>(null);
+  const [suiteDefects, setSuiteDefects] = useState<Defect[]>([]);
+  const [defectTarget, setDefectTarget] = useState<SuiteTestResult | null>(null);
+  const [defectError, setDefectError] = useState("");
+  const [defectBusy, setDefectBusy] = useState(false);
   const [setup, setSetup] = useState<SetupProfile | null>(null);
   const [setupDraft, setSetupDraft] = useState<SetupProfile>(emptySetup());
   const [inputDrafts, setInputDrafts] = useState<Record<string, InputDraft>>({});
@@ -589,6 +611,9 @@ export default function AutopilotPage() {
     setDiscovery(null);
     setAutomation(null);
     setSuite(null);
+    setSuiteDefects([]);
+    setDefectTarget(null);
+    setDefectError("");
     setSetup(null);
     setSetupDraft(emptySetup());
     setInputDrafts({});
@@ -670,6 +695,18 @@ export default function AutopilotPage() {
       // A report is derived data; keep the analysis visible if an older
       // deployment cannot serve the new endpoint yet.
       setReport(null);
+    }
+  }, []);
+
+  const refreshSuiteDefects = useCallback(async (jobId: string) => {
+    if (!jobId) { setSuiteDefects([]); return; }
+    try {
+      setSuiteDefects((await autopilotDefectsApi.list(jobId)).data);
+    } catch {
+      // Older deployments do not have the defect skeleton yet. Keep the
+      // execution result visible and let the logging action surface a clear
+      // error when the user tries to save a defect.
+      setSuiteDefects([]);
     }
   }, []);
 
@@ -928,9 +965,10 @@ export default function AutopilotPage() {
         setSetupOpen(true);
       }
       setReport(reportResult.status === "fulfilled" ? reportResult.value.data : null);
+      void refreshSuiteDefects(analysis.job_id);
     });
     return () => { active = false; };
-  }, [analysis?.job_id, analysis?.checkpoint_stage, analysis?.input_requests]);
+  }, [analysis?.job_id, analysis?.checkpoint_stage, analysis?.input_requests, refreshSuiteDefects]);
 
   useEffect(() => {
     if (!analysis?.job_id) return;
@@ -1353,6 +1391,7 @@ export default function AutopilotPage() {
         include_deferred: true,
       }, { timeout: 960000 });
       setSuite(response.data);
+      await refreshSuiteDefects(analysis.job_id);
       await refreshReport(analysis.job_id);
     } catch (err) { setError(readableError(err, "Autonomous safe-suite execution failed")); }
     finally { setSuiteBusy(false); }
@@ -1371,6 +1410,25 @@ export default function AutopilotPage() {
     } catch (err) {
       setError(readableError(err, "Evidence download failed"));
     }
+  };
+  const submitSuiteDefect = async (payload: DefectSubmission) => {
+    if (!analysis || !defectTarget) return;
+    setDefectBusy(true); setDefectError("");
+    try {
+      await autopilotDefectsApi.create(analysis.job_id, {
+        test_id: defectTarget.test_id,
+        title: payload.title,
+        description: payload.description,
+        severity: payload.severity,
+        integration_provider: payload.integration_provider,
+      });
+      setDefectTarget(null);
+      setDefectError("");
+      await refreshSuiteDefects(analysis.job_id);
+      await refreshReport(analysis.job_id);
+    } catch (err) {
+      setDefectError(readableError(err, "The defect could not be saved"));
+    } finally { setDefectBusy(false); }
   };
   const runSmoke = async () => {
     if (!analysis) return;
@@ -1861,7 +1919,7 @@ export default function AutopilotPage() {
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · plan capped at 100 cases</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 100).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
-        {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe batch: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The evidence-scoped plan is capped at 100 cases. This run can include up to {suiteMaxTests} eligible deterministic cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+        {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe batch: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The evidence-scoped plan is capped at 100 cases. This run can include up to {suiteMaxTests} eligible deterministic cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>
@@ -1885,6 +1943,20 @@ export default function AutopilotPage() {
 
       {analysis.release_risks.length > 0 && <Alert severity="info"><b>Initial release risks:</b> {analysis.release_risks.join(" • ")}</Alert>}
     </>}
+
+    <DefectLogDialog
+      open={Boolean(defectTarget)}
+      testKey={defectTarget?.test_id || ""}
+      testTitle={defectTarget?.title || ""}
+      sourceLabel="Autopilot safe-suite result"
+      failure={defectTarget?.error || ""}
+      defaultDescription={defectTarget && suite ? suiteDefectDescription(defectTarget, suite, activeTargetKind, activeProvider) : ""}
+      evidenceLabels={defectTarget ? suiteDefectEvidenceLabels(defectTarget) : []}
+      busy={defectBusy}
+      error={defectError}
+      onClose={() => { if (!defectBusy) { setDefectTarget(null); setDefectError(""); } }}
+      onSubmit={(payload) => { void submitSuiteDefect(payload); }}
+    />
 
     <Dialog open={Boolean(duplicatePrompt)} onClose={() => !busy && setDuplicatePrompt(null)} fullWidth maxWidth="sm">
       <DialogTitle>Existing Test &amp; Audit Report tab</DialogTitle>

@@ -21,6 +21,8 @@ import {
   DocumentProfile,
   ExecutionProvider,
   ExecutionTargetKind,
+  Defect,
+  DefectJiraDraft,
 } from "@/types/domain";
 
 const activeProjectId = () => localStorage.getItem("qtxpert-selected-project") || undefined;
@@ -64,8 +66,16 @@ export const executionsApi = {
     auto_grant_permissions?: boolean;
   }) => apiClient.post<ExecutionRun>("/executions", payload),
   get: (runId: string) => apiClient.get<ExecutionRun>(`/executions/${runId}`),
-  createDefect: (resultId: string, payload: { title: string; severity: string; description: string }) =>
-    apiClient.post(`/execution-results/${resultId}/defects`, payload),
+  createDefect: (resultId: string, payload: { title: string; severity: string; description: string; integration_provider?: "local" | "jira" }) =>
+    apiClient.post<Defect>(`/execution-results/${resultId}/defects`, payload),
+};
+
+export const autopilotDefectsApi = {
+  list: (jobId: string) => apiClient.get<Defect[]>(`/autopilot/${jobId}/defects`),
+  create: (jobId: string, payload: { test_id: string; title?: string; description?: string; severity: string; integration_provider?: "local" | "jira" }) =>
+    apiClient.post<Defect>(`/autopilot/${jobId}/defects`, payload),
+  jiraDraft: (jobId: string, defectId: string) =>
+    apiClient.get<DefectJiraDraft>(`/autopilot/${jobId}/defects/${defectId}/jira-draft`),
 };
 
 export const executionPlansApi = {

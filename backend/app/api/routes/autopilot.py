@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user
@@ -21,6 +21,7 @@ from app.database.models.autopilot_execution import AutopilotExecution
 from app.database.models.autopilot_input import AutopilotInputRecord
 from app.database.models.autopilot_job import AutopilotJob
 from app.database.models.document_intelligence import DocumentAnalysisRun
+from app.database.models.execution import Defect, DefectStatus
 from app.database.models.uploaded_asset import UploadedAsset
 from app.database.models.user import User
 from app.database.repositories.requirement_repository import ProjectRepository
@@ -48,6 +49,7 @@ from app.schemas.autopilot import (
     AutopilotSuiteRequest,
     AutopilotSuiteResult,
 )
+from app.schemas.execution import AutopilotDefectCreate, DefectJiraDraftOut, DefectOut
 from app.schemas.upload_repository import ReuseUploadedAssetRequest
 from app.services.autopilot import (
     AutopilotPrototypeService,
@@ -65,6 +67,7 @@ from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests,
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata, resolve_value
+from app.services.defect_logging import safe_target_reference, secret_safe_text
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
 from app.services.document_intelligence import DocumentIntelligenceService
 from app.services.upload_repository import (
@@ -3045,6 +3048,287 @@ async def get_autopilot_suite(
         return None
 
 
+def _suite_defect_evidence(test: dict) -> list[dict]:
+    """Normalize opaque evidence references for a defect attachment list."""
+    evidence = test.get("evidence") if isinstance(test, dict) else None
+    if not isinstance(evidence, dict):
+        return []
+    raw_assets = evidence.get("evidence_assets")
+    if not isinstance(raw_assets, list):
+        return []
+    assets: list[dict] = []
+    seen: set[str] = set()
+    for raw in raw_assets:
+        if not isinstance(raw, dict) or not raw.get("asset_id"):
+            continue
+        try:
+            asset_id = UUID(str(raw["asset_id"]))
+        except (TypeError, ValueError):
+            continue
+        normalized_id = str(asset_id)
+        if normalized_id in seen:
+            continue
+        seen.add(normalized_id)
+        kind = str(raw.get("kind") or "other")
+        if kind not in {"screenshot", "page_source", "video", "other"}:
+            kind = "other"
+        assets.append(
+            {
+                "asset_id": normalized_id,
+                "kind": kind,
+                "filename": str(raw.get("filename") or f"evidence-{normalized_id}")[:255],
+            }
+        )
+    return assets[:20]
+
+
+def _autopilot_execution_snapshot(
+    suite: dict,
+    test: dict,
+    smoke_history: list[AutopilotExecution],
+) -> dict:
+    """Build a bounded, secret-free snapshot for issue triage and Jira."""
+    snapshot = {
+        "source": "autopilot_suite",
+        "suite_status": suite.get("status"),
+        "suite_started_at": suite.get("started_at"),
+        "suite_finished_at": suite.get("finished_at"),
+        "suite_duration_seconds": suite.get("duration_seconds"),
+        "provider": suite.get("provider"),
+        "device_name": suite.get("device_name"),
+        "target_kind": suite.get("target_kind"),
+        "target_url": safe_target_reference(suite.get("target_url")),
+        "test_id": test.get("test_id"),
+        "test_title": secret_safe_text(test.get("title"), 500),
+        "test_bucket": test.get("bucket"),
+        "test_status": test.get("status"),
+        "duration_seconds": test.get("duration_seconds"),
+        "error": secret_safe_text(test.get("error"), 1200) or None,
+        "smoke_history": [
+            {
+                "execution_id": str(item.id),
+                "status": item.status,
+                "provider": item.provider,
+                "device_name": item.device_name,
+                "platform_version": item.platform_version,
+                "started_at": item.started_at.isoformat() if item.started_at else None,
+                "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+                "duration_seconds": item.duration_seconds,
+                "error": secret_safe_text(item.error, 1200) or None,
+                "screenshot_asset_id": str(item.screenshot_asset_id) if item.screenshot_asset_id else None,
+                "page_source_asset_id": str(item.page_source_asset_id) if item.page_source_asset_id else None,
+            }
+            for item in smoke_history[:20]
+        ],
+    }
+    # Never persist worker-local paths, raw evidence bytes, or any checkpoint
+    # input values in a defect snapshot.
+    return snapshot
+
+
+def _jira_configuration_status(settings: Settings) -> tuple[bool, str, str]:
+    configured = bool(
+        settings.JIRA_URL
+        and settings.JIRA_CLIENT_ID
+        and settings.JIRA_CLIENT_SECRET
+        and settings.JIRA_REDIRECT_URI
+    )
+    if configured:
+        return (
+            True,
+            "ready_for_auth",
+            "Jira connection settings are present. Complete the Atlassian OAuth consent flow before creating a remote issue.",
+        )
+    return (
+        False,
+        "not_configured",
+        "Jira is not configured. This local defect is ready for a future Jira connector; no remote issue was created.",
+    )
+
+
+@router.get("/{job_id}/defects", response_model=list[DefectOut])
+async def list_autopilot_defects(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """List evidence-linked defects logged from this Autopilot report tab."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    record = await _safe_job_record(db, job_id, user.id)
+    if record is None:
+        return []
+    return list(
+        (
+            await db.scalars(
+                select(Defect)
+                .where(
+                    Defect.autopilot_job_id == record.id,
+                    Defect.logged_by_id == user.id,
+                )
+                .order_by(Defect.created_at.desc())
+                .limit(100)
+            )
+        ).all()
+    )
+
+
+@router.post("/{job_id}/defects", response_model=DefectOut, status_code=status.HTTP_201_CREATED)
+async def create_autopilot_defect(
+    job_id: str,
+    payload: AutopilotDefectCreate,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Create a local defect from a failed safe-suite case.
+
+    The API derives execution history and evidence references from the durable
+    suite instead of trusting client-supplied attachment IDs.  Selecting Jira
+    only changes the integration status to a draft boundary; it never performs
+    an unsolicited external write.
+    """
+    service = _service(settings)
+    job = await _require_owned_job(service, job_id, user)
+    record = await _safe_job_record(db, job_id, user.id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Report storage is temporarily unavailable; retry defect logging after storage recovers.",
+        )
+    suite = record.suite_execution if isinstance(record.suite_execution, dict) else None
+    if suite is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Run the Autopilot safe suite before logging a defect.")
+    tests = suite.get("tests") if isinstance(suite.get("tests"), list) else []
+    test = next((item for item in tests if isinstance(item, dict) and str(item.get("test_id")) == payload.test_id), None)
+    if test is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot test result not found in this report.")
+    if str(test.get("status")) != "failed":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Defects can only be logged from failed Autopilot test results.")
+    # Treat one failed case in one report tab as one defect.  This keeps a
+    # double-click/retry from creating duplicate tracker drafts while still
+    # allowing the same test ID in a later report tab to be logged separately.
+    existing = await db.scalar(
+        select(Defect)
+        .where(
+            Defect.autopilot_job_id == record.id,
+            Defect.autopilot_test_id == payload.test_id,
+            Defect.logged_by_id == user.id,
+        )
+        .order_by(Defect.created_at.desc())
+    )
+    if existing is not None:
+        return existing
+
+    evidence_assets = _suite_defect_evidence(test)
+    smoke_history = list(
+        (
+            await db.scalars(
+                select(AutopilotExecution)
+                .where(
+                    AutopilotExecution.autopilot_job_id == record.id,
+                    AutopilotExecution.owner_id == user.id,
+                )
+                .order_by(AutopilotExecution.created_at.desc())
+                .limit(20)
+            )
+        ).all()
+    )
+    title = secret_safe_text(payload.title or str(test.get("title") or payload.test_id), 500)
+    error = secret_safe_text(test.get("error") or "No failure message was returned by the safe-suite runner.", 1200)
+    description = secret_safe_text(payload.description or (
+        f"Observed failure in Autopilot test {payload.test_id}: {error}\n\n"
+        f"Bucket: {test.get('bucket') or 'unspecified'}\n"
+        f"Target: {suite.get('target_kind') or job.get('target_kind') or 'unknown'}\n"
+        f"Provider: {suite.get('provider') or 'unknown'}\n"
+        f"Evidence assets attached: {len(evidence_assets)}."
+    ), 10000)
+    sequence = (await db.scalar(select(func.count(Defect.id)))) or 0
+    integration_status = "pending_configuration" if payload.integration_provider == "jira" else "local"
+    defect = Defect(
+        autopilot_job_id=record.id,
+        autopilot_test_id=payload.test_id,
+        source="autopilot_suite",
+        test_title=str(test.get("title") or payload.test_id)[:500],
+        test_bucket=str(test.get("bucket") or "")[:40] or None,
+        target_kind=str(suite.get("target_kind") or job.get("target_kind") or "")[:20] or None,
+        provider=str(suite.get("provider") or "")[:30] or None,
+        defect_key=f"QTX-{sequence + 1:05d}",
+        title=title,
+        description=description,
+        severity=payload.severity,
+        status=DefectStatus.OPEN,
+        logged_by_id=user.id,
+        evidence_assets=evidence_assets,
+        execution_snapshot=_autopilot_execution_snapshot(suite, test, smoke_history),
+        integration_provider=payload.integration_provider,
+        integration_status=integration_status,
+    )
+    db.add(defect)
+    await db.commit()
+    await db.refresh(defect)
+    logger.info(
+        "Autopilot defect logged job_id=%s test_id=%s defect_key=%s evidence=%d integration=%s",
+        job_id,
+        payload.test_id,
+        defect.defect_key,
+        len(evidence_assets),
+        payload.integration_provider,
+    )
+    return defect
+
+
+@router.get("/{job_id}/defects/{defect_id}/jira-draft", response_model=DefectJiraDraftOut)
+async def get_autopilot_jira_draft(
+    job_id: str,
+    defect_id: UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Return a Jira issue payload preview without making a remote mutation."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    record = await _safe_job_record(db, job_id, user.id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot report not found")
+    defect = await db.scalar(
+        select(Defect).where(
+            Defect.id == defect_id,
+            Defect.autopilot_job_id == record.id,
+            Defect.logged_by_id == user.id,
+        )
+    )
+    if defect is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Defect not found")
+    configured, integration_status, message = _jira_configuration_status(settings)
+    issue_payload = {
+        "summary": defect.title,
+        "description": defect.description,
+        "issuetype": {"name": "Bug"},
+        "labels": ["qtxpert", "autopilot", defect.severity],
+        "custom_fields": {
+            "qtxpert_defect_key": defect.defect_key,
+            "source": defect.source,
+            "test_id": defect.autopilot_test_id,
+            "evidence_assets": defect.evidence_assets or [],
+        },
+        "evidence_asset_ids": [
+            item.get("asset_id")
+            for item in (defect.evidence_assets or [])
+            if isinstance(item, dict) and item.get("asset_id")
+        ],
+    }
+    return DefectJiraDraftOut(
+        defect_id=defect.id,
+        configured=configured,
+        status=integration_status,
+        message=message,
+        issue_payload=issue_payload,
+    )
+
+
 async def _execution_records_for_job(
     job_id: str,
     user: User,
@@ -3116,12 +3400,28 @@ async def get_autopilot_report(
         except ValueError:
             suite = None
     executions = await _execution_records_for_job(job_id, user, settings, db)
+    defect_count: int | None = None
+    if record is not None:
+        try:
+            defect_count = int(
+                await db.scalar(
+                    select(func.count(Defect.id)).where(
+                        Defect.autopilot_job_id == record.id,
+                        Defect.logged_by_id == user.id,
+                    )
+                )
+                or 0
+            )
+        except Exception as exc:  # pragma: no cover - migration/degraded DB fallback
+            await db.rollback()
+            logger.warning("Autopilot defect count unavailable job_id=%s: %s", job_id, exc)
     return build_test_audit_report(
         analysis,
         str(job.get("context", "")),
         discovery=discovery,
         suite=suite,
         executions=executions,
+        defect_count=defect_count,
     )
 
 

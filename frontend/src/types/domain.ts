@@ -266,6 +266,30 @@ export interface Defect {
   title: string;
   severity: string;
   status: string;
+  execution_result_id?: string | null;
+  autopilot_job_id?: string | null;
+  autopilot_test_id?: string | null;
+  source?: "execution_result" | "autopilot_suite" | string;
+  test_title?: string | null;
+  test_bucket?: string | null;
+  target_kind?: string | null;
+  provider?: string | null;
+  evidence_assets?: Array<{ asset_id: string; filename?: string; kind?: string }> | null;
+  execution_snapshot?: Record<string, unknown> | null;
+  integration_provider?: "local" | "jira" | string;
+  integration_status?: string;
+  external_issue_key?: string | null;
+  external_issue_url?: string | null;
+  created_at?: string | null;
+}
+
+export interface DefectJiraDraft {
+  defect_id: string;
+  provider: "jira";
+  configured: boolean;
+  status: "not_configured" | "ready_for_auth" | "ready";
+  message: string;
+  issue_payload: Record<string, unknown>;
 }
 
 export interface ExecutionResult {

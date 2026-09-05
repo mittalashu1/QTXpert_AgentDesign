@@ -38,6 +38,7 @@ from app.schemas.execution import (
     ExecutionRunOut,
 )
 from app.services.autopilot import AutopilotPrototypeService
+from app.services.defect_logging import safe_target_reference, secret_safe_text
 from app.services.upload_repository import UploadRepositoryService
 
 router = APIRouter(tags=["execution"])
@@ -984,15 +985,95 @@ async def get_execution(run_id: UUID, db: Annotated[AsyncSession, Depends(get_db
     return run
 
 
+def _execution_evidence_assets(evidence: object) -> list[dict]:
+    """Keep only safe, opaque evidence metadata on a defect record."""
+    if not isinstance(evidence, dict):
+        return []
+    assets: list[dict] = []
+    for kind, key in (("screenshot", "screenshot_asset_id"), ("page_source", "page_source_asset_id"), ("video", "video_asset_id")):
+        value = evidence.get(key)
+        if not value:
+            continue
+        try:
+            asset_id = UUID(str(value))
+        except (TypeError, ValueError):
+            continue
+        assets.append({
+            "asset_id": str(asset_id),
+            "kind": kind,
+            "filename": str(evidence.get(f"{key}_filename") or f"{kind}-{asset_id}")[:255],
+        })
+    raw_assets = evidence.get("evidence_assets")
+    if isinstance(raw_assets, list):
+        for raw in raw_assets:
+            if not isinstance(raw, dict) or not raw.get("asset_id"):
+                continue
+            try:
+                asset_id = UUID(str(raw["asset_id"]))
+            except (TypeError, ValueError):
+                continue
+            if any(item["asset_id"] == str(asset_id) for item in assets):
+                continue
+            kind = str(raw.get("kind") or "other")
+            if kind not in {"screenshot", "page_source", "video", "other"}:
+                kind = "other"
+            assets.append({"asset_id": str(asset_id), "kind": kind, "filename": str(raw.get("filename") or f"evidence-{asset_id}")[:255]})
+    return assets[:20]
+
+
 @router.post("/execution-results/{result_id}/defects", response_model=DefectOut, status_code=status.HTTP_201_CREATED)
 async def create_defect(result_id: UUID, payload: DefectCreate, db: Annotated[AsyncSession, Depends(get_db_session)], user: Annotated[User, Depends(get_current_user)]):
-    result = await db.scalar(select(ExecutionResult).join(ExecutionRun).join(Project).where(ExecutionResult.id == result_id, Project.owner_id == user.id))
+    result = await db.scalar(
+        select(ExecutionResult)
+        .join(ExecutionRun)
+        .join(Project)
+        .where(ExecutionResult.id == result_id, Project.owner_id == user.id)
+    )
     if result is None:
         raise HTTPException(status_code=404, detail="Execution result not found")
     if result.status != ResultStatus.FAILED:
         raise HTTPException(status_code=400, detail="Defects can only be logged from failed execution results")
+    existing = await db.scalar(
+        select(Defect)
+        .where(Defect.execution_result_id == result.id, Defect.logged_by_id == user.id)
+        .order_by(Defect.created_at.desc())
+    )
+    if existing is not None:
+        return existing
+    run = await db.scalar(select(ExecutionRun).where(ExecutionRun.id == result.execution_run_id))
+    if run is None:  # pragma: no cover - protected by the result foreign key
+        raise HTTPException(status_code=404, detail="Execution run not found")
     sequence = (await db.scalar(select(func.count(Defect.id)))) or 0
-    defect = Defect(execution_result_id=result.id, defect_key=f"QTX-{sequence + 1:05d}", title=payload.title, description=payload.description, severity=payload.severity, logged_by_id=user.id)
+    defect = Defect(
+        execution_result_id=result.id,
+        defect_key=f"QTX-{sequence + 1:05d}",
+        title=secret_safe_text(payload.title, 500) or "Observed execution failure",
+        description=secret_safe_text(payload.description, 10000) or "No defect description was supplied.",
+        severity=payload.severity,
+        logged_by_id=user.id,
+        source="execution_result",
+        test_title=result.scenario,
+        target_kind=run.target_kind,
+        provider=run.provider,
+        evidence_assets=_execution_evidence_assets(result.evidence),
+        execution_snapshot={
+            "source": "execution_result",
+            "execution_run_id": str(run.id),
+            "execution_result_id": str(result.id),
+            "run_name": run.name,
+            "status": result.status.value if hasattr(result.status, "value") else str(result.status),
+            "duration_ms": result.duration_ms,
+            "error_message": secret_safe_text(result.error_message, 1200) or None,
+            "target_kind": run.target_kind,
+            "provider": run.provider,
+            "base_url": safe_target_reference(run.base_url),
+            "device_name": run.device_name,
+            "platform_version": run.platform_version,
+            "created_at": run.created_at.isoformat() if run.created_at else None,
+        },
+        integration_provider=payload.integration_provider,
+        integration_status="pending_configuration" if payload.integration_provider == "jira" else "local",
+    )
     db.add(defect)
     await db.commit()
     await db.refresh(defect)
@@ -1023,7 +1104,27 @@ async def dashboard(project_id: UUID, db: Annotated[AsyncSession, Depends(get_db
     skipped = result_counts.get(ResultStatus.SKIPPED.value, 0)
     pending = result_counts.get(ResultStatus.PENDING.value, 0)
     executed = passed + failed
-    open_defects = await db.scalar(select(func.count(Defect.id)).join(ExecutionResult).join(ExecutionRun).where(ExecutionRun.project_id == project_id, Defect.status.in_([DefectStatus.OPEN, DefectStatus.IN_PROGRESS]))) or 0
+    open_execution_defects = await db.scalar(
+        select(func.count(Defect.id))
+        .join(ExecutionResult)
+        .join(ExecutionRun)
+        .where(
+            ExecutionRun.project_id == project_id,
+            Defect.status.in_([DefectStatus.OPEN, DefectStatus.IN_PROGRESS]),
+        )
+    ) or 0
+    # Autopilot suite defects do not have an ExecutionResult row. Include them
+    # in the same project dashboard count without double-counting legacy rows.
+    open_autopilot_defects = await db.scalar(
+        select(func.count(Defect.id))
+        .join(AutopilotJob, Defect.autopilot_job_id == AutopilotJob.id)
+        .where(
+            AutopilotJob.project_id == project_id,
+            AutopilotJob.owner_id == user.id,
+            Defect.status.in_([DefectStatus.OPEN, DefectStatus.IN_PROGRESS]),
+        )
+    ) or 0
+    open_defects = int(open_execution_defects) + int(open_autopilot_defects)
     recent = (await db.scalars(select(ExecutionRun).options(
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.test_case),
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.defects),

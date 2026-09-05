@@ -89,13 +89,37 @@ class ExecutionResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class Defect(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "defects"
-    execution_result_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("execution_results.id", ondelete="CASCADE"), nullable=False, index=True)
+    # A defect can originate from the relational execution engine or from an
+    # Autopilot safe-suite result.  Keeping one record shape gives reports and
+    # future integrations a consistent lifecycle without duplicating defects.
+    execution_result_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("execution_results.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    autopilot_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("autopilot_jobs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    autopilot_test_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(30), nullable=False, default="execution_result", server_default="execution_result")
+    test_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    test_bucket: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    target_kind: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     defect_key: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     severity: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[DefectStatus] = mapped_column(Enum(DefectStatus, name="defect_status", values_callable=lambda e: [x.value for x in e]), default=DefectStatus.OPEN, nullable=False)
     logged_by_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    # Evidence is always a list of repository asset metadata (IDs, filenames,
+    # and kinds), never raw screenshots, video bytes, credentials, or tokens.
+    evidence_assets: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Snapshot of the failed test/run context used to pre-populate an issue.
+    # It is deliberately bounded and secret-free at the API boundary.
+    execution_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    integration_provider: Mapped[str] = mapped_column(String(30), nullable=False, default="local", server_default="local")
+    integration_status: Mapped[str] = mapped_column(String(40), nullable=False, default="local", server_default="local")
+    external_issue_key: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    external_issue_url: Mapped[Optional[str]] = mapped_column(String(2048), nullable=True)
     result: Mapped["ExecutionResult"] = relationship(back_populates="defects")
 
 

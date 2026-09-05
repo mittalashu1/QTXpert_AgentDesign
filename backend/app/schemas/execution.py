@@ -117,6 +117,36 @@ class DefectCreate(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     description: str = Field(min_length=1, max_length=10000)
     severity: str = Field(pattern="^(blocker|critical|major|minor|trivial)$")
+    # ``jira`` creates a local, evidence-linked draft and marks it ready for
+    # integration; it never sends an issue without an explicitly configured
+    # Jira connector and authenticated write scope.
+    integration_provider: Literal["local", "jira"] = "local"
+
+
+class AutopilotDefectCreate(BaseModel):
+    """Create a defect from one failed Autopilot safe-suite case.
+
+    Title and description are optional because the API can derive a complete
+    issue draft from the failed case, execution metadata, and durable evidence
+    references.  Clients can still refine the wording before saving it.
+    """
+
+    test_id: str = Field(min_length=1, max_length=120)
+    title: str | None = Field(default=None, max_length=500)
+    description: str | None = Field(default=None, max_length=10000)
+    severity: str = Field(default="major", pattern="^(blocker|critical|major|minor|trivial)$")
+    integration_provider: Literal["local", "jira"] = "local"
+
+
+class DefectJiraDraftOut(BaseModel):
+    """Safe Jira issue preview; no Atlassian mutation is performed here."""
+
+    defect_id: UUID
+    provider: Literal["jira"] = "jira"
+    configured: bool = False
+    status: Literal["not_configured", "ready_for_auth", "ready"]
+    message: str
+    issue_payload: dict
 
 class DefectOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -125,6 +155,21 @@ class DefectOut(BaseModel):
     title: str
     severity: str
     status: str
+    execution_result_id: UUID | None = None
+    autopilot_job_id: UUID | None = None
+    autopilot_test_id: str | None = None
+    source: str = "execution_result"
+    test_title: str | None = None
+    test_bucket: str | None = None
+    target_kind: str | None = None
+    provider: str | None = None
+    evidence_assets: list[dict] | None = None
+    execution_snapshot: dict | None = None
+    integration_provider: str = "local"
+    integration_status: str = "local"
+    external_issue_key: str | None = None
+    external_issue_url: str | None = None
+    created_at: datetime | None = None
 
 class ExecutionResultOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
