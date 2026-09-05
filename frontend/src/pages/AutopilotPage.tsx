@@ -1681,8 +1681,8 @@ export default function AutopilotPage() {
           ))}
         </Stack>
         <Alert severity="info" sx={{ mt: 1.5 }}>
-          A generated case is a plan, not a pass. Authenticated journeys require a secure non-production credential reference,
-          approved test data and an oracle/reset hook; no password is stored in the context or sent to the model.
+          A generated case is a plan, not a pass. Authenticated journeys require a non-production User ID/email and Password
+          (or a secure vault reference), approved test data and an oracle/reset hook; no password is stored in the context or sent to the model.
         </Alert>
         <TableContainer sx={{ mt: 1.5, maxHeight: 460 }}>
           <Table stickyHeader size="small">
@@ -1901,7 +1901,7 @@ export default function AutopilotPage() {
         <Typography variant="overline" color="text.secondary" fontWeight={800} display="block" sx={{ mt: 2 }}>Optional setup references</Typography>
         <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>Use these only when your team already has a vault, fixture, reset hook or oracle reference. Direct values entered above are enough for this checkpoint.</Typography>
         <Grid container spacing={2}>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Credential-set reference (optional)" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat · never paste a password" /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Vault credential reference (optional)" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat · never paste a password" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Test account role (optional)" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Environment name (optional)" value={setupDraft.environment_name} onChange={(event) => updateSetup("environment_name", event.target.value)} placeholder="UAT" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Environment URL / identifier (optional)" value={setupDraft.environment_url} onChange={(event) => updateSetup("environment_url", event.target.value)} /></Grid>

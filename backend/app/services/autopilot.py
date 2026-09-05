@@ -1747,7 +1747,7 @@ class AutopilotPrototypeService:
                 expected=["The journey completes with correct state, messages, persistence and integration outcomes"],
                 requires_auth=True,
                 requires_test_data=True,
-                dependency="A secure non-production credential reference, role permissions, seeded test data, environment URL and reset hook are required.",
+                dependency="A non-production User ID/email and Password (or a secure vault credential reference), role permissions, seeded test data, environment URL and reset hook are required.",
                 evidence_required=["journey screenshots", "API or business oracle", "cleanup result"],
             ),
             AutopilotTest(
@@ -2102,7 +2102,7 @@ class AutopilotPrototypeService:
     def _ai_dependency(bucket: str, requires_auth: bool, requires_test_data: bool, destructive: bool) -> str | None:
         needs: list[str] = []
         if requires_auth:
-            needs.extend(["an approved non-production credential reference", "account role", "safe authentication approval"])
+            needs.extend(["non-production User ID/email and Password (or a secure vault credential reference)", "account role", "safe authentication approval"])
         if requires_test_data:
             needs.extend(["synthetic test data", "reset/cleanup reference"])
         if bucket == "uat":
@@ -2173,7 +2173,7 @@ class AutopilotPrototypeService:
         if meta.get("platform") == "web":
             return [
                 "Which non-production environment and approved URL may QTXpert test?",
-                "Provide a vault/credential reference and account role for authenticated journeys.",
+                "Provide the non-production User ID/email and Password (or a vault credential reference) and account role for authenticated journeys.",
                 "Which business actions are prohibited or require explicit approval?",
                 "Which pages and integrations are release-critical?",
                 "Provide synthetic test data and a reset/cleanup reference.",
