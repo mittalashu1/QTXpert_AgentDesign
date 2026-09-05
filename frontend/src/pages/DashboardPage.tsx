@@ -42,7 +42,7 @@ import { Link as RouterLink } from "react-router-dom";
 import { dashboardApi, documentIntelligenceApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
-import type { DocumentAnalysisRun, ExecutionRun } from "@/types/domain";
+import type { AutopilotDashboardSummary, DocumentAnalysisRun, ExecutionRun } from "@/types/domain";
 
 type MetricKey =
   | "requirements"
@@ -52,7 +52,7 @@ type MetricKey =
   | "open_defects"
   | "automation_candidates";
 
-type WidgetKey = "metrics" | "posture" | "execution" | "signals" | "documentation";
+type WidgetKey = "metrics" | "posture" | "execution" | "signals" | "documentation" | "autopilot";
 
 interface DashboardPreferences {
   title: string;
@@ -84,6 +84,7 @@ const defaultPreferences = (): DashboardPreferences => ({
     execution: true,
     signals: true,
     documentation: true,
+    autopilot: true,
   },
   metricLabels: {
     requirements: "Requirements",
@@ -128,6 +129,7 @@ const widgetDefinitions: Array<{ key: WidgetKey; label: string; description: str
   { key: "execution", label: "Last run", description: "The latest saved execution run and its test counts." },
   { key: "signals", label: "Action required", description: "Counts of items that need follow-up." },
   { key: "documentation", label: "Documentation quality gate", description: "Early findings from Document Intelligence before test design." },
+  { key: "autopilot", label: "Autopilot activity", description: "Generated cases, safe-suite execution and evidence for this project." },
 ];
 
 const preferenceKey = (projectId: string) => `qtxpert-dashboard-preferences:${projectId}`;
@@ -220,6 +222,13 @@ export default function DashboardPage() {
     queryKey: ["dashboard", selectedProjectId],
     queryFn: () => dashboardApi.summary(selectedProjectId).then((response) => response.data),
     enabled: Boolean(selectedProjectId),
+    // Keep the dashboard current while Autopilot is analyzing or waiting for
+    // checkpoint input; once it is idle, the explicit refresh button remains
+    // the low-cost path for a historical snapshot.
+    refetchInterval: (query) => {
+      const activity = query.state.data?.autopilot;
+      return activity && (activity.active_jobs > 0 || activity.waiting_for_input_jobs > 0) ? 5000 : false;
+    },
   });
   const documentReview = useQuery<DocumentAnalysisRun | null>({
     queryKey: ["document-intelligence-latest", selectedProjectId],
@@ -247,6 +256,22 @@ export default function DashboardPage() {
   const documentReviewData = documentReview.isFetching || documentReview.isError
     ? null
     : documentReview.data;
+  const autopilotActivity: AutopilotDashboardSummary = data?.autopilot ?? {
+    report_tabs: 0,
+    active_jobs: 0,
+    waiting_for_input_jobs: 0,
+    generated_test_cases: 0,
+    suite_runs: 0,
+    smoke_runs: 0,
+    selected_tests: 0,
+    executed_tests: 0,
+    passed_tests: 0,
+    failed_tests: 0,
+    blocked_tests: 0,
+    deferred_tests: 0,
+    skipped_tests: 0,
+    last_run_at: null,
+  };
   const visibleMetricDefinitions = metricDefinitions.filter(({ key }) => preferences.visibleMetrics[key]);
   const visibleWidgetCount = Object.values(preferences.visibleWidgets).filter(Boolean).length;
 
@@ -277,11 +302,17 @@ export default function DashboardPage() {
     if (awaitingAutomation > 0) {
       items.push({ key: "automation", count: awaitingAutomation, title: "Tests awaiting automation", detail: "Select cases and decide how they should run.", route: "/execution" });
     }
+    if (autopilotActivity.waiting_for_input_jobs > 0) {
+      items.push({ key: "autopilot-inputs", count: autopilotActivity.waiting_for_input_jobs, title: "Autopilot inputs awaiting review", detail: "Review the checkpoint inputs before dependent checks continue.", route: "/autopilot" });
+    }
+    if (autopilotActivity.deferred_tests > 0) {
+      items.push({ key: "autopilot-deferred", count: autopilotActivity.deferred_tests, title: "Autopilot checks awaiting setup", detail: "Open Autopilot to resolve discovery, data or approval dependencies.", route: "/autopilot" });
+    }
     if (data.execution_runs === 0) {
       items.push({ key: "first-execution", count: 1, title: "Execution run", detail: "Run the selected test cases to populate results.", route: "/execution" });
     }
     return items;
-  }, [data]);
+  }, [autopilotActivity.deferred_tests, autopilotActivity.waiting_for_input_jobs, data]);
   const actionRequiredCount = actionItems.reduce((total, item) => total + item.count, 0);
   const actionCards: ActionItem[] = actionItems.length > 0 ? actionItems : [{
     key: "none",
@@ -296,7 +327,7 @@ export default function DashboardPage() {
     const documentRunning = Boolean(documentStatus && ["queued", "extracting", "analyzing"].includes(documentStatus));
     const documentCompleted = documentStatus === "completed";
     const documentFailed = documentStatus === "failed";
-    const executionAvailable = Boolean(data?.execution_runs);
+    const executionAvailable = Boolean(data?.execution_runs || data?.autopilot?.suite_runs || data?.autopilot?.smoke_runs);
     return [
       {
         key: "understand",
@@ -544,6 +575,58 @@ export default function DashboardPage() {
             })}
           </Grid>
         </Box>
+      )}
+
+      {preferences.visibleWidgets.autopilot && (
+        <Card variant="outlined" sx={{ mb: 3, borderRadius: 3 }}>
+          <CardActionArea component={RouterLink} to="/autopilot" aria-label="Open Autopilot activity" sx={{ alignItems: "stretch" }}>
+            <CardContent sx={{ p: 2.25, "&:last-child": { pb: 2.25 } }}>
+              <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1.5}>
+                <Box>
+                  <Typography variant="h6">Autopilot activity</Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.35 }}>
+                    Generated cases, safe-suite execution and evidence for this project.
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap>
+                  <Chip size="small" variant="outlined" label={`${autopilotActivity.report_tabs} report tab${autopilotActivity.report_tabs === 1 ? "" : "s"}`} />
+                  <Chip
+                    size="small"
+                    color={autopilotActivity.active_jobs > 0 ? "info" : autopilotActivity.waiting_for_input_jobs > 0 ? "warning" : "default"}
+                    variant="outlined"
+                    label={autopilotActivity.active_jobs > 0 ? "Running" : autopilotActivity.waiting_for_input_jobs > 0 ? "Input needed" : "Idle"}
+                  />
+                </Stack>
+              </Stack>
+              <Grid container spacing={1.25} sx={{ mt: 1 }}>
+                {[
+                  ["Generated", autopilotActivity.generated_test_cases],
+                  ["Selected", autopilotActivity.selected_tests],
+                  ["Executed", autopilotActivity.executed_tests],
+                  ["Passed", autopilotActivity.passed_tests],
+                  ["Deferred", autopilotActivity.deferred_tests],
+                ].map(([label, value]) => (
+                  <Grid key={label} size={{ xs: 6, sm: 2.4 }}>
+                    <Box sx={{ borderRadius: 2, bgcolor: "action.hover", px: 1.25, py: 1 }}>
+                      <Typography variant="caption" color="text.secondary">{label}</Typography>
+                      <Typography variant="h6" sx={{ mt: 0.25 }}>{value}</Typography>
+                    </Box>
+                  </Grid>
+                ))}
+              </Grid>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+                {autopilotActivity.last_run_at
+                  ? `Last Autopilot run: ${formatDate(autopilotActivity.last_run_at)}`
+                  : autopilotActivity.active_jobs
+                    ? "Autopilot is analyzing the selected target."
+                    : "No Autopilot execution recorded yet."}
+                {autopilotActivity.suite_runs || autopilotActivity.smoke_runs
+                  ? ` · ${autopilotActivity.suite_runs} suite run${autopilotActivity.suite_runs === 1 ? "" : "s"}, ${autopilotActivity.smoke_runs} smoke run${autopilotActivity.smoke_runs === 1 ? "" : "s"}`
+                  : ""}
+              </Typography>
+            </CardContent>
+          </CardActionArea>
+        </Card>
       )}
 
       {visibleWidgetCount > 0 && (

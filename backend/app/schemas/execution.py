@@ -212,6 +212,32 @@ class ExecutionPlanOut(BaseModel):
     input_requirements: list[ExecutionInputRequirementOut] = Field(default_factory=list)
     cases: list[ExecutionPlanCaseOut] = Field(default_factory=list)
 
+
+class AutopilotDashboardSummary(BaseModel):
+    """Project-scoped Autopilot activity shown separately from Test Execution.
+
+    Autopilot plans are intentionally not copied into the legacy ``test_cases``
+    table: they have their own report-tab lineage and may contain deferred
+    cases that are not yet executable.  These counters make that activity
+    visible on the dashboard without double-counting it in Test Execution.
+    """
+
+    report_tabs: int = 0
+    active_jobs: int = 0
+    waiting_for_input_jobs: int = 0
+    generated_test_cases: int = 0
+    suite_runs: int = 0
+    smoke_runs: int = 0
+    selected_tests: int = 0
+    executed_tests: int = 0
+    passed_tests: int = 0
+    failed_tests: int = 0
+    blocked_tests: int = 0
+    deferred_tests: int = 0
+    skipped_tests: int = 0
+    last_run_at: datetime | None = None
+
+
 class DashboardSummary(BaseModel):
     requirements: int
     test_cases: int
@@ -230,4 +256,5 @@ class DashboardSummary(BaseModel):
     blocked_tests: int = 0
     skipped_tests: int = 0
     pending_tests: int = 0
+    autopilot: AutopilotDashboardSummary = Field(default_factory=AutopilotDashboardSummary)
 

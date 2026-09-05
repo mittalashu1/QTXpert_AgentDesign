@@ -3220,10 +3220,16 @@ async def delete_autopilot_report(
             # another non-superseded report for the same surface still exists.
             shared_surface_job = None
             if record.surface_key:
+                project_scope = (
+                    AutopilotJob.project_id == record.project_id
+                    if record.project_id is not None
+                    else AutopilotJob.project_id.is_(None)
+                )
                 shared_surface_job = await db.scalar(
                     select(AutopilotJob.id)
                     .where(
                         AutopilotJob.owner_id == user.id,
+                        project_scope,
                         AutopilotJob.surface_key == record.surface_key,
                         AutopilotJob.id != record.id,
                         AutopilotJob.status != "superseded",

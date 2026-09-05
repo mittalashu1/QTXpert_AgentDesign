@@ -19,6 +19,8 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
+from app.database.models.autopilot_execution import AutopilotExecution
+from app.database.models.autopilot_job import AutopilotJob
 from app.database.models.execution import Defect, DefectStatus, ExecutionResult, ExecutionRun, ExecutionStatus, ResultStatus
 from app.database.models.generation_run import GenerationRun
 from app.database.models.project import Project
@@ -27,7 +29,14 @@ from app.database.models.test_case import TestCase
 from app.database.models.user import User
 from app.database.session import AsyncSessionLocal, get_db_session
 from app.schemas.autopilot import AutopilotExecutionRequest
-from app.schemas.execution import DashboardSummary, DefectCreate, DefectOut, ExecutionCreate, ExecutionRunOut
+from app.schemas.execution import (
+    AutopilotDashboardSummary,
+    DashboardSummary,
+    DefectCreate,
+    DefectOut,
+    ExecutionCreate,
+    ExecutionRunOut,
+)
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.upload_repository import UploadRepositoryService
 
@@ -53,6 +62,134 @@ def _validated_target(value: str) -> str:
         if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved:
             raise ValueError("Private-network execution targets are disabled")
     return value
+
+
+def _int_or_zero(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_activity_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _autopilot_dashboard_summary(
+    jobs: list[AutopilotJob],
+    executions: list[AutopilotExecution],
+) -> AutopilotDashboardSummary:
+    """Summarize active Autopilot report tabs without double-counting Test Design.
+
+    Autopilot keeps its own report-tab and safe-suite lineage.  The dashboard
+    therefore presents these counters as a separate activity stream instead of
+    copying JSON plans into the legacy TestCase/ExecutionRun tables.
+    """
+
+    active_statuses = {"uploaded", "queued", "analyzing", "running"}
+    waiting_statuses = {"waiting_for_input"}
+    generated = suite_runs = selected = executed = passed = failed = blocked = deferred = skipped = 0
+    timestamps: list[datetime] = []
+
+    for job in jobs:
+        analysis = job.analysis if isinstance(job.analysis, dict) else {}
+        tests = analysis.get("tests") if isinstance(analysis.get("tests"), list) else []
+        generated += len(tests)
+
+        suite = job.suite_execution if isinstance(job.suite_execution, dict) else None
+        if suite is None:
+            continue
+        suite_runs += 1
+        suite_tests = suite.get("tests") if isinstance(suite.get("tests"), list) else []
+        statuses = [str(item.get("status")) for item in suite_tests if isinstance(item, dict)]
+        selected += _int_or_zero(suite.get("selected_count")) or len(suite_tests)
+        executed += _int_or_zero(suite.get("executed_count")) or sum(status in {"passed", "failed"} for status in statuses)
+        passed += _int_or_zero(suite.get("passed_count")) or statuses.count("passed")
+        failed += _int_or_zero(suite.get("failed_count")) or statuses.count("failed")
+        blocked += statuses.count("blocked")
+        deferred += _int_or_zero(suite.get("deferred_count"))
+        reported_skipped = _int_or_zero(suite.get("skipped_count"))
+        # Older suite snapshots included blocked cases in skipped_count. Keep
+        # the dashboard categories mutually exclusive when reading them.
+        skipped += max(0, reported_skipped - statuses.count("blocked"))
+        finished = _parse_activity_datetime(suite.get("finished_at"))
+        if finished is not None:
+            timestamps.append(finished)
+
+    # Smoke executions are a separate, single-launch evidence stream. They
+    # count as Autopilot activity but not as suite test cases.
+    smoke_runs = len(executions)
+    for execution in executions:
+        finished = _parse_activity_datetime(getattr(execution, "finished_at", None))
+        if finished is not None:
+            timestamps.append(finished)
+
+    return AutopilotDashboardSummary(
+        report_tabs=len(jobs),
+        active_jobs=sum(str(job.status or "") in active_statuses for job in jobs),
+        waiting_for_input_jobs=sum(str(job.status or "") in waiting_statuses for job in jobs),
+        generated_test_cases=generated,
+        suite_runs=suite_runs,
+        smoke_runs=smoke_runs,
+        selected_tests=selected,
+        executed_tests=executed,
+        passed_tests=passed,
+        failed_tests=failed,
+        blocked_tests=blocked,
+        deferred_tests=deferred,
+        skipped_tests=skipped,
+        last_run_at=max(timestamps) if timestamps else None,
+    )
+
+
+async def _load_autopilot_dashboard_summary(
+    db: AsyncSession,
+    user_id: UUID,
+    project_id: UUID,
+) -> AutopilotDashboardSummary:
+    """Read project-owned Autopilot activity with a safe zero fallback."""
+
+    try:
+        jobs = list(
+            (
+                await db.scalars(
+                    select(AutopilotJob).where(
+                        AutopilotJob.owner_id == user_id,
+                        AutopilotJob.project_id == project_id,
+                        AutopilotJob.status != "superseded",
+                    )
+                )
+            ).all()
+        )
+    except Exception as exc:  # pragma: no cover - protects older/degraded deployments
+        await db.rollback()
+        logger.warning("Autopilot dashboard activity read skipped: %s", exc)
+        return AutopilotDashboardSummary()
+
+    executions: list[AutopilotExecution] = []
+    job_ids = [job.id for job in jobs]
+    if job_ids:
+        try:
+            executions = list(
+                (
+                    await db.scalars(
+                        select(AutopilotExecution).where(
+                            AutopilotExecution.owner_id == user_id,
+                            AutopilotExecution.autopilot_job_id.in_(job_ids),
+                        )
+                    )
+                ).all()
+            )
+        except Exception as exc:  # pragma: no cover - protects older/degraded deployments
+            await db.rollback()
+            logger.warning("Autopilot smoke activity read skipped: %s", exc)
+    return _autopilot_dashboard_summary(jobs, executions)
 
 
 async def _validate_execution_target(
@@ -891,6 +1028,7 @@ async def dashboard(project_id: UUID, db: Annotated[AsyncSession, Depends(get_db
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.test_case),
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.defects),
     ).where(ExecutionRun.project_id == project_id).order_by(ExecutionRun.created_at.desc()).limit(5))).unique().all()
+    autopilot = await _load_autopilot_dashboard_summary(db, user.id, project_id)
     # Use every result row as the denominator.  This keeps blocked, pending,
     # and skipped tests visible instead of reporting 100% when only one test
     # from a larger execution set has passed.
@@ -910,5 +1048,6 @@ async def dashboard(project_id: UUID, db: Annotated[AsyncSession, Depends(get_db
         blocked_tests=blocked,
         skipped_tests=skipped,
         pending_tests=pending,
+        autopilot=autopilot,
     )
 

@@ -154,10 +154,21 @@ async def apply_submissions(
         raise AutopilotInputStoreError("One or more checkpoint inputs are no longer part of this analysis. Refresh and try again.")
     cipher = _fernet(settings)
     scope = _scope_key(job)
+    # Reuse is deliberately scoped to the exact owner *and project*.  A
+    # surface key identifies the profile/target/build, but it is not a tenant
+    # boundary: two projects can legitimately use the same profile and APK
+    # digest.  Without this predicate an upsert could read a saved credential
+    # from another project and attach it to the current job.
+    project_scope = (
+        AutopilotInputRecord.project_id == job.project_id
+        if job.project_id is not None
+        else AutopilotInputRecord.project_id.is_(None)
+    )
     existing_rows = (
         await db.scalars(
             select(AutopilotInputRecord).where(
                 AutopilotInputRecord.owner_id == job.owner_id,
+                project_scope,
                 AutopilotInputRecord.surface_key == scope,
                 AutopilotInputRecord.input_key.in_(key_set),
             )
@@ -226,6 +237,12 @@ async def apply_submissions(
             )
             db.add(row)
             existing[item.key] = row
+        elif row.project_id != job.project_id:
+            # Defensive guard for rows created before the project predicate
+            # was introduced.  Never mutate or reuse a cross-project record.
+            raise AutopilotInputStoreError(
+                "The saved input belongs to a different project. Choose Enter, Random or Skip."
+            )
         row.job_id = job.job_id
         row.label = request.label[:240]
         row.category = request.category

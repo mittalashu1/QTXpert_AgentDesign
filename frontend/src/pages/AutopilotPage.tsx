@@ -1789,7 +1789,7 @@ export default function AutopilotPage() {
         </Stack>
         <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
-            <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">One guided input at a time: sign-in fields, test data and references are explained in plain language. Saved values are encrypted under Test Data and never shown again.</Typography></Box>
+            <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">One guided input at a time: sign-in fields, test data and references are explained in plain language. Saved values use the encrypted Autopilot checkpoint store and are never shown again.</Typography></Box>
             <Button size="small" variant="outlined" onClick={openSetup} disabled={resumeBusy}>{pendingCheckpointRequests.length ? "Review required inputs" : activeSetup.provided_fields.length ? "Review inputs" : "Open checkpoint"}</Button>
           </Stack>
           {activeSetup.checkpoint_message && <Alert severity={pendingCheckpointRequests.length ? "warning" : "info"} sx={{ mt: 1.25 }}>{activeSetup.checkpoint_message}</Alert>}
@@ -1889,7 +1889,7 @@ export default function AutopilotPage() {
           {pendingCheckpointRequests.length > 0
             ? `${pendingCheckpointRequests.length} input${pendingCheckpointRequests.length === 1 ? "" : "s"} still need a decision.`
             : "All checkpoint inputs have a decision. Save to continue to Runtime Discovery."}
-          {" "}Use only non-production data. Values are encrypted under Test Data, never returned, added to context, or written to logs. Choose Skip when the case is not in scope for this run.
+          {" "}Use only non-production data. Values are encrypted in the Autopilot checkpoint store, never returned, added to context, or written to logs. They are separate from uploaded Test Data files. Choose Skip when the case is not in scope for this run.
         </Alert>
         {activeCheckpointRequest && activeCheckpointDraft && <>
           <Stack direction="row" spacing={.75} alignItems="center" sx={{ mb: 1 }}>

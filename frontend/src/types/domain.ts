@@ -380,6 +380,24 @@ export interface DashboardSummary {
   blocked_tests: number;
   skipped_tests: number;
   pending_tests: number;
+  autopilot?: AutopilotDashboardSummary;
+}
+
+export interface AutopilotDashboardSummary {
+  report_tabs: number;
+  active_jobs: number;
+  waiting_for_input_jobs: number;
+  generated_test_cases: number;
+  suite_runs: number;
+  smoke_runs: number;
+  selected_tests: number;
+  executed_tests: number;
+  passed_tests: number;
+  failed_tests: number;
+  blocked_tests: number;
+  deferred_tests: number;
+  skipped_tests: number;
+  last_run_at: string | null;
 }
 
 export interface AICostBreakdown {
