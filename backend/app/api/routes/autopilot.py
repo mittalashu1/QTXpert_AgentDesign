@@ -676,6 +676,10 @@ async def _ensure_local_artifact(
     job_id: str,
     user: User,
 ) -> Path:
+    # R2 materialization releases the database session with a rollback before
+    # copying a large object. Rollback expires ORM instances, so keep the
+    # immutable owner id and never read ``user.id`` after that await.
+    owner_id = user.id
     job = await _require_owned_job(service, job_id, user)
     if str(job.get("target_kind") or "android") == "web":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Website jobs do not have a mobile artifact.")
@@ -683,7 +687,7 @@ async def _ensure_local_artifact(
     if path_value and Path(path_value).is_file():
         return Path(path_value)
 
-    record = await _safe_job_record(db, job_id, user.id)
+    record = await _safe_job_record(db, job_id, owner_id)
     asset_id = record.repository_asset_id if record is not None else None
     if asset_id is None:
         raise HTTPException(
@@ -696,7 +700,7 @@ async def _ensure_local_artifact(
 
     target = service.root / job_id / Path(job.get("filename") or "application.apk").name
     try:
-        await UploadRepositoryService.materialize(db, asset_id, user.id, target, settings=service.settings)
+        await UploadRepositoryService.materialize(db, asset_id, owner_id, target, settings=service.settings)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored APK was not found")
     await service.update_job(job_id, apk_path=str(target))
@@ -1201,6 +1205,10 @@ async def _persist_evidence_asset(
     """
     if not path_value:
         return None
+    # Evidence persistence may roll back on a storage failure. Snapshot the
+    # scalar owner id so fallback paths cannot trigger an implicit ORM refresh
+    # (which raises MissingGreenlet in async background work).
+    owner_id = user.id
     path = Path(path_value)
     if not path.is_file():
         return None
@@ -1221,7 +1229,7 @@ async def _persist_evidence_asset(
         asset = await UploadRepositoryService.create_from_path(
             db,
             path,
-            user.id,
+            owner_id,
             filename=filename,
             content_type=content_type,
             project_id=project_id,
