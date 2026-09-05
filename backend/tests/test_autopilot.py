@@ -13,9 +13,17 @@ from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
     AutopilotExecutionRequest,
+    AutopilotSuiteResult,
+    AutopilotSuiteTestResult,
+    DiscoveredControl,
     DiscoveredScreen,
+    DiscoveryLocator,
 )
-from app.api.routes.autopilot import _remove_local_report_data, _sanitize_discovery_assets
+from app.api.routes.autopilot import (
+    _remove_local_report_data,
+    _sanitize_discovery_assets,
+    _strip_suite_evidence_paths,
+)
 from app.services.autopilot import (
     AutopilotPrototypeService,
     AutopilotUploadTooLarge,
@@ -23,6 +31,7 @@ from app.services.autopilot import (
     build_surface_key,
     normalize_surface_identity,
 )
+from app.services.autopilot_ir import AutopilotIRCompiler
 from app.services.autopilot_context import (
     DEFAULT_AUTOPILOT_CONTEXT,
     DEFAULT_AUTOPILOT_PROFILE_ID,
@@ -71,6 +80,145 @@ def test_autopilot_generates_core_and_permission_tests(tmp_path):
         "permissions",
         "regression",
     }.issubset({test.bucket for test in tests})
+
+
+def test_autopilot_initial_plan_exposes_positive_negative_uat_and_sit(tmp_path):
+    service = _service(tmp_path)
+    tests = service._build_deterministic_tests({"permissions": []})
+
+    assert len(tests) >= 20
+    assert {"functional_positive", "functional_negative", "uat", "sit", "ui_positive", "ui_negative"}.issubset(
+        {test.bucket for test in tests}
+    )
+    assert any(test.suite == "UI · Positive" for test in tests)
+    assert any(test.suite == "UI · Negative" for test in tests)
+
+
+def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
+    service = _service(tmp_path)
+    baseline = service._build_deterministic_tests({"permissions": []})
+    analysis = AutopilotAnalysis(
+        job_id="11111111-1111-1111-1111-111111111111",
+        filename="investnation.apk",
+        sha256="0" * 64,
+        tests=baseline,
+    )
+    sign_in = DiscoveredControl(
+        control_id="sign-in",
+        semantic_label="Sign in",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        input_capable=False,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/sign_in", confidence=0.98)],
+    )
+    username = DiscoveredControl(
+        control_id="username",
+        semantic_label="Username",
+        class_name="android.widget.EditText",
+        clickable=False,
+        enabled=True,
+        input_capable=True,
+        input_kind="credential",
+        risk="review",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/username", confidence=0.98)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-05T00:00:00+00:00",
+        finished_at="2026-09-05T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screen_count=1,
+        control_count=2,
+        safe_control_count=1,
+        screens=[
+            DiscoveredScreen(
+                screen_id="screen-001",
+                fingerprint="a" * 64,
+                activity_name=".MainActivity",
+                controls=[sign_in, username],
+            )
+        ],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    buckets = {test.bucket for test in expanded.tests}
+
+    assert len(expanded.tests) > len(baseline)
+    assert len(expanded.tests) <= 100
+    assert {"functional_positive", "functional_negative", "uat", "sit"}.issubset(buckets)
+    assert any("Sign in" in test.title for test in expanded.tests)
+    assert any(test.requires_test_data for test in expanded.tests)
+    assert any("Runtime Discovery added" in item for item in expanded.analysis_basis)
+
+
+def test_runtime_expansion_promotes_deterministic_observed_cases(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="22222222-2222-2222-2222-222222222222",
+        filename="investnation.apk",
+        sha256="1" * 64,
+        tests=service._build_deterministic_tests({"permissions": []}),
+    )
+    help_control = DiscoveredControl(
+        control_id="help",
+        semantic_label="Help",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        input_capable=False,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/help", confidence=0.99)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-05T00:00:00+00:00",
+        finished_at="2026-09-05T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screen_count=1,
+        control_count=1,
+        safe_control_count=1,
+        screens=[DiscoveredScreen(screen_id="home", fingerprint="b" * 64, controls=[help_control])],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    bundle = AutopilotIRCompiler().compile_bundle(expanded, discovery)
+
+    assert bundle.discovery_used is True
+    assert bundle.promoted_count >= 2
+    assert any(item.bucket == "functional_positive" and item.readiness == "executable" for item in bundle.tests)
+    assert any(item.bucket == "accessibility" and item.readiness == "executable" for item in bundle.tests)
+
+
+def test_suite_result_never_exposes_worker_evidence_path(tmp_path):
+    result = AutopilotSuiteResult(
+        job_id="33333333-3333-3333-3333-333333333333",
+        status="partial",
+        provider="appium",
+        started_at="2026-09-05T00:00:00+00:00",
+        finished_at="2026-09-05T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Android Emulator",
+        tests=[
+            AutopilotSuiteTestResult(
+                test_id="QT-RUNTIME-1",
+                title="Safe observed control",
+                status="passed",
+                evidence={"evidence_dir": str(tmp_path / "private-worker-dir")},
+            )
+        ],
+    )
+
+    sanitized = _strip_suite_evidence_paths(result)
+
+    assert sanitized.tests[0].evidence == {}
 
 
 @pytest.mark.asyncio

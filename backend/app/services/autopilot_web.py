@@ -301,6 +301,24 @@ class AutopilotWebService:
                         )
                         status_code = response.status if response is not None else None
                         evidence.update({"status_code": status_code, "url": page.url, "title": (await page.title())[:300]})
+                        # Every executed web case gets its own screenshot and
+                        # HTML snapshot.  The API replaces these temporary
+                        # paths with repository asset IDs before returning the
+                        # result, so the report remains useful after a
+                        # Render restart without leaking local filesystem
+                        # locations.
+                        safe_test_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", test.test_id)[:100]
+                        evidence_root = self.prototype._job_dir(job_id) / "evidence" / "web-suite"
+                        evidence_root.mkdir(parents=True, exist_ok=True)
+                        screenshot_path = evidence_root / f"{safe_test_id}.png"
+                        page_source_path = evidence_root / f"{safe_test_id}.html"
+                        captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
+                        if captured_screenshot:
+                            evidence["screenshot_path"] = captured_screenshot
+                        if screenshot_warning:
+                            evidence["screenshot_warning"] = screenshot_warning
+                        page_source_path.write_text(await page.content(), encoding="utf-8")
+                        evidence["page_source_path"] = str(page_source_path)
                         if status_code is not None and status_code >= 400:
                             raise AssertionError(f"Website returned HTTP {status_code}")
                         if test.bucket == "accessibility":
@@ -310,14 +328,6 @@ class AutopilotWebService:
                             evidence["unnamed_controls"] = int(unnamed)
                             if unnamed:
                                 raise AssertionError(f"{unnamed} interactive control(s) have no accessible name")
-                        if test.bucket == "ui":
-                            path = self.prototype._job_dir(job_id) / "evidence" / "web-suite" / f"{test.test_id}.png"
-                            path.parent.mkdir(parents=True, exist_ok=True)
-                            captured_screenshot, screenshot_warning = await _capture_screenshot(page, path)
-                            if captured_screenshot:
-                                evidence["screenshot_path"] = captured_screenshot
-                            if screenshot_warning:
-                                evidence["screenshot_warning"] = screenshot_warning
                         if test.bucket == "security":
                             evidence["security_headers"] = {
                                 key: response.headers.get(key)

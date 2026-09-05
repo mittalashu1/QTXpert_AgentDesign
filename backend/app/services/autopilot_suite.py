@@ -44,6 +44,7 @@ class AutopilotSuiteService:
         "capture_evidence",
         "inspect_ui",
         "tap",
+        "fill",
         "assert_visible",
     }
 
@@ -57,13 +58,20 @@ class AutopilotSuiteService:
         request: AutopilotSuiteRequest,
         discovery: AutopilotDiscoveryResult | None,
         setup: AutopilotSetupProfile | None = None,
+        input_values: Dict[str, str] | None = None,
+        sensitive_input_keys: set[str] | None = None,
     ) -> AutopilotSuiteResult:
         job = await self.prototype.load_job(job_id)
         analysis = await self.prototype.load_analysis(job_id)
         target_kind = str(job.get("target_kind") or analysis.target_kind or "android")
         if request.target_kind != target_kind:
             request = request.model_copy(update={"target_kind": target_kind})
-        bundle = AutopilotIRCompiler().compile_bundle(analysis, discovery, setup)
+        bundle = AutopilotIRCompiler().compile_bundle(
+            analysis,
+            discovery,
+            setup,
+            input_values=input_values,
+        )
 
         requested_ids = set(request.test_ids)
         requested_buckets = set(request.buckets)
@@ -155,6 +163,8 @@ class AutopilotSuiteService:
                     self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
                     self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
                     self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
+                    input_values=input_values or {},
+                    sensitive_input_keys=sensitive_input_keys or set(),
                 ),
                 timeout=self.settings.AUTOPILOT_SUITE_TIMEOUT_SECONDS,
             )
@@ -271,8 +281,13 @@ class AutopilotSuiteService:
         install_timeout_ms: int,
         server_launch_timeout_ms: int,
         adb_exec_timeout_ms: int,
+        input_values: Dict[str, str] | None = None,
+        sensitive_input_keys: set[str] | None = None,
     ) -> list[AutopilotSuiteTestResult]:
         from appium import webdriver
+
+        input_values = input_values or {}
+        sensitive_input_keys = sensitive_input_keys or set()
 
         is_ios = request.target_kind == "ios"
         capabilities: Dict[str, Any] = {
@@ -333,7 +348,15 @@ class AutopilotSuiteService:
                 evidence_dir.mkdir(parents=True, exist_ok=True)
                 try:
                     self._reset_to_application(driver, package)
-                    evidence = self._execute_test(driver, test, evidence_dir, package, request.target_kind)
+                    evidence = self._execute_test(
+                        driver,
+                        test,
+                        evidence_dir,
+                        package,
+                        request.target_kind,
+                        input_values=input_values,
+                        sensitive_input_keys=sensitive_input_keys,
+                    )
                     status = "passed"
                     error = None
                     dependency = test.dependency
@@ -343,6 +366,10 @@ class AutopilotSuiteService:
                         page_source=safe_page_source(driver),
                         package_hint=package,
                     )
+                    # Keep the evidence location internal; the API route
+                    # replaces it with repository asset IDs before returning
+                    # the durable result.
+                    evidence["evidence_dir"] = str(evidence_dir)
                     status = "blocked"
                     error = str(exc)[:1200]
                     dependency = str(exc)[:1200]
@@ -352,13 +379,24 @@ class AutopilotSuiteService:
                         page_source=safe_page_source(driver),
                         package_hint=package,
                     )
+                    evidence["evidence_dir"] = str(evidence_dir)
                     status = "failed"
                     error = f"{type(exc).__name__}: {exc}"[:1200]
                     dependency = test.dependency
-                    try:
-                        driver.get_screenshot_as_file(str(evidence_dir / "failure.png"))
-                    except Exception:
-                        pass
+                    # A password/OTP may be rendered in the native hierarchy
+                    # while a failure screenshot is captured. Suppress that
+                    # artifact whenever this test touched a sensitive input.
+                    sensitive_touched = any(
+                        step.action == "fill"
+                        and step.input_key in sensitive_input_keys
+                        and step.input_key in input_values
+                        for step in test.steps
+                    )
+                    if not sensitive_touched:
+                        try:
+                            driver.get_screenshot_as_file(str(evidence_dir / "failure.png"))
+                        except Exception:
+                            pass
                 results.append(
                     AutopilotSuiteTestResult(
                         test_id=test.test_id,
@@ -398,6 +436,8 @@ class AutopilotSuiteService:
         evidence_dir: Path,
         package: str | None,
         target_kind: str = "android",
+        input_values: Dict[str, str] | None = None,
+        sensitive_input_keys: set[str] | None = None,
     ) -> Dict[str, Any]:
         from appium.webdriver.common.appiumby import AppiumBy
 
@@ -407,6 +447,9 @@ class AutopilotSuiteService:
             "xpath": AppiumBy.XPATH,
         }
         actions: list[dict[str, Any]] = []
+        input_values = input_values or {}
+        sensitive_input_keys = sensitive_input_keys or set()
+        sensitive_input_touched = False
         for index, step in enumerate(test.steps, start=1):
             mechanism: str | None = None
             if step.action == "launch_app":
@@ -445,11 +488,37 @@ class AutopilotSuiteService:
                     time.sleep(0.9)
                 elif not element.is_displayed():
                     raise AssertionError(f"Resolved control is not visible: {step.target}")
+            elif step.action == "fill":
+                input_key = step.input_key
+                value = input_values.get(input_key or "")
+                if not input_key or value is None or not str(value).strip():
+                    raise AssertionError(
+                        f"Encrypted runtime input is unavailable for {step.target or 'the requested field'}"
+                    )
+                element = self._find_semantic_element(driver, step, locator_map)
+                if not element.is_enabled():
+                    raise AssertionError(f"Resolved input control is disabled: {step.target}")
+                if hasattr(element, "clear"):
+                    element.clear()
+                try:
+                    element.send_keys(value)
+                except Exception:
+                    # Provider errors occasionally echo command arguments;
+                    # never propagate a password, OTP or test value into the
+                    # suite result, logs or report.
+                    raise AssertionError("Encrypted runtime input could not be entered") from None
+                sensitive_input_touched = sensitive_input_touched or input_key in sensitive_input_keys
             elif step.action == "capture_evidence":
-                screenshot = evidence_dir / f"step-{index:02d}.png"
-                source_path = evidence_dir / f"step-{index:02d}.xml"
-                driver.get_screenshot_as_file(str(screenshot))
-                source_path.write_text(driver.page_source or "", encoding="utf-8")
+                if sensitive_input_touched:
+                    # Do not persist a screenshot or hierarchy after a
+                    # password/OTP has been entered; the result still records
+                    # that evidence was intentionally suppressed.
+                    pass
+                else:
+                    screenshot = evidence_dir / f"step-{index:02d}.png"
+                    source_path = evidence_dir / f"step-{index:02d}.xml"
+                    driver.get_screenshot_as_file(str(screenshot))
+                    source_path.write_text(driver.page_source or "", encoding="utf-8")
             else:
                 raise RuntimeError(f"IR action is not permitted by the safe suite runner: {step.action}")
             action_evidence = {
@@ -473,6 +542,7 @@ class AutopilotSuiteService:
             "identity_source": identity["identity_source"],
             "actions": actions,
             "evidence_dir": str(evidence_dir),
+            "sensitive_input_evidence_suppressed": sensitive_input_touched,
         }
 
     @staticmethod

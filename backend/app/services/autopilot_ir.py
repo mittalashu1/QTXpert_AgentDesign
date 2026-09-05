@@ -9,9 +9,10 @@ non-executable instead of emitting brittle or unsafe automation.
 from __future__ import annotations
 
 import re
+import hashlib
 from datetime import datetime, timezone
 from textwrap import dedent
-from typing import Optional
+from typing import Mapping, Optional
 
 from app.schemas.autopilot import (
     AutopilotAnalysis,
@@ -240,8 +241,12 @@ class AutopilotIRCompiler:
         analysis: AutopilotAnalysis,
         discovery: Optional[AutopilotDiscoveryResult] = None,
         setup: Optional[AutopilotSetupProfile] = None,
+        input_values: Optional[Mapping[str, str]] = None,
     ) -> AutopilotAutomationBundle:
-        compiled = [self.compile_test(test, analysis, discovery, setup) for test in analysis.tests]
+        compiled = [
+            self.compile_test(test, analysis, discovery, setup, input_values=input_values)
+            for test in analysis.tests
+        ]
         bucket_counts: dict[str, int] = {}
         for test in compiled:
             bucket_counts[test.bucket] = bucket_counts.get(test.bucket, 0) + 1
@@ -271,6 +276,7 @@ class AutopilotIRCompiler:
         analysis: AutopilotAnalysis,
         discovery: Optional[AutopilotDiscoveryResult] = None,
         setup: Optional[AutopilotSetupProfile] = None,
+        input_values: Optional[Mapping[str, str]] = None,
     ) -> QTXTestIR:
         promoted = False
         readiness_reason: Optional[str] = None
@@ -295,7 +301,11 @@ class AutopilotIRCompiler:
             readiness = "executable"
             readiness_reason = "Deterministic platform-level Autopilot check."
         elif discovery and discovery.screens:
-            resolved_steps, readiness_reason = self._resolve_semantic_steps(test, discovery)
+            resolved_steps, readiness_reason = self._resolve_semantic_steps(
+                test,
+                discovery,
+                input_values=input_values,
+            )
             if resolved_steps:
                 readiness = "executable"
                 promoted = True
@@ -374,7 +384,7 @@ class AutopilotIRCompiler:
                 missing.append("reset/cleanup reference")
         if test.bucket == "uat" and not has_value("acceptance_criteria_reference"):
             missing.append("signed-off acceptance criteria reference")
-        if test.bucket == "integration" and not has_value("api_oracle_reference"):
+        if test.bucket in {"integration", "sit"} and not has_value("api_oracle_reference"):
             missing.append("API/oracle reference")
         return missing
 
@@ -422,6 +432,7 @@ class AutopilotIRCompiler:
         self,
         test: AutopilotTest,
         discovery: AutopilotDiscoveryResult,
+        input_values: Optional[Mapping[str, str]] = None,
     ) -> tuple[Optional[list[QTXIRStep]], str]:
         if discovery.status not in {"completed", "partial"} or not discovery.screens:
             return None, "Runtime Discovery has no usable screen graph."
@@ -441,7 +452,37 @@ class AutopilotIRCompiler:
             if not step:
                 continue
             if self._INPUT_RE.match(step):
-                return None, f"Input/test-data step still requires controlled data: {raw_step}"
+                phrase = self._input_phrase(step)
+                control = self._best_input_control(current, phrase)
+                if control is None:
+                    return None, (
+                        f"Input/test-data step still requires controlled data; no high-confidence input control "
+                        f"matched step: {raw_step}"
+                    )
+                locator = self._best_locator(control, interaction=False)
+                if locator is None:
+                    return None, f"No deterministic input locator is strong enough for: {control.semantic_label}"
+                field_type = control.input_kind or "text"
+                input_key = self._runtime_input_key(current.screen_id, control.control_id, field_type)
+                value = (input_values or {}).get(input_key)
+                if value is None or not str(value).strip():
+                    return None, (
+                        f"Input value is not available for {control.semantic_label} ({input_key}). "
+                        "Complete the field-level checkpoint or choose Skip."
+                    )
+                resolved.append(
+                    QTXIRStep(
+                        action="fill",
+                        description=raw_step,
+                        target=control.semantic_label,
+                        screen_id=current.screen_id,
+                        input_key=input_key,
+                        locator_strategy=locator.strategy,
+                        locator_value=locator.value,
+                        locator_confidence=locator.confidence,
+                    )
+                )
+                continue
             if re.search(r"\b(?:launch|start)\s+(?:the\s+)?(?:application|app)\b", step, re.I):
                 resolved.append(QTXIRStep(action="launch_app", description=raw_step, screen_id=current.screen_id))
                 continue
@@ -508,6 +549,45 @@ class AutopilotIRCompiler:
 
         resolved.append(QTXIRStep(action="capture_evidence", description="Capture evidence after the resolved semantic journey.", screen_id=current.screen_id))
         return resolved, "All runtime interactions and at least one assertion were resolved from the discovered screen graph with safe deterministic locators."
+
+    @staticmethod
+    def _runtime_input_key(screen_id: str, control_id: str, field_type: str) -> str:
+        """Build the same stable key exposed by Runtime Discovery."""
+        raw_key = f"{screen_id}:{control_id}:{field_type or 'text'}"
+        return f"runtime_{hashlib.sha1(raw_key.encode('utf-8', errors='ignore')).hexdigest()[:14]}"
+
+    def _input_phrase(self, step: str) -> str:
+        """Extract a field phrase from natural-language input instructions."""
+        phrase = re.sub(r"^(?:enter|type|input|fill|provide)\b", "", step, flags=re.I).strip()
+        # Generated cases use phrases such as "a valid value into Username".
+        # Remove instruction words while retaining the field identity.
+        phrase = re.sub(
+            r"\b(?:a|an|the|valid|invalid|approved|synthetic|representative|boundary|value|data|into|in|on|field|control)\b",
+            " ",
+            phrase,
+            flags=re.I,
+        )
+        return re.sub(r"\s+", " ", phrase).strip(" .,:;-")
+
+    def _best_input_control(self, screen: DiscoveredScreen, phrase: str) -> Optional[DiscoveredControl]:
+        candidates = [
+            control
+            for control in screen.controls
+            if control.enabled and control.input_capable and control.locators
+        ]
+        if not candidates:
+            return None
+        if not phrase:
+            return candidates[0] if len(candidates) == 1 else None
+        scored = [(self._semantic_score(phrase, control), control) for control in candidates]
+        scored.sort(key=lambda item: (-item[0], -max(locator.confidence for locator in item[1].locators)))
+        # A single input is a safe fallback for generic language such as
+        # "enter a valid value". Multiple equally plausible fields stay gated.
+        if scored[0][0] < 0.45:
+            return candidates[0] if len(candidates) == 1 else None
+        if len(scored) > 1 and scored[0][0] - scored[1][0] < 0.08:
+            return None
+        return scored[0][1]
 
     def _resolve_expected_assertion(self, test: AutopilotTest, screen: DiscoveredScreen) -> Optional[QTXIRStep]:
         for expected in test.expected:
@@ -675,7 +755,7 @@ class AutopilotIRCompiler:
 
         if generated.readiness == "executable" and generated.promoted_by_discovery:
             lines = [
-                f"def {function_name}(driver, evidence_dir):",
+                f"def {function_name}(driver, evidence_dir, runtime_inputs=None):",
                 f'    """QTX {test.id}: discovery-resolved semantic journey."""',
                 "    from pathlib import Path",
                 "    import time",
@@ -684,6 +764,7 @@ class AutopilotIRCompiler:
                 "",
                 "    evidence_dir = Path(evidence_dir)",
                 "    evidence_dir.mkdir(parents=True, exist_ok=True)",
+                "    runtime_inputs = runtime_inputs or {}",
                 "    locator_map = {'accessibility_id': AppiumBy.ACCESSIBILITY_ID, 'id': AppiumBy.ID, 'xpath': AppiumBy.XPATH}",
             ]
             for index, step in enumerate(generated.steps, start=1):
@@ -698,6 +779,16 @@ class AutopilotIRCompiler:
                         lines.extend(["    assert element.is_enabled(), 'Resolved control is disabled'", "    element.click()", "    time.sleep(1)"])
                     else:
                         lines.append("    assert element.is_displayed(), 'Resolved semantic control is not visible'")
+                elif step.action == "fill":
+                    lines.extend([
+                        f"    # {index}. {step.description}",
+                        f"    input_value = runtime_inputs.get({step.input_key!r})",
+                        f"    if input_value is None: raise RuntimeError('Encrypted runtime input is unavailable for {step.input_key}')",
+                        f"    element = driver.find_element(locator_map[{step.locator_strategy!r}], {step.locator_value!r})",
+                        "    if not element.is_enabled(): raise AssertionError('Resolved input control is disabled')",
+                        "    element.clear()",
+                        "    element.send_keys(input_value)",
+                    ])
                 elif step.action == "capture_evidence":
                     lines.extend([
                         f"    # {index}. {step.description}",

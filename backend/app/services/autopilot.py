@@ -44,6 +44,9 @@ from app.schemas.autopilot import (
     AutopilotExecutionResult,
     AutopilotJobStatus,
     AutopilotTest,
+    AutopilotDiscoveryResult,
+    DiscoveredControl,
+    DiscoveredScreen,
 )
 from app.services.appium_compat import safe_app_identity, safe_page_source, safe_quit
 from app.services.autopilot_context import default_context, get_profile, sanitize_target_url
@@ -116,6 +119,7 @@ def build_report_tab_key(surface_key: str | None, surface_version: int | None, j
 _ANALYSIS_SLOT = threading.BoundedSemaphore(1)
 _MAX_ARCHIVE_ENTRIES = 200_000
 _MAX_ARCHIVE_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
+_MAX_GENERATED_AUTOPILOT_TESTS = 100
 
 
 class _WebSurfaceParser(html.parser.HTMLParser):
@@ -1099,7 +1103,7 @@ class AutopilotPrototypeService:
             if any(
                 test.requires_auth
                 or test.requires_test_data
-                or test.bucket in {"uat", "integration"}
+                or test.bucket in {"uat", "integration", "sit"}
                 for test in analysis.tests
             ):
                 from app.schemas.autopilot import AutopilotSetupProfile
@@ -1426,7 +1430,10 @@ class AutopilotPrototypeService:
             app_summary=enrichment.get("app_summary") or self._fallback_summary(metadata),
             critical_journeys=enrichment.get("critical_journeys") or self._fallback_journeys(metadata),
             clarification_questions=enrichment.get("clarification_questions") or self._fallback_questions(metadata),
-            tests=deduped[:80],
+            # Keep one bounded, auditable plan.  The runtime expansion pass
+            # below can add observed screen/control cases after discovery,
+            # but Autopilot never creates an unbounded case explosion.
+            tests=deduped[:_MAX_GENERATED_AUTOPILOT_TESTS],
             release_risks=enrichment.get("release_risks") or self._fallback_risks(metadata),
             warnings=metadata.get("warnings", []),
             capabilities=self._capabilities(metadata),
@@ -1874,7 +1881,408 @@ class AutopilotPrototypeService:
                     expected=["Production/release builds are not debuggable unless an approved exception exists"],
                 )
             )
+
+        # The first analysis pass must describe the complete testing intent,
+        # even before a real device has supplied screen-level locators.  These
+        # explicit positive/negative, UAT and SIT anchors prevent a release
+        # plan from collapsing to only the two legacy functional cases.  They
+        # remain setup/discovery gated and therefore can never be reported as
+        # passed without evidence.
+        tests.extend(
+            [
+                AutopilotTest(
+                    id="QT-AUTO-FUNC-POS-001",
+                    suite="Functional · Positive",
+                    bucket="functional_positive",
+                    title="Primary business journey — positive path",
+                    priority="critical",
+                    objective="Validate the primary supported customer journey from entry through its expected safe completion state.",
+                    steps=["Launch application", "Navigate through the approved primary journey", "Verify the expected completion state"],
+                    expected=["The primary journey completes with the expected state, messages and persistence"],
+                    requires_auth=True,
+                    requires_test_data=True,
+                    dependency="An approved non-production account, role, synthetic data, environment and reset/cleanup reference are required.",
+                    evidence_required=["journey screenshots", "business/API oracle", "cleanup result"],
+                ),
+                AutopilotTest(
+                    id="QT-AUTO-FUNC-NEG-001",
+                    suite="Functional · Negative",
+                    bucket="functional_negative",
+                    title="Validation and recovery — negative path",
+                    priority="high",
+                    objective="Validate invalid, boundary and recoverable failure paths across the identified customer journey.",
+                    steps=["Launch application", "Exercise approved invalid and boundary inputs", "Verify validation and recovery feedback"],
+                    expected=["Invalid input is rejected with specific feedback and no invalid state is committed"],
+                    requires_test_data=True,
+                    dependency="Approved negative fixtures, acceptance criteria, backend/oracle access and reset capability are required.",
+                    evidence_required=["negative-path screenshots", "error/oracle evidence", "cleanup result"],
+                ),
+                AutopilotTest(
+                    id="QT-AUTO-UAT-POS-001",
+                    suite="UAT · Positive",
+                    bucket="uat",
+                    title="Business acceptance — positive journey",
+                    priority="critical",
+                    objective="Run the signed-off UAT happy path for each approved business role and compare every acceptance criterion.",
+                    steps=["Load signed-off acceptance criteria", "Authenticate as the approved UAT role", "Execute the positive business scenario", "Verify acceptance outcomes"],
+                    expected=["Every positive acceptance criterion has a traceable pass/fail result and evidence"],
+                    requires_auth=True,
+                    requires_test_data=True,
+                    dependency="Signed-off acceptance criteria, a non-production role, synthetic data, environment and cleanup hook are required.",
+                    evidence_required=["acceptance trace", "journey screenshots", "business oracle"],
+                ),
+                AutopilotTest(
+                    id="QT-AUTO-UAT-NEG-001",
+                    suite="UAT · Negative",
+                    bucket="uat",
+                    title="Business acceptance — negative and recovery journey",
+                    priority="high",
+                    objective="Confirm the signed-off UAT behavior for invalid input, boundary conditions and recoverable errors.",
+                    steps=["Load signed-off negative acceptance criteria", "Exercise approved invalid and boundary scenarios", "Verify recovery and user guidance"],
+                    expected=["Negative acceptance criteria are met without corrupting business state"],
+                    requires_test_data=True,
+                    dependency="Signed-off negative acceptance criteria, synthetic fixtures, backend/oracle access and cleanup are required.",
+                    evidence_required=["acceptance trace", "error screenshots", "oracle evidence"],
+                ),
+                AutopilotTest(
+                    id="QT-AUTO-UI-POS-001",
+                    suite="UI · Positive",
+                    bucket="ui_positive",
+                    title="UI baseline — positive interaction states",
+                    priority="medium",
+                    objective="Validate that observed screens render readable labels, usable controls and stable positive states.",
+                    steps=["Inspect the discovered UI hierarchy", "Verify the primary safe control", "Capture visual evidence"],
+                    expected=["Observed positive states have no clipping, overlap, unreadable labels or disabled safe controls"],
+                    dependency="Runtime screen discovery and an approved viewport/device baseline are required.",
+                    evidence_required=["screen screenshots", "UI hierarchy"],
+                ),
+                AutopilotTest(
+                    id="QT-AUTO-UI-NEG-001",
+                    suite="UI · Negative",
+                    bucket="ui_negative",
+                    title="UI validation — error and empty states",
+                    priority="medium",
+                    objective="Validate visual clarity and accessibility of validation, empty, loading and recoverable error states.",
+                    steps=["Inspect the discovered UI hierarchy", "Exercise an approved invalid or empty state", "Capture visual evidence"],
+                    expected=["Error and empty states are understandable, accessible and do not overlap or clip primary controls"],
+                    requires_test_data=True,
+                    dependency="Runtime discovery, approved negative fixtures and visual baselines are required.",
+                    evidence_required=["error-state screenshots", "UI hierarchy"],
+                ),
+                AutopilotTest(
+                    id="QT-AUTO-SIT-POS-001",
+                    suite="SIT · Positive",
+                    bucket="sit",
+                    title="System integration — positive contract path",
+                    priority="high",
+                    objective="Validate UI-to-API and third-party integration contracts for the approved happy path.",
+                    steps=["Execute the approved integration journey", "Correlate UI results with the API/oracle", "Verify persisted state"],
+                    expected=["UI, service and persistence outcomes agree for the positive integration path"],
+                    requires_test_data=True,
+                    dependency="Non-production endpoints, API/oracle reference, synthetic data and reset capability are required.",
+                    evidence_required=["request/response evidence", "UI screenshot", "persistence/oracle result"],
+                ),
+                AutopilotTest(
+                    id="QT-AUTO-SIT-NEG-001",
+                    suite="SIT · Negative",
+                    bucket="sit",
+                    title="System integration — timeout and contract failure path",
+                    priority="high",
+                    objective="Validate timeout, malformed response, dependency outage and retry behavior at system boundaries.",
+                    steps=["Inject an approved non-production integration failure", "Observe timeout and retry behavior", "Verify recovery and data integrity"],
+                    expected=["Integration failures are surfaced safely, retried according to contract and never corrupt state"],
+                    requires_test_data=True,
+                    dependency="Non-production fault-injection controls, API/oracle reference, synthetic data and reset capability are required.",
+                    evidence_required=["failure request/response", "retry telemetry", "cleanup result"],
+                ),
+            ]
+        )
         return tests
+
+    @staticmethod
+    def _runtime_case_id(prefix: str, *parts: str) -> str:
+        """Create a stable, non-sensitive id from observed runtime metadata."""
+        material = "|".join(str(part or "") for part in parts)
+        digest = hashlib.sha1(material.encode("utf-8", errors="ignore")).hexdigest()[:10].upper()
+        return f"QT-RUNTIME-{prefix}-{digest}"
+
+    @staticmethod
+    def _runtime_screen_label(screen: DiscoveredScreen, index: int) -> str:
+        value = screen.title or screen.activity_name or screen.url or screen.screen_id or f"screen {index}"
+        value = re.sub(r"\s+", " ", str(value)).strip()
+        return value[:100] or f"screen {index}"
+
+    @classmethod
+    def expand_discovered_coverage(
+        cls,
+        analysis: AutopilotAnalysis,
+        discovery: Optional[AutopilotDiscoveryResult],
+    ) -> AutopilotAnalysis:
+        """Expand the plan from evidence returned by Runtime Discovery.
+
+        The initial APK/IPA pass deliberately creates a small, honest baseline
+        because it cannot infer product behavior from a binary alone. Once a
+        device provider returns screens and semantic controls, this method
+        creates bounded cases for each observed surface across positive,
+        negative, UI, accessibility, UAT and SIT coverage. Every interaction
+        is derived from a discovered label/locator; input, business and
+        integration cases retain their setup gates and are never silently
+        promoted to pass.
+        """
+        if discovery is None or not discovery.screens:
+            return analysis
+
+        screens = list(discovery.screens[:40])
+        screen_map = {screen.screen_id: screen for screen in screens}
+        queues: dict[str, list[AutopilotTest]] = {
+            "page": [],
+            "functional_positive": [],
+            "functional_negative": [],
+            "ui_positive": [],
+            "ui_negative": [],
+            "accessibility": [],
+            "uat_positive": [],
+            "uat_negative": [],
+            "sit_positive": [],
+            "sit_negative": [],
+        }
+
+        for screen_index, screen in enumerate(screens, start=1):
+            screen_label = cls._runtime_screen_label(screen, screen_index)
+            controls = [control for control in screen.controls if control.enabled and control.locators]
+            anchor = next((control for control in controls if control.semantic_label), None)
+            anchor_label = anchor.semantic_label if anchor else None
+
+            if anchor_label:
+                queues["page"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("PAGE", screen.screen_id),
+                        suite="Page-level",
+                        bucket="page_level",
+                        title=f"Page-level: render and inspect {screen_label}",
+                        priority="high",
+                        objective="Verify the observed screen renders and exposes at least one deterministic interactive or semantic control.",
+                        steps=["Launch application", f"Verify {anchor_label}"],
+                        expected=[f"{anchor_label} is visible on {screen_label}"],
+                        evidence_required=["screen screenshot", "UI hierarchy"],
+                    )
+                )
+                queues["ui_positive"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("UI", screen.screen_id, anchor.control_id),
+                        suite="UI · Positive",
+                        bucket="ui_positive",
+                        title=f"UI positive: readable {anchor_label} on {screen_label}",
+                        priority="medium",
+                        objective="Check an observed screen's primary control for stable visibility, readable semantics and safe interaction readiness.",
+                        steps=["Launch application", f"Verify {anchor_label}"],
+                        expected=[f"{anchor_label} is visible, labelled and usable on {screen_label}"],
+                        evidence_required=["screen screenshot", "UI hierarchy"],
+                    )
+                )
+
+            # UAT and SIT are intentionally represented per observed screen so
+            # the eventual plan can be traced back to a concrete surface.
+            queues["uat_positive"].append(
+                AutopilotTest(
+                    id=cls._runtime_case_id("UAT-POS", screen.screen_id),
+                    suite="UAT · Positive",
+                    bucket="uat",
+                    title=f"UAT positive: approved journey reaches {screen_label}",
+                    priority="high",
+                    objective="Validate the approved business journey reaches this observed screen with the expected customer outcome.",
+                    steps=["Authenticate as the approved UAT role", f"Navigate to {screen_label}", f"Verify {anchor_label or screen_label}"],
+                    expected=[f"The approved acceptance criteria for {screen_label} are satisfied"],
+                    requires_auth=True,
+                    requires_test_data=True,
+                    dependency="Signed-off acceptance criteria, approved non-production credentials, synthetic data, environment and cleanup are required.",
+                    evidence_required=["acceptance trace", "journey screenshot", "business oracle"],
+                )
+            )
+            queues["uat_negative"].append(
+                AutopilotTest(
+                    id=cls._runtime_case_id("UAT-NEG", screen.screen_id),
+                    suite="UAT · Negative",
+                    bucket="uat",
+                    title=f"UAT negative: recover safely from {screen_label} validation",
+                    priority="high",
+                    objective="Validate signed-off rejection, boundary and recovery behavior associated with this observed screen.",
+                    steps=[f"Navigate to {screen_label}", "Exercise an approved invalid or boundary scenario", "Verify recovery feedback"],
+                    expected=[f"The negative acceptance criteria for {screen_label} are satisfied without invalid state"],
+                    requires_test_data=True,
+                    dependency="Signed-off negative acceptance criteria, approved synthetic fixtures, oracle access and cleanup are required.",
+                    evidence_required=["acceptance trace", "error screenshot", "oracle result"],
+                )
+            )
+            queues["sit_positive"].append(
+                AutopilotTest(
+                    id=cls._runtime_case_id("SIT-POS", screen.screen_id),
+                    suite="SIT · Positive",
+                    bucket="sit",
+                    title=f"SIT positive: service contract supports {screen_label}",
+                    priority="high",
+                    objective="Correlate the observed screen outcome with the approved backend and third-party contract.",
+                    steps=[f"Navigate to {screen_label}", "Correlate the UI outcome with the API/oracle", "Verify persisted state"],
+                    expected=[f"The service and UI outcomes agree for the {screen_label} path"],
+                    requires_test_data=True,
+                    dependency="Non-production endpoints, API/oracle reference, synthetic data and reset capability are required.",
+                    evidence_required=["request/response evidence", "UI screenshot", "persistence result"],
+                )
+            )
+            queues["sit_negative"].append(
+                AutopilotTest(
+                    id=cls._runtime_case_id("SIT-NEG", screen.screen_id),
+                    suite="SIT · Negative",
+                    bucket="sit",
+                    title=f"SIT negative: dependency failure recovery on {screen_label}",
+                    priority="high",
+                    objective="Validate timeout, malformed response and recoverable dependency failures at this observed screen.",
+                    steps=[f"Navigate to {screen_label}", "Inject an approved non-production dependency failure", "Verify retry and recovery behavior"],
+                    expected=[f"The {screen_label} flow surfaces a controlled error and preserves data integrity"],
+                    requires_test_data=True,
+                    dependency="Approved non-production fault injection, API/oracle reference, synthetic data and reset capability are required.",
+                    evidence_required=["failure request/response", "retry telemetry", "cleanup result"],
+                )
+            )
+
+            safe_controls = [
+                control
+                for control in controls
+                if control.clickable and not control.input_capable and control.risk == "safe"
+            ][:6]
+            for control in safe_controls:
+                label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "safe control"
+                transition = next(
+                    (
+                        item
+                        for item in discovery.transitions
+                        if item.from_screen_id == screen.screen_id
+                        and item.control_id == control.control_id
+                        and item.to_screen_id in screen_map
+                        and item.action == "tap"
+                    ),
+                    None,
+                )
+                target_screen = screen_map.get(transition.to_screen_id) if transition else screen
+                target_anchor = next(
+                    (item for item in target_screen.controls if item.enabled and item.locators and item.semantic_label),
+                    None,
+                )
+                assertion_label = target_anchor.semantic_label if target_anchor else label
+                queues["functional_positive"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("FUNC-POS", screen.screen_id, control.control_id),
+                        suite="Functional · Positive",
+                        bucket="functional_positive",
+                        title=f"Functional positive: activate {label} on {screen_label}",
+                        priority="high",
+                        objective="Exercise one observed safe control and verify the resulting evidence-backed state.",
+                        steps=["Launch application", f"Tap {label}", f"Verify {assertion_label}"],
+                        expected=[f"Activating {label} reaches a stable state with {assertion_label} visible"],
+                        evidence_required=["before/after screenshots", "UI hierarchy"],
+                    )
+                )
+                queues["accessibility"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("A11Y", screen.screen_id, control.control_id),
+                        suite="Accessibility",
+                        bucket="accessibility",
+                        title=f"Accessibility: semantic name for {label} on {screen_label}",
+                        priority="medium",
+                        objective="Verify that the observed safe control has a deterministic accessible name and can be located safely.",
+                        steps=["Launch application", f"Verify {label}"],
+                        expected=[f"{label} has an accessible name and stable locator"],
+                        evidence_required=["UI hierarchy", "locator evidence"],
+                    )
+                )
+
+            input_controls = [control for control in controls if control.input_capable][:4]
+            for control in input_controls:
+                label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "input field"
+                queues["functional_positive"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("FUNC-INPUT-POS", screen.screen_id, control.control_id),
+                        suite="Functional · Positive",
+                        bucket="functional_positive",
+                        title=f"Functional positive: accept valid {label} on {screen_label}",
+                        priority="high",
+                        objective="Verify an observed input accepts an approved synthetic value and advances the safe journey.",
+                        steps=["Launch application", f"Enter a valid value into {label}", f"Verify {label} is accepted"],
+                        expected=[f"A valid synthetic value is accepted for {label} without an invalid state"],
+                        requires_test_data=True,
+                        dependency="A field-appropriate synthetic value, environment and reset/cleanup reference are required.",
+                        evidence_required=["input-state screenshot", "validation evidence", "cleanup result"],
+                    )
+                )
+                queues["functional_negative"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("FUNC-INPUT-NEG", screen.screen_id, control.control_id),
+                        suite="Functional · Negative",
+                        bucket="functional_negative",
+                        title=f"Functional negative: reject invalid {label} on {screen_label}",
+                        priority="high",
+                        objective="Verify invalid, empty and boundary values for an observed input are rejected safely.",
+                        steps=["Launch application", f"Enter an invalid value into {label}", "Verify validation feedback"],
+                        expected=[f"Invalid input for {label} is rejected with specific feedback and no state corruption"],
+                        requires_test_data=True,
+                        dependency="Approved invalid fixtures, acceptance criteria, oracle access and reset capability are required.",
+                        evidence_required=["validation screenshot", "error/oracle evidence", "cleanup result"],
+                    )
+                )
+                queues["ui_negative"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("UI-NEG", screen.screen_id, control.control_id),
+                        suite="UI · Negative",
+                        bucket="ui_negative",
+                        title=f"UI negative: error state for {label} on {screen_label}",
+                        priority="medium",
+                        objective="Check that the observed field's invalid and empty states remain readable and accessible.",
+                        steps=["Launch application", f"Enter an invalid value into {label}", "Verify validation feedback"],
+                        expected=[f"The {label} error state is visible, understandable and does not obscure primary controls"],
+                        requires_test_data=True,
+                        dependency="Approved invalid fixture and visual baseline are required.",
+                        evidence_required=["error-state screenshot", "UI hierarchy"],
+                    )
+                )
+
+        # Round-robin category queues keep the first bounded page balanced;
+        # otherwise a large number of observed controls could crowd UAT/SIT
+        # cases out of the 100-case plan.
+        merged: list[AutopilotTest] = []
+        seen_titles: set[str] = set()
+        for test in [*analysis.tests]:
+            key = re.sub(r"\W+", " ", test.title.lower()).strip()
+            if key and key not in seen_titles:
+                merged.append(test)
+                seen_titles.add(key)
+        queue_order = list(queues.values())
+        while any(queue_order) and len(merged) < _MAX_GENERATED_AUTOPILOT_TESTS:
+            for queue in queue_order:
+                if not queue or len(merged) >= _MAX_GENERATED_AUTOPILOT_TESTS:
+                    continue
+                test = queue.pop(0)
+                key = re.sub(r"\W+", " ", test.title.lower()).strip()
+                if key and key not in seen_titles:
+                    merged.append(test)
+                    seen_titles.add(key)
+        before = len(analysis.tests)
+        # Re-discovery is idempotent. Replace the previous expansion note
+        # instead of accumulating a new "N to N" line on every refresh.
+        basis = [
+            item
+            for item in analysis.analysis_basis
+            if not (
+                str(item).startswith("Runtime Discovery expanded the plan")
+                or str(item).startswith("Runtime Discovery added ")
+            )
+        ]
+        expansion_note = (
+            f"Runtime Discovery added {max(0, len(merged) - before)} observed-surface case(s); the plan now has "
+            f"{len(merged)} evidence-scoped case(s) across {len(screens)} observed screen(s) and is capped at "
+            f"{_MAX_GENERATED_AUTOPILOT_TESTS} cases."
+        )
+        basis.append(expansion_note)
+        return analysis.model_copy(update={"tests": merged, "analysis_basis": basis})
 
     @staticmethod
     def _build_web_tests(meta: Dict[str, Any]) -> List[AutopilotTest]:
@@ -1884,7 +2292,7 @@ class AutopilotPrototypeService:
             if meta.get("web_form_count")
             else "No HTML forms were observed on the initial public page; authenticated journeys still require explicit setup."
         )
-        return [
+        tests = [
             AutopilotTest(
                 id="QT-WEB-SMOKE-001",
                 suite="Smoke",
@@ -1974,6 +2382,95 @@ class AutopilotPrototypeService:
                 dependency="A prior completed baseline run is required.",
             ),
         ]
+        # Keep the web plan aligned with mobile: positive/negative functional,
+        # UAT and SIT intent is visible before authenticated runtime discovery,
+        # while the dependencies keep those cases pending until evidence is
+        # supplied.
+        tests.extend(
+            [
+                AutopilotTest(
+                    id="QT-WEB-FUNC-POS-001",
+                    suite="Functional · Positive",
+                    bucket="functional_positive",
+                    title="Website business journey — positive path",
+                    priority="critical",
+                    objective="Validate the primary supported web journey from entry through its expected safe completion state.",
+                    steps=["Authenticate with an approved non-production account", "Execute the configured primary journey", "Verify the expected completion state"],
+                    expected=["The primary web journey completes with traceable UI and service evidence"],
+                    requires_auth=True,
+                    requires_test_data=True,
+                    dependency="An approved non-production account, synthetic data, environment and reset/cleanup reference are required.",
+                    evidence_required=["journey screenshots", "API/business oracle", "cleanup result"],
+                ),
+                AutopilotTest(
+                    id="QT-WEB-FUNC-NEG-001",
+                    suite="Functional · Negative",
+                    bucket="functional_negative",
+                    title="Website validation and recovery — negative path",
+                    priority="high",
+                    objective="Validate invalid, boundary and recoverable web form behavior without committing invalid state.",
+                    steps=["Exercise approved invalid and boundary inputs", "Verify validation and recovery feedback"],
+                    expected=["Invalid web input is rejected with specific feedback and no invalid state is committed"],
+                    requires_test_data=True,
+                    dependency="Approved negative fixtures, acceptance criteria, API/oracle access and reset capability are required.",
+                    evidence_required=["validation screenshot", "error/oracle evidence"],
+                ),
+                AutopilotTest(
+                    id="QT-WEB-UAT-POS-001",
+                    suite="UAT · Positive",
+                    bucket="uat",
+                    title="Website UAT acceptance — positive journey",
+                    priority="high",
+                    objective="Validate signed-off web acceptance criteria for the approved customer role and journey.",
+                    steps=["Load signed-off acceptance criteria", "Execute the positive UAT journey", "Verify acceptance outcomes"],
+                    expected=["Every positive acceptance criterion has a traceable result and evidence"],
+                    requires_auth=True,
+                    requires_test_data=True,
+                    dependency="Signed-off acceptance criteria, non-production credentials, synthetic data and cleanup are required.",
+                    evidence_required=["acceptance trace", "journey screenshots"],
+                ),
+                AutopilotTest(
+                    id="QT-WEB-UAT-NEG-001",
+                    suite="UAT · Negative",
+                    bucket="uat",
+                    title="Website UAT acceptance — negative and recovery",
+                    priority="high",
+                    objective="Validate signed-off web rejection, boundary and recovery acceptance criteria.",
+                    steps=["Load signed-off negative acceptance criteria", "Exercise approved invalid scenarios", "Verify recovery guidance"],
+                    expected=["Negative web acceptance criteria are met without corrupting business state"],
+                    requires_test_data=True,
+                    dependency="Signed-off negative acceptance criteria, synthetic fixtures, oracle access and cleanup are required.",
+                    evidence_required=["acceptance trace", "error screenshots"],
+                ),
+                AutopilotTest(
+                    id="QT-WEB-SIT-POS-001",
+                    suite="SIT · Positive",
+                    bucket="sit",
+                    title="Website system integration — positive contract path",
+                    priority="high",
+                    objective="Correlate web UI outcomes with approved REST/GraphQL and third-party contracts.",
+                    steps=["Execute the approved web integration journey", "Correlate UI results with the API/oracle", "Verify persisted state"],
+                    expected=["Web UI, service and persistence outcomes agree for the positive path"],
+                    requires_test_data=True,
+                    dependency="Non-production endpoints, API/oracle reference, synthetic data and reset capability are required.",
+                    evidence_required=["request/response evidence", "UI screenshot"],
+                ),
+                AutopilotTest(
+                    id="QT-WEB-SIT-NEG-001",
+                    suite="SIT · Negative",
+                    bucket="sit",
+                    title="Website system integration — timeout and contract failure",
+                    priority="high",
+                    objective="Validate web timeout, malformed response, dependency outage and retry behavior.",
+                    steps=["Inject an approved non-production integration failure", "Observe timeout and retry behavior", "Verify recovery and data integrity"],
+                    expected=["Web integration failures are controlled and do not corrupt state"],
+                    requires_test_data=True,
+                    dependency="Approved fault-injection controls, API/oracle reference, synthetic data and reset capability are required.",
+                    evidence_required=["failure response", "retry telemetry", "cleanup result"],
+                ),
+            ]
+        )
+        return tests
 
     async def _enrich_with_ai(self, meta: Dict[str, Any], context: str) -> Dict[str, Any]:
         try:
@@ -2008,17 +2505,20 @@ class AutopilotPrototypeService:
                         "must influence the generated plan or clarification questions, but context claims are not observed evidence. "
                         "Return strict JSON with keys: app_summary (string), inferred_domain (string), "
                         "critical_journeys (array of short strings), clarification_questions (max 6 array), "
-                        "release_risks (array), tests (array). Each test must contain title, suite, priority, "
-                        "objective, steps, expected, destructive. Prefer high-value tests that can be "
-                        "derived from the artifact. Never assume credentials or real transaction permission."
+                        "release_risks (array), tests (array). Generate a broad but evidence-scoped plan: "
+                        "cover positive and negative functional paths, UAT acceptance, SIT/integration contracts, "
+                        "UI visual/error states, accessibility, page-level navigation, resilience and security. "
+                        "Generate up to 50 distinct high-value cases when the artifact/context supports them; "
+                        "do not invent screens, workflows or business rules. Each test must contain title, suite, "
+                        "priority, objective, steps, expected, destructive. Never assume credentials or real transaction permission."
                     ),
                 ),
                 LLMMessage(role="user", content=json.dumps(prompt, ensure_ascii=False)),
             ]
-            response = await provider.complete(messages, temperature=0.1, max_tokens=2800, response_format_json=True)
+            response = await provider.complete(messages, temperature=0.1, max_tokens=4200, response_format_json=True)
             data = json.loads(response.content)
             parsed_tests: list[AutopilotTest] = []
-            for index, raw in enumerate(data.get("tests", [])[:30], start=1):
+            for index, raw in enumerate(data.get("tests", [])[:50], start=1):
                 if not isinstance(raw, dict) or not raw.get("title"):
                     continue
                 priority = str(raw.get("priority", "medium")).lower()
@@ -2082,13 +2582,19 @@ class AutopilotPrototypeService:
             ("accessibility", ("accessibility", "a11y", "screen reader", "wcag")),
             ("performance", ("performance", "load", "latency", "throughput", "resource footprint", "startup time")),
             ("security", ("security", "penetration", "vulnerability", "encryption", "tls", "data protection")),
+            ("sit", ("sit", "system integration", "contract failure", "fault injection")),
             ("integration", ("integration", "api", "backend", "third-party", "webhook", "contract")),
             ("compatibility", ("compatibility", "device matrix", "os matrix", "cross-platform")),
             ("permissions", ("permission", "privacy consent")),
             ("regression", ("regression", "baseline comparison")),
             ("resilience", ("resilience", "recovery", "offline", "network loss", "background", "interruption", "retry")),
             ("page_level", ("page-level", "page level", "screen inventory", "screen coverage")),
-            ("ui", ("visual", "layout", "responsive ui", "user interface", "ui test")),
+            ("ui_negative", ("ui negative", "visual error", "error state", "empty state")),
+            ("ui_positive", ("ui positive", "visual baseline", "positive interaction")),
+            ("ui", ("ui", "visual", "layout", "responsive ui", "user interface", "ui test")),
+            ("functional_negative", ("functional negative", "negative path", "invalid input", "boundary validation", "error handling")),
+            ("functional_positive", ("functional positive", "positive path", "happy path", "success path")),
+            ("functional", ("functional",)),
         )
         for bucket, signals in rules:
             if any(signal in suite_text for signal in signals):
@@ -2107,7 +2613,7 @@ class AutopilotPrototypeService:
             needs.extend(["synthetic test data", "reset/cleanup reference"])
         if bucket == "uat":
             needs.append("signed-off acceptance criteria")
-        if bucket == "integration":
+        if bucket in {"integration", "sit"}:
             needs.append("API/oracle reference")
         if destructive:
             needs.append("explicit supervised-run approval")

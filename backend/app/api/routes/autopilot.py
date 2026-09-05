@@ -64,7 +64,7 @@ from app.services.autopilot_context import default_context, get_profile, list_pr
 from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests, credential_value_available
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
-from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata
+from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata, resolve_value
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
 from app.services.document_intelligence import DocumentIntelligenceService
 from app.services.upload_repository import (
@@ -918,29 +918,17 @@ def _setup_profile(
             # direct-input labels, password/OTP hints and safe actions.
             discovered_requests = AutopilotDiscoveryService.runtime_input_requests(discovery.screens)
             source_requests = discovered_requests or list(discovery.input_requests)
-            accepted_decisions = {"provide", "reuse", "random"}
-            category_provided = {
-                # Keep runtime username/password prompts aligned with the
-                # plan-level checkpoint.  A legacy generic credential
-                # decision must not make live sign-in fields disappear.
-                "credential": credential_value_available(normalized_setup)
-                or any(
-                    decisions.get(item.key) in accepted_decisions
-                    for item in source_requests
-                    if item.category == "credential" and not item.credential_bundle
-                ),
-                "test_data": bool(normalized_setup.test_data_reference.strip())
-                or any(
-                    decisions.get(item.key) in accepted_decisions
-                    for item in source_requests
-                    if item.category == "test_data"
-                ),
-            }
+            credential_bundle_available = credential_value_available(normalized_setup)
             for item in source_requests:
                 reference_present = bool(
                     str(normalized_setup.runtime_input_references.get(item.key) or "").strip()
-                    or category_provided.get(item.category, False)
                     or decisions.get(item.key) in {"provide", "reuse", "random"}
+                    # A saved plan-level credential bundle intentionally
+                    # satisfies both the discovered username and password
+                    # fields.  Generic test-data references do not hide a
+                    # field-level prompt: each field must be mapped, provided
+                    # or explicitly randomized on its own.
+                    or (item.category == "credential" and credential_bundle_available)
                 )
                 decision = decisions.get(item.key)
                 runtime_requests.append(
@@ -1070,6 +1058,86 @@ async def _setup_with_input_metadata(
     return _setup_profile(job_id, raw, analysis, discovery)
 
 
+async def _resolve_suite_input_values(
+    db: AsyncSession,
+    settings: Settings,
+    record: Optional[AutopilotJob],
+    setup: Optional[AutopilotSetupProfile],
+) -> tuple[dict[str, str], set[str]]:
+    """Resolve encrypted checkpoint values for one in-memory safe-suite run.
+
+    The runner needs real values to fill a discovered username, password or
+    synthetic field, but those values must never cross an API response, job
+    manifest, prompt or log line.  This helper is intentionally route-local:
+    it decrypts only after ownership has been checked and returns the values
+    to the service call in memory.  The password/OTP keys are tracked
+    separately so the suite can suppress screenshots and UI hierarchies after
+    sensitive input is entered.
+    """
+    if record is None or setup is None:
+        return {}, set()
+    surface_key = (record.surface_key or record.job_id or "autopilot")[:128]
+    requests = [*(setup.input_requests or []), *(setup.runtime_input_requests or [])]
+    by_key = {item.key: item for item in requests if item.key}
+    values: dict[str, str] = {}
+    sensitive_keys: set[str] = set()
+
+    async def read(key: str) -> Optional[str]:
+        try:
+            return await resolve_value(
+                db,
+                settings,
+                record.owner_id,
+                record.project_id,
+                surface_key,
+                key,
+            )
+        except Exception:
+            # Missing/rotated encryption configuration should leave the case
+            # blocked by the compiler rather than fail the whole suite or
+            # expose a storage error containing secret material.
+            logger.warning("Autopilot encrypted input resolution skipped key=%s", key, exc_info=True)
+            return None
+
+    # Direct field submissions (including generated random values) are keyed
+    # by the stable runtime_* identifier produced by Runtime Discovery.
+    for request in setup.runtime_input_requests or []:
+        value = await read(request.key)
+        if value is None or not value.strip():
+            continue
+        values[request.key] = value
+        if request.sensitive or request.input_hint in {"password", "otp"}:
+            sensitive_keys.add(request.key)
+
+    # The checkpoint stores the User ID and password as one encrypted JSON
+    # credential bundle. Split it only in memory and map each half to the
+    # discovered field key; the bundle itself is never passed to the runner.
+    credential_bundle = await read("credential_reference")
+    if credential_bundle and credential_bundle.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(credential_bundle)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            for request in setup.runtime_input_requests or []:
+                hint = str(request.input_hint or "").strip().lower()
+                if hint not in {"username", "password"}:
+                    label = str(request.label or "").lower()
+                    hint = "password" if "password" in label else "username" if any(term in label for term in ("user id", "username", "email")) else ""
+                value = parsed.get(hint) if hint else None
+                if value is None or not str(value).strip():
+                    continue
+                values[request.key] = str(value)
+                sensitive_keys.add(request.key)
+
+    # Keep the local mapping limited to request keys. This protects against a
+    # stale encrypted record accidentally being interpreted as an executable
+    # input after a discovery refresh.
+    values = {key: value for key, value in values.items() if key in by_key}
+    sensitive_keys.intersection_update(values)
+    return values, sensitive_keys
+
+
 async def _resume_and_discover_background(
     job_id: str,
     owner_id: UUID,
@@ -1124,14 +1192,32 @@ async def _resume_and_discover_background(
                 device_name=resume_payload.discovery_device_name or "Google Pixel 8",
                 platform_version=resume_payload.discovery_platform_version or "14.0",
                 observe_only=False,
-                max_screens=12,
-                max_actions=10,
+                # Explore a meaningful app surface while keeping navigation
+                # bounded to safe/reversible controls only. The compiler
+                # still caps the resulting plan at 100 cases.
+                max_screens=40,
+                max_actions=50,
             )
             if target_kind == "web":
                 result = await AutopilotWebService(settings, service).discover(job_id, request)
             else:
                 await _ensure_local_artifact(db, service, job_id, user)
                 result = await AutopilotDiscoveryService(settings, service).run(job_id, request)
+            # Runtime Discovery is the point at which the plan can become
+            # app-specific. Expand the bounded baseline from the observed
+            # screens/controls, then persist that snapshot together with the
+            # discovery result so refreshes, reports and execution all use the
+            # same generated case inventory.
+            expanded_analysis = None
+            try:
+                discovered_analysis = await service.load_analysis(job_id)
+                expanded_analysis = service.expand_discovered_coverage(discovered_analysis, result)
+            except Exception:
+                logger.warning(
+                    "Autopilot runtime coverage expansion skipped job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
             record = await _safe_job_record(db, job_id, user.id)
             if record is not None:
                 repository_asset_id = record.repository_asset_id
@@ -1160,7 +1246,9 @@ async def _resume_and_discover_background(
                 if record is not None:
                     record.discovery = result.model_dump(mode="json")
                     try:
-                        analysis = await service.load_analysis(job_id)
+                        analysis = expanded_analysis or await service.load_analysis(job_id)
+                        if expanded_analysis is not None:
+                            record.analysis = expanded_analysis.model_dump(mode="json")
                         record.setup_profile = _setup_profile(
                             job_id,
                             record.setup_profile,
@@ -1171,6 +1259,8 @@ async def _resume_and_discover_background(
                         pass
                     await db.commit()
             job_changes: dict[str, object] = {"discovery": result.model_dump(mode="json")}
+            if expanded_analysis is not None:
+                job_changes["analysis"] = expanded_analysis.model_dump(mode="json")
             if record is not None and getattr(record, "setup_profile", None) is not None:
                 job_changes["setup_profile"] = record.setup_profile
             await service.update_job(
@@ -2335,10 +2425,14 @@ async def get_autopilot_automation(
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
     record = await _safe_job_record(db, job_id, user.id)
+    discovery = _record_discovery(record)
+    setup = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
+    input_values, _ = await _resolve_suite_input_values(db, settings, record, setup)
     return AutopilotIRCompiler().compile_bundle(
         analysis,
-        _record_discovery(record),
-        await _setup_with_input_metadata(db, record, job_id, analysis, _record_discovery(record)),
+        discovery,
+        setup,
+        input_values=input_values,
     )
 
 
@@ -2597,6 +2691,12 @@ async def run_autopilot_discovery(
             if settings.APP_ENV != "local" and record is not None and record.repository_asset_id and not payload.appium_app:
                 raise HTTPException(status_code=400, detail="Hosted custom Appium requires a remote IPA reference for iOS discovery.")
         result = await AutopilotDiscoveryService(settings, service).run(job_id, payload)
+    expanded_analysis = None
+    try:
+        discovered_analysis = await service.load_analysis(job_id)
+        expanded_analysis = service.expand_discovered_coverage(discovered_analysis, result)
+    except Exception:
+        logger.warning("Autopilot runtime coverage expansion skipped job_id=%s", job_id, exc_info=True)
     record = await _safe_job_record(db, job_id, user.id)
     if record is not None and result.screens:
         repository_asset_id = record.repository_asset_id
@@ -2629,7 +2729,9 @@ async def run_autopilot_discovery(
             # prompts. Refresh the durable checkpoint immediately so a page
             # refresh (or another worker) sees the same entry points.
             try:
-                analysis = await service.load_analysis(job_id)
+                analysis = expanded_analysis or await service.load_analysis(job_id)
+                if expanded_analysis is not None:
+                    record.analysis = expanded_analysis.model_dump(mode="json")
                 profile = await _setup_with_input_metadata(db, record, job_id, analysis, result)
                 record.setup_profile = profile.model_dump(mode="json")
             except FileNotFoundError:
@@ -2640,12 +2742,118 @@ async def run_autopilot_discovery(
             logger.warning("Autopilot discovery durable write skipped", exc_info=True)
     try:
         job_changes: dict[str, object] = {"discovery": result.model_dump(mode="json")}
+        if expanded_analysis is not None:
+            job_changes["analysis"] = expanded_analysis.model_dump(mode="json")
         if record is not None and getattr(record, "setup_profile", None) is not None:
             job_changes["setup_profile"] = record.setup_profile
-        await service.update_job(job_id, **job_changes)
+        await service.update_job(
+            job_id,
+            **job_changes,
+            stage="ready_for_execution" if result.screens else "runtime_discovery",
+            checkpoint_stage="ready" if result.screens else "runtime_discovery",
+            checkpoint_message=(
+                "Runtime Discovery completed. Generated an evidence-scoped coverage plan; review it and run safe execution."
+                if result.screens
+                else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+            ),
+        )
     except Exception:
         logger.warning("Autopilot discovery manifest update skipped job_id=%s", job_id, exc_info=True)
     return result
+
+
+def _strip_suite_evidence_paths(result: AutopilotSuiteResult) -> AutopilotSuiteResult:
+    """Remove worker-local evidence paths before a result crosses the API.
+
+    A database/storage outage must not turn a safe-suite response into a
+    filesystem disclosure.  The durable path is normally replaced by opaque
+    repository asset IDs in ``_persist_suite_evidence``; this fallback keeps
+    degraded responses safe when no job row is available to persist assets.
+    """
+    sanitized = []
+    changed = False
+    for test in result.tests:
+        evidence = dict(test.evidence or {})
+        for path_key in ("evidence_dir", "screenshot_path", "page_source_path"):
+            if path_key in evidence:
+                evidence.pop(path_key, None)
+                changed = True
+        sanitized.append(test.model_copy(update={"evidence": evidence}))
+    return result.model_copy(update={"tests": sanitized}) if changed else result
+
+
+async def _persist_suite_evidence(
+    db: AsyncSession,
+    user: User,
+    job_record: AutopilotJob,
+    settings: Settings,
+    result: AutopilotSuiteResult,
+) -> AutopilotSuiteResult:
+    """Make bounded safe-suite screenshots and hierarchies report-downloadable.
+
+    The suite runner deliberately writes evidence into a per-test temporary
+    directory so one Appium session can execute a batch efficiently.  Those
+    local paths are not useful after a Render restart and must never be
+    exposed to the browser.  Copy at most a small, deterministic evidence
+    set for each executed case into the same repository used by discovery and
+    smoke, then replace the path with opaque asset metadata in the result.
+    Deferred cases have no evidence directory and remain untouched.
+    """
+    repository_asset_id = job_record.repository_asset_id
+    persisted = []
+    total_assets = 0
+    max_assets = 120
+    for test in result.tests:
+        evidence = dict(test.evidence or {})
+        raw_directory = evidence.pop("evidence_dir", None)
+        directory = Path(str(raw_directory)) if raw_directory else None
+        direct_paths: list[Path] = []
+        for path_key in ("screenshot_path", "page_source_path"):
+            raw_path = evidence.pop(path_key, None)
+            if raw_path:
+                direct_paths.append(Path(str(raw_path)))
+        assets: list[dict[str, str]] = []
+        candidates: list[Path] = []
+        if directory is not None and directory.is_dir():
+            try:
+                candidates = sorted(
+                    path
+                    for path in directory.iterdir()
+                    if path.is_file() and path.suffix.lower() in {".png", ".xml", ".html"}
+                )[:8]
+            except OSError:
+                candidates = []
+        for path in [*direct_paths, *candidates[:8]]:
+            if total_assets >= max_assets or not path.is_file():
+                break
+            suffix = path.suffix.lower()
+            if suffix not in {".png", ".xml", ".html"}:
+                continue
+            content_type = "image/png" if suffix == ".png" else "text/html" if suffix == ".html" else "application/xml"
+            asset_id = await _persist_evidence_asset(
+                db,
+                user,
+                job_record,
+                settings,
+                str(path),
+                filename=f"suite-{result.job_id[:8]}-{test.test_id}-{path.name}",
+                content_type=content_type,
+                repository_asset_id=repository_asset_id,
+            )
+            if asset_id is not None:
+                assets.append({
+                    "asset_id": str(asset_id),
+                    "filename": path.name,
+                    "kind": "screenshot" if suffix == ".png" else "page_source",
+                })
+                total_assets += 1
+        if assets:
+            evidence["evidence_assets"] = assets
+        updated = test.model_copy(update={"evidence": evidence})
+        persisted.append(updated)
+    if not persisted:
+        return result
+    return result.model_copy(update={"tests": persisted})
 
 
 @router.get("/{job_id}/discovery", response_model=AutopilotDiscoveryResult | None)
@@ -2678,7 +2886,13 @@ async def execute_autopilot_suite(
         analysis = await service.load_analysis(job_id)
         discovery = _record_discovery(record)
         setup = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
-        bundle = AutopilotIRCompiler().compile_bundle(analysis, discovery, setup)
+        input_values, _ = await _resolve_suite_input_values(db, settings, record, setup)
+        bundle = AutopilotIRCompiler().compile_bundle(
+            analysis,
+            discovery,
+            setup,
+            input_values=input_values,
+        )
         requested_ids = set(payload.test_ids)
         requested_buckets = set(payload.buckets)
         selected = [
@@ -2728,12 +2942,33 @@ async def execute_autopilot_suite(
         except FileNotFoundError:
             analysis_for_setup = None
         discovery = _record_discovery(record)
+        setup = await _setup_with_input_metadata(db, record, job_id, analysis_for_setup, discovery)
+        input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
         result = await AutopilotSuiteService(settings, service).run(
             job_id,
             payload,
             discovery,
-            await _setup_with_input_metadata(db, record, job_id, analysis_for_setup, discovery),
+            setup,
+            input_values=input_values,
+            sensitive_input_keys=sensitive_input_keys,
         )
+    # Safe-suite evidence is created per case inside the worker. Persist the
+    # bounded screenshots/UI hierarchies before saving the suite snapshot so
+    # the Autopilot report can offer durable downloads after a Render restart.
+    if record is not None:
+        try:
+            result = await _persist_suite_evidence(db, user, record, settings, result)
+            # Evidence uploads commit their own transactions. Reload the job
+            # row before writing the suite snapshot so an expired ORM object
+            # cannot raise a MissingGreenlet on the next access.
+            record = await _safe_job_record(db, job_id, user.id)
+        except Exception:
+            logger.warning("Autopilot suite evidence persistence skipped job_id=%s", job_id, exc_info=True)
+            result = _strip_suite_evidence_paths(result)
+    else:
+        # Never expose the temporary worker directory if the durable job row
+        # is unavailable (for example during a transient database outage).
+        result = _strip_suite_evidence_paths(result)
     if record is not None:
         try:
             record.suite_execution = result.model_dump(mode="json")

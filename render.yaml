@@ -60,6 +60,11 @@ services:
         value: "4"
       - key: AUTOPILOT_DISCOVERY_SETTLE_RETRIES
         value: "3"
+      - key: AUTOPILOT_WEB_MAX_PAGES
+        # Keep public-site exploration broad enough for end-to-end coverage,
+        # while the adapter still follows same-origin and safe-navigation
+        # bounds.
+        value: "40"
       - key: OBJECT_STORAGE_ENDPOINT_URL
         sync: false
       - key: OBJECT_STORAGE_BUCKET

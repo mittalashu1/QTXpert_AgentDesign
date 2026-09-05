@@ -225,6 +225,53 @@ def test_input_dependent_journey_remains_discovery_required_after_discovery():
     assert "Input/test-data step" in (generated.readiness_reason or "")
 
 
+def test_runtime_input_is_promoted_only_when_encrypted_value_is_available():
+    input_control = DiscoveredControl(
+        control_id="username",
+        semantic_label="Username",
+        class_name="android.widget.EditText",
+        resource_id="com.qtxpert.demo:id/username",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtxpert.demo:id/username", confidence=0.97)],
+    )
+    discovery = _discovery().model_copy(update={
+        "screens": [
+            _discovery().screens[0].model_copy(update={"controls": [input_control]}),
+        ],
+    })
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AI-INPUT",
+            suite="Functional · Positive",
+            title="Accept a username",
+            priority="high",
+            objective="Validate username entry",
+            steps=["Enter username", "Verify username"],
+            expected=["Username is visible"],
+            source="ai",
+        )
+    ])
+
+    pending = AutopilotIRCompiler().compile_bundle(analysis, discovery)
+    assert pending.tests[0].readiness == "discovery_required"
+    assert "Input value is not available" in (pending.tests[0].readiness_reason or "")
+    key = AutopilotIRCompiler._runtime_input_key("screen-001", "username", "credential")
+
+    ready = AutopilotIRCompiler().compile_bundle(
+        analysis,
+        discovery,
+        input_values={key: "qa.investor@example.test"},
+    )
+    generated = ready.tests[0]
+    assert generated.readiness == "executable"
+    fill = next(step for step in generated.steps if step.action == "fill")
+    assert fill.input_key == key
+    assert fill.value is None
+    assert "qa.investor@example.test" not in generated.model_dump_json()
+    assert "runtime_inputs" in generated.appium_python
+
+
 def test_blocked_control_cannot_be_promoted_to_tap():
     analysis = _analysis([
         AutopilotTest(

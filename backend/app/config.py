@@ -252,7 +252,7 @@ class Settings(BaseSettings):
     AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS: int = Field(default=300, ge=30, le=1800)
     # Website exploration is intentionally bounded until an approved
     # non-production credential reference and test data are supplied.
-    AUTOPILOT_WEB_MAX_PAGES: int = Field(default=12, ge=1, le=50)
+    AUTOPILOT_WEB_MAX_PAGES: int = Field(default=40, ge=1, le=50)
     AUTOPILOT_WEB_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=180)
     # Optional reachable Appium endpoint for hosted deployments. A hosted
     # Render service cannot reach a customer's laptop at 127.0.0.1; keep this

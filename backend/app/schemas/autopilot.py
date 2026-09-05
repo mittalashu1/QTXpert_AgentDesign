@@ -10,10 +10,15 @@ AutopilotTestBucket = Literal[
     "installation",
     "page_level",
     "functional",
+    "functional_positive",
+    "functional_negative",
     "uat",
     "ui",
+    "ui_positive",
+    "ui_negative",
     "accessibility",
     "integration",
+    "sit",
     "performance",
     "security",
     "compatibility",
@@ -440,11 +445,15 @@ class QTXIRStep(BaseModel):
         "network_condition",
         "intent",
         "tap",
+        "fill",
         "assert_visible",
     ]
     description: str
     target: Optional[str] = None
     value: Optional[str] = None
+    # Stable encrypted-input reference.  The actual value is resolved only in
+    # the runner and is never included in the generated IR or API response.
+    input_key: Optional[str] = None
     safe_for_autopilot: bool = True
     screen_id: Optional[str] = None
     locator_strategy: Optional[Literal["accessibility_id", "id", "xpath", "css"]] = None
@@ -634,9 +643,12 @@ class AutopilotDiscoveryResult(BaseModel):
 class AutopilotSuiteRequest(AutopilotExecutionRequest):
     """Execute safe IR cases and report deferred cases with their dependencies."""
 
-    test_ids: List[str] = Field(default_factory=list, max_length=20)
+    test_ids: List[str] = Field(default_factory=list, max_length=100)
     buckets: List[AutopilotTestBucket] = Field(default_factory=list, max_length=20)
-    max_tests: int = Field(default=8, ge=1, le=20)
+    # The generated plan is capped at 100.  A safe batch defaults to 20 so a
+    # real-device run remains bounded, while API callers can deliberately
+    # request additional eligible cases in later batches up to that cap.
+    max_tests: int = Field(default=20, ge=1, le=100)
     include_deferred: bool = True
 
 

@@ -162,6 +162,18 @@ class AutopilotDiscoveryService:
         return "text"
 
     @classmethod
+    def runtime_input_key(cls, screen_id: str, control_id: str, field_type: str) -> str:
+        """Return the stable, non-secret key for one discovered input.
+
+        The key is deliberately derived from the screen/control identity and
+        field kind rather than the value typed by a user.  The checkpoint,
+        compiler and runner all use this helper so a saved encrypted value is
+        mapped to the same field after a refresh or a resumed discovery.
+        """
+        raw_key = f"{screen_id}:{control_id}:{field_type or 'text'}"
+        return f"runtime_{hashlib.sha1(raw_key.encode('utf-8', errors='ignore')).hexdigest()[:14]}"
+
+    @classmethod
     def runtime_input_requests(cls, screens: Iterable[DiscoveredScreen]) -> list[AutopilotInputRequest]:
         """Build field-level checkpoint questions from discovered UI.
 
@@ -176,8 +188,7 @@ class AutopilotDiscoveryService:
                 if not control.input_capable:
                     continue
                 field_type = control.input_kind or "text"
-                raw_key = f"{screen.screen_id}:{control.control_id}:{field_type}"
-                key = f"runtime_{hashlib.sha1(raw_key.encode('utf-8', errors='ignore')).hexdigest()[:14]}"
+                key = cls.runtime_input_key(screen.screen_id, control.control_id, field_type)
                 if key in seen:
                     continue
                 seen.add(key)

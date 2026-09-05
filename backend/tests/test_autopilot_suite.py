@@ -10,6 +10,8 @@ from app.services.autopilot_suite import AutopilotSuiteService
 class _Element:
     def __init__(self):
         self.clicked = False
+        self.cleared = False
+        self.values = []
 
     def is_enabled(self):
         return True
@@ -19,6 +21,13 @@ class _Element:
 
     def click(self):
         self.clicked = True
+
+    def clear(self):
+        self.cleared = True
+        self.values.clear()
+
+    def send_keys(self, value):
+        self.values.append(value)
 
 
 class _Driver:
@@ -94,3 +103,35 @@ def test_suite_interpreter_rejects_non_allowlisted_ir_action(tmp_path):
 
     with pytest.raises(RuntimeError, match="not permitted"):
         service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+
+def test_suite_interpreter_fills_input_and_suppresses_sensitive_evidence(tmp_path):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _Driver()
+    test = _test_ir([
+        QTXIRStep(
+            action="fill",
+            description="Enter password",
+            target="Password",
+            input_key="runtime_password",
+            locator_strategy="id",
+            locator_value="com.qtx:id/password",
+            locator_confidence=0.97,
+        ),
+        QTXIRStep(action="capture_evidence", description="Capture evidence"),
+    ])
+
+    evidence = service._execute_test(
+        driver,
+        test,
+        tmp_path,
+        "com.qtx.demo",
+        input_values={"runtime_password": "do-not-log"},
+        sensitive_input_keys={"runtime_password"},
+    )
+
+    assert driver.element.cleared is True
+    assert driver.element.values == ["do-not-log"]
+    assert evidence["sensitive_input_evidence_suppressed"] is True
+    assert not any(path.suffix in {".png", ".xml"} for path in tmp_path.iterdir())
+    assert "do-not-log" not in str(evidence)
