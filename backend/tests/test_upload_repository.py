@@ -1,3 +1,8 @@
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
 from app.services.upload_repository import UploadRepositoryService
 from app.config import Settings
 from app.database.models.uploaded_asset import UploadedAsset
@@ -68,3 +73,37 @@ def test_object_storage_key_is_project_scoped_and_path_safe():
 def test_object_storage_requires_all_credentials():
     settings = Settings(UPLOAD_STORAGE_BACKEND="object_store", OBJECT_STORAGE_BUCKET="bucket")
     assert settings.object_storage_configured is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_materialization_uses_isolated_staging_files(tmp_path, monkeypatch):
+    """A resume request and a status retry may materialize the same APK together."""
+    asset_id = uuid4()
+    owner_id = uuid4()
+    asset = SimpleNamespace(
+        id=asset_id,
+        storage_backend="postgres_chunks",
+    )
+
+    async def get_owned(cls, _db, requested_asset_id, requested_owner_id):
+        assert requested_asset_id == asset_id
+        assert requested_owner_id == owner_id
+        return asset
+
+    async def iter_content(cls, _db, _asset_id, *, settings=None):
+        # Yield control while both writers have their own staging file open.
+        await asyncio.sleep(0.01)
+        yield b"investnation-apk"
+
+    monkeypatch.setattr(UploadRepositoryService, "get_owned", classmethod(get_owned))
+    monkeypatch.setattr(UploadRepositoryService, "iter_content", classmethod(iter_content))
+
+    target = tmp_path / "job" / "investnation.apk"
+    results = await asyncio.gather(
+        UploadRepositoryService.materialize(None, asset_id, owner_id, target),
+        UploadRepositoryService.materialize(None, asset_id, owner_id, target),
+    )
+
+    assert results == [asset, asset]
+    assert target.read_bytes() == b"investnation-apk"
+    assert list(target.parent.glob("*.part")) == []

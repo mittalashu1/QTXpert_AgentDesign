@@ -518,7 +518,21 @@ class UploadRepositoryService:
         if asset is None:
             raise FileNotFoundError(str(asset_id))
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target_path.with_suffix(target_path.suffix + ".part")
+        # Recovery/status polling can start more than one materialization for
+        # the same job (for example, a resume request racing a GET /jobs
+        # retry).  A shared ``target.apk.part`` lets one copier delete or
+        # rename the other copier's staging file, producing a misleading
+        # FileNotFoundError at the final rename.  Use a unique staging file
+        # per copier and atomically publish whichever complete copy finishes
+        # last.  The repository object is immutable, so last-writer-wins is
+        # safe and leaves a complete target in either case.
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".qtxpert-materialize-",
+            suffix=".part",
+            dir=str(target_path.parent),
+        )
+        os.close(fd)
+        temporary = Path(temporary_name)
         try:
             with temporary.open("wb") as handle:
                 if asset.storage_backend == "object_store":
@@ -551,7 +565,7 @@ class UploadRepositoryService:
                     content = cls.iter_content(db, asset.id, settings=settings)
                 async for chunk in content:
                     handle.write(chunk)
-            temporary.replace(target_path)
+            os.replace(temporary, target_path)
             return asset
         except Exception:
             temporary.unlink(missing_ok=True)
