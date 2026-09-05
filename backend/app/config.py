@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     DB_CONNECT_TIMEOUT_SECONDS: int = Field(default=10, ge=1, le=120)
     DB_COMMAND_TIMEOUT_SECONDS: int = Field(default=60, ge=5, le=600)
     DB_POOL_TIMEOUT_SECONDS: int = Field(default=15, ge=1, le=120)
+    # Neon connections can be silently closed while a Render instance is
+    # sleeping or during a provider failover. Recycle idle pooled sockets
+    # before they become a source of rollback/close timeouts.
+    DB_POOL_RECYCLE_SECONDS: int = Field(default=300, ge=30, le=3600)
+    # Closing a session must never turn an otherwise handled database error into
+    # a second unhandled exception in FastAPI's dependency cleanup path.
+    DB_CLOSE_TIMEOUT_SECONDS: int = Field(default=5, ge=1, le=60)
     DB_ECHO: bool = False
 
     # ------------------------------------------------------------------ #
@@ -200,12 +207,19 @@ class Settings(BaseSettings):
     # Mobile Autopilot prototype
     # ------------------------------------------------------------------ #
     # Mobile packages are streamed to object storage and analysed in bounded
-    # stages. Keep the product limit aligned with the deep manifest ceiling
-    # so a 300 MB release build can be inspected instead of being accepted
-    # only for execution.
+    # stages. The product accepts release builds up to 300 MB, while the
+    # in-process resource-table parser stays capped at 64 MB on the web
+    # instance. Larger builds use the safe ZIP inventory path and remain
+    # available for runtime execution; a dedicated worker can raise this
+    # ceiling later without changing the upload contract.
     AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=300, ge=1, le=2048)
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
     AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
+    # A short retry absorbs a transient Neon failover without holding the
+    # analysis worker or HTTP request indefinitely. The filesystem manifest
+    # remains the immediate fallback when all attempts are exhausted.
+    AUTOPILOT_DB_RETRY_ATTEMPTS: int = Field(default=2, ge=0, le=4)
+    AUTOPILOT_DB_RETRY_BACKOFF_SECONDS: float = Field(default=0.25, ge=0.05, le=5)
     # Startup recovery can replay a large APK analysis after a process restart.
     # Keep it opt-in until a dedicated worker/queue is configured so deploys
     # do not compete with authentication traffic for the web instance's memory.
@@ -227,12 +241,12 @@ class Settings(BaseSettings):
     AUTOPILOT_SUITE_TIMEOUT_SECONDS: int = Field(default=900, ge=60, le=3600)
     AUTOPILOT_BROWSERSTACK_UPLOAD_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
     # Androguard can allocate a very large resource table for some release
-    # APKs. Up to 300 MB is inspected by the manifest parser; the parser is
-    # still isolated behind the analysis timeout and falls back to bounded ZIP
-    # metadata if a malformed or highly-compressed package exhausts the
-    # worker budget. The binary always remains available for
-    # BrowserStack/Appium execution.
-    AUTOPILOT_DEEP_PARSE_MAX_MB: int = Field(default=300, ge=1, le=512)
+    # APKs. Keep deep parsing conservative on the Render web instance; the
+    # binary always remains available for BrowserStack/Appium execution.
+    AUTOPILOT_DEEP_PARSE_MAX_MB: int = Field(default=64, ge=1, le=512)
+    # Orphaned atomic-write files are safe to remove after this window. Job
+    # manifests, analyses and source artifacts are never removed by this sweep.
+    AUTOPILOT_LOCAL_STAGING_TTL_SECONDS: int = Field(default=3600, ge=300, le=604800)
     AUTOPILOT_DISCOVERY_SETTLE_SECONDS: int = Field(default=4, ge=1, le=30)
     AUTOPILOT_DISCOVERY_SETTLE_RETRIES: int = Field(default=3, ge=0, le=6)
     AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS: int = Field(default=300, ge=30, le=1800)

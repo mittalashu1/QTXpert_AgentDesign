@@ -521,7 +521,35 @@ class UploadRepositoryService:
         temporary = target_path.with_suffix(target_path.suffix + ".part")
         try:
             with temporary.open("wb") as handle:
-                async for chunk in cls.iter_content(db, asset.id, settings=settings):
+                if asset.storage_backend == "object_store":
+                    # Capture ORM values before rollback. SQLAlchemy may
+                    # expire instances during rollback, and reading
+                    # ``asset.object_key`` afterwards could trigger an
+                    # implicit async database round-trip while the copy is
+                    # already underway.
+                    object_key = asset.object_key
+                    # The metadata lookup above briefly uses a Neon
+                    # connection. Return it to the pool before copying a
+                    # potentially hundreds-of-megabytes R2 object so a long
+                    # materialization cannot starve authentication/report
+                    # requests. The object key is already present on the
+                    # owned row, so no second database query is necessary.
+                    try:
+                        await db.rollback()
+                    except Exception as exc:  # pragma: no cover - provider-specific
+                        logger.warning(
+                            "Could not release the repository session before object materialization: %s",
+                            exc,
+                        )
+                    storage = cls._object_storage(settings)
+                    if storage is None or not object_key:
+                        raise UploadRepositoryStorageUnavailable(
+                            "The object-store asset cannot be read because storage is unavailable"
+                        )
+                    content = storage.iter_content(object_key)
+                else:
+                    content = cls.iter_content(db, asset.id, settings=settings)
+                async for chunk in content:
                     handle.write(chunk)
             temporary.replace(target_path)
             return asset

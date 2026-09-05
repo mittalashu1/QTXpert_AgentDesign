@@ -23,6 +23,14 @@ services:
         value: "60"
       - key: DB_POOL_TIMEOUT_SECONDS
         value: "15"
+      - key: DB_POOL_RECYCLE_SECONDS
+        # Recycle idle Neon sockets before a sleeping/failover connection can
+        # fail while FastAPI is closing a request-scoped session.
+        value: "300"
+      - key: DB_CLOSE_TIMEOUT_SECONDS
+        # Cleanup is bounded so a dead Neon connection cannot turn a handled
+        # request error into an unhandled 500 during dependency finalization.
+        value: "5"
       - key: UPLOAD_STORAGE_BACKEND
         # APKs and evidence live in the configured private R2 bucket.
         value: object_store
@@ -35,10 +43,19 @@ services:
         # product under test. Keep this explicit so Blueprint syncs cannot
         # accidentally restore the old 25 MB document limit.
         value: "300"
+      - key: AUTOPILOT_DB_RETRY_ATTEMPTS
+        value: "2"
+      - key: AUTOPILOT_DB_RETRY_BACKOFF_SECONDS
+        value: "0.25"
       - key: AUTOPILOT_DEEP_PARSE_MAX_MB
-        # Parse APK manifests up to the same 300 MB product limit. The
-        # backend still falls back to bounded ZIP metadata on parser failure.
-        value: "300"
+        # Keep the in-process Androguard parser within the web instance memory
+        # envelope. Builds up to 300 MB are still accepted and use bounded ZIP
+        # metadata until a dedicated analysis worker is configured.
+        value: "64"
+      - key: AUTOPILOT_LOCAL_STAGING_TTL_SECONDS
+        # Remove only abandoned .part/.tmp files; durable manifests, analyses
+        # and repository source assets are never deleted by this sweep.
+        value: "3600"
       - key: AUTOPILOT_DISCOVERY_SETTLE_SECONDS
         value: "4"
       - key: AUTOPILOT_DISCOVERY_SETTLE_RETRIES

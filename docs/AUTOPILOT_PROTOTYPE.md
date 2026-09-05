@@ -6,7 +6,7 @@ QTXpert Autopilot is the autonomous mobile Quality Engineering entry point for Q
 
 `APK/IPA → application understanding → minimal context → test strategy → test cases → QTX Test IR → automation → device execution → evidence → RCA → healing → coverage learning → release confidence`
 
-The current prototype establishes the Android/iOS vertical slices and safe execution boundary. APK and IPA uploads up to the configured `AUTOPILOT_MAX_UPLOAD_SIZE_MB` (300 MB by default) are streamed into the repository and remain eligible for runtime execution. Packages up to `AUTOPILOT_DEEP_PARSE_MAX_MB` (300 MB by default) can use deep manifest parsing; if a malformed or highly-compressed package exceeds the parser's bounded archive safety budget, Autopilot records SHA-256 and bounded ZIP metadata and continues with deterministic coverage. This is a safe partial-analysis state, not an upload or execution failure.
+The current prototype establishes the Android/iOS vertical slices and safe execution boundary. APK and IPA uploads up to the configured `AUTOPILOT_MAX_UPLOAD_SIZE_MB` (300 MB by default) are streamed into the repository and remain eligible for runtime execution. The Render web instance keeps `AUTOPILOT_DEEP_PARSE_MAX_MB` at 64 MB by default so Androguard resource-table parsing cannot exhaust its memory envelope. Larger release builds use SHA-256 plus bounded ZIP metadata and continue with deterministic coverage; this is a safe partial-analysis state, not an upload or execution failure. A dedicated analysis worker can raise the deep-parse ceiling independently later.
 
 ## What is implemented
 

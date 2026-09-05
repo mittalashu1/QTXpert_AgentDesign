@@ -90,7 +90,12 @@ still shown when a model has no configured rate.
 |---|---|---|
 | `MAX_UPLOAD_SIZE_MB` | 25 | Per-file readable document limit (BRD/export/test-data text inputs) |
 | `AUTOPILOT_MAX_UPLOAD_SIZE_MB` | 300 | Per-file APK/IPA limit shared by Autopilot and Design app-source uploads |
-| `AUTOPILOT_DEEP_PARSE_MAX_MB` | 300 | Maximum APK size sent to the deep manifest parser; oversized/malformed archives fall back to bounded metadata |
+| `AUTOPILOT_DEEP_PARSE_MAX_MB` | 64 | Maximum APK size sent to the in-process deep manifest parser on the web instance; larger builds fall back to bounded metadata while remaining executable |
+| `AUTOPILOT_LOCAL_STAGING_TTL_SECONDS` | 3600 | Age after which abandoned `.part`/`.tmp` atomic-write files may be removed; durable job data is retained |
+| `DB_POOL_RECYCLE_SECONDS` | 300 | Recycle idle Neon connections before provider sleep/failover leaves stale sockets |
+| `DB_CLOSE_TIMEOUT_SECONDS` | 5 | Maximum rollback/close budget so dead Neon sessions cannot mask the original request error |
+| `AUTOPILOT_DB_RETRY_ATTEMPTS` | 2 | Bounded retries for durable Autopilot job writes after transient Neon failures |
+| `AUTOPILOT_DB_RETRY_BACKOFF_SECONDS` | 0.25 | Initial backoff between durable job-write retries |
 | `AUTOPILOT_DISCOVERY_SETTLE_SECONDS` | 4 | Initial/retry wait for a mobile launch screen to become interactive |
 | `AUTOPILOT_DISCOVERY_SETTLE_RETRIES` | 3 | Maximum bounded splash-settle retries before retaining launch evidence |
 | `ALLOWED_UPLOAD_EXTENSIONS` | pdf,docx,txt,md,json,csv,… | Accepted document, test-data, media and APK/IPA formats |

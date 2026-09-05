@@ -523,6 +523,31 @@ export default function AutopilotPage() {
   const [testBucketFilter, setTestBucketFilter] = useState<"all" | TestBucket>("all");
   const [suiteBucket, setSuiteBucket] = useState<"all" | TestBucket>("all");
 
+  const clearRunState = useCallback((options: { clearSurface?: boolean } = {}) => {
+    // A refresh or project/surface change must not keep rendering an analysis
+    // that belongs to an earlier job. Clear every derived result together so
+    // a partial network response cannot leave a mixed old/new dashboard.
+    setAnalysis(null);
+    setReport(null);
+    setExecution(null);
+    setExecutionHistory([]);
+    setDiscovery(null);
+    setAutomation(null);
+    setSuite(null);
+    setSetup(null);
+    setSetupDraft(emptySetup());
+    setInputDrafts({});
+    setArtifactAvailable(true);
+    setAnalysisProgress(0);
+    setAnalysisStage("");
+    setContextNotice("");
+    setError("");
+    if (options.clearSurface) {
+      setReportTabs([]);
+      setActiveReportTabKey("");
+    }
+  }, []);
+
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === profileId) ?? DEFAULT_PROFILE_OPTIONS[0],
     [profileId, profiles],
@@ -548,8 +573,13 @@ export default function AutopilotPage() {
   }, []);
 
   const refreshReportTabs = useCallback(async (projectId: string) => {
-    if (!projectId) { setReportTabs([]); return; }
+    if (!projectId) { setReportTabs([]); setActiveReportTabKey(""); return false; }
     setReportTabsLoading(true);
+    // Do not leave tabs from the previous project/surface visible while the
+    // replacement list is in flight. A failed request therefore cannot make
+    // stale reports look current after a browser refresh.
+    setReportTabs([]);
+    setActiveReportTabKey("");
     try {
       let response;
       try {
@@ -561,9 +591,13 @@ export default function AutopilotPage() {
         response = await apiClient.get<ReportTab[]>("/autopilot/surfaces", { timeout: 15000 });
       }
       setReportTabs(response.data);
-      if (response.data[0]) setActiveReportTabKey((current) => current || reportTabKey(response.data[0]));
+      const keys = response.data.map(reportTabKey);
+      setActiveReportTabKey((current) => current && keys.includes(current) ? current : (keys[0] || ""));
+      return true;
     } catch {
       setReportTabs([]);
+      setActiveReportTabKey("");
+      return false;
     } finally { setReportTabsLoading(false); }
   }, []);
 
@@ -619,9 +653,11 @@ export default function AutopilotPage() {
     void refreshReportTabs(selectedProjectId);
   }, [refreshReportTabs, selectedProjectId]);
   useEffect(() => {
+    clearRunState({ clearSurface: true });
+    setSelectedUploadId("");
     setSelectedDocumentAssetIds([]);
     setDocumentAnalysisRunId("");
-  }, [selectedProjectId]);
+  }, [clearRunState, selectedProjectId]);
 
   useEffect(() => {
     const runId = searchParams.get("document_run") || "";
@@ -681,12 +717,29 @@ export default function AutopilotPage() {
     if (job.document_analysis_run_id) setDocumentAnalysisRunId(job.document_analysis_run_id);
     else if (job.analysis?.document_analysis_run_id) setDocumentAnalysisRunId(job.analysis.document_analysis_run_id);
     setArtifactAvailable(job.artifact_available !== false);
+    if (job.status === "failed") {
+      // A failed/latest job has no valid report. Remove any prior completed
+      // result before surfacing its actionable error so a refresh cannot make
+      // old evidence appear to belong to this failure.
+      setAnalysis(null);
+      setReport(null);
+      setExecution(null);
+      setExecutionHistory([]);
+      setDiscovery(null);
+      setAutomation(null);
+      setSuite(null);
+      setSetup(null);
+      setSetupDraft(emptySetup(job.job_id));
+      setInputDrafts({});
+      setSetupOpen(false);
+      if (job.error) setError(job.error);
+      return;
+    }
     if (["analyzed", "waiting_for_input", "superseded"].includes(job.status) && job.analysis) {
       setAnalysis(job.analysis);
       void refreshExecutionHistory(job.analysis.job_id);
       void refreshReport(job.analysis.job_id);
     }
-    if (job.status === "failed" && job.error) setError(job.error);
   }, [profiles, refreshExecutionHistory, refreshReport]);
   const pollAnalysis = useCallback(async (jobId: string) => {
     const deadline = Date.now() + 20 * 60 * 1000;
@@ -721,10 +774,18 @@ export default function AutopilotPage() {
     let active = true;
     const restore = async () => {
       if (!selectedProjectId) return;
+      // Start every restore from an empty derived state. If the latest-job
+      // request returns null (or Neon is temporarily unavailable), the user
+      // sees a clean pending view instead of the previous job's report.
+      clearRunState({ clearSurface: true });
       try {
         await refreshReportTabs(selectedProjectId);
         const job = (await apiClient.get<AnalysisJob | null>("/autopilot/jobs/latest", { timeout: 15000 })).data;
-        if (!active || !job) return;
+        if (!active) return;
+        if (!job) {
+          setBusy(false);
+          return;
+        }
         applyJob(job);
         if (job.status === "uploaded" || job.status === "analyzing") {
           setBusy(true);
@@ -733,6 +794,7 @@ export default function AutopilotPage() {
         }
       } catch (err) {
         if (active) {
+          clearRunState({ clearSurface: true });
           setBusy(false);
           setError(readableError(err, "Unable to restore the latest Autopilot analysis"));
         }
@@ -740,7 +802,7 @@ export default function AutopilotPage() {
     };
     void restore();
     return () => { active = false; };
-  }, [selectedProjectId, applyJob, pollAnalysis, refreshReportTabs]);
+  }, [selectedProjectId, applyJob, clearRunState, pollAnalysis, refreshReportTabs]);
 
   useEffect(() => {
     let active = true;
@@ -792,7 +854,7 @@ export default function AutopilotPage() {
     || null;
   const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen: screen.screen_id, control }))) ?? [], [discovery]);
 
-  const resetResult = () => { setAnalysis(null); setReport(null); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setSetup(null); setSetupOpen(false); setArtifactAvailable(true); setError(""); };
+  const resetResult = () => { clearRunState(); setSetupOpen(false); };
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected);

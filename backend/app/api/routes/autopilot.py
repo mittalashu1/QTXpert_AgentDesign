@@ -95,6 +95,10 @@ async def _materialize_repository_asset_and_analyze(
     """
     service = _service(settings)
     try:
+        # Clear only orphaned atomic-write files before starting another large
+        # repository copy. Durable job manifests and source assets remain
+        # untouched and can be reused for a retry.
+        await service.cleanup_local_staging()
         logger.info(
             "Autopilot repository materialization started job_id=%s asset_id=%s",
             job_id,

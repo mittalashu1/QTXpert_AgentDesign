@@ -239,7 +239,14 @@ export default function DashboardPage() {
     setPreferences(readPreferences(selectedProjectId));
   }, [selectedProjectId]);
 
-  const data = summary.data;
+  // Do not render cached metrics while a manual refresh is in flight or has
+  // failed. Showing the previous project snapshot during that window makes
+  // stale results look current; the cards repopulate only from the confirmed
+  // response for the selected project.
+  const data = summary.isFetching || summary.isError ? undefined : summary.data;
+  const documentReviewData = documentReview.isFetching || documentReview.isError
+    ? null
+    : documentReview.data;
   const visibleMetricDefinitions = metricDefinitions.filter(({ key }) => preferences.visibleMetrics[key]);
   const visibleWidgetCount = Object.values(preferences.visibleWidgets).filter(Boolean).length;
 
@@ -285,7 +292,7 @@ export default function DashboardPage() {
   }];
 
   const workflowStages = useMemo<WorkflowStage[]>(() => {
-    const documentStatus = documentReview.data?.status;
+    const documentStatus = documentReviewData?.status;
     const documentRunning = Boolean(documentStatus && ["queued", "extracting", "analyzing"].includes(documentStatus));
     const documentCompleted = documentStatus === "completed";
     const documentFailed = documentStatus === "failed";
@@ -332,7 +339,7 @@ export default function DashboardPage() {
         stateLabel: executionAvailable ? "Evidence available" : "After execution",
       },
     ];
-  }, [data, documentReview.data?.status]);
+  }, [data, documentReviewData?.status]);
 
   const openCustomize = () => {
     setDraftPreferences(copyPreferences(preferences));
@@ -399,7 +406,7 @@ export default function DashboardPage() {
         }
       />
 
-      {summary.isLoading && <LinearProgress sx={{ mb: 2 }} />}
+      {summary.isFetching && <LinearProgress sx={{ mb: 2 }} />}
       {summary.isError && <Alert severity="warning" sx={{ mb: 2 }}>Dashboard data is temporarily unavailable. Try refreshing the view.</Alert>}
 
       <Card
@@ -556,18 +563,18 @@ export default function DashboardPage() {
                       <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
                         <Chip
                           size="small"
-                          color={documentReview.data?.status === "completed" ? "success" : documentReview.data?.status === "failed" ? "error" : "info"}
+                          color={documentReviewData?.status === "completed" ? "success" : documentReviewData?.status === "failed" ? "error" : "info"}
                           variant="outlined"
-                          label={documentReview.isLoading ? "Loading" : documentReview.data ? documentReview.data.status === "completed" ? `${Math.round(documentReview.data.readiness_score)}% ready` : displayDocumentStatus(documentReview.data.status) : "Not reviewed"}
+                          label={documentReview.isFetching ? "Refreshing" : documentReviewData ? documentReviewData.status === "completed" ? `${Math.round(documentReviewData.readiness_score)}% ready` : displayDocumentStatus(documentReviewData.status) : "Not reviewed"}
                         />
-                        {documentReview.data?.status === "completed" && <Chip size="small" variant="outlined" label={`${documentReview.data.findings.filter((finding) => !["resolved", "rejected"].includes(finding.status)).length} open findings`} />}
+                        {documentReviewData?.status === "completed" && <Chip size="small" variant="outlined" label={`${documentReviewData.findings.filter((finding) => !["resolved", "rejected"].includes(finding.status)).length} open findings`} />}
                       </Stack>
                     </Stack>
                     <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
-                      {documentReview.data?.status === "completed"
-                        ? `Last review: ${formatDate(documentReview.data.updated_at)} · findings remain static evidence until runtime execution confirms behaviour.`
-                        : documentReview.data?.status === "failed"
-                          ? documentReview.data.error_message || "Open Document Intelligence to retry the review."
+                      {documentReviewData?.status === "completed"
+                        ? `Last review: ${formatDate(documentReviewData.updated_at)} · findings remain static evidence until runtime execution confirms behaviour.`
+                        : documentReviewData?.status === "failed"
+                          ? documentReviewData.error_message || "Open Document Intelligence to retry the review."
                           : "Run a documentation review to establish the evidence baseline for Test Design and Autopilot."}
                     </Typography>
                   </CardContent>

@@ -26,6 +26,7 @@ from app.config import get_settings
 from app.database.session import AsyncSessionLocal
 from app.services.data_retention import cleanup_generated_data
 from app.services.autopilot_recovery import recover_interrupted_autopilot_jobs
+from app.services.autopilot import AutopilotPrototypeService
 from app.services.cost_catalog import refresh_cost_catalog_if_due
 
 settings_obj = get_settings()
@@ -105,6 +106,19 @@ def create_app() -> FastAPI:
                 logger.exception("Generated-data startup retention failed")
 
         app.state.data_retention = asyncio.create_task(_run_retention())
+
+    @app.on_event("startup")
+    async def cleanup_autopilot_staging() -> None:
+        """Sweep abandoned atomic-write files without querying the database."""
+        try:
+            app.state.autopilot_staging_cleanup = asyncio.create_task(
+                AutopilotPrototypeService(settings_obj).cleanup_local_staging()
+            )
+        except Exception:
+            # A storage permission issue must never prevent the API from
+            # starting; the next materialization attempt will retry the sweep.
+            logger.exception("Autopilot staging cleanup could not be scheduled")
+            app.state.autopilot_staging_cleanup = None
 
     @app.on_event("startup")
     async def schedule_cost_catalog_refresh() -> None:

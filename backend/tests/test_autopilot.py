@@ -1,4 +1,6 @@
 import json
+import os
+import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -628,6 +630,32 @@ def test_large_apk_uses_safe_zip_inventory_without_shadowing_zipfile(tmp_path):
     assert result["file_count"] == 1
     assert any("bounded archive metadata" in warning for warning in result["warnings"])
     assert not any("UnboundLocalError" in warning for warning in result["warnings"])
+
+
+def test_large_apk_upload_limit_is_separate_from_deep_parse_limit(tmp_path):
+    service = _service(tmp_path)
+
+    assert service.settings.AUTOPILOT_MAX_UPLOAD_SIZE_MB == 300
+    assert service.settings.AUTOPILOT_DEEP_PARSE_MAX_MB == 64
+
+
+@pytest.mark.asyncio
+async def test_local_staging_cleanup_removes_only_stale_atomic_files(tmp_path):
+    service = _service(tmp_path, AUTOPILOT_LOCAL_STAGING_TTL_SECONDS=300)
+    job_id, artifact_path = await service.save_upload("keep.apk", b"x" * 2048, "owner")
+    stale_part = tmp_path / job_id / "old.apk.part"
+    stale_tmp = tmp_path / job_id / "old.json.tmp"
+    stale_part.write_bytes(b"orphaned")
+    stale_tmp.write_bytes(b"orphaned")
+    old_timestamp = time.time() - 3600
+    os.utime(stale_part, (old_timestamp, old_timestamp))
+    os.utime(stale_tmp, (old_timestamp, old_timestamp))
+
+    removed = await service.cleanup_local_staging()
+
+    assert removed == 2
+    assert artifact_path.exists()
+    assert (artifact_path.parent / "job.json").exists()
 
 
 @pytest.mark.asyncio

@@ -422,7 +422,8 @@ class AutopilotPrototypeService:
         """Best-effort durable write; filesystem operation must never fail on DB hiccups."""
         if not self._durable_results_enabled or time.monotonic() < self._persistence_disabled_until:
             return
-        try:
+
+        async def persist_once() -> None:
             owner_id = uuid.UUID(str(job["owner_id"]))
             created_at = datetime.fromisoformat(str(job["created_at"]).replace("Z", "+00:00"))
             async with AsyncSessionLocal() as session:
@@ -470,12 +471,23 @@ class AutopilotPrototypeService:
                 if analysis is not _MISSING:
                     record.analysis = analysis
                 await session.commit()
-        except Exception as exc:  # pragma: no cover - exercised by unavailable production DBs
-            # Do not turn a healthy APK analysis into a failed job just because
-            # the optional result store is temporarily unavailable. Avoid
-            # repeatedly waiting on a broken connection for the next minute.
-            self._persistence_disabled_until = time.monotonic() + 60
-            logger.warning("Autopilot durable result write skipped: %s", exc)
+
+        attempts = max(1, min(3, int(getattr(self.settings, "AUTOPILOT_DB_RETRY_ATTEMPTS", 2))))
+        backoff = max(0.05, float(getattr(self.settings, "AUTOPILOT_DB_RETRY_BACKOFF_SECONDS", 0.25)))
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                await persist_once()
+                return
+            except Exception as exc:  # pragma: no cover - provider/network specific
+                last_error = exc
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(backoff * (attempt + 1))
+        # Do not turn a healthy APK analysis into a failed job just because the
+        # optional result store is temporarily unavailable. Avoid repeatedly
+        # waiting on a broken connection for the next minute.
+        self._persistence_disabled_until = time.monotonic() + 60
+        logger.warning("Autopilot durable result write skipped after %d attempt(s): %s", attempts, last_error)
 
     async def _load_job_from_db(self, job_id: str) -> Dict[str, Any] | None:
         if not self._durable_results_enabled or time.monotonic() < self._persistence_disabled_until:
@@ -551,6 +563,46 @@ class AutopilotPrototypeService:
     def _execution_dir(self, job_id: str) -> Path:
         """Return the per-job execution directory used as a local fallback."""
         return self._job_dir(job_id) / "executions"
+
+    async def cleanup_local_staging(self) -> int:
+        """Remove abandoned atomic-write files without touching job data.
+
+        APK materialization and manifest updates write ``.part``/``.tmp``
+        files before an atomic rename. A worker restart can leave those files
+        behind; on a 512 MiB Render instance an abandoned 221 MB materialized
+        build is expensive disk pressure even though it is not a durable source
+        asset. This sweep is intentionally narrow: manifests, analyses,
+        execution evidence and source artifacts are never selected.
+        """
+        ttl = max(300, int(getattr(self.settings, "AUTOPILOT_LOCAL_STAGING_TTL_SECONDS", 3600)))
+        cutoff = time.time() - ttl
+        root = self.root.resolve()
+
+        def sweep() -> int:
+            removed = 0
+            try:
+                paths = list(root.rglob("*"))
+            except OSError:
+                return 0
+            for path in paths:
+                if not path.is_file() or path.suffix.lower() not in {".part", ".tmp"}:
+                    continue
+                try:
+                    resolved = path.resolve()
+                    if resolved != root and root not in resolved.parents:
+                        continue
+                    if path.stat().st_mtime >= cutoff:
+                        continue
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    logger.debug("Unable to remove stale Autopilot staging file %s", path, exc_info=True)
+            return removed
+
+        removed = await asyncio.to_thread(sweep)
+        if removed:
+            logger.info("Removed %d stale Autopilot staging file(s)", removed)
+        return removed
 
     async def _persist_execution_file(
         self,
