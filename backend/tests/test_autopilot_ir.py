@@ -1,6 +1,7 @@
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
+    AutopilotSavedInput,
     AutopilotSetupProfile,
     AutopilotTest,
     DiscoveredControl,
@@ -8,7 +9,7 @@ from app.schemas.autopilot import (
     DiscoveredTransition,
     DiscoveryLocator,
 )
-from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests
+from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests, credential_value_available
 
 
 def _analysis(tests):
@@ -330,6 +331,37 @@ def test_input_checkpoint_groups_dependencies_by_safe_reference():
     assert "user id" in (by_key["credential_reference"].placeholder or "").lower()
     assert set(by_key["credential_reference"].required_for) == {"QT-AI-AUTH", "QT-AI-UAT"}
     assert all(request.status == "pending" for request in requests)
+
+
+def test_legacy_credential_reference_decision_does_not_hide_sign_in_fields():
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AI-LEGACY-AUTH",
+            suite="Functional",
+            title="Authenticate customer",
+            priority="high",
+            objective="Validate a non-production sign-in",
+            requires_auth=True,
+        )
+    ])
+    setup = AutopilotSetupProfile(
+        job_id=analysis.job_id,
+        input_decisions={"credential_reference": "provide"},
+        saved_inputs=[
+            AutopilotSavedInput(
+                key="credential_reference",
+                label="Approved credential-set reference",
+                category="credential",
+                decision="provide",
+                has_value=True,
+            )
+        ],
+    )
+
+    assert credential_value_available(setup) is False
+    requests = build_input_requests(analysis, setup)
+    assert requests[0].key == "credential_reference"
+    assert requests[0].credential_bundle is True
 
 
 def test_safe_authentication_input_decision_counts_as_approval():

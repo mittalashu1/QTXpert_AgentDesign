@@ -61,7 +61,7 @@ from app.services.autopilot import (
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_web import AutopilotWebService
 from app.services.autopilot_context import default_context, get_profile, list_profiles
-from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests
+from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests, credential_value_available
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata
@@ -920,11 +920,14 @@ def _setup_profile(
             source_requests = discovered_requests or list(discovery.input_requests)
             accepted_decisions = {"provide", "reuse", "random"}
             category_provided = {
-                "credential": bool(normalized_setup.credential_reference.strip())
+                # Keep runtime username/password prompts aligned with the
+                # plan-level checkpoint.  A legacy generic credential
+                # decision must not make live sign-in fields disappear.
+                "credential": credential_value_available(normalized_setup)
                 or any(
                     decisions.get(item.key) in accepted_decisions
                     for item in source_requests
-                    if item.category == "credential"
+                    if item.category == "credential" and not item.credential_bundle
                 ),
                 "test_data": bool(normalized_setup.test_data_reference.strip())
                 or any(
@@ -1029,8 +1032,24 @@ async def _setup_with_input_metadata(
         logger.info("Autopilot input metadata merge skipped job_id=%s", job_id, exc_info=True)
         return profile
 
+    # A previous checkpoint version called the credential field a generic
+    # "credential-set reference" and allowed a placeholder/reference to be
+    # marked as complete.  Keep those rows for audit history, but do not feed
+    # them back into the active setup: the current flow must explicitly show
+    # the UAT User ID/email + Password fields (or a freshly supplied vault
+    # reference) before authenticated cases can continue.
+    current_credential_label = "UAT sign-in credentials"
+    active_metadata = [
+        item
+        for item in metadata
+        if not (
+            item.key == "credential_reference"
+            and not str(profile.credential_reference or "").strip()
+            and str(item.label or "").strip().casefold() != current_credential_label.casefold()
+        )
+    ]
     raw = profile.model_dump(mode="json")
-    raw["saved_inputs"] = [item.model_dump(mode="json") for item in metadata]
+    raw["saved_inputs"] = [item.model_dump(mode="json") for item in active_metadata]
     decisions = dict(raw.get("input_decisions") or {})
     request_keys = {
         item.key
@@ -1040,7 +1059,7 @@ async def _setup_with_input_metadata(
     # ``reuse`` decision that falsely marks a required field as complete.
     for key in request_keys:
         decisions.pop(key, None)
-    for item in metadata:
+    for item in active_metadata:
         decisions[item.key] = item.decision
     raw["input_decisions"] = decisions
     approval_decision = decisions.get("safe_authentication_approved")

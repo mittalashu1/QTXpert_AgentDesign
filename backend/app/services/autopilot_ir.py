@@ -130,6 +130,35 @@ _INPUT_REQUEST_GUIDANCE: dict[str, dict[str, str | bool | None]] = {
 }
 
 
+def credential_value_available(setup: Optional[AutopilotSetupProfile]) -> bool:
+    """Return whether an authenticated journey has usable sign-in setup.
+
+    Older releases stored a generic ``credential_reference`` decision before
+    the checkpoint had explicit User ID/password fields.  Treating that stale
+    decision as complete is what made the new checkpoint start at ``Test
+    account role`` and hid the actual sign-in fields.  A direct vault
+    reference supplied in the setup editor is still valid; metadata-only
+    values must, however, carry the current ``UAT sign-in credentials`` label
+    so a legacy generic reference cannot silently satisfy authentication.
+    """
+    if setup is None:
+        return False
+    if str(getattr(setup, "credential_reference", "") or "").strip():
+        return True
+    decision = (getattr(setup, "input_decisions", {}) or {}).get("credential_reference")
+    if decision not in {"provide", "reuse"}:
+        return False
+    current_label = _INPUT_REQUEST_METADATA["credential reference"][1].strip().casefold()
+    for item in getattr(setup, "saved_inputs", []) or []:
+        if (
+            item.key == "credential_reference"
+            and item.has_value
+            and str(item.label or "").strip().casefold() == current_label
+        ):
+            return True
+    return False
+
+
 def build_input_requests(
     analysis: AutopilotAnalysis,
     setup: Optional[AutopilotSetupProfile] = None,
@@ -154,7 +183,7 @@ def build_input_requests(
         else:
             key, label, category, sensitive = metadata
         reason = {
-            "credential": "A non-production credential-set reference is needed for an approved authenticated journey. Store the secret in the configured vault; provide only its reference here.",
+            "credential": "A non-production User ID/email and password are needed for the approved authenticated journey. Enter them in the dedicated fields, or use a configured vault reference.",
             "approval": "Explicit approval is required before Autopilot can enter an authenticated non-transactional flow.",
             "test_data": "Seeded synthetic data and a reset/cleanup hook keep repeated runs isolated and reversible.",
             "acceptance": "UAT assertions need signed-off acceptance criteria so business outcomes are not inferred.",
@@ -318,7 +347,11 @@ class AutopilotIRCompiler:
 
         missing: list[str] = []
         if test.requires_auth:
-            if not has_value("credential_reference", "credential"):
+            # ``credential_reference`` is also the stable key used by older
+            # clients.  Only an explicit setup-editor reference or a current
+            # encrypted credential bundle can satisfy it; legacy generic
+            # decisions must reopen the credential checkpoint.
+            if not credential_value_available(setup):
                 missing.append("credential reference")
             if not has_value("account_role"):
                 missing.append("test account role")
