@@ -999,6 +999,58 @@ def _record_setup(
         return _setup_profile(job_id, None, analysis, discovery)
 
 
+async def _setup_with_input_metadata(
+    db: AsyncSession,
+    record: Optional[AutopilotJob],
+    job_id: str,
+    analysis: Optional[AutopilotAnalysis] = None,
+    discovery: Optional[AutopilotDiscoveryResult] = None,
+) -> AutopilotSetupProfile:
+    """Build setup from the durable profile and encrypted-input metadata.
+
+    The setup JSON is a safe cache, while ``AutopilotInputRecord`` is the
+    source of truth for direct values and their decisions.  Keeping this merge
+    in one helper prevents the setup dialog, automation compiler and resume
+    endpoint from disagreeing after a prior tab, deploy or partial save.
+    """
+    profile = _record_setup(record, job_id, analysis, discovery)
+    if record is None:
+        return profile
+    try:
+        metadata = await list_metadata(
+            db,
+            record.owner_id,
+            record.project_id,
+            (record.surface_key or job_id)[:128],
+        )
+    except Exception:
+        # A degraded database must not hide the safe setup snapshot. The
+        # caller can still retry once storage recovers.
+        logger.info("Autopilot input metadata merge skipped job_id=%s", job_id, exc_info=True)
+        return profile
+
+    raw = profile.model_dump(mode="json")
+    raw["saved_inputs"] = [item.model_dump(mode="json") for item in metadata]
+    decisions = dict(raw.get("input_decisions") or {})
+    request_keys = {
+        item.key
+        for item in [*(profile.input_requests or []), *(profile.runtime_input_requests or [])]
+    }
+    # Expired/deleted encrypted rows must not leave a stale ``provide`` or
+    # ``reuse`` decision that falsely marks a required field as complete.
+    for key in request_keys:
+        decisions.pop(key, None)
+    for item in metadata:
+        decisions[item.key] = item.decision
+    raw["input_decisions"] = decisions
+    approval_decision = decisions.get("safe_authentication_approved")
+    if approval_decision in {"provide", "reuse"}:
+        raw["safe_authentication_approved"] = True
+    elif approval_decision == "skip":
+        raw["safe_authentication_approved"] = False
+    return _setup_profile(job_id, raw, analysis, discovery)
+
+
 async def _resume_and_discover_background(
     job_id: str,
     owner_id: UUID,
@@ -2267,7 +2319,7 @@ async def get_autopilot_automation(
     return AutopilotIRCompiler().compile_bundle(
         analysis,
         _record_discovery(record),
-        _record_setup(record, job_id),
+        await _setup_with_input_metadata(db, record, job_id, analysis, _record_discovery(record)),
     )
 
 
@@ -2287,28 +2339,7 @@ async def get_autopilot_setup(
     except FileNotFoundError:
         analysis = None
     discovery = _record_discovery(record)
-    profile = _record_setup(record, job_id, analysis, discovery)
-    if record is not None:
-        try:
-            metadata = await list_metadata(
-                db,
-                user.id,
-                record.project_id,
-                (record.surface_key or job_id)[:128],
-            )
-            if metadata:
-                raw = profile.model_dump(mode="json")
-                raw["saved_inputs"] = [item.model_dump(mode="json") for item in metadata]
-                decisions = dict(raw.get("input_decisions") or {})
-                for item in metadata:
-                    decisions[item.key] = item.decision
-                raw["input_decisions"] = decisions
-                profile = _setup_profile(job_id, raw, analysis, discovery)
-        except Exception:
-            # The checkpoint remains readable during a migration/degraded DB;
-            # the durable setup snapshot is still the safe fallback.
-            logger.info("Autopilot input metadata read skipped job_id=%s", job_id, exc_info=True)
-    return profile
+    return await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
 
 
 @router.put("/{job_id}/setup", response_model=AutopilotSetupProfile)
@@ -2371,7 +2402,7 @@ async def update_autopilot_setup(
     except FileNotFoundError:
         analysis = None
     discovery = _record_discovery(record)
-    current_profile = _record_setup(record, job_id, analysis, discovery)
+    current_profile = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
     request_map = {
         item.key: item
         for item in [*(current_profile.input_requests or []), *(current_profile.runtime_input_requests or [])]
@@ -2476,7 +2507,7 @@ async def resume_autopilot_checkpoint(
             status_code=status.HTTP_409_CONFLICT,
             detail="Autopilot analysis is not ready for input validation yet. Re-run analysis from the stored target.",
         ) from exc
-    setup = _record_setup(record, job_id, analysis, _record_discovery(record))
+    setup = await _setup_with_input_metadata(db, record, job_id, analysis, _record_discovery(record))
     if not payload.confirm_saved_inputs:
         return await service.get_job_status(job_id)
     pending_inputs = [
@@ -2580,7 +2611,7 @@ async def run_autopilot_discovery(
             # refresh (or another worker) sees the same entry points.
             try:
                 analysis = await service.load_analysis(job_id)
-                profile = _setup_profile(job_id, record.setup_profile, analysis, result)
+                profile = await _setup_with_input_metadata(db, record, job_id, analysis, result)
                 record.setup_profile = profile.model_dump(mode="json")
             except FileNotFoundError:
                 pass
@@ -2626,8 +2657,8 @@ async def execute_autopilot_suite(
     record = await _safe_job_record(db, job_id, user.id)
     if str(job.get("target_kind") or "android") == "web":
         analysis = await service.load_analysis(job_id)
-        setup = _record_setup(record, job_id)
         discovery = _record_discovery(record)
+        setup = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
         bundle = AutopilotIRCompiler().compile_bundle(analysis, discovery, setup)
         requested_ids = set(payload.test_ids)
         requested_buckets = set(payload.buckets)
@@ -2673,11 +2704,16 @@ async def execute_autopilot_suite(
             })
     else:
         await _ensure_local_artifact(db, service, job_id, user)
+        try:
+            analysis_for_setup = await service.load_analysis(job_id)
+        except FileNotFoundError:
+            analysis_for_setup = None
+        discovery = _record_discovery(record)
         result = await AutopilotSuiteService(settings, service).run(
             job_id,
             payload,
-            _record_discovery(record),
-            _record_setup(record, job_id),
+            discovery,
+            await _setup_with_input_metadata(db, record, job_id, analysis_for_setup, discovery),
         )
     if record is not None:
         try:
