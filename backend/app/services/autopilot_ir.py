@@ -30,7 +30,7 @@ from app.schemas.autopilot import (
 _INPUT_REQUEST_METADATA: dict[str, tuple[str, str, str, bool]] = {
     "credential reference": (
         "credential_reference",
-        "Approved credential-set reference",
+        "UAT sign-in credentials",
         "credential",
         True,
     ),
@@ -72,13 +72,28 @@ _INPUT_REQUEST_METADATA: dict[str, tuple[str, str, str, bool]] = {
     ),
 }
 
+# Keep the checkpoint in the same order a person completes an authenticated
+# journey.  Alphabetical ordering put the API/oracle and reset references
+# ahead of the actual sign-in fields, which made the dialog look unrelated to
+# the user's immediate need and caused the credentials step to be missed.
+_INPUT_REQUEST_ORDER = {
+    "credential reference": 10,
+    "test account role": 20,
+    "safe authentication approval": 30,
+    "environment": 40,
+    "synthetic test-data reference": 50,
+    "reset/cleanup reference": 60,
+    "signed-off acceptance criteria reference": 70,
+    "API/oracle reference": 80,
+}
+
 # The checkpoint is a customer-facing workflow, not an implementation error
 # list. Keep the stable compiler field names above, but attach plain-language
 # prompts and safe examples so a user understands what belongs in each field.
 _INPUT_REQUEST_GUIDANCE: dict[str, dict[str, str | bool | None]] = {
     "credential reference": {
-        "question": "Which non-production account should Autopilot use to sign in?",
-        "placeholder": "Enter the UAT user ID/email and password below",
+        "question": "Enter the non-production User ID/email and password for the account Autopilot should use to sign in.",
+        "placeholder": "Enter the UAT User ID/email and password in the fields below",
         "format_hint": "Use a test account only. The two values are encrypted together and never sent to the AI model or written to logs.",
         "credential_bundle": True,
         "input_hint": "username",
@@ -132,7 +147,7 @@ def build_input_requests(
         for field in compiler._missing_setup(test, setup):
             dependents.setdefault(field, []).append(test.id)
     requests: list[AutopilotInputRequest] = []
-    for field in sorted(dependents):
+    for field in sorted(dependents, key=lambda value: (_INPUT_REQUEST_ORDER.get(value, 100), value)):
         metadata = _INPUT_REQUEST_METADATA.get(field)
         if metadata is None:
             key, label, category, sensitive = field.replace(" ", "_"), field.title(), "environment", False
@@ -307,7 +322,17 @@ class AutopilotIRCompiler:
                 missing.append("credential reference")
             if not has_value("account_role"):
                 missing.append("test account role")
-            if not setup or not setup.safe_authentication_approved:
+            # The checkpoint UI records the approval as an input decision. It
+            # is not a secret and therefore does not need a value/reference;
+            # accepting the decision here keeps the compiler and the setup
+            # dialog on the same readiness contract.
+            approval_decision = (getattr(setup, "input_decisions", {}) or {}).get(
+                "safe_authentication_approved"
+            ) if setup is not None else None
+            if not setup or (
+                not setup.safe_authentication_approved
+                and approval_decision not in {"provide", "reuse"}
+            ):
                 missing.append("safe authentication approval")
         if test.requires_test_data:
             if not has_value("test_data_reference", "test_data"):

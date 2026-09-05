@@ -169,11 +169,19 @@ async def apply_submissions(
         request = requests[item.key]
         decision = item.decision
         if decision == "provide":
-            if item.value is None or not item.value.strip():
-                raise AutopilotInputStoreError(f"Enter a value for {request.label}, or choose Skip.")
-            if len(item.value) > 4000:
-                raise AutopilotInputStoreError(f"The value for {request.label} is too long.")
-            if request.credential_bundle and item.value.lstrip().startswith("{"):
+            # Approval is a boolean checkpoint, not a data field.  The UI can
+            # submit the decision without inventing a placeholder value; the
+            # setup profile persists the actual approval flag separately.
+            approval_only = request.category == "approval" and request.key == "safe_authentication_approved"
+            if approval_only:
+                encrypted = None
+                generator_spec = None
+            else:
+                if item.value is None or not item.value.strip():
+                    raise AutopilotInputStoreError(f"Enter a value for {request.label}, or choose Skip.")
+                if len(item.value) > 4000:
+                    raise AutopilotInputStoreError(f"The value for {request.label} is too long.")
+            if not approval_only and request.credential_bundle and item.value.lstrip().startswith("{"):
                 # The UI submits the User ID and password as one encrypted
                 # bundle so neither value is ever returned in a response. Keep
                 # accepting a vault reference string for older API clients.
@@ -187,8 +195,9 @@ async def apply_submissions(
                     raise AutopilotInputStoreError(
                         "Enter both the UAT user ID/email and password before continuing."
                     )
-            encrypted = cipher.encrypt(item.value.encode("utf-8")).decode("ascii")
-            generator_spec = None
+            if not approval_only:
+                encrypted = cipher.encrypt(item.value.encode("utf-8")).decode("ascii")
+                generator_spec = None
         elif decision == "random":
             spec = _validate_generator(request, item.random_spec)
             encrypted = cipher.encrypt(generate_synthetic_value(spec).encode("utf-8")).decode("ascii")

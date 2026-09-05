@@ -1158,12 +1158,21 @@ export default function AutopilotPage() {
         runtime_input_references: setupDraft.runtime_input_references || {},
         input_submissions: Object.entries(inputDrafts).filter(([key, draft]) => {
           const request = checkpointRequestMap.get(key);
+          // Approval is a boolean checkpoint.  It deliberately has no value
+          // field, so keep its decision in the encrypted-input boundary only
+          // as metadata and let the setup flag carry the actual approval.
+          if (request?.category === "approval") return true;
           return draft.decision !== "provide"
             || Boolean(request?.credential_bundle ? draft.username.trim() && draft.password : draft.value.trim());
         }).map(([key, draft]) => ({
           key,
-          decision: draft.decision,
-          ...(draft.decision === "provide" ? {
+          // The setup switch is the source of truth for this non-value
+          // checkpoint; never let a stale draft default accidentally approve
+          // authentication when the switch is off.
+          decision: checkpointRequestMap.get(key)?.category === "approval"
+            ? (setupDraft.safe_authentication_approved ? "provide" : "skip")
+            : draft.decision,
+          ...(draft.decision === "provide" && checkpointRequestMap.get(key)?.category !== "approval" ? {
             value: checkpointRequestMap.get(key)?.credential_bundle
               ? JSON.stringify({ username: draft.username.trim(), password: draft.password })
               : draft.value,
@@ -1208,6 +1217,17 @@ export default function AutopilotPage() {
           { timeout: 20000 },
         );
         applyJob(resumeResponse.data);
+        if (resumeResponse.data.status === "waiting_for_input") {
+          // A concurrent discovery update or a stale browser tab can reveal a
+          // newly required field after the setup PUT succeeds. Keep the
+          // checkpoint visible instead of sending the user back to the main
+          // "Analyze stored APK" action, which otherwise looks like a loop.
+          setSetupOpen(true);
+          setContextNotice(
+            "Autopilot found additional setup inputs. Review the highlighted fields and save again to continue.",
+          );
+          return;
+        }
         if (resumeResponse.data.status === "uploaded" || resumeResponse.data.status === "analyzing") {
           await pollAnalysis(analysis.job_id);
         }
@@ -1404,6 +1424,16 @@ export default function AutopilotPage() {
   const activeCheckpointSaved = activeCheckpointRequest
     ? (setupDraft.saved_inputs || []).find((item) => item.key === activeCheckpointRequest.key)
     : null;
+  const checkpointWaiting = Boolean(analysis && pendingCheckpointRequests.length > 0);
+  const analysisButtonLabel = checkpointWaiting
+    ? "Review required inputs"
+    : busy
+      ? "Inspecting target…"
+      : resumeBusy
+        ? "Resuming Autopilot…"
+        : selectedStoredApk
+          ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}`
+          : "Start analysis";
 
   return <Stack spacing={3}>
     <Box>
@@ -1499,7 +1529,7 @@ export default function AutopilotPage() {
           {contextNotice && <Alert severity="info" sx={{ mt: 1.5 }}>{contextNotice}</Alert>}
           <Alert severity="info" sx={{ mt: 1.5 }}>The selected target and brief guide coverage. Claims stay separate from observed evidence; missing metrics remain pending.</Alert>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
-            <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || !selectedProjectId} onClick={() => void analyze()} variant="contained" size="large" startIcon={busy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{busy ? "Inspecting target…" : selectedStoredApk ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}` : "Start analysis"}</Button>
+            <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || resumeBusy || !selectedProjectId} onClick={checkpointWaiting ? openSetup : () => void analyze()} variant="contained" size="large" startIcon={busy || resumeBusy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{analysisButtonLabel}</Button>
             {analysis && <Button disabled={busy || resumeBusy || !selectedProjectId} onClick={startRerun} variant="outlined" size="large">Rerun this analysis</Button>}
           </Stack>
         </Grid>
@@ -1514,6 +1544,7 @@ export default function AutopilotPage() {
         compact
         onOpenRepository={() => navigate("/test-data/documents")}
       />
+      {resumeBusy && <Alert severity="info" sx={{ mt: 1.5 }}>Inputs saved. Autopilot is resuming this analysis now; Runtime Discovery will start automatically when validation completes.</Alert>}
       {documentAnalysisRunId && <Alert severity="info" sx={{ mt: 1.5 }}>
         Document Intelligence baseline attached. Static document findings guide coverage; runtime pass/fail is established only after execution.
       </Alert>}
@@ -1827,23 +1858,39 @@ export default function AutopilotPage() {
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Needed for: {requestDependentTitles(activeCheckpointRequest, analysis?.tests || []).join(" · ") || "this checkpoint"}</Typography>
             {activeCheckpointRequest.screen_id && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Screen: {activeCheckpointRequest.screen_id}{activeCheckpointRequest.locator ? ` · Control: ${activeCheckpointRequest.locator}` : ""}</Typography>}
             {activeCheckpointSaved?.save_for_reuse && <Alert severity="success" sx={{ mt: 1.25 }}>A saved encrypted value exists for this field. Choose “Reuse saved” to use it without revealing it.</Alert>}
-            <FormControl size="small" fullWidth sx={{ mt: 1.5 }}>
-              <InputLabel>What should Autopilot do?</InputLabel>
-              <Select label="What should Autopilot do?" value={activeCheckpointDraft.decision} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { decision: event.target.value as InputDecision, value: event.target.value === "provide" ? activeCheckpointDraft.value : "", username: event.target.value === "provide" ? activeCheckpointDraft.username : "", password: event.target.value === "provide" ? activeCheckpointDraft.password : "" })}>
-                <MenuItem value="provide">Enter this value</MenuItem>
-                <MenuItem value="skip">Skip this case input</MenuItem>
-                <MenuItem value="reuse" disabled={!activeCheckpointSaved?.save_for_reuse}>Reuse saved encrypted value</MenuItem>
-                {activeCheckpointRequest.category === "test_data" && !activeCheckpointRequest.sensitive && <MenuItem value="random">Generate safe random data</MenuItem>}
-              </Select>
-            </FormControl>
-            {activeCheckpointDraft.decision === "provide" && activeCheckpointRequest.credential_bundle ? <Grid container spacing={1.25} sx={{ mt: .5 }}>
-              <Grid item xs={12} md={6}><TextField fullWidth size="small" label="User ID / email" placeholder="qa.investor@example.test" value={activeCheckpointDraft.username} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { username: event.target.value })} autoComplete="off" helperText="Use the non-production account ID or email." /></Grid>
-              <Grid item xs={12} md={6}><TextField fullWidth size="small" type="password" label="Password" placeholder="Password for this UAT account" value={activeCheckpointDraft.password} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { password: event.target.value })} autoComplete="new-password" helperText="Encrypted immediately; never echoed or sent to the model." /></Grid>
-              <Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save this sign-in securely for this target" /></Grid>
-            </Grid> : activeCheckpointDraft.decision === "provide" && <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1 }}><TextField fullWidth size="small" type={activeCheckpointRequest.input_hint === "password" || activeCheckpointRequest.input_hint === "otp" ? "password" : "text"} label={activeCheckpointRequest.input_hint === "password" ? "Password" : activeCheckpointRequest.input_hint === "otp" ? "One-time code" : activeCheckpointRequest.input_hint === "username" ? "User ID / email" : "Value or reference"} placeholder={activeCheckpointRequest.placeholder || undefined} value={activeCheckpointDraft.value} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { value: event.target.value })} autoComplete="off" helperText={activeCheckpointRequest.format_hint || "Use synthetic/non-production data only."} /><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save encrypted" /></Stack>}
+            {activeCheckpointRequest.category === "approval" ? <Alert severity="info" sx={{ mt: 1.5 }}>
+              <Typography variant="body2" fontWeight={700}>Authentication permission</Typography>
+              <Typography variant="body2" sx={{ mt: .25 }}>Allow Autopilot to sign in to the approved non-production environment. Payments, OTP submission and destructive actions remain blocked.</Typography>
+              <FormControlLabel
+                control={<Switch checked={setupDraft.safe_authentication_approved && activeCheckpointDraft.decision !== "skip"} onChange={(event) => {
+                  const approved = event.target.checked;
+                  updateSetup("safe_authentication_approved", approved);
+                  updateInputDraft(activeCheckpointRequest.key, { decision: approved ? "provide" : "skip", value: "" });
+                }} />}
+                label="Approve safe sign-in for this run"
+              />
+            </Alert> : <>
+              <FormControl size="small" fullWidth sx={{ mt: 1.5 }}>
+                <InputLabel>What should Autopilot do?</InputLabel>
+                <Select label="What should Autopilot do?" value={activeCheckpointDraft.decision} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { decision: event.target.value as InputDecision, value: event.target.value === "provide" ? activeCheckpointDraft.value : "", username: event.target.value === "provide" ? activeCheckpointDraft.username : "", password: event.target.value === "provide" ? activeCheckpointDraft.password : "" })}>
+                  <MenuItem value="provide">Enter this value</MenuItem>
+                  <MenuItem value="skip">Skip this case input</MenuItem>
+                  <MenuItem value="reuse" disabled={!activeCheckpointSaved?.save_for_reuse}>Reuse saved encrypted value</MenuItem>
+                  {activeCheckpointRequest.category === "test_data" && !activeCheckpointRequest.sensitive && <MenuItem value="random">Generate safe random data</MenuItem>}
+                </Select>
+              </FormControl>
+              {activeCheckpointDraft.decision === "provide" && activeCheckpointRequest.credential_bundle ? <>
+                <Alert severity="info" sx={{ mt: 1.25 }}>Authentication details: enter the non-production User ID/email and password for the account described above. These values are encrypted immediately and are never added to the context or logs.</Alert>
+                <Grid container spacing={1.25} sx={{ mt: .5 }}>
+                  <Grid item xs={12} md={6}><TextField fullWidth size="small" label="User ID / email" placeholder="qa.investor@example.test" value={activeCheckpointDraft.username} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { username: event.target.value })} autoComplete="off" helperText="Use the non-production account ID or email." /></Grid>
+                  <Grid item xs={12} md={6}><TextField fullWidth size="small" type="password" label="Password" placeholder="Password for this UAT account" value={activeCheckpointDraft.password} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { password: event.target.value })} autoComplete="new-password" helperText="Encrypted immediately; never echoed or sent to the model." /></Grid>
+                  <Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save this sign-in securely for this target" /></Grid>
+                </Grid>
+              </> : activeCheckpointDraft.decision === "provide" && <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1 }}><TextField fullWidth size="small" type={activeCheckpointRequest.input_hint === "password" || activeCheckpointRequest.input_hint === "otp" ? "password" : "text"} label={activeCheckpointRequest.input_hint === "password" ? "Password" : activeCheckpointRequest.input_hint === "otp" ? "One-time code" : activeCheckpointRequest.input_hint === "username" ? "User ID / email" : "Value or reference"} placeholder={activeCheckpointRequest.placeholder || undefined} value={activeCheckpointDraft.value} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { value: event.target.value })} autoComplete="off" helperText={activeCheckpointRequest.format_hint || "Use synthetic/non-production data only."} /><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save encrypted" /></Stack>}
+            </>}
             {activeCheckpointDraft.decision === "random" && <Grid container spacing={1} sx={{ mt: .25 }}><Grid item xs={12} sm={4}><FormControl fullWidth size="small"><InputLabel>Generator</InputLabel><Select label="Generator" value={activeCheckpointDraft.random_spec.kind} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, kind: event.target.value as RandomSpec["kind"] } })}>{["text", "digits", "number", "amount", "email", "phone", "date"].map((kind) => <MenuItem key={kind} value={kind}>{kind}</MenuItem>)}</Select></FormControl></Grid><Grid item xs={6} sm={2}><TextField fullWidth size="small" type="number" label="Length" value={activeCheckpointDraft.random_spec.length} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, length: Math.max(1, Number(event.target.value) || 1) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Minimum" value={activeCheckpointDraft.random_spec.minimum ?? ""} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, minimum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Maximum" value={activeCheckpointDraft.random_spec.maximum ?? ""} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, maximum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save generated value encrypted" /><Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>Generated data is bounded synthetic input; it never uses production data.</Typography></Grid></Grid>}
-            {activeCheckpointDraft.decision !== "skip" && activeCheckpointDraft.decision !== "reuse" && <Button size="small" sx={{ mt: .75 }} onClick={() => updateInputDraft(activeCheckpointRequest.key, { decision: "skip", value: "", username: "", password: "", save_for_reuse: false })}>Skip this input</Button>}
-            {activeCheckpointDraft.decision === "skip" && <Button size="small" sx={{ mt: .75 }} onClick={() => updateInputDraft(activeCheckpointRequest.key, { decision: activeCheckpointSaved?.save_for_reuse ? "reuse" : "provide" })}>Undo skip</Button>}
+            {activeCheckpointRequest.category !== "approval" && activeCheckpointDraft.decision !== "skip" && activeCheckpointDraft.decision !== "reuse" && <Button size="small" sx={{ mt: .75 }} onClick={() => updateInputDraft(activeCheckpointRequest.key, { decision: "skip", value: "", username: "", password: "", save_for_reuse: false })}>Skip this input</Button>}
+            {activeCheckpointRequest.category !== "approval" && activeCheckpointDraft.decision === "skip" && <Button size="small" sx={{ mt: .75 }} onClick={() => updateInputDraft(activeCheckpointRequest.key, { decision: activeCheckpointSaved?.save_for_reuse ? "reuse" : "provide" })}>Undo skip</Button>}
           </Box>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.25 }}>
             <Button size="small" variant="outlined" disabled={activeCheckpointIndex === 0} onClick={() => setCheckpointStep((current) => Math.max(0, current - 1))}>Previous input</Button>

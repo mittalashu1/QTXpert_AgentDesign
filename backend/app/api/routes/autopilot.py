@@ -178,6 +178,57 @@ def _queue_repository_materialization(
     )
 
 
+async def _prepare_resume_target(
+    settings: Settings,
+    job_id: str,
+    owner_id: UUID,
+) -> str:
+    """Ensure a mobile source is present before a background resume.
+
+    The HTTP request and its BackgroundTask can observe different lifecycle
+    points around a Render restart.  Materializing here makes resume safe even
+    when the request could read a durable analysis but the worker cannot see
+    the disposable APK path.
+    """
+    service = _service(settings)
+    async with AsyncSessionLocal() as db:
+        user = await db.scalar(select(User).where(User.id == owner_id))
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot owner was not found")
+        job = await _require_owned_job(service, job_id, user)
+        target_kind = str(job.get("target_kind") or "android")
+        if target_kind != "web":
+            await _ensure_local_artifact(db, service, job_id, user)
+        return target_kind
+
+
+async def _resume_analysis_background(
+    settings: Settings,
+    job_id: str,
+    owner_id: UUID,
+) -> None:
+    """Resume a checkpoint after preparing any repository-backed artifact."""
+    service = _service(settings)
+    try:
+        await _prepare_resume_target(settings, job_id, owner_id)
+        await service.resume_analysis(job_id)
+    except Exception as exc:  # pragma: no cover - provider/storage specific
+        logger.exception("Autopilot background resume failed job_id=%s", job_id)
+        try:
+            await service.update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                progress=100,
+                error=(
+                    "Autopilot could not resume the saved checkpoint. "
+                    f"{type(exc).__name__}: {str(exc)[:700]}"
+                ),
+            )
+        except Exception:
+            logger.exception("Autopilot background resume failure could not be recorded job_id=%s", job_id)
+
+
 def _effective_context(
     value: Optional[str],
     profile_id: str = "uae_fintech",
@@ -688,7 +739,16 @@ async def _ensure_local_artifact(
         return Path(path_value)
 
     record = await _safe_job_record(db, job_id, owner_id)
+    # The local manifest is deliberately the first durable fallback after a
+    # Render restart.  Older rows can have the repository link in that
+    # manifest even when the ORM row is briefly unavailable or was written by
+    # an earlier deployment, so accept either source after ownership has been
+    # verified by ``_require_owned_job`` above.
     asset_id = record.repository_asset_id if record is not None else None
+    if asset_id is None:
+        raw_asset_id = job.get("repository_asset_id")
+        if raw_asset_id and _is_uuid(raw_asset_id):
+            asset_id = UUID(str(raw_asset_id))
     if asset_id is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -829,7 +889,8 @@ def _setup_profile(
         "navigation_notes",
     )
     provided = [name for name in reference_fields if str(raw.get(name) or "").strip()]
-    if raw.get("safe_authentication_approved"):
+    approval_decision = (raw.get("input_decisions") or {}).get("safe_authentication_approved")
+    if raw.get("safe_authentication_approved") or approval_decision in {"provide", "reuse"}:
         provided.append("safe_authentication_approved")
     if raw.get("approved_test_ids"):
         provided.append("approved_test_ids")
@@ -954,6 +1015,7 @@ async def _resume_and_discover_background(
     """
     service = _service(settings)
     try:
+        await _prepare_resume_target(settings, job_id, owner_id)
         await service.resume_analysis(job_id)
         current = await service.get_job_status(job_id)
         if current.status != "analyzed":
@@ -2337,6 +2399,14 @@ async def update_autopilot_setup(
     prior_decisions = dict(current_profile.input_decisions or {})
     prior_decisions.update(decisions)
     stored["input_decisions"] = prior_decisions
+    # Safe authentication is an explicit boolean checkpoint.  Older clients
+    # represented it only as an input decision, so normalize both shapes to
+    # the same durable flag before compiling/resuming the analysis.
+    approval_decision = prior_decisions.get("safe_authentication_approved")
+    if approval_decision in {"provide", "reuse"}:
+        stored["safe_authentication_approved"] = True
+    elif approval_decision == "skip":
+        stored["safe_authentication_approved"] = False
     stored["saved_inputs"] = [item.model_dump(mode="json") for item in saved_inputs]
     stored["skipped_input_keys"] = sorted(key for key, value in prior_decisions.items() if value == "skip")
     stored["random_input_keys"] = sorted(key for key, value in prior_decisions.items() if value == "random")
@@ -2383,7 +2453,13 @@ async def resume_autopilot_checkpoint(
         # uploaded APK remains durable in the repository. Rehydrate the
         # artifact and restart the bounded analysis instead of turning a safe
         # checkpoint confirmation into a failed run.
-        if record is not None and record.repository_asset_id is not None and str((await service.load_job(job_id)).get("target_kind") or "android") != "web":
+        recovered_job = await service.load_job(job_id)
+        recovered_asset_id = record.repository_asset_id if record is not None else None
+        if recovered_asset_id is None:
+            raw_asset_id = recovered_job.get("repository_asset_id")
+            if raw_asset_id and _is_uuid(raw_asset_id):
+                recovered_asset_id = UUID(str(raw_asset_id))
+        if recovered_asset_id is not None and str(recovered_job.get("target_kind") or "android") != "web":
             await _ensure_local_artifact(db, service, job_id, user)
             await service.update_job(
                 job_id,
@@ -2433,7 +2509,12 @@ async def resume_autopilot_checkpoint(
             payload,
         )
     else:
-        background_tasks.add_task(service.resume_analysis, job_id)
+        background_tasks.add_task(
+            _resume_analysis_background,
+            settings,
+            job_id,
+            user.id,
+        )
     return await service.get_job_status(job_id)
 
 

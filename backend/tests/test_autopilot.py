@@ -642,6 +642,36 @@ async def test_analysis_pauses_for_inputs_and_resumes_after_references(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_resume_rebuilds_missing_snapshot_from_available_source(tmp_path, monkeypatch):
+    """A disposable Render filesystem must not turn a saved checkpoint into a loop."""
+    service = _service(tmp_path)
+    job_id, apk_path = await service.save_upload("investnation.apk", b"x" * 2048, "owner")
+    rebuilt = AutopilotAnalysis(
+        job_id=job_id,
+        filename="investnation.apk",
+        sha256="b" * 64,
+        app_name="Investnation",
+    )
+    calls = 0
+
+    async def rebuild(_job_id):
+        nonlocal calls
+        calls += 1
+        return rebuilt
+
+    monkeypatch.setattr(service, "analyze", rebuild)
+    assert not service._metadata_path(job_id).exists()
+    assert apk_path.exists()
+
+    await service.resume_analysis(job_id)
+    resumed = await service.get_job_status(job_id)
+
+    assert calls == 1
+    assert resumed.status == "analyzed"
+    assert resumed.analysis is not None
+
+
+@pytest.mark.asyncio
 async def test_large_upload_stream_is_written_incrementally(tmp_path):
     service = _service(tmp_path)
 

@@ -310,6 +310,11 @@ def test_input_checkpoint_groups_dependencies_by_safe_reference():
 
     requests = build_input_requests(analysis)
 
+    # Sign-in is the first actionable checkpoint.  References such as an API
+    # oracle or reset hook come later, after the user has been shown the
+    # concrete User ID/password requirement.
+    assert requests[0].key == "credential_reference"
+
     by_key = {request.key: request for request in requests}
     assert set(by_key) == {
         "credential_reference",
@@ -325,4 +330,32 @@ def test_input_checkpoint_groups_dependencies_by_safe_reference():
     assert "user id" in (by_key["credential_reference"].placeholder or "").lower()
     assert set(by_key["credential_reference"].required_for) == {"QT-AI-AUTH", "QT-AI-UAT"}
     assert all(request.status == "pending" for request in requests)
+
+
+def test_safe_authentication_input_decision_counts_as_approval():
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AI-010",
+            suite="Functional",
+            title="Authenticate customer",
+            priority="high",
+            objective="Validate a non-production sign-in",
+            steps=["Open Help", "Verify Support"],
+            expected=["Support is visible"],
+            requires_auth=True,
+        )
+    ])
+    setup = AutopilotSetupProfile(
+        job_id=analysis.job_id,
+        credential_reference="qtxpert://credentials/uat",
+        account_role="Retail investor",
+        safe_authentication_approved=False,
+        input_decisions={"safe_authentication_approved": "provide"},
+        provided_fields=["credential_reference", "account_role"],
+    )
+
+    bundle = AutopilotIRCompiler().compile_bundle(analysis, _discovery(), setup)
+
+    assert bundle.tests[0].readiness == "executable"
+    assert "safe authentication approval" not in bundle.setup_missing_fields
 

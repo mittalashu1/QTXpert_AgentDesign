@@ -1211,6 +1211,31 @@ class AutopilotPrototypeService:
             if acquired:
                 _ANALYSIS_SLOT.release()
 
+    async def _load_analysis_for_resume(self, job_id: str) -> AutopilotAnalysis:
+        """Load a checkpoint snapshot, rebuilding it when only the source remains.
+
+        Render's filesystem is disposable.  A job can therefore retain its
+        repository-backed APK/IPA (or URL) while the per-job ``analysis.json``
+        snapshot was lost during an instance replacement.  Treat that as a
+        recoverable checkpoint: the resume worker replays the bounded analysis
+        once, instead of marking the job failed and making the user start over.
+        """
+        try:
+            return await self.load_analysis(job_id)
+        except FileNotFoundError:
+            job = await self.load_job(job_id)
+            target_kind = str(job.get("target_kind") or "android").lower()
+            artifact_path = Path(str(job.get("apk_path") or ""))
+            source_available = target_kind == "web" or artifact_path.is_file()
+            if not source_available:
+                raise
+            logger.warning(
+                "Autopilot analysis snapshot missing; rebuilding from source job_id=%s target_kind=%s",
+                job_id,
+                target_kind,
+            )
+            return await self.analyze(job_id)
+
     async def resume_analysis(self, job_id: str) -> None:
         """Resume a checkpointed analysis after setup references are confirmed.
 
@@ -1224,8 +1249,11 @@ class AutopilotPrototypeService:
         try:
             await asyncio.to_thread(_ANALYSIS_SLOT.acquire)
             acquired = True
+            analysis = await self._load_analysis_for_resume(job_id)
+            # ``analyze`` may have refreshed the manifest while rebuilding a
+            # missing snapshot. Read it again so the latest setup checkpoint is
+            # used for the readiness calculation below.
             job = await self.load_job(job_id)
-            analysis = await self.load_analysis(job_id)
             from app.schemas.autopilot import AutopilotSetupProfile
             from app.services.autopilot_ir import build_input_requests
 
