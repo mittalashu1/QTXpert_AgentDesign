@@ -29,6 +29,10 @@ from app.database.models.document_intelligence import (  # noqa: F401
     DocumentAnalysisRun,
     DocumentFinding,
 )
+from app.database.models.integration import (  # noqa: F401
+    IntegrationConnection,
+    IntegrationUserPreference,
+)
 
 __all__ = [
     "User", "UserRole", "Project", "Requirement", "RequirementSource", "RequirementStatus",
@@ -37,6 +41,7 @@ __all__ = [
     "ExecutionPlan", "ExecutionPlanCase",
     "Defect", "DefectStatus", "LLMUsageEvent", "CostCenterSnapshot", "UploadedAsset", "UploadedAssetChunk", "AutopilotJob", "AutopilotExecution", "AutopilotInputRecord",
     "DocumentAnalysisRun", "DocumentFinding",
+    "IntegrationConnection", "IntegrationUserPreference",
 ]
 
 

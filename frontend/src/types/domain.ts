@@ -14,6 +14,92 @@ export interface User {
   is_active: boolean;
 }
 
+export type IntegrationProvider =
+  | "jira"
+  | "confluence"
+  | "github"
+  | "gitlab"
+  | "azure_devops"
+  | "test_case_repository"
+  | "rest_api"
+  | "database"
+  | "object_storage"
+  | "slack";
+
+export type IntegrationScope = "organization" | "project";
+export type IntegrationStatus =
+  | "not_configured"
+  | "configured"
+  | "ready_for_test"
+  | "needs_reauth"
+  | "error"
+  | "disabled";
+
+export interface IntegrationCatalogItem {
+  key: IntegrationProvider;
+  label: string;
+  category: string;
+  description: string;
+  capabilities: string[];
+  auth_methods: string[];
+  recommended_scope: IntegrationScope;
+  docs_url?: string | null;
+}
+
+export interface IntegrationConnection {
+  id: string;
+  project_id: string | null;
+  provider: IntegrationProvider;
+  name: string;
+  scope: IntegrationScope;
+  status: IntegrationStatus;
+  enabled: boolean;
+  base_url: string | null;
+  external_org: string | null;
+  external_project: string | null;
+  scopes: string[];
+  metadata: Record<string, unknown>;
+  secret_configured: boolean;
+  last_tested_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IntegrationConnectionTestResult {
+  id: string;
+  provider: IntegrationProvider;
+  status: IntegrationStatus;
+  healthy: boolean;
+  external_call_made: boolean;
+  checked_at: string;
+  message: string;
+}
+
+export type IntegrationNotificationMode = "all" | "important" | "none";
+
+export interface IntegrationUserPreferences {
+  id: string;
+  user_id: string;
+  default_provider: IntegrationProvider | null;
+  default_connection_id: string | null;
+  notifications_enabled: boolean;
+  notification_mode: IntegrationNotificationMode;
+  timezone: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IntegrationOverview {
+  workspace_label: string;
+  role: string;
+  can_manage_connections: boolean;
+  connection_count: number;
+  configured_connection_count: number;
+  catalog: IntegrationCatalogItem[];
+  preferences: IntegrationUserPreferences | null;
+}
+
 export interface Project {
   id: string;
   name: string;

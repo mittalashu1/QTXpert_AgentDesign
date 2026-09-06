@@ -23,6 +23,13 @@ import {
   ExecutionTargetKind,
   Defect,
   DefectJiraDraft,
+  IntegrationCatalogItem,
+  IntegrationConnection,
+  IntegrationConnectionTestResult,
+  IntegrationOverview,
+  IntegrationProvider,
+  IntegrationScope,
+  IntegrationUserPreferences,
 } from "@/types/domain";
 
 const activeProjectId = () => localStorage.getItem("qtxpert-selected-project") || undefined;
@@ -306,5 +313,54 @@ export const settingsApi = {
       "/settings/test-provider",
       { provider }
     ),
+  integrationCatalog: () =>
+    apiClient.get<IntegrationCatalogItem[]>("/settings/integrations/catalog"),
+  integrationOverview: () =>
+    apiClient.get<IntegrationOverview>("/settings/overview"),
+  listIntegrations: (projectId?: string) =>
+    apiClient.get<IntegrationConnection[]>("/settings/integrations", {
+      params: projectId ? { project_id: projectId } : undefined,
+    }),
+  createIntegration: (payload: {
+    provider: IntegrationProvider;
+    name: string;
+    scope: IntegrationScope;
+    project_id?: string | null;
+    base_url?: string | null;
+    external_org?: string | null;
+    external_project?: string | null;
+    secret_ref?: string | null;
+    scopes?: string[];
+    metadata?: Record<string, unknown> | null;
+    enabled?: boolean;
+  }) => apiClient.post<IntegrationConnection>("/settings/integrations", payload),
+  updateIntegration: (
+    id: string,
+    payload: Partial<{
+      name: string;
+      project_id: string | null;
+      base_url: string | null;
+      external_org: string | null;
+      external_project: string | null;
+      secret_ref: string | null;
+      scopes: string[];
+      metadata: Record<string, unknown> | null;
+      enabled: boolean;
+    }>,
+  ) => apiClient.patch<IntegrationConnection>(`/settings/integrations/${id}`, payload),
+  deleteIntegration: (id: string) =>
+    apiClient.delete<void>(`/settings/integrations/${id}`),
+  testIntegration: (id: string) =>
+    apiClient.post<IntegrationConnectionTestResult>(`/settings/integrations/${id}/test`),
+  getIntegrationPreferences: () =>
+    apiClient.get<IntegrationUserPreferences | null>("/settings/me/integration-preferences"),
+  updateIntegrationPreferences: (payload: {
+    default_provider?: IntegrationProvider | null;
+    default_connection_id?: string | null;
+    notifications_enabled: boolean;
+    notification_mode: "all" | "important" | "none";
+    timezone: string;
+  }) =>
+    apiClient.put<IntegrationUserPreferences>("/settings/me/integration-preferences", payload),
 };
 

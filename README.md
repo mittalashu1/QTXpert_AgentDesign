@@ -123,6 +123,21 @@ execution results continue to use
 boundary for a future Jira/ADO/Linear adapter and keeps evidence storage in
 the existing project repository.
 
+### Organization integration settings
+
+The Settings page now provides an integration catalogue and a secret-safe
+connection registry for Jira, Confluence, GitHub, GitLab, Azure DevOps,
+customer test-case repositories, REST/GraphQL APIs, read-only databases,
+object storage, and Slack. Connections can be organization- or project-scoped;
+only non-secret metadata and opaque secret-manager references such as
+`vault://...` or `env://...` are accepted. Admins and QA leads can configure,
+validate, and remove their account-scoped connection records, while every user
+can save personal defaults and notification preferences. The validation
+endpoint is intentionally local-only until a provider adapter and explicit
+read/write approval are added. See
+[`docs/ORGANIZATION_INTEGRATIONS.md`](docs/ORGANIZATION_INTEGRATIONS.md) for
+the connector lifecycle, access-control plan, and provider roadmap.
+
 ## Deployment (Render + Neon)
 
 Render runs the frontend and backend web services. Production relational data

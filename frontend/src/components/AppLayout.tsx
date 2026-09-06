@@ -10,6 +10,7 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import StorageOutlinedIcon from "@mui/icons-material/StorageOutlined";
 import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import AccountBalanceWalletOutlinedIcon from "@mui/icons-material/AccountBalanceWalletOutlined";
+import SettingsOutlinedIcon from "@mui/icons-material/SettingsOutlined";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DarkModeOutlinedIcon from "@mui/icons-material/DarkModeOutlined";
@@ -28,6 +29,7 @@ const navigation = [
   { to: "/design", label: "Test design", icon: <ArchitectureOutlinedIcon /> },
   { to: "/execution", label: "Test execution", icon: <PlayCircleOutlineIcon /> },
   { to: "/reports", label: "Test reports", icon: <AssessmentOutlinedIcon /> },
+  { to: "/settings", label: "Settings", icon: <SettingsOutlinedIcon /> },
 ];
 
 export default function AppLayout() {
