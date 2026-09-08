@@ -272,6 +272,48 @@ def test_runtime_input_is_promoted_only_when_encrypted_value_is_available():
     assert "runtime_inputs" in generated.appium_python
 
 
+def test_autonomous_candidate_uses_bounded_synthetic_value_for_non_sensitive_input():
+    address = DiscoveredControl(
+        control_id="address",
+        semantic_label="Address",
+        class_name="android.widget.EditText",
+        resource_id="com.qtxpert.demo:id/address",
+        input_capable=True,
+        input_kind="test_data",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtxpert.demo:id/address", confidence=0.97)],
+    )
+    discovery = _discovery().model_copy(update={
+        "screens": [_discovery().screens[0].model_copy(update={"controls": [address]})],
+        "screen_count": 1,
+        "control_count": 1,
+        "safe_control_count": 0,
+        "blocked_control_count": 0,
+        "transitions": [],
+    })
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AI-SYNTHETIC-INPUT",
+            suite="Functional · Positive",
+            title="Probe address entry",
+            priority="high",
+            objective="Validate a non-sensitive address field",
+            steps=["Enter a valid value into Address", "Verify Address is accepted"],
+            expected=["Address is accepted"],
+            source="deterministic",
+            requires_test_data=True,
+            autonomous_candidate=True,
+            synthetic_data_strategy="valid_field_probe",
+        )
+    ])
+
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+
+    assert generated.readiness == "executable"
+    fill = next(step for step in generated.steps if step.action == "fill")
+    assert fill.value == "12 Example Street, Dubai"
+    assert generated.autonomous_candidate is True
+
+
 def test_blocked_control_cannot_be_promoted_to_tap():
     analysis = _analysis([
         AutopilotTest(

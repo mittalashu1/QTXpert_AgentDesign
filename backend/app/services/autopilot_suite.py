@@ -47,6 +47,7 @@ class AutopilotSuiteService:
         "tap",
         "fill",
         "assert_visible",
+        "assert_validation_feedback",
     }
     # Record only user-journey coverage.  Installation, discovery, security
     # and performance checks keep their lighter screenshot/XML evidence.
@@ -89,7 +90,9 @@ class AutopilotSuiteService:
             for test in bundle.tests
             if (not requested_ids or test.test_id in requested_ids)
             and (not requested_buckets or test.bucket in requested_buckets)
-        ][: request.max_tests]
+        ]
+        selected.sort(key=lambda test: not (test.readiness == "executable" and self._supported(test)))
+        selected = selected[: request.max_tests]
         candidates = [
             test
             for test in selected
@@ -622,7 +625,7 @@ class AutopilotSuiteService:
                     raise AssertionError(f"Resolved control is not visible: {step.target}")
             elif step.action == "fill":
                 input_key = step.input_key
-                value = input_values.get(input_key or "")
+                value = step.value if test.autonomous_candidate else input_values.get(input_key or "")
                 if not input_key or value is None or not str(value).strip():
                     raise AssertionError(
                         f"Encrypted runtime input is unavailable for {step.target or 'the requested field'}"
@@ -640,6 +643,29 @@ class AutopilotSuiteService:
                     # suite result, logs or report.
                     raise AssertionError("Encrypted runtime input could not be entered") from None
                 sensitive_input_touched = sensitive_input_touched or input_key in sensitive_input_keys
+            elif step.action == "assert_validation_feedback":
+                # Validation is deliberately evidence-led.  The runner does
+                # not infer a pass from the fact that a field accepted a
+                # value; it must observe an explicit invalid/error/required
+                # state in the returned hierarchy.  If the product gives no
+                # feedback, record a failed test so the missing affordance is
+                # visible to the user instead of silently blocking the case.
+                source = (safe_page_source(driver) or "").lower()
+                validation_markers = (
+                    'aria-invalid="true"',
+                    "invalid",
+                    "error",
+                    "required",
+                    "warning",
+                    "alert",
+                    "incorrect",
+                    "not valid",
+                    "must ",
+                )
+                if not any(marker in source for marker in validation_markers):
+                    raise AssertionError(
+                        f"No validation feedback was visible after exercising {step.target or 'the field'}"
+                    )
             elif step.action == "capture_evidence":
                 if sensitive_input_touched:
                     # Do not persist a screenshot or hierarchy after a

@@ -310,9 +310,13 @@ class AutopilotWebService:
                     "evidence_dir": str(evidence_dir),
                 }
                 video_requested = self._is_video_case(test)
-                # Safe web execution currently does not submit forms, but keep
-                # the privacy boundary ready for future authenticated steps.
-                sensitive_case = bool(test.requires_auth or any(step.action == "fill" for step in test.steps))
+                # Keep recordings for non-sensitive synthetic probes.  A case
+                # that needs a user-provided value (or authentication) is
+                # still privacy-protected and will not persist a video.
+                sensitive_case = bool(
+                    test.requires_auth
+                    or any(step.action == "fill" and not step.value for step in test.steps)
+                )
                 video_status: str | None = None
                 context = None
                 page = None
@@ -350,6 +354,48 @@ class AutopilotWebService:
                     )
                     status_code = response.status if response is not None else None
                     evidence.update({"status_code": status_code, "url": page.url, "title": (await page.title())[:300]})
+                    for step in test.steps:
+                        if step.action in {"launch_app", "inspect_ui", "capture_evidence"}:
+                            continue
+                        if step.action not in {"tap", "assert_visible", "fill", "assert_validation_feedback"}:
+                            raise AssertionError(f"Website runner cannot validate action: {step.action}")
+                        if step.action == "assert_validation_feedback":
+                            # Look for an explicit validation affordance rather
+                            # than treating a successful DOM interaction as a
+                            # pass.  Missing feedback is a useful, actionable
+                            # failure for the product team.
+                            validation = page.locator(
+                                '[aria-invalid="true"], [role="alert"], .error, .invalid, '
+                                '[data-testid*="error" i], [class*="error" i]'
+                            )
+                            if await validation.count() == 0:
+                                body_text = (await page.locator("body").inner_text()).lower()
+                                markers = ("invalid", "error", "required", "warning", "incorrect", "not valid", "must ")
+                                if not any(marker in body_text for marker in markers):
+                                    raise AssertionError(
+                                        f"No validation feedback was visible after exercising {step.target or 'the field'}"
+                                    )
+                            continue
+                        if step.locator_strategy != "css" or not step.locator_value:
+                            raise AssertionError("A deterministic CSS locator is required for this journey")
+                        element = page.locator(step.locator_value)
+                        if await element.count() != 1:
+                            raise AssertionError(f"Journey control is missing or ambiguous: {step.target}")
+                        if not await element.is_visible():
+                            raise AssertionError(f"Journey control is not visible: {step.target}")
+                        if step.action == "tap":
+                            await element.click(timeout=10000)
+                            if not _same_origin(target_url, page.url):
+                                raise AssertionError("Journey navigated outside the selected website")
+                        elif step.action == "fill":
+                            if step.value is None or not str(step.value).strip():
+                                raise AssertionError(
+                                    f"A non-sensitive synthetic value is unavailable for {step.target or 'the field'}"
+                                )
+                            await element.fill(str(step.value))
+                            # Trigger client-side blur/validation without
+                            # submitting the form or changing server state.
+                            await element.evaluate("el => el.blur()")
                     # Every executed web case gets its own screenshot and HTML
                     # snapshot.  The API replaces these temporary paths with
                     # repository asset IDs before returning the result.

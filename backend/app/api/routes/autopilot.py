@@ -902,7 +902,7 @@ def _setup_profile(
     raw["provided_fields"] = provided
     if analysis is not None:
         normalized_setup = AutopilotSetupProfile.model_validate({**raw, "job_id": job_id})
-        requests = build_input_requests(analysis, normalized_setup)
+        requests = [] if analysis.checkpoint_stage == "ready_for_discovery" and discovery is None else build_input_requests(analysis, normalized_setup)
         decisions = normalized_setup.input_decisions or {}
         normalized_requests = []
         for item in requests:
@@ -1284,6 +1284,12 @@ async def _resume_and_discover_background(
                 result.screen_count,
                 len(result.input_requests),
             )
+            if resume_payload.auto_run_safe_suite and result.screens:
+                await execute_autopilot_suite(
+                    job_id,
+                    AutopilotSuiteRequest(**request.model_dump(exclude={"observe_only", "max_screens", "max_actions"})),
+                    user, settings, db,
+                )
     except Exception as exc:  # pragma: no cover - provider-specific background path
         logger.exception("Autopilot chained resume/discovery failed job_id=%s", job_id)
         try:
@@ -2949,7 +2955,9 @@ async def execute_autopilot_suite(
             item for item in bundle.tests
             if (not requested_ids or item.test_id in requested_ids)
             and (not requested_buckets or item.bucket in requested_buckets)
-        ][: payload.max_tests]
+        ]
+        selected.sort(key=lambda item: not (item.readiness == "executable" and item.steps))
+        selected = selected[: payload.max_tests]
         candidates = [item for item in selected if item.readiness == "executable" and item.steps]
         deferred = [item for item in selected if item not in candidates]
         if not candidates:

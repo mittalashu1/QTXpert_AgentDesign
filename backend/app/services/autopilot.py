@@ -1096,16 +1096,34 @@ class AutopilotPrototypeService:
             )
             await asyncio.wait_for(self.analyze(job_id), timeout=self.settings.AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS)
             analysis = await self.load_analysis(job_id)
-            # The first pass deliberately stops at a durable checkpoint when
-            # any generated case needs credentials, seeded data, acceptance
-            # criteria or an API oracle.  This prevents an apparently complete
-            # report from being produced without the customer's approval.
-            if any(
+            has_deferred_cases = any(
                 test.requires_auth
                 or test.requires_test_data
                 or test.bucket in {"uat", "integration", "sit"}
                 for test in analysis.tests
-            ):
+            )
+            has_safe_first_pass = any(
+                not test.requires_auth
+                and not test.requires_test_data
+                and not test.destructive
+                and test.bucket not in {"uat", "integration", "sit"}
+                for test in analysis.tests
+            )
+            if has_deferred_cases and has_safe_first_pass:
+                ready = analysis.model_copy(update={"checkpoint_stage": "ready_for_discovery", "input_requests": []})
+                await asyncio.to_thread(self._metadata_path(job_id).write_text, ready.model_dump_json(indent=2), "utf-8")
+                await self.update_job(
+                    job_id, status="analyzed", stage="ready_for_discovery", progress=100,
+                    checkpoint_stage="ready_for_discovery", input_requests=[],
+                    checkpoint_message="Ready to explore the app. Additional inputs will be identified from observed screens.",
+                    analysis=ready.model_dump(mode="json"),
+                )
+                return
+            # The first pass deliberately stops at a durable checkpoint when
+            # any generated case needs credentials, seeded data, acceptance
+            # criteria or an API oracle.  This prevents an apparently complete
+            # report from being produced without the customer's approval.
+            if has_deferred_cases:
                 from app.schemas.autopilot import AutopilotSetupProfile
                 from app.services.autopilot_ir import build_input_requests
 
@@ -2033,7 +2051,7 @@ class AutopilotPrototypeService:
     def _runtime_screen_label(screen: DiscoveredScreen, index: int) -> str:
         value = screen.title or screen.activity_name or screen.url or screen.screen_id or f"screen {index}"
         value = re.sub(r"\s+", " ", str(value)).strip()
-        return value[:100] or f"screen {index}"
+        return f"{value[:80]} · {screen.screen_id}" or f"screen {index}"
 
     @classmethod
     def expand_discovered_coverage(
@@ -2057,6 +2075,19 @@ class AutopilotPrototypeService:
 
         screens = list(discovery.screens[:40])
         screen_map = {screen.screen_id: screen for screen in screens}
+        # Replay observed navigation from the launch screen for every case.
+        # A label on a later screen is not reachable merely by launching again.
+        paths: dict[str, list[str]] = {screens[0].screen_id: []}
+        pending = [screens[0].screen_id]
+        while pending:
+            source_id = pending.pop(0)
+            for transition in discovery.transitions:
+                if transition.from_screen_id != source_id or transition.action != "tap" or transition.to_screen_id not in screen_map or transition.to_screen_id in paths:
+                    continue
+                control = next((item for item in screen_map[source_id].controls if item.control_id == transition.control_id and item.risk == "safe" and not item.input_capable), None)
+                if control and control.semantic_label:
+                    paths[transition.to_screen_id] = [*paths[source_id], f"Tap {control.semantic_label}"]
+                    pending.append(transition.to_screen_id)
         queues: dict[str, list[AutopilotTest]] = {
             "page": [],
             "functional_positive": [],
@@ -2072,9 +2103,10 @@ class AutopilotPrototypeService:
 
         for screen_index, screen in enumerate(screens, start=1):
             screen_label = cls._runtime_screen_label(screen, screen_index)
-            controls = [control for control in screen.controls if control.enabled and control.locators]
+            controls = [control for control in screen.controls if control.enabled and control.locators and not control.resource_id.startswith("android:id/")]
             anchor = next((control for control in controls if control.semantic_label), None)
             anchor_label = anchor.semantic_label if anchor else None
+            navigation = ["Launch application", *paths.get(screen.screen_id, [])]
 
             if anchor_label:
                 queues["page"].append(
@@ -2085,7 +2117,7 @@ class AutopilotPrototypeService:
                         title=f"Page-level: render and inspect {screen_label}",
                         priority="high",
                         objective="Verify the observed screen renders and exposes at least one deterministic interactive or semantic control.",
-                        steps=["Launch application", f"Verify {anchor_label}"],
+                        steps=[*navigation, f"Verify {anchor_label}"],
                         expected=[f"{anchor_label} is visible on {screen_label}"],
                         evidence_required=["screen screenshot", "UI hierarchy"],
                     )
@@ -2098,7 +2130,7 @@ class AutopilotPrototypeService:
                         title=f"UI positive: readable {anchor_label} on {screen_label}",
                         priority="medium",
                         objective="Check an observed screen's primary control for stable visibility, readable semantics and safe interaction readiness.",
-                        steps=["Launch application", f"Verify {anchor_label}"],
+                        steps=[*navigation, f"Verify {anchor_label}"],
                         expected=[f"{anchor_label} is visible, labelled and usable on {screen_label}"],
                         evidence_required=["screen screenshot", "UI hierarchy"],
                     )
@@ -2111,14 +2143,13 @@ class AutopilotPrototypeService:
                     id=cls._runtime_case_id("UAT-POS", screen.screen_id),
                     suite="UAT · Positive",
                     bucket="uat",
-                    title=f"UAT positive: approved journey reaches {screen_label}",
+                    title=f"UAT candidate: navigation reaches {screen_label}",
                     priority="high",
-                    objective="Validate the approved business journey reaches this observed screen with the expected customer outcome.",
-                    steps=["Authenticate as the approved UAT role", f"Navigate to {screen_label}", f"Verify {anchor_label or screen_label}"],
-                    expected=[f"The approved acceptance criteria for {screen_label} are satisfied"],
-                    requires_auth=True,
-                    requires_test_data=True,
-                    dependency="Signed-off acceptance criteria, approved non-production credentials, synthetic data, environment and cleanup are required.",
+                    objective="Replay the observed navigation journey and verify its destination. Business acceptance remains subject to approved criteria.",
+                    steps=[*navigation, f"Verify {anchor_label or screen_label}"] if screen.screen_id in paths else [f"Navigate to {screen_label}"],
+                    expected=[f"The observed destination control {anchor_label or screen_label} is visible"],
+                    autonomous_candidate=bool(anchor_label and screen.screen_id in paths),
+                    dependency=None if screen.screen_id in paths else "A replayable navigation path to this screen is required.",
                     evidence_required=["acceptance trace", "journey screenshot", "business oracle"],
                 )
             )
@@ -2200,7 +2231,7 @@ class AutopilotPrototypeService:
                         title=f"Functional positive: activate {label} on {screen_label}",
                         priority="high",
                         objective="Exercise one observed safe control and verify the resulting evidence-backed state.",
-                        steps=["Launch application", f"Tap {label}", f"Verify {assertion_label}"],
+                        steps=[*navigation, f"Tap {label}", f"Verify {assertion_label}"],
                         expected=[f"Activating {label} reaches a stable state with {assertion_label} visible"],
                         evidence_required=["before/after screenshots", "UI hierarchy"],
                     )
@@ -2213,7 +2244,7 @@ class AutopilotPrototypeService:
                         title=f"Accessibility: semantic name for {label} on {screen_label}",
                         priority="medium",
                         objective="Verify that the observed safe control has a deterministic accessible name and can be located safely.",
-                        steps=["Launch application", f"Verify {label}"],
+                        steps=[*navigation, f"Verify {label}"],
                         expected=[f"{label} has an accessible name and stable locator"],
                         evidence_required=["UI hierarchy", "locator evidence"],
                     )
@@ -2222,6 +2253,15 @@ class AutopilotPrototypeService:
             input_controls = [control for control in controls if control.input_capable][:4]
             for control in input_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "input field"
+                input_is_sensitive = control.input_kind == "credential"
+                input_is_reachable = screen.screen_id in paths
+                input_candidate = input_is_reachable and not input_is_sensitive
+                input_navigation = [*navigation]
+                input_dependency = (
+                    None
+                    if input_candidate
+                    else "A field value and replayable navigation path are required; credentials and OTPs are always user-supplied."
+                )
                 queues["functional_positive"].append(
                     AutopilotTest(
                         id=cls._runtime_case_id("FUNC-INPUT-POS", screen.screen_id, control.control_id),
@@ -2230,10 +2270,12 @@ class AutopilotPrototypeService:
                         title=f"Functional positive: accept valid {label} on {screen_label}",
                         priority="high",
                         objective="Verify an observed input accepts an approved synthetic value and advances the safe journey.",
-                        steps=["Launch application", f"Enter a valid value into {label}", f"Verify {label} is accepted"],
+                        steps=[*input_navigation, f"Enter a valid value into {label}", f"Verify {label} is accepted"],
                         expected=[f"A valid synthetic value is accepted for {label} without an invalid state"],
                         requires_test_data=True,
-                        dependency="A field-appropriate synthetic value, environment and reset/cleanup reference are required.",
+                        autonomous_candidate=input_candidate,
+                        synthetic_data_strategy="valid_field_probe" if input_candidate else None,
+                        dependency=input_dependency,
                         evidence_required=["input-state screenshot", "validation evidence", "cleanup result"],
                     )
                 )
@@ -2245,10 +2287,12 @@ class AutopilotPrototypeService:
                         title=f"Functional negative: reject invalid {label} on {screen_label}",
                         priority="high",
                         objective="Verify invalid, empty and boundary values for an observed input are rejected safely.",
-                        steps=["Launch application", f"Enter an invalid value into {label}", "Verify validation feedback"],
+                        steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
                         expected=[f"Invalid input for {label} is rejected with specific feedback and no state corruption"],
                         requires_test_data=True,
-                        dependency="Approved invalid fixtures, acceptance criteria, oracle access and reset capability are required.",
+                        autonomous_candidate=input_candidate,
+                        synthetic_data_strategy="invalid_field_probe" if input_candidate else None,
+                        dependency=input_dependency or "An approved invalid fixture and reset/cleanup reference are required.",
                         evidence_required=["validation screenshot", "error/oracle evidence", "cleanup result"],
                     )
                 )
@@ -2260,13 +2304,33 @@ class AutopilotPrototypeService:
                         title=f"UI negative: error state for {label} on {screen_label}",
                         priority="medium",
                         objective="Check that the observed field's invalid and empty states remain readable and accessible.",
-                        steps=["Launch application", f"Enter an invalid value into {label}", "Verify validation feedback"],
+                        steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
                         expected=[f"The {label} error state is visible, understandable and does not obscure primary controls"],
                         requires_test_data=True,
-                        dependency="Approved invalid fixture and visual baseline are required.",
+                        autonomous_candidate=input_candidate,
+                        synthetic_data_strategy="invalid_field_probe" if input_candidate else None,
+                        dependency=input_dependency or "An approved invalid fixture and visual baseline are required.",
                         evidence_required=["error-state screenshot", "UI hierarchy"],
                     )
                 )
+                if input_candidate:
+                    queues["uat_negative"].append(
+                        AutopilotTest(
+                            id=cls._runtime_case_id("UAT-NEG-INPUT", screen.screen_id, control.control_id),
+                            suite="UAT · Negative",
+                            bucket="uat",
+                            title=f"UAT negative: validate {label} on {screen_label}",
+                            priority="high",
+                            objective="Probe an observed field with a bounded invalid value and expose the product's recovery guidance for UAT review.",
+                            steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
+                            expected=[f"The {label} journey rejects invalid input with clear, recoverable feedback"],
+                            requires_test_data=True,
+                            autonomous_candidate=True,
+                            synthetic_data_strategy="invalid_field_probe",
+                            dependency=None,
+                            evidence_required=["validation screenshot", "UI hierarchy", "acceptance trace"],
+                        )
+                    )
 
         # Round-robin category queues keep the first bounded page balanced;
         # otherwise a large number of observed controls could crowd UAT/SIT

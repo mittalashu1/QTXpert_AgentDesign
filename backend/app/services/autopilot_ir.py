@@ -326,6 +326,8 @@ class AutopilotIRCompiler:
             bucket=test.bucket,
             requires_auth=test.requires_auth,
             requires_test_data=test.requires_test_data,
+            autonomous_candidate=test.autonomous_candidate,
+            synthetic_data_strategy=test.synthetic_data_strategy,
             dependency=test.dependency,
             promoted_by_discovery=promoted,
             readiness_reason=readiness_reason,
@@ -377,12 +379,16 @@ class AutopilotIRCompiler:
                 and approval_decision not in {"provide", "reuse"}
             ):
                 missing.append("safe authentication approval")
-        if test.requires_test_data:
+        # Evidence-scoped first-pass cases may use a bounded synthetic value.
+        # They must not be held behind the generic fixture/reset checkpoint;
+        # business journeys still set ``autonomous_candidate`` to False and
+        # retain the strict setup gate.
+        if test.requires_test_data and not test.autonomous_candidate:
             if not has_value("test_data_reference", "test_data"):
                 missing.append("synthetic test-data reference")
             if not has_value("reset_hook_reference"):
                 missing.append("reset/cleanup reference")
-        if test.bucket == "uat" and not has_value("acceptance_criteria_reference"):
+        if test.bucket == "uat" and not test.autonomous_candidate and not has_value("acceptance_criteria_reference"):
             missing.append("signed-off acceptance criteria reference")
         if test.bucket in {"integration", "sit"} and not has_value("api_oracle_reference"):
             missing.append("API/oracle reference")
@@ -465,11 +471,27 @@ class AutopilotIRCompiler:
                 field_type = control.input_kind or "text"
                 input_key = self._runtime_input_key(current.screen_id, control.control_id, field_type)
                 value = (input_values or {}).get(input_key)
+                synthetic = False
                 if value is None or not str(value).strip():
-                    return None, (
-                        f"Input value is not available for {control.semantic_label} ({input_key}). "
-                        "Complete the field-level checkpoint or choose Skip."
-                    )
+                    # A first-pass candidate never fabricates credentials or
+                    # OTPs.  For ordinary fields, however, a deterministic
+                    # type-aware value lets Autopilot probe the form without
+                    # waiting for a user to supply every field up front.
+                    if test.autonomous_candidate:
+                        value = self._synthetic_input_value(
+                            control,
+                            invalid=(
+                                test.bucket in {"functional_negative", "ui_negative"}
+                                or "invalid" in raw_step.lower()
+                                or "negative" in test.title.lower()
+                            ),
+                        )
+                        synthetic = value is not None
+                    if value is None or not str(value).strip():
+                        return None, (
+                            f"Input value is not available for {control.semantic_label} ({input_key}). "
+                            "Complete the field-level checkpoint or choose Skip."
+                        )
                 resolved.append(
                     QTXIRStep(
                         action="fill",
@@ -477,6 +499,11 @@ class AutopilotIRCompiler:
                         target=control.semantic_label,
                         screen_id=current.screen_id,
                         input_key=input_key,
+                        # Synthetic values are safe test fixtures and are
+                        # carried in the IR. User-provided values (especially
+                        # credentials) remain write-only and are resolved by
+                        # the runner from the encrypted input store.
+                        value=str(value) if synthetic else None,
                         locator_strategy=locator.strategy,
                         locator_value=locator.value,
                         locator_confidence=locator.confidence,
@@ -513,7 +540,19 @@ class AutopilotIRCompiler:
 
             assert_match = self._ASSERT_RE.match(step)
             if assert_match:
-                control = self._best_control(current, assert_match.group(1), interaction=False)
+                assertion_phrase = assert_match.group(1)
+                if re.search(r"\b(?:validation|error|invalid|rejection|feedback)\b", assertion_phrase, re.I):
+                    resolved.append(
+                        QTXIRStep(
+                            action="assert_validation_feedback",
+                            description=raw_step,
+                            target=assertion_phrase[:160],
+                            screen_id=current.screen_id,
+                        )
+                    )
+                    assertion_count += 1
+                    continue
+                control = self._best_control(current, assertion_phrase, interaction=False)
                 if control is None:
                     return None, f"No high-confidence visible control matched assertion: {raw_step}"
                 locator = self._best_locator(control, interaction=False)
@@ -549,6 +588,53 @@ class AutopilotIRCompiler:
 
         resolved.append(QTXIRStep(action="capture_evidence", description="Capture evidence after the resolved semantic journey.", screen_id=current.screen_id))
         return resolved, "All runtime interactions and at least one assertion were resolved from the discovered screen graph with safe deterministic locators."
+
+    @staticmethod
+    def _synthetic_input_value(control: DiscoveredControl, *, invalid: bool = False) -> Optional[str]:
+        """Return a deterministic, non-secret value for an observed field.
+
+        The value is intentionally local and generic. Credential and OTP
+        controls return ``None`` so the first pass can never guess a secret or
+        accidentally authenticate as a real user. Invalid variants are useful
+        for checking whether the product exposes a clear validation message.
+        """
+
+        label = " ".join(
+            [
+                control.semantic_label or "",
+                control.text or "",
+                control.content_description or "",
+                control.resource_id.rsplit("/", 1)[-1] if control.resource_id else "",
+                control.input_kind or "",
+            ]
+        ).lower().replace("_", " ").replace("-", " ")
+        if control.input_kind == "credential":
+            return None
+        if any(term in label for term in ("password", "passcode", "secret", "otp", "one time", "mfa", "verification code")):
+            return None
+        if invalid:
+            if any(term in label for term in ("email", "e mail")):
+                return "not-an-email"
+            if any(term in label for term in ("phone", "mobile", "telephone")):
+                return "not-a-phone"
+            if any(term in label for term in ("amount", "number", "quantity", "count", "age")):
+                return "-1"
+            if any(term in label for term in ("date", "dob")):
+                return "not-a-date"
+            return "!invalid!"
+        if any(term in label for term in ("email", "e mail")):
+            return "qtxpert+autopilot@example.test"
+        if any(term in label for term in ("phone", "mobile", "telephone")):
+            return "0500000000"
+        if any(term in label for term in ("amount", "number", "quantity", "count", "age")):
+            return "1"
+        if any(term in label for term in ("date", "dob")):
+            return "2030-01-01"
+        if any(term in label for term in ("address", "street", "city", "country", "postal", "zip")):
+            return "12 Example Street, Dubai"
+        if control.input_kind == "credential":
+            return None
+        return "QTXpert synthetic test"
 
     @staticmethod
     def _runtime_input_key(screen_id: str, control_id: str, field_type: str) -> str:

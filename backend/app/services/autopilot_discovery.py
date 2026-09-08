@@ -41,7 +41,11 @@ _SAFE_NAVIGATION_TERMS = {
     "menu", "more", "settings", "help", "about", "search", "skip", "back", "home",
     "login", "log in", "sign in", "register", "sign up", "forgot password",
     "forgot username", "privacy", "terms", "language", "profile",
+    "explore", "explore as a guest", "learn more", "view details", "dashboard",
 }
+_SAFE_NAVIGATION_PATTERNS = (
+    re.compile(r"^(?:view details|learn more|help|about|privacy|terms)$", re.I),
+)
 _INPUT_CLASSES = {
     "android.widget.EditText",
     "android.widget.AutoCompleteTextView",
@@ -304,7 +308,7 @@ class AutopilotDiscoveryService:
             if term in haystack:
                 return "blocked", f"Blocked business/destructive action matched: {term}"
         normalized = cls._normalize(label)
-        if normalized in _SAFE_NAVIGATION_TERMS:
+        if normalized in _SAFE_NAVIGATION_TERMS or any(pattern.search(normalized) for pattern in _SAFE_NAVIGATION_PATTERNS):
             return "safe", None
         return "review", "Control requires semantic review before autonomous interaction"
 
@@ -337,9 +341,11 @@ class AutopilotDiscoveryService:
         controls: list[DiscoveredControl] = []
         seen: set[str] = set()
         recent_static_labels: list[str] = []
+        class_positions: dict[str, int] = {}
         for index, node in enumerate(root.iter()):
             attrs = {str(k): str(v) for k, v in node.attrib.items()}
             class_name = attrs.get("class", "")
+            class_positions[class_name] = class_positions.get(class_name, 0) + 1
             ios_node = class_name.startswith("XCUIElementType") or "label" in attrs or "identifier" in attrs
             ios_actionable = class_name in {
                 "XCUIElementTypeButton", "XCUIElementTypeCell", "XCUIElementTypeLink",
@@ -378,13 +384,17 @@ class AutopilotDiscoveryService:
             # Do not create a text XPath from a value in an input widget.
             locator_attrs = {**attrs, "text": ""} if input_capable else attrs
             locators = cls._locators(locator_attrs)
+            if input_capable and not locators and re.fullmatch(r"[A-Za-z0-9_.]+", class_name):
+                locators = [DiscoveryLocator(
+                    strategy="xpath", value=f'(//*[@class="{class_name}"])[{class_positions[class_name]}]', confidence=0.95,
+                )]
             if not label and not locators:
                 continue
             signature = "|".join([
                 class_name,
                 attrs.get("resource-id", ""),
                 attrs.get("content-desc", ""),
-                attrs.get("text", ""),
+                "" if input_capable else attrs.get("text", ""),
                 attrs.get("bounds", ""),
             ])
             control_id = hashlib.sha1(signature.encode("utf-8", errors="ignore")).hexdigest()[:16]
@@ -655,6 +665,10 @@ class AutopilotDiscoveryService:
                     f"Initial app screen remained non-interactive after {retries} bounded settle attempt(s); "
                     "the launch state was retained as evidence and no controls were auto-clicked."
                 )
+            elif current is not screens[0]:
+                # The replay root must be the settled app, not its splash.
+                screens.remove(current)
+                screens.insert(0, current)
             if request.observe_only:
                 stop_reason = "Observe-only discovery captured the current screen"
                 return {
@@ -698,8 +712,8 @@ class AutopilotDiscoveryService:
                             time.sleep(0.8)
                         except Exception:
                             pass
-                        stop_reason = "Safe navigation returned to an already-known state"
-                        break
+                        current, _ = capture()
+                        continue
                     current = next_screen
                 except Exception as exc:
                     warnings.append(

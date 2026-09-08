@@ -136,6 +136,13 @@ class AutopilotTest(BaseModel):
     bucket: AutopilotTestBucket = "functional"
     requires_auth: bool = False
     requires_test_data: bool = False
+    # ``autonomous_candidate`` marks an evidence-scoped case that can use a
+    # bounded synthetic value (or an observed read-only assertion) during the
+    # first pass.  It is deliberately separate from ``autonomous``: a case
+    # can be designed for automation while still needing credentials, an
+    # oracle or explicit approval before it is eligible to run.
+    autonomous_candidate: bool = False
+    synthetic_data_strategy: Optional[str] = None
     dependency: Optional[str] = None
     evidence_required: List[str] = Field(default_factory=list)
 
@@ -442,6 +449,10 @@ class AutopilotResumeRequest(BaseModel):
 
     confirm_saved_inputs: bool = True
     run_runtime_discovery: bool = False
+    # When enabled, a successful safe discovery is followed by the bounded
+    # read-only suite automatically.  Payments, OTP, destructive and other
+    # approval-gated cases are never included by this switch.
+    auto_run_safe_suite: bool = True
     # Optional safe-discovery preferences used when the server chains resume
     # directly into discovery. They contain no credentials or field values.
     discovery_provider: Optional[AutopilotProvider] = None
@@ -465,6 +476,7 @@ class QTXIRStep(BaseModel):
         "tap",
         "fill",
         "assert_visible",
+        "assert_validation_feedback",
     ]
     description: str
     target: Optional[str] = None
@@ -490,6 +502,8 @@ class QTXTestIR(BaseModel):
     bucket: AutopilotTestBucket = "functional"
     requires_auth: bool = False
     requires_test_data: bool = False
+    autonomous_candidate: bool = False
+    synthetic_data_strategy: Optional[str] = None
     dependency: Optional[str] = None
     promoted_by_discovery: bool = False
     readiness_reason: Optional[str] = None
@@ -668,6 +682,9 @@ class AutopilotSuiteRequest(AutopilotExecutionRequest):
     # request additional eligible cases in later batches up to that cap.
     max_tests: int = Field(default=20, ge=1, le=100)
     include_deferred: bool = True
+    # This is informational for explicitly triggered runs and is also used by
+    # the checkpoint-resume worker when it chains discovery into execution.
+    auto_run_safe_suite: bool = True
 
 
 class AutopilotSuiteTestResult(BaseModel):

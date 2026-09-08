@@ -39,6 +39,7 @@ type TestCase = {
   objective: string; steps: string[]; expected: string[]; autonomous: boolean;
   destructive: boolean; source: "deterministic" | "ai"; bucket?: TestBucket;
   requires_auth?: boolean; requires_test_data?: boolean; dependency?: string | null;
+  autonomous_candidate?: boolean; synthetic_data_strategy?: string | null;
   evidence_required?: string[];
 };
 type Analysis = {
@@ -122,6 +123,7 @@ type AutomationTest = {
   test_id: string; title: string; suite: string; priority: "critical" | "high" | "medium" | "low";
   readiness: "executable" | "discovery_required" | "approval_required";
   bucket?: TestBucket; requires_auth?: boolean; requires_test_data?: boolean;
+  autonomous_candidate?: boolean; synthetic_data_strategy?: string | null;
   dependency?: string | null; promoted_by_discovery: boolean; readiness_reason?: string | null;
 };
 type AutomationBundle = {
@@ -301,6 +303,7 @@ function normalizedBucket(test: Pick<TestCase, "bucket"> | Pick<AutomationTest, 
 }
 function testModeLabel(test: TestCase) {
   if (test.destructive) return "Approval required";
+  if (test.autonomous_candidate) return "First-pass candidate";
   if (test.requires_auth || test.requires_test_data || test.dependency) return "Setup required";
   return "Autonomous-safe";
 }
@@ -590,6 +593,7 @@ export default function AutopilotPage() {
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [suiteBusy, setSuiteBusy] = useState(false);
   const [discoveryMode, setDiscoveryMode] = useState<"safe" | "observe">("safe");
+  const [autoRunFirstPass, setAutoRunFirstPass] = useState(true);
   const [error, setError] = useState("");
   const [appiumUrl, setAppiumUrl] = useState("");
   const [deviceName, setDeviceName] = useState("Google Pixel 8");
@@ -1132,7 +1136,10 @@ export default function AutopilotPage() {
           try { await mobileAssets.refetch(); } catch { /* keep the analysis result */ }
         }
       }
-      applyJob(response.data); await pollAnalysis(response.data.job_id); await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshReportTabs(selectedProjectId);
+      applyJob(response.data);
+      const completed = await pollAnalysis(response.data.job_id);
+      await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshReportTabs(selectedProjectId);
+      if (autoRunFirstPass && completed.checkpoint_stage === "ready_for_discovery") await runDiscovery(response.data.job_id);
     } catch (err) {
       const duplicate = duplicateReportTabDetails(err);
       if (duplicate && surfaceAction === "ask") {
@@ -1287,6 +1294,7 @@ export default function AutopilotPage() {
             // inputs instead of launching a duplicate discovery run.
             run_runtime_discovery: !discovery,
             discovery_provider: executionPayload().provider,
+            auto_run_safe_suite: autoRunFirstPass,
             discovery_device_name: deviceName,
             discovery_platform_version: platformVersion || null,
             discovery_appium_url: provider === "appium" ? appiumUrl || null : null,
@@ -1350,11 +1358,12 @@ export default function AutopilotPage() {
     [key]: { ...(current[key] || { decision: "provide", value: "", username: "", password: "", save_for_reuse: false, random_spec: { ...DEFAULT_RANDOM_SPEC } }), ...patch },
   }));
 
-  const runDiscovery = async () => {
-    if (!analysis) return;
+  const runDiscovery = async (requestedJobId?: unknown) => {
+    const jobId = typeof requestedJobId === "string" ? requestedJobId : analysis?.job_id;
+    if (!jobId) return;
     setDiscoveryBusy(true); setError("");
     try {
-      const response = await apiClient.post<Discovery>(`/autopilot/${analysis.job_id}/discover`, {
+      const response = await apiClient.post<Discovery>(`/autopilot/${jobId}/discover`, {
         ...executionPayload(),
         observe_only: discoveryMode === "observe",
         // Safe navigation is still bounded, but a normal run should map a
@@ -1366,7 +1375,7 @@ export default function AutopilotPage() {
       }, { timeout: 660000 });
       setDiscovery(response.data);
       try {
-        const nextSetup = (await apiClient.get<SetupProfile>(`/autopilot/${analysis.job_id}/setup`, { timeout: 15000 })).data;
+        const nextSetup = (await apiClient.get<SetupProfile>(`/autopilot/${jobId}/setup`, { timeout: 15000 })).data;
         setSetup(nextSetup);
         setSetupDraft(nextSetup);
         setInputDrafts(buildInputDrafts(nextSetup));
@@ -1374,16 +1383,18 @@ export default function AutopilotPage() {
         const firstPending = nextRequests.findIndex((item) => item.status === "pending");
         if (firstPending >= 0) setCheckpointStep(firstPending);
       } catch { /* discovery evidence remains visible */ }
-      await refreshAutomation(analysis.job_id);
-      await refreshReport(analysis.job_id);
+      await refreshAutomation(jobId);
+      await refreshReport(jobId);
+      if (autoRunFirstPass && discoveryMode === "safe" && response.data.screens.length > 0) await runSuite(jobId);
     } catch (err) { setError(readableError(err, "Runtime discovery failed")); }
     finally { setDiscoveryBusy(false); }
   };
-  const runSuite = async () => {
-    if (!analysis) return;
+  const runSuite = async (requestedJobId?: unknown) => {
+    const jobId = typeof requestedJobId === "string" ? requestedJobId : analysis?.job_id;
+    if (!jobId) return;
     setSuiteBusy(true); setError("");
     try {
-      const response = await apiClient.post<SuiteResult>(`/autopilot/${analysis.job_id}/suite`, {
+      const response = await apiClient.post<SuiteResult>(`/autopilot/${jobId}/suite`, {
         ...executionPayload(),
         max_tests: suiteMaxTests,
         test_ids: [],
@@ -1391,8 +1402,8 @@ export default function AutopilotPage() {
         include_deferred: true,
       }, { timeout: 960000 });
       setSuite(response.data);
-      await refreshSuiteDefects(analysis.job_id);
-      await refreshReport(analysis.job_id);
+      await refreshSuiteDefects(jobId);
+      await refreshReport(jobId);
     } catch (err) { setError(readableError(err, "Autonomous safe-suite execution failed")); }
     finally { setSuiteBusy(false); }
   };
@@ -1849,7 +1860,7 @@ export default function AutopilotPage() {
             <TableBody>
               {visibleTests.map((test) => {
                 const bucket = normalizedBucket(test);
-                const setupRequired = Boolean(test.requires_auth || test.requires_test_data || test.dependency);
+                const setupRequired = Boolean(!test.autonomous_candidate && (test.requires_auth || test.requires_test_data || test.dependency));
                 return <TableRow key={test.id} hover>
                   <TableCell sx={{ minWidth: 320 }}>
                     <Typography fontWeight={700} variant="body2">{test.title}</Typography>
@@ -1880,11 +1891,11 @@ export default function AutopilotPage() {
           <Box>
             <Stack direction="row" spacing={1} alignItems="center"><SmartToyOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Semantic automation & safe execution</Typography></Stack>
             <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>
-              Run only cases with safe deterministic actions. Functional/UAT cases are still shown with their setup dependency;
-              they cannot be reported as passed until credentials, data, locators and assertions are supplied.
+              The first pass explores read-only journeys, uses bounded synthetic values for non-sensitive fields, and records screenshots/video when safe. Credentials, OTPs, transactions and business acceptance remain explicitly gated.
             </Typography>
           </Box>
-          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}>
+            <FormControlLabel sx={{ mr: .5 }} control={<Switch size="small" checked={autoRunFirstPass} onChange={(event) => setAutoRunFirstPass(event.target.checked)} />} label={<Typography variant="caption">Auto-run safe first pass</Typography>} />
             <FormControl size="small" sx={{ minWidth: 170 }}>
               <InputLabel id="suite-bucket-label">Suite bucket</InputLabel>
               <Select labelId="suite-bucket-label" label="Suite bucket" value={suiteBucket} onChange={(event) => setSuiteBucket(event.target.value as "all" | TestBucket)}>
