@@ -1428,6 +1428,7 @@ async def _persist_evidence_asset(
     content_type: str,
     repository_asset_id: Optional[UUID] = None,
     max_bytes: Optional[int] = None,
+    owner_id: Optional[UUID] = None,
 ) -> Optional[UUID]:
     """Copy bounded execution evidence into the durable Upload Repository.
 
@@ -1441,7 +1442,11 @@ async def _persist_evidence_asset(
     # Evidence persistence may roll back on a storage failure. Snapshot the
     # scalar owner id so fallback paths cannot trigger an implicit ORM refresh
     # (which raises MissingGreenlet in async background work).
-    owner_id = user.id
+    # A preceding repository materialization may have rolled back the shared
+    # session and expired the request-scoped User object.  Callers that cross
+    # that boundary pass the immutable owner id captured before the rollback;
+    # ordinary callers can continue to derive it from the User instance.
+    owner_id = owner_id or user.id
     path = Path(path_value)
     if not path.is_file():
         return None
@@ -2798,6 +2803,8 @@ async def _persist_suite_evidence(
     job_record: AutopilotJob,
     settings: Settings,
     result: AutopilotSuiteResult,
+    *,
+    owner_id: Optional[UUID] = None,
 ) -> AutopilotSuiteResult:
     """Make bounded safe-suite screenshots, hierarchies and videos report-downloadable.
 
@@ -2812,6 +2819,7 @@ async def _persist_suite_evidence(
     Deferred cases have no evidence directory and remain untouched.
     """
     repository_asset_id = job_record.repository_asset_id
+    owner_id = owner_id or user.id
     persisted = []
     total_assets = 0
     video_assets = 0
@@ -2883,6 +2891,7 @@ async def _persist_suite_evidence(
                 content_type=content_type,
                 repository_asset_id=repository_asset_id,
                 max_bytes=settings.AUTOPILOT_VIDEO_MAX_BYTES if is_video else None,
+                owner_id=owner_id,
             )
             if asset_id is not None:
                 assets.append({
@@ -2937,7 +2946,10 @@ async def execute_autopilot_suite(
     """Execute only QTX IR cases proven safe and deterministic."""
     service = _service(settings)
     job = await _require_owned_job(service, job_id, user)
-    record = await _safe_job_record(db, job_id, user.id)
+    # Capture the immutable owner id before any repository operation can roll
+    # back the request session and expire the User ORM instance.
+    owner_id = user.id
+    record = await _safe_job_record(db, job_id, owner_id)
     if str(job.get("target_kind") or "android") == "web":
         analysis = await service.load_analysis(job_id)
         discovery = _record_discovery(record)
@@ -3000,7 +3012,7 @@ async def execute_autopilot_suite(
         # above; reload it before reading discovery/setup so async SQLAlchemy
         # does not attempt an implicit IO from a synchronous attribute access
         # (which surfaces as MissingGreenlet in the suite endpoint).
-        record = await _safe_job_record(db, job_id, user.id)
+        record = await _safe_job_record(db, job_id, owner_id)
         try:
             analysis_for_setup = await service.load_analysis(job_id)
         except FileNotFoundError:
@@ -3021,11 +3033,18 @@ async def execute_autopilot_suite(
     # the Autopilot report can offer durable downloads after a Render restart.
     if record is not None:
         try:
-            result = await _persist_suite_evidence(db, user, record, settings, result)
+            result = await _persist_suite_evidence(
+                db,
+                user,
+                record,
+                settings,
+                result,
+                owner_id=owner_id,
+            )
             # Evidence uploads commit their own transactions. Reload the job
             # row before writing the suite snapshot so an expired ORM object
             # cannot raise a MissingGreenlet on the next access.
-            record = await _safe_job_record(db, job_id, user.id)
+            record = await _safe_job_record(db, job_id, owner_id)
         except Exception:
             logger.warning("Autopilot suite evidence persistence skipped job_id=%s", job_id, exc_info=True)
             result = _strip_suite_evidence_paths(result)
