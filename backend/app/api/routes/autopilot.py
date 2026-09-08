@@ -2995,6 +2995,12 @@ async def execute_autopilot_suite(
             })
     else:
         await _ensure_local_artifact(db, service, job_id, user)
+        # Materializing a repository-backed APK may commit/rollback on the
+        # shared session.  That expires ORM attributes on the row fetched
+        # above; reload it before reading discovery/setup so async SQLAlchemy
+        # does not attempt an implicit IO from a synchronous attribute access
+        # (which surfaces as MissingGreenlet in the suite endpoint).
+        record = await _safe_job_record(db, job_id, user.id)
         try:
             analysis_for_setup = await service.load_analysis(job_id)
         except FileNotFoundError:
