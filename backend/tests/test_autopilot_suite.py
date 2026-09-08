@@ -68,6 +68,28 @@ class _RecordingDriver(_Driver):
         return base64.b64encode(b"bounded-video").decode("ascii")
 
 
+class _FlakyLookupDriver(_Driver):
+    def __init__(self):
+        super().__init__()
+        self.lookup_attempts = 0
+
+    def find_element(self, by, value):
+        self.lookup_attempts += 1
+        if self.lookup_attempts < 3:
+            raise RuntimeError("hierarchy is still settling")
+        return super().find_element(by, value)
+
+
+class _ResettableDriver(_Driver):
+    def __init__(self):
+        super().__init__()
+        self.page_source = '<hierarchy package="com.qtx.demo"><node text="Help" /></hierarchy>'
+        self.reset_calls = 0
+
+    def reset(self):
+        self.reset_calls += 1
+
+
 def _test_ir(actions):
     return QTXTestIR(
         test_id="QT-AI-100",
@@ -109,6 +131,28 @@ def test_suite_interpreter_executes_resolved_tap_assert_and_evidence(tmp_path):
     assert evidence["package"] == "com.qtx.demo"
     assert any(path.suffix == ".png" for path in tmp_path.iterdir())
     assert any(path.suffix == ".xml" for path in tmp_path.iterdir())
+
+
+def test_suite_interpreter_retries_a_settling_hierarchy(tmp_path):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _FlakyLookupDriver()
+    test = _test_ir([
+        QTXIRStep(action="tap", description="Open Help", target="Help", locator_strategy="id", locator_value="com.qtx:id/help", locator_confidence=0.97),
+    ])
+
+    evidence = service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    assert evidence["package"] == "com.qtx.demo"
+    assert driver.lookup_attempts == 3
+    assert driver.element.clicked is True
+
+
+def test_suite_reset_to_application_prefers_provider_reset():
+    driver = _ResettableDriver()
+
+    AutopilotSuiteService._reset_to_application(driver, "com.qtx.demo")
+
+    assert driver.reset_calls == 1
 
 
 def test_suite_interpreter_rejects_non_allowlisted_ir_action(tmp_path):
