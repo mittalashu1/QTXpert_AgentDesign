@@ -213,7 +213,7 @@ const workflowStateColor: Record<WorkflowState, "success" | "info" | "default"> 
 };
 
 export default function DashboardPage() {
-  const { selectedProjectId } = useSelectedProject();
+  const { selectedProjectId, selectedProject } = useSelectedProject();
   const [preferences, setPreferences] = useState<DashboardPreferences>(defaultPreferences);
   const [draftPreferences, setDraftPreferences] = useState<DashboardPreferences>(defaultPreferences);
   const [customizeOpen, setCustomizeOpen] = useState(false);
@@ -221,7 +221,10 @@ export default function DashboardPage() {
   const summary = useQuery({
     queryKey: ["dashboard", selectedProjectId],
     queryFn: () => dashboardApi.summary(selectedProjectId).then((response) => response.data),
-    enabled: Boolean(selectedProjectId),
+    // Wait for the project list to confirm the selection. This prevents a
+    // stale localStorage id from producing a 404 that looks like a dashboard
+    // outage while the current account has no matching project.
+    enabled: Boolean(selectedProjectId && selectedProject),
     // Keep the dashboard current while Autopilot is analyzing or waiting for
     // checkpoint input; once it is idle, the explicit refresh button remains
     // the low-cost path for a historical snapshot.
@@ -233,7 +236,7 @@ export default function DashboardPage() {
   const documentReview = useQuery<DocumentAnalysisRun | null>({
     queryKey: ["document-intelligence-latest", selectedProjectId],
     queryFn: () => documentIntelligenceApi.latest(selectedProjectId).then((response) => response.data),
-    enabled: Boolean(selectedProjectId),
+    enabled: Boolean(selectedProjectId && selectedProject),
     refetchInterval: (query) => {
       const status = query.state.data?.status;
       return status && ["queued", "extracting", "analyzing"].includes(status) ? 3000 : false;

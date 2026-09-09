@@ -9,7 +9,7 @@ function storedProjectId() {
 }
 
 export function useSelectedProject() {
-  const { data: projects } = useProjects();
+  const { data: projects, isSuccess: projectsLoaded } = useProjects();
   const [selectedProjectId, setSelectedProjectId] = useState<string>(() => storedProjectId());
 
   useEffect(() => {
@@ -23,13 +23,25 @@ export function useSelectedProject() {
   }, []);
 
   useEffect(() => {
-    if (!projects?.length) return;
+    // A project id can outlive the account/session that created it (for
+    // example after switching domains or signing in as another user). Do not
+    // keep sending that stale id to project-scoped endpoints: the backend
+    // correctly returns 404 for an id the current user cannot access, but the
+    // dashboard would otherwise surface that as a misleading data outage.
+    if (!projectsLoaded || !projects) return;
+    if (!projects.length) {
+      if (!selectedProjectId) return;
+      window.localStorage.removeItem(STORAGE_KEY);
+      setSelectedProjectId("");
+      window.dispatchEvent(new Event(PROJECT_EVENT));
+      return;
+    }
     const currentStillExists = projects.some((project) => project.id === selectedProjectId);
     if (currentStillExists) return;
     const fallback = projects[0].id;
     window.localStorage.setItem(STORAGE_KEY, fallback);
     setSelectedProjectId(fallback);
-  }, [projects, selectedProjectId]);
+  }, [projects, projectsLoaded, selectedProjectId]);
 
   const selectProject = (projectId: string) => {
     if (!projectId || projectId === storedProjectId()) return;
