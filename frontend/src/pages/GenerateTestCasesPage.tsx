@@ -645,15 +645,15 @@ export default function GenerateTestCasesPage() {
     {!isActive && !draftCases.length && run.status !== "failed" && <Alert severity="info">The provider returned no test cases. Edit the inputs and run again.</Alert>}{message && <Alert severity="success" onClose={() => setMessage(null)}>{message}</Alert>}{error && <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>}
   </Stack>);
 
-  return workspace(<Stack spacing={3}>
+  return workspace(<Stack spacing={2}>
     <PageHeader
       eyebrow="TEST DESIGN"
       title="Create a test design"
       description="Bring product context into one reviewable set of test cases."
     />
-    <Card variant="outlined" sx={{ borderRadius: 3 }}>
-      <CardContent sx={{ p: { xs: 2, md: 3 }, "&:last-child": { pb: { xs: 2, md: 3 } } }}>
-        <Stack spacing={2.5}>
+    <Card variant="outlined" sx={{ borderRadius: 2.5 }}>
+      <CardContent sx={{ p: { xs: 1.5, md: 2 }, "&:last-child": { pb: { xs: 1.5, md: 2 } } }}>
+        <Stack spacing={1.5}>
           <Box>
             <Typography variant="overline" color="primary.main" sx={{ fontWeight: 800, letterSpacing: ".12em" }}>01 · SOURCE</Typography>
             <Typography variant="h6" sx={{ mt: 0.25 }}>Choose what to design from</Typography>
@@ -667,7 +667,7 @@ export default function GenerateTestCasesPage() {
                   variant={selectedSource === item.id ? "contained" : "outlined"}
                   startIcon={item.kind === "file" ? <CloudUploadOutlinedIcon /> : <AddOutlinedIcon />}
                   onClick={() => chooseSource(item)}
-                  sx={{ minHeight: 64, justifyContent: "flex-start", textAlign: "left", textTransform: "none", px: 1.5 }}
+                    sx={{ minHeight: 52, justifyContent: "flex-start", textAlign: "left", textTransform: "none", px: 1.25 }}
                 >
                   <Box sx={{ minWidth: 0 }}>
                     <Typography variant="body2" sx={{ fontWeight: 700 }}>{item.label}</Typography>
@@ -686,7 +686,7 @@ export default function GenerateTestCasesPage() {
             onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); fileInputRef.current?.click(); } }}
             onDragOver={(event) => event.preventDefault()}
             onDrop={(event) => { event.preventDefault(); addFiles(Array.from(event.dataTransfer.files)); }}
-            sx={{ border: "1px dashed", borderColor: "primary.main", borderRadius: 2, p: 2, cursor: "pointer", bgcolor: "action.hover", "&:hover": { bgcolor: "action.selected" }, "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: 2 } }}
+            sx={{ border: "1px dashed", borderColor: "primary.main", borderRadius: 2, p: 1.25, cursor: "pointer", bgcolor: "action.hover", "&:hover": { bgcolor: "action.selected" }, "&:focus-visible": { outline: "2px solid", outlineColor: "primary.main", outlineOffset: 2 } }}
           >
             <Typography sx={{ fontWeight: 600 }}>Drop files here or browse</Typography>
             <Typography variant="caption" color="text.secondary">Accepted: {source.accept ?? FILE_EXTENSIONS} · up to {source.id === "app" ? MOBILE_PACKAGE_MAX_UPLOAD_MB : DOCUMENT_MAX_UPLOAD_MB} MB</Typography>

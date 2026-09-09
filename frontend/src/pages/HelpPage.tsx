@@ -21,11 +21,11 @@ const FAQ = [
 
 export default function HelpPage() {
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       <Typography variant="h5" sx={{ fontWeight: 700 }}>
         Help
       </Typography>
-      <Stack spacing={2}>
+      <Stack spacing={1}>
         {FAQ.map((item) => (
           <Card key={item.q} sx={{ borderRadius: 3 }}>
             <CardContent>

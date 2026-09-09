@@ -183,12 +183,12 @@ export default function UploadsPage({ mode = "test_data" }: UploadsPageProps) {
     : "Structured fixtures and datasets kept separate from project documents and application builds.";
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" gap={2}>
         <Box>
           <Stack direction="row" spacing={1.2} alignItems="center">
             <FolderOutlinedIcon color="primary" />
-            <Typography variant="h4" fontWeight={800}>{title}</Typography>
+            <Typography variant="h3" fontWeight={800}>{title}</Typography>
           </Stack>
           <Typography color="text.secondary" sx={{ mt: 0.5 }}>
             {description} Files belong to <b>{selectedProject?.name || "the active project"}</b> only.

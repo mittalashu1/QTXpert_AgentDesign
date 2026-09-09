@@ -31,7 +31,7 @@ export default function HistoryPage() {
   });
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Typography variant="h5" sx={{ fontWeight: 700 }}>
           History

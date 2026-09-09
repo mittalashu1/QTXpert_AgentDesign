@@ -11,11 +11,11 @@ export default function ProfilePage() {
   if (!user) return null;
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       <Typography variant="h5" sx={{ fontWeight: 700 }}>
         Profile
       </Typography>
-      <Card sx={{ borderRadius: 3, maxWidth: 480 }}>
+      <Card sx={{ borderRadius: 2.5, maxWidth: 480 }}>
         <CardContent>
           <Stack direction="row" spacing={2} alignItems="center" sx={{ mb: 2 }}>
             <Avatar sx={{ width: 56, height: 56, bgcolor: "primary.main" }}>
@@ -31,7 +31,7 @@ export default function ProfilePage() {
           <Chip label={user.role.replace("_", " ")} />
         </CardContent>
       </Card>
-      <Card sx={{ borderRadius: 3, maxWidth: 480 }}>
+      <Card sx={{ borderRadius: 2.5, maxWidth: 480 }}>
         <CardContent>
           <Typography variant="h6" sx={{ mb: 2 }}>Change password</Typography>
           <Stack spacing={2}>

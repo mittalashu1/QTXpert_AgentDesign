@@ -205,7 +205,7 @@ export default function CostCenterPage() {
     {query.isError && <Alert severity="error" sx={{ mb: 2 }}>Cost data is temporarily unavailable.</Alert>}
     {refreshMessage && <Alert severity={refreshMessage.startsWith("Provider") ? "success" : "warning"} sx={{ mb: 2 }}>{refreshMessage}</Alert>}
 
-    {data && <Stack spacing={2.5}>
+    {data && <Stack spacing={2}>
       <Grid container spacing={2}>
         <Grid size={{ xs: 12, sm: 6, lg: 3 }}><Card variant="outlined"><CardContent><Typography variant="caption" color="text.secondary">Azure actual</Typography><Typography variant="h4" sx={{ mt: .5 }}>{azureValue}</Typography><Typography variant="caption" color="text.secondary">{data.azure.connected ? "Azure Cost Management" : "Actual billing feed unavailable"}</Typography></CardContent></Card></Grid>
         <Grid size={{ xs: 12, sm: 6, lg: 3 }}><Card variant="outlined"><CardContent><Typography variant="caption" color="text.secondary">QTXpert AI estimate</Typography><Typography variant="h4" sx={{ mt: .5 }}>{money(data.estimated_cost_usd)}</Typography><Typography variant="caption" color="text.secondary">{data.unpriced_requests ? `${data.unpriced_requests} unpriced request(s)` : "Token-metered estimate"}</Typography></CardContent></Card></Grid>

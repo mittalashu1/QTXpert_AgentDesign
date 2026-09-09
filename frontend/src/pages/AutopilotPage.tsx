@@ -1563,14 +1563,14 @@ export default function AutopilotPage() {
           ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}`
           : "Start analysis";
 
-  return <Stack spacing={3}>
+  return <Stack spacing={2}>
     <Box>
-      <Stack direction="row" spacing={1.5} alignItems="center"><AutoAwesomeIcon color="primary" /><Typography variant="h4" fontWeight={800}>Autopilot</Typography></Stack>
-      <Typography color="text.secondary" sx={{ mt: 1, maxWidth: 920 }}>Inspect a web, Android or iOS target, generate complete coverage, discover safe journeys and report only evidence-backed outcomes.</Typography>
+      <Stack direction="row" spacing={1} alignItems="center"><AutoAwesomeIcon color="primary" fontSize="small" /><Typography variant="h3" fontWeight={800}>Autopilot</Typography></Stack>
+      <Typography variant="body2" color="text.secondary" sx={{ mt: .5, maxWidth: 920 }}>Inspect a target, generate coverage, discover safe journeys and retain evidence-backed outcomes.</Typography>
     </Box>
 
-    <Paper variant="outlined" sx={{ p: { xs: 2, md: 3 }, borderRadius: 3 }}>
-      <Box sx={{ mb: 2.5 }}>
+    <Paper variant="outlined" sx={{ p: { xs: 1.5, md: 2 }, borderRadius: 2.5 }}>
+      <Box sx={{ mb: 1.75 }}>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} justifyContent="space-between">
           <Box>
             <Typography variant="overline" color="primary" fontWeight={800} letterSpacing={1}>1 · Scope</Typography>
@@ -1578,7 +1578,7 @@ export default function AutopilotPage() {
           </Box>
           <Chip size="small" label={`Profile: ${selectedProfile.name}`} color="primary" variant="outlined" />
         </Stack>
-        <Grid container spacing={2} alignItems="center" sx={{ mt: .25 }}>
+        <Grid container spacing={1.25} alignItems="center" sx={{ mt: .25 }}>
           <Grid item xs={12} md={5}>
             <FormControl fullWidth size="small" disabled={busy || contextBusy}>
               <InputLabel id="autopilot-profile-label">Profile category</InputLabel>
@@ -1593,7 +1593,7 @@ export default function AutopilotPage() {
           </Grid>
         </Grid>
       </Box>
-      <Grid container spacing={2} sx={{ mb: 2 }}>
+      <Grid container spacing={1.25} sx={{ mb: 1.5 }}>
         <Grid item xs={12} md={4}>
           <FormControl fullWidth size="small" disabled={busy || contextBusy}>
             <InputLabel id="autopilot-target-label">Target type</InputLabel>
@@ -1617,8 +1617,8 @@ export default function AutopilotPage() {
         </Grid>
         {targetKind === "web" && <Grid item xs={12} md={8}><TextField fullWidth size="small" label="Website URL" placeholder="https://qa.example.com" value={targetUrl} disabled={busy} onChange={(event) => { setTargetUrl(event.target.value); if (contextSource === "default") setContext(contextForTarget(selectedProfile, "web", null, event.target.value)); resetResult(); }} helperText="Use a reachable non-production URL; credentials stay in approved setup references." /></Grid>}
       </Grid>
-      <Grid container spacing={3}>
-        <Grid item xs={12} md={5}><Stack spacing={2}>
+      <Grid container spacing={2}>
+        <Grid item xs={12} md={5}><Stack spacing={1.25}>
           {targetKind !== "web" && <RepositoryAssetPicker
             projectId={selectedProjectId}
             value={selectedUploadId}
@@ -1644,18 +1644,18 @@ export default function AutopilotPage() {
             disabled={busy || contextBusy}
             onOpenRepository={() => navigate("/test-data/documents")}
           />}
-          {targetKind !== "web" && (selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 3, p: 2.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1.2} alignItems="center"><FolderOutlinedIcon color="primary" /><Box sx={{ minWidth: 0 }}><Typography fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored {selectedStoredApk.extension.toUpperCase()} · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: 1 }} onClick={() => navigate("/test-data/documents")}>Open repository</Button></Box>
-          : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 3, p: 3, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 40, color: "primary.main" }} /><Typography fontWeight={700}>{file?.name || `Choose a ${targetKind === "ios" ? "iOS IPA" : "Android APK"}`}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1.5 }}><Button component="label" variant="outlined" disabled={busy}>Choose build<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
+           {targetKind !== "web" && (selectedStoredApk ? <Box sx={{ border: "1px solid", borderColor: "primary.main", borderRadius: 2, p: 1.5, bgcolor: "action.hover" }}><Stack direction="row" spacing={1} alignItems="center"><FolderOutlinedIcon color="primary" fontSize="small" /><Box sx={{ minWidth: 0 }}><Typography variant="body2" fontWeight={800} noWrap>{selectedStoredApk.filename}</Typography><Typography variant="caption" color="text.secondary">Stored {selectedStoredApk.extension.toUpperCase()} · {formatBytes(selectedStoredApk.size_bytes)}</Typography></Box></Stack><Button size="small" sx={{ mt: .75 }} onClick={() => navigate("/test-data/documents")}>Open repository</Button></Box>
+           : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 2, p: 1.75, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 32, color: "primary.main" }} /><Typography variant="body2" fontWeight={700} display="block">{file?.name || `Choose a ${targetKind === "ios" ? "iOS IPA" : "Android APK"}`}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1 }}><Button component="label" variant="outlined" disabled={busy}>Choose build<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
-          <TextField fullWidth multiline minRows={5} maxRows={12} inputProps={{ maxLength: 8000 }} label="Testing context" placeholder="Select a profile or add product, audience, workflow and expected-outcome details." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText={`${context.length.toLocaleString()} / 8,000 characters · Stored with this report; never paste passwords, tokens or OTPs.`} />
+           <TextField fullWidth multiline minRows={4} maxRows={10} inputProps={{ maxLength: 8000 }} label="Testing context" placeholder="Profile brief, target and key workflows." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText={`${context.length.toLocaleString()} / 8,000 characters · Stored with this report; never paste secrets.`} />
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
             <Button size="small" variant="outlined" onClick={() => void generateContext("default")} disabled={contextBusy}>Reset to profile brief</Button>
             <Button size="small" variant="outlined" onClick={() => void generateContext(context.trim() ? "improve" : "generate")} disabled={contextBusy} startIcon={contextBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon />}>{contextBusy ? "Writing context…" : context.trim() ? "Improve with AI" : "Generate with AI"}</Button>
             <Chip size="small" label={`Context: ${contextSource}`} color={contextSource === "ai" ? "primary" : "default"} variant="outlined" />
           </Stack>
           {contextNotice && <Alert severity="info" sx={{ mt: 1.5 }}>{contextNotice}</Alert>}
-          <Alert severity="info" sx={{ mt: 1.5 }}>The selected target and brief guide coverage. Claims stay separate from observed evidence; missing metrics remain pending.</Alert>
+           <Tooltip title="The target and brief guide coverage. Claims stay separate from observed evidence; missing metrics remain pending." placement="bottom-start"><Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, cursor: "help", textDecoration: "underline", textDecorationStyle: "dotted" }}>How this run is scoped</Typography></Tooltip>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
             <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || resumeBusy || !selectedProjectId} onClick={checkpointWaiting ? openSetup : () => void analyze()} variant="contained" size="large" startIcon={busy || resumeBusy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{analysisButtonLabel}</Button>
             {analysis && <Button disabled={busy || resumeBusy || !selectedProjectId} onClick={startRerun} variant="outlined" size="large">Rerun this analysis</Button>}
@@ -1789,9 +1789,9 @@ export default function AutopilotPage() {
         </>}
       </CardContent></Card>}
       {analysis.warnings.length > 0 && <Alert severity="warning">{analysis.warnings.join(" ")}</Alert>}
-      <Grid container spacing={2}>{[["Generated tests", stats.tests], ["Coverage buckets", stats.buckets], ["Autonomous-safe", stats.autonomous], ["Critical / high", stats.critical]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Card variant="outlined"><CardContent><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h4" fontWeight={800}>{value}</Typography></CardContent></Card></Grid>)}</Grid>
+       <Grid container spacing={1.25}>{[["Generated tests", stats.tests], ["Coverage buckets", stats.buckets], ["Autonomous-safe", stats.autonomous], ["Critical / high", stats.critical]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Card variant="outlined"><CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h4" fontWeight={800}>{value}</Typography></CardContent></Card></Grid>)}</Grid>
 
-       <Grid container spacing={3}>
+        <Grid container spacing={2}>
          <Grid item xs={12} lg={8}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><AccountTreeOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Application intelligence</Typography></Stack><Typography sx={{ mt: 1.5 }}>{analysis.app_summary}</Typography><Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1.5 }}><Chip size="small" label={contextBadge.label} color={contextBadge.color} variant="outlined" /><Chip size="small" label={aiBadge.label} color={aiBadge.color} variant="outlined" /></Stack>{analysis.analysis_basis && analysis.analysis_basis.length > 0 && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Basis: {analysis.analysis_basis.join(" · ")}</Typography>}<Divider sx={{ my: 2 }} /><Grid container spacing={2}><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Application</Typography><Typography fontWeight={700}>{analysis.app_name || "Unknown"}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Domain</Typography><Typography fontWeight={700}>{analysis.inferred_domain}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Version</Typography><Typography fontWeight={700}>{analysis.version_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Package</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.package_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Main activity</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.main_activity || "—"}</Typography></Grid></Grid></CardContent></Card></Grid>
         <Grid item xs={12} lg={4}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><SecurityOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Guardrails</Typography></Stack><Stack spacing={1} sx={{ mt: 1.5 }}><Chip label="Safe discovery: enabled" color="success" variant="outlined" /><Chip label="Transactions / destructive actions: blocked" color="warning" variant="outlined" /><Chip label={`Debuggable: ${analysis.debuggable === true ? "YES" : analysis.debuggable === false ? "No" : "Unknown"}`} variant="outlined" /></Stack></CardContent></Card></Grid>
       </Grid>

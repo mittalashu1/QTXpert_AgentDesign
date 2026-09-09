@@ -19,8 +19,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useThemeMode } from "@/contexts/ThemeModeContext";
 import ProjectSelector from "@/components/ProjectSelector";
 
-const drawerWidth = 248;
-const compactDrawerWidth = 64;
+const drawerWidth = 224;
+const compactDrawerWidth = 56;
 const COST_ADMIN_EMAIL = "admin@qtxpert.com";
 const navigation = [
   { to: "/", label: "Dashboard", icon: <DashboardOutlinedIcon />, end: true },
@@ -69,12 +69,12 @@ export default function AppLayout() {
   return (
     <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
       <AppBar position="fixed" elevation={0} sx={{ zIndex: (theme) => theme.zIndex.drawer + 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "background.paper", color: "text.primary" }}>
-        <Toolbar sx={{ gap: 3 }}>
+        <Toolbar sx={{ gap: 1.75, px: { xs: 1.5, md: 2 } }}>
           <Box
             component="img"
             src="/qtxpert-logo.svg"
             alt="QTXpert"
-            sx={{ display: "block", width: designRunFocused ? 128 : 150, height: "auto", maxHeight: 40, flexShrink: 0 }}
+            sx={{ display: "block", width: designRunFocused ? 116 : 132, height: "auto", maxHeight: 34, flexShrink: 0 }}
           />
           <Box sx={{ flex: 1, maxWidth: 440 }}><ProjectSelector topLevel /></Box>
           <Tooltip title={mode === "dark" ? "Use light theme" : "Use dark theme"}><IconButton onClick={toggleMode}>{mode === "dark" ? <LightModeOutlinedIcon /> : <DarkModeOutlinedIcon />}</IconButton></Tooltip>
@@ -107,7 +107,7 @@ export default function AppLayout() {
         }}
       >
         <Toolbar />
-        <Box sx={{ px: designNavCollapsed ? 0.75 : 1.5, py: 2 }}>
+        <Box sx={{ px: designNavCollapsed ? 0.5 : 1, py: 1.5 }}>
           {!designNavCollapsed && <Typography variant="caption" color="text.secondary" sx={{ px: 1.5, fontWeight: 700, letterSpacing: ".12em", whiteSpace: "nowrap" }}>QUALITY WORKSPACE</Typography>}
           <List sx={{ mt: 1 }}>
             {navigation.map((item) => (
@@ -145,7 +145,7 @@ export default function AppLayout() {
           </List>
         </Box>
       </Drawer>
-      <Box component="main" sx={{ ml: designRunFocused ? `${compactDrawerWidth}px` : `${drawerWidth}px`, p: { xs: 2, md: 4 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
+      <Box component="main" className="qtxpert-workspace-main" sx={{ ml: designRunFocused ? `${compactDrawerWidth}px` : `${drawerWidth}px`, p: { xs: 1.5, md: 2.25 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
     </Box>
   );
 }

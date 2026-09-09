@@ -446,25 +446,25 @@ export default function DashboardPage() {
       <Card
         variant="outlined"
         sx={{
-          mb: 3,
+          mb: 2,
           overflow: "hidden",
-          borderRadius: 4,
+          borderRadius: 3,
           borderColor: "rgba(14, 124, 119, .28)",
           background: (theme) => theme.palette.mode === "dark"
             ? "linear-gradient(135deg, rgba(18, 199, 192, .12), rgba(17, 30, 46, .82) 58%, rgba(232, 160, 61, .06))"
             : "linear-gradient(135deg, rgba(14, 124, 119, .10), rgba(255, 255, 255, .86) 58%, rgba(232, 160, 61, .08))",
         }}
       >
-        <CardContent sx={{ p: { xs: 2.25, md: 3 }, "&:last-child": { pb: { xs: 2.25, md: 3 } } }}>
-          <Grid container spacing={{ xs: 2.5, md: 4 }} alignItems="center">
+        <CardContent sx={{ p: { xs: 1.75, md: 2 }, "&:last-child": { pb: { xs: 1.75, md: 2 } } }}>
+          <Grid container spacing={{ xs: 1.5, md: 2.5 }} alignItems="center">
             <Grid size={{ xs: 12, md: 7 }}>
-              <Stack spacing={1.25}>
+              <Stack spacing={0.9}>
                 <Chip size="small" label="AUTONOMOUS QUALITY LOOP" color="primary" variant="outlined" sx={{ alignSelf: "flex-start", fontWeight: 800, letterSpacing: ".06em" }} />
-                <Typography variant="h4" sx={{ fontWeight: 800, letterSpacing: "-.02em" }}>From product intent to release evidence.</Typography>
-                <Typography color="text.secondary" sx={{ maxWidth: 680 }}>
-                  QTXpert brings documentation, test design, safe exploration, execution and reporting into one traceable path. AI proposes the next best check; deterministic engines and human approvals keep the evidence trustworthy.
+                <Typography variant="h3" sx={{ fontWeight: 800, letterSpacing: "-.02em" }}>From intent to release evidence.</Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 680 }}>
+                  One traceable quality loop: AI proposes checks, deterministic engines execute, and people approve risk.
                 </Typography>
-                <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ pt: .5 }}>
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={0.75} sx={{ pt: .25 }}>
                   <Button component={RouterLink} to="/autopilot" variant="contained" endIcon={<ArrowForwardRoundedIcon />}>Open Autopilot</Button>
                   <Button component={RouterLink} to="/documents" variant="outlined">Review documents</Button>
                 </Stack>
@@ -474,8 +474,8 @@ export default function DashboardPage() {
               <Paper
                 variant="outlined"
                 sx={{
-                  p: 2,
-                  borderRadius: 3,
+                  p: 1.5,
+                  borderRadius: 2.5,
                   backgroundColor: (theme) => theme.palette.mode === "dark" ? "rgba(7, 18, 29, .46)" : "rgba(255, 255, 255, .64)",
                   backdropFilter: "blur(14px)",
                   WebkitBackdropFilter: "blur(14px)",
@@ -485,26 +485,28 @@ export default function DashboardPage() {
                   <SecurityOutlinedIcon color="primary" fontSize="small" />
                   <Typography variant="subtitle2" fontWeight={800}>Operating model</Typography>
                 </Stack>
-                <Typography variant="body2" sx={{ mt: 1 }}>AI plans · engines execute · people approve risk</Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .75 }}>
-                  One report lineage across every target and build.
-                </Typography>
-                <Stack direction="row" spacing={.75} useFlexGap flexWrap="wrap" sx={{ mt: 1.5 }}>
+                <Typography variant="body2" sx={{ mt: .75 }}>AI plans · engines execute · people approve risk</Typography>
+                <Tooltip title="Every target and build keeps an isolated report lineage so evidence is never mixed between applications." placement="bottom-start">
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .5, cursor: "help", textDecoration: "underline", textDecorationStyle: "dotted" }}>
+                    Report lineage by target and build
+                  </Typography>
+                </Tooltip>
+                <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
                   {["Web", "Android", "iOS"].map((target) => <Chip key={target} size="small" label={target} variant="outlined" />)}
                 </Stack>
               </Paper>
             </Grid>
           </Grid>
 
-          <Divider sx={{ my: { xs: 2.25, md: 2.75 } }} />
-          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={.5} sx={{ mb: 1.5 }}>
+          <Divider sx={{ my: { xs: 1.5, md: 1.75 } }} />
+          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={.5} sx={{ mb: 1 }}>
             <Box>
               <Typography variant="subtitle1" fontWeight={800}>Quality loop</Typography>
               <Typography variant="body2" color="text.secondary">Follow the evidence from source to release.</Typography>
             </Box>
             <Typography variant="caption" color="text.secondary">Select a stage to continue</Typography>
           </Stack>
-          <Grid container spacing={1.25}>
+          <Grid container spacing={0.9}>
             {workflowStages.map((stage) => (
               <Grid key={stage.key} size={{ xs: 12, sm: 6, lg: 3 }}>
                 <CardActionArea
@@ -513,7 +515,7 @@ export default function DashboardPage() {
                   aria-label={`Open ${stage.title}`}
                   sx={{
                     height: "100%",
-                    p: 1.5,
+                    p: 1.1,
                     border: "1px solid",
                     borderColor: "divider",
                     borderRadius: 2.5,
@@ -523,14 +525,16 @@ export default function DashboardPage() {
                   }}
                 >
                   <Stack direction="row" spacing={1.1} alignItems="flex-start">
-                    <Box sx={{ display: "grid", placeItems: "center", width: 34, height: 34, borderRadius: 2, bgcolor: "action.hover", color: "primary.main", flexShrink: 0 }}>{stage.icon}</Box>
+                    <Box sx={{ display: "grid", placeItems: "center", width: 30, height: 30, borderRadius: 1.5, bgcolor: "action.hover", color: "primary.main", flexShrink: 0 }}>{stage.icon}</Box>
                     <Box sx={{ minWidth: 0 }}>
                       <Stack direction="row" spacing={.75} alignItems="center" justifyContent="space-between">
                         <Typography variant="caption" color="text.secondary" sx={{ fontFamily: "monospace", fontWeight: 700 }}>{stage.step}</Typography>
                         <Chip size="small" label={stage.stateLabel} color={workflowStateColor[stage.state]} variant="outlined" sx={{ height: 22, maxWidth: "100%", "& .MuiChip-label": { overflow: "hidden", textOverflow: "ellipsis" } }} />
                       </Stack>
-                      <Typography variant="body2" fontWeight={800} sx={{ mt: .5 }}>{stage.title}</Typography>
-                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .35, lineHeight: 1.45 }}>{stage.description}</Typography>
+                      <Typography variant="body2" fontWeight={800} sx={{ mt: .35 }}>{stage.title}</Typography>
+                      <Tooltip title={stage.description} placement="bottom-start">
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .25, lineHeight: 1.35, cursor: "help", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stage.description}</Typography>
+                      </Tooltip>
                     </Box>
                   </Stack>
                 </CardActionArea>
@@ -541,15 +545,15 @@ export default function DashboardPage() {
       </Card>
 
       {preferences.visibleWidgets.metrics && visibleMetricDefinitions.length > 0 && (
-        <Box sx={{ mb: 3 }}>
-          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
+        <Box sx={{ mb: 2 }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
             <Box>
               <Typography variant="overline" color="primary.main" sx={{ fontWeight: 700, letterSpacing: ".12em" }}>TEST RESULTS</Typography>
               <Typography variant="h6">Test results</Typography>
             </Box>
             <Typography variant="caption" color="text.secondary">{visibleMetricDefinitions.length} of {metricDefinitions.length} metrics shown</Typography>
           </Stack>
-          <Grid container spacing={2}>
+          <Grid container spacing={1.25}>
             {visibleMetricDefinitions.map(({ key, helper }) => {
               const value = metricValues[key];
               const tone = key === "open_defects" && Number(value) > 0 ? "error.main" : key === "pass_rate" ? "success.main" : "primary.main";
@@ -558,18 +562,18 @@ export default function DashboardPage() {
                 : helper;
               return (
                 <Grid key={key} size={{ xs: 12, sm: 6, lg: 4 }}>
-                  <Card variant="outlined" sx={{ height: "100%", borderRadius: 3, transition: "transform .2s ease, box-shadow .2s ease", "&:hover": { transform: "translateY(-2px)", boxShadow: 3 } }}>
+                  <Card variant="outlined" sx={{ height: "100%", borderRadius: 2.5, transition: "transform .2s ease, box-shadow .2s ease", "&:hover": { transform: "translateY(-2px)", boxShadow: 3 } }}>
                     <CardActionArea component={RouterLink} to={metricRoutes[key]} aria-label={`Open ${preferences.metricLabels[key]}`} sx={{ height: "100%", alignItems: "stretch" }}>
-                      <CardContent sx={{ p: 2.25, "&:last-child": { pb: 2.25 } }}>
+                      <CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}>
                         <Stack direction="row" alignItems="flex-start" justifyContent="space-between" spacing={2}>
                           <Box>
                             <Typography variant="body2" color="text.secondary">{preferences.metricLabels[key]}</Typography>
-                            <Typography variant="h3" sx={{ mt: 0.75, color: tone }}>{value}</Typography>
+                            <Typography variant="h3" sx={{ mt: 0.45, color: tone }}>{value}</Typography>
                           </Box>
                           <Box sx={{ p: 1, borderRadius: 2, bgcolor: "action.hover", color: tone, display: "flex" }}>{metricIcons[key]}</Box>
                         </Stack>
                         <Typography variant="caption" color="text.secondary">{metricHelper}</Typography>
-                        {key === "pass_rate" && <LinearProgress variant="determinate" value={Number(data?.pass_rate ?? 0)} color={data?.pass_rate && data.pass_rate >= 90 ? "success" : "primary"} sx={{ mt: 1.25, height: 5, borderRadius: 4 }} />}
+                        {key === "pass_rate" && <LinearProgress variant="determinate" value={Number(data?.pass_rate ?? 0)} color={data?.pass_rate && data.pass_rate >= 90 ? "success" : "primary"} sx={{ mt: .75, height: 4, borderRadius: 4 }} />}
                       </CardContent>
                     </CardActionArea>
                   </Card>
@@ -581,9 +585,9 @@ export default function DashboardPage() {
       )}
 
       {preferences.visibleWidgets.autopilot && (
-        <Card variant="outlined" sx={{ mb: 3, borderRadius: 3 }}>
+        <Card variant="outlined" sx={{ mb: 2, borderRadius: 2.5 }}>
           <CardActionArea component={RouterLink} to="/autopilot" aria-label="Open Autopilot activity" sx={{ alignItems: "stretch" }}>
-            <CardContent sx={{ p: 2.25, "&:last-child": { pb: 2.25 } }}>
+            <CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}>
               <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1.5}>
                 <Box>
                   <Typography variant="h6">Autopilot activity</Typography>
@@ -601,7 +605,7 @@ export default function DashboardPage() {
                   />
                 </Stack>
               </Stack>
-              <Grid container spacing={1.25} sx={{ mt: 1 }}>
+              <Grid container spacing={0.9} sx={{ mt: .75 }}>
                 {[
                   ["Generated", autopilotActivity.generated_test_cases],
                   ["Selected", autopilotActivity.selected_tests],
@@ -610,7 +614,7 @@ export default function DashboardPage() {
                   ["Deferred", autopilotActivity.deferred_tests],
                 ].map(([label, value]) => (
                   <Grid key={label} size={{ xs: 6, sm: 2.4 }}>
-                    <Box sx={{ borderRadius: 2, bgcolor: "action.hover", px: 1.25, py: 1 }}>
+                    <Box sx={{ borderRadius: 1.5, bgcolor: "action.hover", px: 1, py: .75 }}>
                       <Typography variant="caption" color="text.secondary">{label}</Typography>
                       <Typography variant="h6" sx={{ mt: 0.25 }}>{value}</Typography>
                     </Box>
@@ -636,9 +640,9 @@ export default function DashboardPage() {
         <Grid container spacing={2.5}>
           {preferences.visibleWidgets.documentation && (
             <Grid size={{ xs: 12 }}>
-              <Card variant="outlined" sx={{ borderRadius: 3 }}>
+              <Card variant="outlined" sx={{ borderRadius: 2.5 }}>
                 <CardActionArea component={RouterLink} to="/documents" aria-label="Open Document Intelligence quality gate" sx={{ alignItems: "stretch" }}>
-                  <CardContent sx={{ p: 2.25, "&:last-child": { pb: 2.25 } }}>
+                  <CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}>
                     <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" alignItems={{ sm: "center" }} spacing={1.5}>
                       <Box sx={{ minWidth: 0 }}>
                         <Typography variant="h6">Documentation quality gate</Typography>
@@ -670,21 +674,21 @@ export default function DashboardPage() {
           )}
           {preferences.visibleWidgets.posture && (
             <Grid size={{ xs: 12, md: 7 }}>
-              <Card variant="outlined" sx={{ height: "100%", borderRadius: 3 }}>
-                <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
+              <Card variant="outlined" sx={{ height: "100%", borderRadius: 2.5 }}>
+                <CardContent sx={{ p: 1.75, "&:last-child": { pb: 1.75 } }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={2}>
                     <Box>
                       <Typography variant="h6">Coverage results</Typography>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>Observed coverage and completion rates from the project data.</Typography>
                     </Box>
                   </Stack>
-                  <Stack spacing={2.25} sx={{ mt: 3 }}>
+                  <Stack spacing={1.5} sx={{ mt: 1.75 }}>
                     <Box component={RouterLink} to="/design" aria-label="Open test design coverage" sx={{ display: "block", color: "inherit", textDecoration: "none", p: 1, mx: -1, borderRadius: 2, "&:hover": { bgcolor: "action.hover" } }}>
                       <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.75 }}>
                         <Typography variant="body2">Test depth</Typography>
                         <Typography variant="body2" fontWeight={700}>{progressValue(data?.test_cases ?? 0, data?.requirements ?? 0)}%</Typography>
                       </Stack>
-                      <LinearProgress variant="determinate" value={progressValue(data?.test_cases ?? 0, data?.requirements ?? 0)} sx={{ height: 7, borderRadius: 4 }} />
+                      <LinearProgress variant="determinate" value={progressValue(data?.test_cases ?? 0, data?.requirements ?? 0)} sx={{ height: 5, borderRadius: 4 }} />
                       <Typography variant="caption" color="text.secondary">{data?.test_cases ?? 0} test cases across {data?.requirements ?? 0} requirements</Typography>
                     </Box>
                     <Box component={RouterLink} to="/execution" aria-label="Open automation coverage" sx={{ display: "block", color: "inherit", textDecoration: "none", p: 1, mx: -1, borderRadius: 2, "&:hover": { bgcolor: "action.hover" } }}>
@@ -692,7 +696,7 @@ export default function DashboardPage() {
                         <Typography variant="body2">Automation coverage</Typography>
                         <Typography variant="body2" fontWeight={700}>{progressValue(data?.automation_candidates ?? 0, data?.test_cases ?? 0)}%</Typography>
                       </Stack>
-                      <LinearProgress variant="determinate" value={progressValue(data?.automation_candidates ?? 0, data?.test_cases ?? 0)} color="secondary" sx={{ height: 7, borderRadius: 4 }} />
+                      <LinearProgress variant="determinate" value={progressValue(data?.automation_candidates ?? 0, data?.test_cases ?? 0)} color="secondary" sx={{ height: 5, borderRadius: 4 }} />
                       <Typography variant="caption" color="text.secondary">{data?.automation_candidates ?? 0} candidates ready for automation</Typography>
                     </Box>
                     <Box component={RouterLink} to="/reports" aria-label="Open observed pass rate" sx={{ display: "block", color: "inherit", textDecoration: "none", p: 1, mx: -1, borderRadius: 2, "&:hover": { bgcolor: "action.hover" } }}>
@@ -700,7 +704,7 @@ export default function DashboardPage() {
                         <Typography variant="body2">Observed pass rate</Typography>
                         <Typography variant="body2" fontWeight={700}>{data?.pass_rate ?? 0}%</Typography>
                       </Stack>
-                      <LinearProgress variant="determinate" value={data?.pass_rate ?? 0} color={data?.pass_rate && data.pass_rate >= 90 ? "success" : "primary"} sx={{ height: 7, borderRadius: 4 }} />
+                      <LinearProgress variant="determinate" value={data?.pass_rate ?? 0} color={data?.pass_rate && data.pass_rate >= 90 ? "success" : "primary"} sx={{ height: 5, borderRadius: 4 }} />
                       <Typography variant="caption" color="text.secondary">{data?.passed_tests ?? 0} passed · {data?.executed_tests ?? 0} executed of {data?.total_execution_tests ?? 0} total tests</Typography>
                     </Box>
                   </Stack>
@@ -711,9 +715,9 @@ export default function DashboardPage() {
 
           {preferences.visibleWidgets.execution && (
             <Grid size={{ xs: 12, md: 5 }}>
-              <Card variant="outlined" sx={{ height: "100%", borderRadius: 3 }}>
+              <Card variant="outlined" sx={{ height: "100%", borderRadius: 2.5 }}>
                 <CardActionArea component={RouterLink} to="/execution" aria-label="Open last execution results" sx={{ height: "100%", alignItems: "stretch" }}>
-                  <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
+                  <CardContent sx={{ p: 1.75, "&:last-child": { pb: 1.75 } }}>
                     <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
                       <Box>
                         <Typography variant="h6">Last run</Typography>
@@ -734,8 +738,8 @@ export default function DashboardPage() {
 
           {preferences.visibleWidgets.signals && (
             <Grid size={{ xs: 12 }}>
-              <Card variant="outlined" sx={{ borderRadius: 3 }}>
-                <CardContent sx={{ p: 2.5, "&:last-child": { pb: 2.5 } }}>
+              <Card variant="outlined" sx={{ borderRadius: 2.5 }}>
+                <CardContent sx={{ p: 1.75, "&:last-child": { pb: 1.75 } }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 2 }}>
                     <Box>
                       <Typography variant="h6">Action required</Typography>
@@ -746,13 +750,13 @@ export default function DashboardPage() {
                       <WarningAmberOutlinedIcon color="action" />
                     </Stack>
                   </Stack>
-                  <Grid container spacing={1.5}>
+                  <Grid container spacing={1}>
                     {actionCards.map((item) => (
                       <Grid key={item.key} size={{ xs: 12, sm: 6, md: 4 }}>
-                        <Card variant="outlined" sx={{ height: "100%", borderRadius: 2 }}>
+                          <Card variant="outlined" sx={{ height: "100%", borderRadius: 1.75 }}>
                           <CardActionArea component={RouterLink} to={item.route} aria-label={`Open ${item.title}: ${item.count}`} sx={{ height: "100%", alignItems: "stretch" }}>
-                            <CardContent sx={{ p: 1.75, "&:last-child": { pb: 1.75 } }}>
-                              <Typography variant="h4" color={item.count > 0 ? "primary.main" : "text.secondary"}>{item.count}</Typography>
+                            <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+                              <Typography variant="h3" color={item.count > 0 ? "primary.main" : "text.secondary"}>{item.count}</Typography>
                               <Typography variant="body2" fontWeight={700} sx={{ mt: 0.5 }}>{item.title}</Typography>
                               <Typography variant="caption" color="text.secondary">{item.detail}</Typography>
                             </CardContent>

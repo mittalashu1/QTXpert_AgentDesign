@@ -288,12 +288,12 @@ export default function SettingsPage() {
   const busy = createMutation.isPending || updateMutation.isPending;
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ md: "center" }} spacing={2}>
         <Box>
-          <Typography variant="overline" color="primary.main" sx={{ letterSpacing: ".14em", fontWeight: 700 }}>WORKSPACE CONTROL</Typography>
-          <Typography variant="h4" sx={{ fontWeight: 700 }}>Settings</Typography>
-          <Typography color="text.secondary">Connect the systems that hold requirements, source changes, test cases, data, and evidence.</Typography>
+          <Typography variant="overline" color="primary.main" sx={{ letterSpacing: ".12em", fontWeight: 700 }}>WORKSPACE CONTROL</Typography>
+          <Typography variant="h3" sx={{ fontWeight: 700 }}>Settings</Typography>
+          <Typography variant="body2" color="text.secondary">Connections, preferences and access in one place.</Typography>
         </Box>
         <Button variant="outlined" startIcon={<SettingsSuggestOutlinedIcon />} onClick={() => navigate("/settings/api-configuration")}>
           API configuration
@@ -305,7 +305,7 @@ export default function SettingsPage() {
         <Alert severity="warning"><AlertTitle>Settings data is unavailable</AlertTitle>Retry after the database connection recovers. Existing connector secrets are not exposed by this page.</Alert>
       )}
 
-      <Paper variant="outlined" sx={{ borderRadius: 3, overflow: "hidden" }}>
+      <Paper variant="outlined" sx={{ borderRadius: 2.5, overflow: "hidden" }}>
         <Tabs value={tab} onChange={(_, value: SettingsTab) => setTab(value)} variant="scrollable" allowScrollButtonsMobile>
           <Tab value="overview" label="Overview" />
           <Tab value="integrations" label="Integrations" />

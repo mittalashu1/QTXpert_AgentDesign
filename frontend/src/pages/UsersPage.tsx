@@ -42,7 +42,7 @@ export default function UsersPage() {
   };
   const openEdit = (target: User) => { setEditing(target); setForm({ email: target.email, full_name: target.full_name, password: "", role: target.role }); setOpen(true); };
 
-  return <Stack spacing={3}>
+  return <Stack spacing={2}>
     <Box display="flex" justifyContent="space-between" alignItems="center"><Typography variant="h5" fontWeight={700}>Administration · Users</Typography><Button variant="contained" onClick={() => { setEditing(null); setForm(blank); setOpen(true); }}>Add user</Button></Box>
     {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
     <Stack spacing={1}>

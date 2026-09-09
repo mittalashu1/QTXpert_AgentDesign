@@ -256,22 +256,22 @@ export default function DocumentIntelligencePage() {
   if (!selectedProjectId) return <Alert severity="info">Create or select a project from the top bar.</Alert>;
 
   return (
-    <Stack spacing={2.5}>
+    <Stack spacing={2}>
       <Box>
         <Stack direction="row" spacing={1} alignItems="center">
-          <AutoAwesomeIcon color="primary" />
-          <Typography variant="h4" fontWeight={800}>Document Intelligence</Typography>
+          <AutoAwesomeIcon color="primary" fontSize="small" />
+          <Typography variant="h3" fontWeight={800}>Document Intelligence</Typography>
           <Chip size="small" label="AI" color="primary" variant="outlined" />
         </Stack>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          Validate whether the current project documentation is complete and testable for the intended change.
+          Find gaps early and turn project documents into a testable baseline.
         </Typography>
       </Box>
 
       {message && <Alert severity="success" onClose={() => setMessage("")}>{message}</Alert>}
       {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
 
-      <Card variant="outlined" sx={{ borderRadius: 3 }}>
+      <Card variant="outlined" sx={{ borderRadius: 2.5 }}>
         <CardContent>
           <Grid container spacing={2} alignItems="flex-start">
             <Grid item xs={12} lg={8}>

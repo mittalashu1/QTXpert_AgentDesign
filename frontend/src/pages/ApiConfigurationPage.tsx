@@ -40,12 +40,12 @@ export default function ApiConfigurationPage() {
   });
 
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       <Typography variant="h5" sx={{ fontWeight: 700 }}>
         API Configuration
       </Typography>
 
-      <Card sx={{ borderRadius: 3, maxWidth: 560 }}>
+      <Card sx={{ borderRadius: 2.5, maxWidth: 560 }}>
         <CardContent>
           <Stack spacing={2}>
             <TextField label="Configuration name" value={name} onChange={(e) => setName(e.target.value)} />

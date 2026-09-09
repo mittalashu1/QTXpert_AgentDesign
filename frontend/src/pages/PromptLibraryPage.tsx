@@ -12,14 +12,14 @@ const STAGES = [
 
 export default function PromptLibraryPage() {
   return (
-    <Stack spacing={3}>
+    <Stack spacing={2}>
       <Typography variant="h5" sx={{ fontWeight: 700 }}>
         Prompt Library
       </Typography>
       <Typography color="text.secondary">
         The AI Test Design Agent runs these stages in sequence for every generation request.
       </Typography>
-      <Stack spacing={2}>
+      <Stack spacing={1}>
         {STAGES.map((stage) => (
           <Card key={stage.title} sx={{ borderRadius: 3 }}>
             <CardContent>

@@ -479,14 +479,14 @@ export default function TestExecutionPage() {
       <PageHeader
         eyebrow="M4 · EXECUTION FABRIC"
         title="Test execution"
-        description="Import a versioned Test Design set, select the cases to automate, validate readiness, and retain evidence for every run."
+        description="Import a Test Design set, select cases, validate readiness, and retain run evidence."
       />
 
-      <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 3 }}>
+      <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 2 }}>
         {STEPS.map((label) => <Step key={label}><StepLabel>{label}</StepLabel></Step>)}
       </Stepper>
 
-      <Card variant="outlined" sx={{ mb: 3 }}>
+      <Card variant="outlined" sx={{ mb: 2 }}>
         <CardContent>
           <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ md: "flex-end" }}>
             <FormControl fullWidth>
@@ -533,7 +533,7 @@ export default function TestExecutionPage() {
       </Card>
 
       {plans.data && plans.data.length > 0 && (
-        <Card variant="outlined" sx={{ mb: 3 }}>
+        <Card variant="outlined" sx={{ mb: 2 }}>
           <CardContent>
             <Stack direction={{ xs: "column", md: "row" }} spacing={2} alignItems={{ md: "center" }}>
               <FormControl fullWidth>
@@ -556,7 +556,7 @@ export default function TestExecutionPage() {
 
       {currentPlan && (
         <>
-          <Card variant="outlined" sx={{ mb: 3 }}>
+          <Card variant="outlined" sx={{ mb: 2 }}>
             <CardContent>
               <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2}>
                 <Box>
@@ -644,7 +644,7 @@ export default function TestExecutionPage() {
             </CardContent>
           </Card>
 
-          <Card variant="outlined" sx={{ mb: 3 }}>
+          <Card variant="outlined" sx={{ mb: 2 }}>
             <CardContent>
               <Typography variant="h6" sx={{ fontWeight: 800, mb: 0.5 }}>Preflight and execute</Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>Choose a web URL or a mobile package. Preflight validates the target and selected snapshot before any test is run.</Typography>
