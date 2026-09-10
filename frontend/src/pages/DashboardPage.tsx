@@ -226,22 +226,17 @@ export default function DashboardPage() {
     // stale localStorage id from producing a 404 that looks like a dashboard
     // outage while the current account has no matching project.
     enabled: Boolean(selectedProjectId && selectedProject),
-    // Keep the dashboard current while Autopilot is analyzing or waiting for
-    // checkpoint input; once it is idle, the explicit refresh button remains
-    // the low-cost path for a historical snapshot.
-    refetchInterval: (query) => {
-      const activity = query.state.data?.autopilot;
-      return activity && (activity.active_jobs > 0 || activity.waiting_for_input_jobs > 0) ? 5000 : false;
-    },
+    // Keep the dashboard as a stable snapshot. React Query refreshes this
+    // query when the browser tab regains focus, or the user clicks Refresh.
+    refetchInterval: false,
+    refetchOnWindowFocus: true,
   });
   const documentReview = useQuery<DocumentAnalysisRun | null>({
     queryKey: ["document-intelligence-latest", selectedProjectId],
     queryFn: () => documentIntelligenceApi.latest(selectedProjectId).then((response) => response.data),
     enabled: Boolean(selectedProjectId && selectedProject),
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return status && ["queued", "extracting", "analyzing"].includes(status) ? 3000 : false;
-    },
+    refetchInterval: false,
+    refetchOnWindowFocus: true,
   });
 
   useEffect(() => {
@@ -252,10 +247,9 @@ export default function DashboardPage() {
     setPreferences(readPreferences(selectedProjectId));
   }, [selectedProjectId]);
 
-  // Do not render cached metrics while a manual refresh is in flight or has
-  // failed. Showing the previous project snapshot during that window makes
-  // stale results look current; the cards repopulate only from the confirmed
-  // response for the selected project.
+  // Do not render cached metrics while a refresh is in flight or has failed.
+  // Showing the previous project snapshot during that window makes stale
+  // results look current; cards repopulate from the confirmed project response.
   const data = summary.isFetching || summary.isError ? undefined : summary.data;
   const documentReviewData = documentReview.isFetching || documentReview.isError
     ? null
