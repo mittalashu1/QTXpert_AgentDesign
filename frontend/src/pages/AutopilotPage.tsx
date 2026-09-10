@@ -26,6 +26,7 @@ import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
 import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
 import DefectLogDialog, { type DefectSubmission } from "@/components/DefectLogDialog";
+import PageHeader from "@/components/PageHeader";
 import type { Defect } from "@/types/domain";
 
 type TestBucket =
@@ -1563,13 +1564,15 @@ export default function AutopilotPage() {
           ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}`
           : "Start analysis";
 
-  return <Stack spacing={2}>
-    <Box>
-      <Stack direction="row" spacing={1} alignItems="center"><AutoAwesomeIcon color="primary" fontSize="small" /><Typography variant="h3" fontWeight={800}>Autopilot</Typography></Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mt: .5, maxWidth: 920 }}>Inspect a target, generate coverage, discover safe journeys and retain evidence-backed outcomes.</Typography>
-    </Box>
+  return <Stack spacing={1.5} className="qtxpert-autopilot">
+    <PageHeader
+      eyebrow="AUTONOMOUS TESTING"
+      title="Autopilot"
+      description="Inspect a target, generate coverage, discover safe journeys and retain evidence-backed outcomes."
+      actions={<Chip size="small" icon={<AutoAwesomeIcon />} label={activeTargetKind === "web" ? "Web" : activeTargetKind === "ios" ? "iOS" : "Android"} color="primary" variant="outlined" />}
+    />
 
-    <Paper variant="outlined" sx={{ p: { xs: 1.5, md: 2 }, borderRadius: 2.5 }}>
+    <Paper variant="outlined" sx={{ p: { xs: 1.25, md: 1.5 }, borderRadius: 2 }}>
       <Box sx={{ mb: 1.75 }}>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} justifyContent="space-between">
           <Box>
@@ -2104,4 +2107,5 @@ export default function AutopilotPage() {
     </Dialog>
   </Stack>;
 }
+
 
