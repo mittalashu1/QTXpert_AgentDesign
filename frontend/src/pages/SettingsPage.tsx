@@ -50,6 +50,7 @@ import {
   IntegrationUserPreferences,
 } from "@/types/domain";
 import { useNavigate } from "react-router-dom";
+import PageHeader from "@/components/PageHeader";
 
 type SettingsTab = "overview" | "integrations" | "preferences" | "access";
 
@@ -288,17 +289,13 @@ export default function SettingsPage() {
   const busy = createMutation.isPending || updateMutation.isPending;
 
   return (
-    <Stack spacing={2}>
-      <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ md: "center" }} spacing={2}>
-        <Box>
-          <Typography variant="overline" color="primary.main" sx={{ letterSpacing: ".12em", fontWeight: 700 }}>WORKSPACE CONTROL</Typography>
-          <Typography variant="h3" sx={{ fontWeight: 700 }}>Settings</Typography>
-          <Typography variant="body2" color="text.secondary">Connections, preferences and access in one place.</Typography>
-        </Box>
-        <Button variant="outlined" startIcon={<SettingsSuggestOutlinedIcon />} onClick={() => navigate("/settings/api-configuration")}>
-          API configuration
-        </Button>
-      </Stack>
+    <Stack spacing={1.5} className="qtxpert-settings">
+      <PageHeader
+        eyebrow="WORKSPACE CONTROL"
+        title="Settings"
+        description="Connections, preferences and access in one place."
+        actions={<Button variant="outlined" startIcon={<SettingsSuggestOutlinedIcon />} onClick={() => navigate("/settings/api-configuration")}>API configuration</Button>}
+      />
 
       {notice && <Alert severity={notice.severity} onClose={() => setNotice(null)}>{notice.text}</Alert>}
       {(overviewQuery.isError || catalogQuery.isError) && (
@@ -401,3 +398,4 @@ function IntegrationDialog({ open, editing, form, catalog, selectedProjectName, 
   const selected = catalog.find((item) => item.key === form.provider);
   return <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth><DialogTitle>{editing ? "Edit integration connection" : `Configure ${selected?.label ?? "integration"}`}</DialogTitle><DialogContent><Stack spacing={2.25} sx={{ pt: 1 }}><Alert severity="info"><AlertTitle>Secret-safe setup</AlertTitle>Enter metadata only. Use an opaque reference such as <code>vault://qtxpert/jira/prod</code> or <code>env://JIRA_TOKEN</code>; never paste a token, password, or bearer value.</Alert><Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 2 }}><TextField select label="Provider" value={form.provider} disabled={editing} onChange={(event) => onChange({ ...form, provider: event.target.value as IntegrationProvider })}>{catalog.map((item) => <MenuItem key={item.key} value={item.key}>{item.label}</MenuItem>)}</TextField><TextField label="Connection name" value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} required /><TextField select label="Scope" value={form.scope} disabled={editing} helperText={form.scope === "organization" ? "Available to the workspace after access controls are enabled." : "Restricted to the selected project."} onChange={(event) => onChange({ ...form, scope: event.target.value as IntegrationScope, projectId: event.target.value === "project" ? form.projectId : "" })}><MenuItem value="organization">Organization</MenuItem><MenuItem value="project">Project</MenuItem></TextField><TextField label="Project" value={form.scope === "project" ? (selectedProjectName ?? "") : "Not applicable"} disabled helperText={form.scope === "project" ? "Uses the project selected in the top bar." : undefined} /><TextField label="Base URL / tenant URL" value={form.baseUrl} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder="https://jira.example.com" /><TextField label="Organization / workspace" value={form.externalOrg} onChange={(event) => onChange({ ...form, externalOrg: event.target.value })} /><TextField label="Project / repository / database" value={form.externalProject} onChange={(event) => onChange({ ...form, externalProject: event.target.value })} /><TextField label="Secret-manager reference" value={form.secretRef} onChange={(event) => onChange({ ...form, secretRef: event.target.value })} placeholder="vault://qtxpert/provider/connection" helperText={editing ? "Leave blank to preserve the existing reference." : "Required before a provider adapter can authenticate."} /></Box><TextField label="Permission scopes" value={form.scopes} onChange={(event) => onChange({ ...form, scopes: event.target.value })} placeholder="read:requirements, read:repositories" helperText="Comma-separated, least-privilege scopes; write scopes require a later approval." /><TextField label="Connection notes" value={form.notes} onChange={(event) => onChange({ ...form, notes: event.target.value })} multiline minRows={2} helperText="Non-secret notes only. Do not paste credentials or payloads." /><FormControlLabel control={<Checkbox checked={form.enabled} onChange={(event) => onChange({ ...form, enabled: event.target.checked })} />} label="Enable this connection for future approved adapter calls" /></Stack></DialogContent><DialogActions><Button onClick={onClose}>Cancel</Button><Button variant="contained" onClick={onSubmit} disabled={busy || !form.name.trim()}>{busy ? "Saving…" : editing ? "Save changes" : "Save connection"}</Button></DialogActions></Dialog>;
 }
+
