@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AppBar, Avatar, Box, Chip, Collapse, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Toolbar, Tooltip, Typography } from "@mui/material";
+import { AppBar, Avatar, Box, Chip, Collapse, Divider, Drawer, IconButton, List, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Toolbar, Tooltip, Typography, useMediaQuery, useTheme } from "@mui/material";
 import DashboardOutlinedIcon from "@mui/icons-material/DashboardOutlined";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import ArchitectureOutlinedIcon from "@mui/icons-material/ArchitectureOutlined";
@@ -20,7 +20,7 @@ import { useThemeMode } from "@/contexts/ThemeModeContext";
 import ProjectSelector from "@/components/ProjectSelector";
 
 const drawerWidth = 224;
-const compactDrawerWidth = 56;
+const compactDrawerWidth = 60;
 const COST_ADMIN_EMAIL = "admin@qtxpert.com";
 const navigation = [
   { to: "/", label: "Dashboard", icon: <DashboardOutlinedIcon />, end: true },
@@ -37,31 +37,32 @@ export default function AppLayout() {
   const location = useLocation();
   const { user, logout } = useAuth();
   const { mode, toggleMode } = useThemeMode();
+  const theme = useTheme();
+  const wideViewport = useMediaQuery(theme.breakpoints.up("md"));
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
-  const [designNavHovered, setDesignNavHovered] = useState(false);
+  const [navHovered, setNavHovered] = useState(false);
   const [testDataOpen, setTestDataOpen] = useState(location.pathname.startsWith("/test-data"));
   const canViewCosts = user?.role === "admin" && user.email.trim().toLowerCase() === COST_ADMIN_EMAIL;
-  const designRunFocused = location.pathname === "/design" && Boolean(new URLSearchParams(location.search).get("run"));
-  // Keep the focused Design run spacious while leaving an always-available icon rail.
-  // Hovering the rail temporarily reveals the full workspace navigation.
-  const designNavCollapsed = designRunFocused && !designNavHovered;
-  const drawerRootWidth = designRunFocused ? compactDrawerWidth : drawerWidth;
-  const drawerPaperWidth = designNavCollapsed ? compactDrawerWidth : drawerWidth;
+  // The desktop shell keeps a quiet icon rail and reveals the full navigation
+  // on hover/focus. This preserves room for dense test lists while keeping all
+  // destinations one gesture away.
+  const navExpanded = !wideViewport || navHovered;
+  const drawerRootWidth = wideViewport ? compactDrawerWidth : drawerWidth;
+  const drawerPaperWidth = navExpanded ? drawerWidth : compactDrawerWidth;
 
   useEffect(() => {
     if (location.pathname.startsWith("/test-data")) setTestDataOpen(true);
   }, [location.pathname]);
 
-  useEffect(() => {
-    if (!designRunFocused) setDesignNavHovered(false);
-  }, [designRunFocused]);
-
   const navSx = {
-    borderRadius: 2,
+    borderRadius: 1.5,
     mb: 0.5,
+    position: "relative",
     "&.active": {
-      bgcolor: "primary.main",
-      color: "primary.contrastText",
+      bgcolor: "action.selected",
+      color: "primary.main",
+      borderLeft: "3px solid",
+      borderColor: "primary.main",
       "& .MuiListItemIcon-root": { color: "inherit" },
     },
   } as const;
@@ -74,7 +75,7 @@ export default function AppLayout() {
             component="img"
             src="/qtxpert-logo.svg"
             alt="QTXpert"
-            sx={{ display: "block", width: designRunFocused ? 116 : 132, height: "auto", maxHeight: 34, flexShrink: 0 }}
+            sx={{ display: "block", width: navExpanded ? 132 : 116, height: "auto", maxHeight: 34, flexShrink: 0 }}
           />
           <Box sx={{ flex: 1, maxWidth: 440 }}><ProjectSelector topLevel /></Box>
           <Tooltip title={mode === "dark" ? "Use light theme" : "Use dark theme"}><IconButton onClick={toggleMode}>{mode === "dark" ? <LightModeOutlinedIcon /> : <DarkModeOutlinedIcon />}</IconButton></Tooltip>
@@ -89,40 +90,45 @@ export default function AppLayout() {
       </AppBar>
       <Drawer
         variant="permanent"
-        onMouseEnter={() => { if (designRunFocused) setDesignNavHovered(true); }}
-        onMouseLeave={() => { if (designRunFocused) setDesignNavHovered(false); }}
+        onMouseEnter={() => { if (wideViewport) setNavHovered(true); }}
+        onMouseLeave={() => { if (wideViewport) setNavHovered(false); }}
+        onFocus={() => { if (wideViewport) setNavHovered(true); }}
         sx={{
           width: drawerRootWidth,
           flexShrink: 0,
           overflow: "visible",
-          transition: "width 160ms ease",
+          transition: "width 180ms ease",
           "& .MuiDrawer-paper": {
             width: drawerPaperWidth,
             boxSizing: "border-box",
+            borderRight: "1px solid",
             borderRightColor: "divider",
             bgcolor: "background.paper",
             overflowX: "hidden",
-            transition: "width 160ms ease",
+            transition: "width 180ms ease, box-shadow 180ms ease",
+            boxShadow: navExpanded && wideViewport ? "8px 0 26px rgba(15, 27, 45, .10)" : "none",
+            zIndex: (theme) => theme.zIndex.drawer + 2,
           },
         }}
       >
         <Toolbar />
-        <Box sx={{ px: designNavCollapsed ? 0.5 : 1, py: 1.5 }}>
-          {!designNavCollapsed && <Typography variant="caption" color="text.secondary" sx={{ px: 1.5, fontWeight: 700, letterSpacing: ".12em", whiteSpace: "nowrap" }}>QUALITY WORKSPACE</Typography>}
+        <Box sx={{ px: navExpanded ? 1 : 0.5, py: 1.5 }}>
+          {!navExpanded && <Tooltip title="Open workspace navigation" placement="right"><Box aria-hidden sx={{ height: 22 }} /></Tooltip>}
+          {navExpanded && <Typography variant="caption" color="text.secondary" sx={{ px: 1.5, fontWeight: 700, letterSpacing: ".12em", whiteSpace: "nowrap" }}>QUALITY WORKSPACE</Typography>}
           <List sx={{ mt: 1 }}>
             {navigation.map((item) => (
-              <ListItemButton key={item.to} component={NavLink} to={item.to} end={item.end} title={designNavCollapsed ? item.label : undefined} sx={{ ...navSx, justifyContent: designNavCollapsed ? "center" : undefined, px: designNavCollapsed ? 1 : undefined }}>
-                <ListItemIcon sx={{ minWidth: designNavCollapsed ? "auto" : 38, color: "text.secondary", justifyContent: "center" }}>{item.icon}</ListItemIcon>
-                {!designNavCollapsed && <ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
-                {!designNavCollapsed && item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}
+              <ListItemButton key={item.to} component={NavLink} to={item.to} end={item.end} title={!navExpanded ? item.label : undefined} sx={{ ...navSx, justifyContent: navExpanded ? undefined : "center", px: navExpanded ? undefined : 1 }}>
+                <ListItemIcon sx={{ minWidth: navExpanded ? 38 : "auto", color: "text.secondary", justifyContent: "center" }}>{item.icon}</ListItemIcon>
+                {navExpanded && <ListItemText primary={item.label} primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
+                {navExpanded && item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}
               </ListItemButton>
             ))}
-            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={designNavCollapsed ? "Repositories" : undefined} sx={{ borderRadius: 2, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined, justifyContent: designNavCollapsed ? "center" : undefined, px: designNavCollapsed ? 1 : undefined }}>
-              <ListItemIcon sx={{ minWidth: designNavCollapsed ? "auto" : 38, color: "text.secondary", justifyContent: "center" }}><StorageOutlinedIcon /></ListItemIcon>
-              {!designNavCollapsed && <ListItemText primary="Repositories" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
-              {!designNavCollapsed && (testDataOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />)}
+            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={!navExpanded ? "Repositories" : undefined} sx={{ borderRadius: 1.5, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined, justifyContent: navExpanded ? undefined : "center", px: navExpanded ? undefined : 1 }}>
+              <ListItemIcon sx={{ minWidth: navExpanded ? 38 : "auto", color: "text.secondary", justifyContent: "center" }}><StorageOutlinedIcon /></ListItemIcon>
+              {navExpanded && <ListItemText primary="Repositories" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
+              {navExpanded && (testDataOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />)}
             </ListItemButton>
-            <Collapse in={testDataOpen && !designNavCollapsed} timeout="auto" unmountOnExit>
+            <Collapse in={testDataOpen && navExpanded} timeout="auto" unmountOnExit>
               <List disablePadding>
                 <ListItemButton component={NavLink} to="/test-data/uploads" sx={{ ...navSx, pl: 4.6 }}>
                   <ListItemIcon sx={{ minWidth: 34, color: "text.secondary" }}><CloudUploadOutlinedIcon fontSize="small" /></ListItemIcon>
@@ -136,16 +142,17 @@ export default function AppLayout() {
             </Collapse>
             {canViewCosts && <>
               <Divider sx={{ my: 1.25 }} />
-              <ListItemButton component={NavLink} to="/cost-center" title={designNavCollapsed ? "Cost Center" : undefined} sx={{ ...navSx, justifyContent: designNavCollapsed ? "center" : undefined, px: designNavCollapsed ? 1 : undefined }}>
-                <ListItemIcon sx={{ minWidth: designNavCollapsed ? "auto" : 38, color: "text.secondary", justifyContent: "center" }}><AccountBalanceWalletOutlinedIcon /></ListItemIcon>
-                {!designNavCollapsed && <ListItemText primary="Cost Center" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
-                {!designNavCollapsed && <Chip label="ADMIN" size="small" sx={{ height: 20, fontSize: 9, fontWeight: 800 }} />}
+              <ListItemButton component={NavLink} to="/cost-center" title={!navExpanded ? "Cost Center" : undefined} sx={{ ...navSx, justifyContent: navExpanded ? undefined : "center", px: navExpanded ? undefined : 1 }}>
+                <ListItemIcon sx={{ minWidth: navExpanded ? 38 : "auto", color: "text.secondary", justifyContent: "center" }}><AccountBalanceWalletOutlinedIcon /></ListItemIcon>
+                {navExpanded && <ListItemText primary="Cost Center" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
+                {navExpanded && <Chip label="ADMIN" size="small" sx={{ height: 20, fontSize: 9, fontWeight: 800 }} />}
               </ListItemButton>
             </>}
           </List>
         </Box>
       </Drawer>
-      <Box component="main" className="qtxpert-workspace-main" sx={{ ml: designRunFocused ? `${compactDrawerWidth}px` : `${drawerWidth}px`, p: { xs: 1.5, md: 2.25 }, minHeight: "100vh" }}><Toolbar /><Outlet /></Box>
+      <Box component="main" className="qtxpert-workspace-main" sx={{ ml: `${drawerRootWidth}px`, p: { xs: 1.5, md: 2.25 }, minHeight: "100vh", transition: "margin-left 180ms ease" }}><Toolbar /><Outlet /></Box>
     </Box>
   );
 }
+
