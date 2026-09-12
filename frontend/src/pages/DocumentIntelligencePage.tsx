@@ -37,6 +37,7 @@ import { DocumentAnalysisRun, DocumentFinding, DocumentFindingStatus, DocumentPr
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 import { useRepositoryAssets } from "@/components/repositoryAssets";
+import PageHeader from "@/components/PageHeader";
 
 const EXTRACTABLE_EXTENSIONS = new Set([
   "pdf", "docx", "pptx", "txt", "md", "json", "csv", "xlsx", "xls", "xml", "yaml", "yml", "html", "htm",
@@ -256,22 +257,18 @@ export default function DocumentIntelligencePage() {
   if (!selectedProjectId) return <Alert severity="info">Create or select a project from the top bar.</Alert>;
 
   return (
-    <Stack spacing={2}>
-      <Box>
-        <Stack direction="row" spacing={1} alignItems="center">
-          <AutoAwesomeIcon color="primary" fontSize="small" />
-          <Typography variant="h3" fontWeight={800}>Document Intelligence</Typography>
-          <Chip size="small" label="AI" color="primary" variant="outlined" />
-        </Stack>
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-          Find gaps early and turn project documents into a testable baseline.
-        </Typography>
-      </Box>
+    <Stack spacing={1.5} className="qtxpert-documents">
+      <PageHeader
+        eyebrow="DOCUMENT INTELLIGENCE"
+        title="Document intelligence"
+        description="Find gaps early and turn project documents into a testable baseline."
+        actions={<Chip size="small" icon={<AutoAwesomeIcon />} label="AI review" color="primary" variant="outlined" />}
+      />
 
       {message && <Alert severity="success" onClose={() => setMessage("")}>{message}</Alert>}
       {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
 
-      <Card variant="outlined" sx={{ borderRadius: 2.5 }}>
+      <Card variant="outlined" sx={{ borderRadius: 2 }}>
         <CardContent>
           <Grid container spacing={2} alignItems="flex-start">
             <Grid item xs={12} lg={8}>

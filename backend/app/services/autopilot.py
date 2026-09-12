@@ -24,7 +24,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 from uuid import UUID, uuid4
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -1102,20 +1102,23 @@ class AutopilotPrototypeService:
                 or test.bucket in {"uat", "integration", "sit"}
                 for test in analysis.tests
             )
-            has_safe_first_pass = any(
-                not test.requires_auth
-                and not test.requires_test_data
-                and not test.destructive
-                and test.bucket not in {"uat", "integration", "sit"}
-                for test in analysis.tests
-            )
-            if has_deferred_cases and has_safe_first_pass:
+            # Static analysis is only the inventory phase.  For every supported
+            # target with a generated plan, hand off to Runtime Discovery even
+            # when the static plan contains no executable smoke case.  This is
+            # what lets Autopilot invoke the app/site, detect the real sign-in
+            # form, and ask for the exact User ID/password before it requests
+            # secondary UAT/SIT data.  The discovery runner remains bounded and
+            # never submits destructive business actions.
+            if analysis.tests and target_kind in {"android", "ios", "web"}:
                 ready = analysis.model_copy(update={"checkpoint_stage": "ready_for_discovery", "input_requests": []})
                 await asyncio.to_thread(self._metadata_path(job_id).write_text, ready.model_dump_json(indent=2), "utf-8")
                 await self.update_job(
                     job_id, status="analyzed", stage="ready_for_discovery", progress=100,
                     checkpoint_stage="ready_for_discovery", input_requests=[],
-                    checkpoint_message="Ready to explore the app. Additional inputs will be identified from observed screens.",
+                    checkpoint_message=(
+                        "Ready for Runtime Discovery. Autopilot will inspect the target first, "
+                        "then ask for the exact sign-in and field inputs it observes."
+                    ),
                     analysis=ready.model_dump(mode="json"),
                 )
                 return
@@ -1258,12 +1261,15 @@ class AutopilotPrototypeService:
             )
             return await self.analyze(job_id)
 
-    async def resume_analysis(self, job_id: str) -> None:
+    async def resume_analysis(self, job_id: str, *, allow_runtime_discovery: bool = False) -> None:
         """Resume a checkpointed analysis after setup references are confirmed.
 
         References are checked against the same IR readiness rules used by the
-        automation compiler.  No secret is read or copied into the job; the
-        next explicit action is Runtime Discovery or safe execution.
+        automation compiler.  No secret is read or copied into the job.  The
+        first runtime-discovery pass is allowed to proceed while non-secret
+        plan references are still pending: the live app must be inspected
+        before QTXpert can know which credentials and field values it actually
+        needs.  Credential checkpoints remain a hard stop.
         """
 
         started = time.perf_counter()
@@ -1287,9 +1293,15 @@ class AutopilotPrototypeService:
                 for item in build_input_requests(analysis, setup)
                 if not setup or (setup.input_decisions or {}).get(item.key) != "skip"
             ]
-            if requests:
+            pending_runtime_credentials = [
+                item
+                for item in (setup.runtime_input_requests or [])
+                if item.category == "credential" and item.status == "pending"
+            ]
+            if pending_runtime_credentials or (requests and not allow_runtime_discovery):
+                checkpoint_requests = [*pending_runtime_credentials, *requests]
                 checkpoint_analysis = analysis.model_copy(
-                    update={"checkpoint_stage": "input_collection", "input_requests": requests}
+                    update={"checkpoint_stage": "input_collection", "input_requests": checkpoint_requests}
                 )
                 await asyncio.to_thread(
                     self._metadata_path(job_id).write_text,
@@ -1303,11 +1315,25 @@ class AutopilotPrototypeService:
                     progress=75,
                     checkpoint_stage="input_collection",
                     checkpoint_message="Additional approved setup references are still required before continuation.",
-                    input_requests=[item.model_dump(mode="json") for item in requests],
+                    input_requests=[item.model_dump(mode="json") for item in checkpoint_requests],
                     analysis=checkpoint_analysis.model_dump(mode="json"),
                 )
                 return
 
+            # Keep the durable plan requests in the setup profile for the next
+            # checkpoint, but clear the job/analysis-level request list while
+            # the target is being explored. Runtime Discovery will rehydrate
+            # and merge the plan plus field-level requests after each pass.
+            setup_checkpoint = setup.model_copy(
+                update={
+                    "last_validated_at": datetime.now(timezone.utc).isoformat(),
+                    "checkpoint_stage": "ready_for_discovery",
+                    "checkpoint_message": (
+                        "Runtime Discovery is the next step; remaining plan references will be requested after the live map."
+                    ),
+                    "input_requests": [],
+                }
+            )
             await self.update_job(
                 job_id,
                 status="analyzed",
@@ -1319,15 +1345,7 @@ class AutopilotPrototypeService:
                     "then execute the safe deterministic suite."
                 ),
                 input_requests=[],
-                setup_profile=setup.model_copy(
-                    update={
-                        "last_validated_at": datetime.now(timezone.utc).isoformat(),
-                        "checkpoint_stage": "ready_for_discovery",
-                        "checkpoint_message": "Setup references confirmed. Runtime Discovery is the next step.",
-                        "input_requests": [],
-                        "missing_fields": [],
-                    }
-                ).model_dump(mode="json"),
+                setup_profile=setup_checkpoint.model_dump(mode="json"),
                 analysis=analysis.model_copy(
                     update={"checkpoint_stage": "ready_for_discovery", "input_requests": []}
                 ).model_dump(mode="json"),
@@ -1384,7 +1402,15 @@ class AutopilotPrototypeService:
         ai_enrichment_used = bool(enrichment.pop("_ai_used", False))
         await self.update_job(job_id, status="analyzing", stage="finalizing", progress=90)
 
-        tests = deterministic_tests + enrichment.get("tests", [])
+        # The LLM may describe context-scoped journeys, but the initial pass
+        # has no runtime controls with which to prove them.  Keep only safe,
+        # evidence-neutral AI cases until discovery observes the corresponding
+        # surface; otherwise a profile word such as "investment" or "SIP"
+        # would become an invented checkpoint.
+        ai_tests, held_back_ai_cases = self._filter_unobserved_ai_tests(
+            enrichment.get("tests", []), metadata
+        )
+        tests = deterministic_tests + ai_tests
         deduped: list[AutopilotTest] = []
         seen: set[str] = set()
         for test in tests:
@@ -1418,7 +1444,7 @@ class AutopilotPrototypeService:
         if job.get("document_analysis_run_id") and _is_uuid(job.get("document_analysis_run_id")):
             document_analysis_run_id = uuid.UUID(str(job["document_analysis_run_id"]))
         analysis_basis = [
-            "Observed target metadata and bounded runtime/HTML evidence",
+            "Target metadata plus bounded static HTML/binary evidence; runtime controls are required for deeper journeys",
             (
                 "Selected profile and user-supplied context used as analysis scope"
                 if context_text
@@ -1429,6 +1455,10 @@ class AutopilotPrototypeService:
             if ai_enrichment_used
             else "LLM enrichment unavailable; deterministic fallback retained the selected scope",
         ]
+        if held_back_ai_cases:
+            analysis_basis.append(
+                f"Held back {held_back_ai_cases} AI-generated setup-gated or unobserved business case(s) until Runtime Discovery observes the relevant controls; profile/context alone never creates a checkpoint"
+            )
         if document_asset_ids:
             analysis_basis.append(
                 f"{len(document_asset_ids)} selected repository document(s) supplied bounded, redacted context"
@@ -1463,7 +1493,12 @@ class AutopilotPrototypeService:
             inferred_domain=enrichment.get("inferred_domain") or self._infer_domain(metadata, context_text),
             app_summary=enrichment.get("app_summary") or self._fallback_summary(metadata),
             critical_journeys=enrichment.get("critical_journeys") or self._fallback_journeys(metadata),
-            clarification_questions=enrichment.get("clarification_questions") or self._fallback_questions(metadata),
+            clarification_questions=(
+                self._filter_initial_clarification_questions(
+                    enrichment.get("clarification_questions"), metadata
+                )
+                or self._fallback_questions(metadata)
+            ),
             # Keep one bounded, auditable plan.  The runtime expansion pass
             # below can add observed screen/control cases after discovery,
             # but Autopilot never creates an unbounded case explosion.
@@ -1732,15 +1767,20 @@ class AutopilotPrototypeService:
     def _build_deterministic_tests(self, meta: Dict[str, Any]) -> List[AutopilotTest]:
         if meta.get("platform") == "web":
             return self._build_web_tests(meta)
+        platform = str(meta.get("platform") or "android").strip().lower()
+        platform_label = "iOS" if platform == "ios" else "Android"
+        mobile_app_label = f"{platform_label} application" if platform == "ios" else "application"
+        artifact_label = "IPA" if platform == "ios" else "APK"
+        device_label = f"{platform_label} device"
         tests: list[AutopilotTest] = [
             AutopilotTest(
                 id="QT-AUTO-SMOKE-001",
                 suite="Smoke",
                 bucket="installation",
-                title="Install and cold-launch application",
+                title=f"Install and cold-launch {mobile_app_label}",
                 priority="critical",
                 objective="Verify the uploaded build installs and reaches a stable foreground UI without an immediate crash.",
-                steps=["Install uploaded APK on clean Android device", "Cold-launch the application", "Wait for first stable foreground screen", "Capture screenshot, UI hierarchy and device state"],
+                steps=[f"Install uploaded {artifact_label} on clean {device_label}", f"Cold-launch the {mobile_app_label}", "Wait for first stable foreground screen", "Capture screenshot, UI hierarchy and device state"],
                 expected=["Installation succeeds", "Application becomes foreground process", "No immediate fatal crash is detected", "A readable UI hierarchy or rendered screen is available"],
             ),
             AutopilotTest(
@@ -1767,10 +1807,14 @@ class AutopilotPrototypeService:
                 id="QT-AUTO-SEC-001",
                 suite="Security",
                 bucket="security",
-                title="Application package security posture baseline",
+                title=f"{platform_label} application security posture baseline",
                 priority="high",
-                objective="Baseline manifest exposure, requested permissions and debug posture before deeper dynamic security testing.",
-                steps=["Inspect Android manifest", "Inventory permissions, exported components and debug posture", "Flag high-risk configuration for review"],
+                objective=f"Baseline {platform_label} bundle exposure, requested permissions and debug posture before deeper dynamic security testing.",
+                steps=[
+                    f"Inspect {platform_label} application metadata",
+                    "Inventory permissions, exported components and debug posture",
+                    "Flag high-risk configuration for review",
+                ],
                 expected=["No unexplained high-risk package configuration remains unreviewed"],
             ),
             AutopilotTest(
@@ -1786,42 +1830,27 @@ class AutopilotPrototypeService:
             ),
             AutopilotTest(
                 id="QT-AUTO-FUNC-001",
-                suite="Functional",
-                bucket="functional",
-                title="Authenticated end-to-end functional journey",
+                suite="Functional · Positive",
+                bucket="functional_positive",
+                title="Safe entry and navigation baseline",
                 priority="critical",
-                objective="Validate a complete release-critical business journey from authentication through its safe terminal state.",
-                steps=["Authenticate with an approved non-production account", "Execute the configured critical journey", "Verify business and API outcomes", "Run approved cleanup"],
-                expected=["The journey completes with correct state, messages, persistence and integration outcomes"],
-                requires_auth=True,
-                requires_test_data=True,
-                dependency="A non-production User ID/email and Password (or a secure vault credential reference), role permissions, seeded test data, environment URL and reset hook are required.",
-                evidence_required=["journey screenshots", "API or business oracle", "cleanup result"],
+                objective="Verify that the app can enter a stable foreground state and follow only the safe navigation controls observed at runtime.",
+                steps=["Launch application", "Capture the first readable screen", "Discover safe navigation controls", "Exercise observed read-only navigation"],
+                expected=["The app reaches a stable screen", "Observed safe navigation remains responsive", "No business or authentication workflow is assumed without runtime evidence"],
+                dependency="Runtime screen discovery is required before screen-level locators or business journeys are emitted.",
+                evidence_required=["launch screenshot", "UI hierarchy", "navigation evidence"],
             ),
             AutopilotTest(
                 id="QT-AUTO-FUNC-002",
-                suite="Functional negative paths",
-                bucket="functional",
-                title="Validation, negative and recovery paths",
+                suite="Functional · Negative",
+                bucket="functional_negative",
+                title="Safe startup and navigation recovery baseline",
                 priority="high",
-                objective="Verify boundary, invalid-input, backend-error and retry behavior without using production data.",
-                steps=["Load representative synthetic data", "Exercise approved negative and boundary conditions", "Observe error and recovery behavior", "Verify no invalid state is persisted"],
-                expected=["Validation is specific and controlled, recovery is possible and invalid state is not committed"],
-                requires_test_data=True,
-                dependency="Approved acceptance criteria, representative synthetic data and backend error/oracle access are required.",
-            ),
-            AutopilotTest(
-                id="QT-AUTO-UAT-001",
-                suite="UAT",
-                bucket="uat",
-                title="Business acceptance journey",
-                priority="critical",
-                objective="Validate signed-off user acceptance criteria for the primary business role and journey.",
-                steps=["Load signed-off acceptance criteria", "Authenticate as the approved UAT role", "Execute the primary business scenario with synthetic data", "Compare the outcome with acceptance evidence"],
-                expected=["Every acceptance criterion has a conclusive pass/fail result with traceable evidence"],
-                requires_auth=True,
-                requires_test_data=True,
-                dependency="Signed-off acceptance criteria, a non-production role, test data, an environment and cleanup hook are required.",
+                objective="Observe safe startup, permission and navigation failures and verify that the app recovers without inventing a business workflow.",
+                steps=["Launch application", "Observe any startup or safe navigation error", "Verify the user-facing recovery state", "Capture the resulting UI evidence"],
+                expected=["Safe failures are visible and recoverable", "The app does not crash or enter an invalid state", "No input or transaction data is required for this baseline"],
+                dependency="Runtime screen discovery is required to exercise an observed safe recovery state.",
+                evidence_required=["error-state screenshot", "UI hierarchy", "recovery evidence"],
             ),
             AutopilotTest(
                 id="QT-AUTO-UI-001",
@@ -1835,16 +1864,28 @@ class AutopilotPrototypeService:
                 dependency="Runtime screen discovery, supported viewport matrix and approved visual baselines are required.",
             ),
             AutopilotTest(
-                id="QT-AUTO-INTEGRATION-001",
-                suite="Integration",
-                bucket="integration",
-                title="Backend API and third-party integration contracts",
-                priority="high",
-                objective="Validate configured backend and third-party contracts across approved app journeys.",
-                steps=["Exercise approved API-backed journeys", "Correlate UI outcome with the trusted API oracle", "Verify timeout, error and retry contracts"],
-                expected=["UI and backend outcomes agree and integration failures are handled without data corruption"],
-                requires_test_data=True,
-                dependency="Non-production endpoints, API/oracle access, synthetic data and reset capability are required.",
+                id="QT-AUTO-UI-POS-001",
+                suite="UI · Positive",
+                bucket="ui_positive",
+                title="Observed screen visual baseline",
+                priority="medium",
+                objective="Capture readable layout, semantic labels and safe positive interaction states from screens observed at runtime.",
+                steps=["Discover the first readable screen", "Inspect visible labels and safe controls", "Capture screenshot and UI hierarchy"],
+                expected=["Observed screens have readable labels, stable layout and usable safe controls"],
+                dependency="Runtime screen discovery and an approved viewport/device baseline are required.",
+                evidence_required=["screen screenshot", "UI hierarchy"],
+            ),
+            AutopilotTest(
+                id="QT-AUTO-UI-NEG-001",
+                suite="UI · Negative",
+                bucket="ui_negative",
+                title="Observed error and empty-state baseline",
+                priority="medium",
+                objective="Record the visual and accessibility quality of error, empty, loading and recoverable states when they are observed.",
+                steps=["Discover a safe error or empty state", "Inspect its labels and recovery controls", "Capture screenshot and UI hierarchy"],
+                expected=["Observed error or empty states are readable, accessible and do not obscure safe controls"],
+                dependency="Runtime discovery is required; no synthetic input or business workflow is assumed for this baseline.",
+                evidence_required=["error-state screenshot", "UI hierarchy"],
             ),
             AutopilotTest(
                 id="QT-AUTO-PERF-001",
@@ -1861,12 +1902,16 @@ class AutopilotPrototypeService:
                 id="QT-AUTO-COMPAT-001",
                 suite="Compatibility",
                 bucket="compatibility",
-                title="Supported Android and iOS device matrix",
+                title=f"Supported {platform_label} device matrix",
                 priority="high",
                 objective="Validate installation, launch and primary safe journeys across the supported OS/device matrix.",
                 steps=["Install the release build on each approved device and OS", "Run launch and safe navigation checks", "Record platform-specific differences"],
                 expected=["Compatibility outcomes are traceable by device, OS and application version"],
-                dependency="A signed iOS build is required for iOS coverage; Android APK evidence applies only to Android.",
+                dependency=(
+                    "A signed iOS build is required for iOS coverage."
+                    if platform == "ios"
+                    else "Android APK evidence applies only to Android; use an approved Android device matrix for compatibility coverage."
+                ),
             ),
             AutopilotTest(
                 id="QT-AUTO-REG-001",
@@ -1877,11 +1922,10 @@ class AutopilotPrototypeService:
                 objective="Re-execute an approved baseline and compare the current build with the previous release.",
                 steps=["Load the selected baseline suite", "Execute eligible safe checks", "Compare results and evidence with the prior build", "Flag new or changed failures"],
                 expected=["Every baseline case has a current outcome and version-to-version comparison"],
-                requires_test_data=True,
                 dependency="A selected baseline, stable synthetic data and reset/cleanup reference are required.",
             ),
         ]
-        if "android.permission.INTERNET" in meta.get("permissions", []):
+        if platform == "ios" or "android.permission.INTERNET" in meta.get("permissions", []):
             tests.append(
                 AutopilotTest(
                     id="QT-AUTO-NET-001",
@@ -1923,121 +1967,9 @@ class AutopilotPrototypeService:
                 )
             )
 
-        # The first analysis pass must describe the complete testing intent,
-        # even before a real device has supplied screen-level locators.  These
-        # explicit positive/negative, UAT and SIT anchors prevent a release
-        # plan from collapsing to only the two legacy functional cases.  They
-        # remain setup/discovery gated and therefore can never be reported as
-        # passed without evidence.
-        tests.extend(
-            [
-                AutopilotTest(
-                    id="QT-AUTO-FUNC-POS-001",
-                    suite="Functional · Positive",
-                    bucket="functional_positive",
-                    title="Primary business journey — positive path",
-                    priority="critical",
-                    objective="Validate the primary supported customer journey from entry through its expected safe completion state.",
-                    steps=["Launch application", "Navigate through the approved primary journey", "Verify the expected completion state"],
-                    expected=["The primary journey completes with the expected state, messages and persistence"],
-                    requires_auth=True,
-                    requires_test_data=True,
-                    dependency="An approved non-production account, role, synthetic data, environment and reset/cleanup reference are required.",
-                    evidence_required=["journey screenshots", "business/API oracle", "cleanup result"],
-                ),
-                AutopilotTest(
-                    id="QT-AUTO-FUNC-NEG-001",
-                    suite="Functional · Negative",
-                    bucket="functional_negative",
-                    title="Validation and recovery — negative path",
-                    priority="high",
-                    objective="Validate invalid, boundary and recoverable failure paths across the identified customer journey.",
-                    steps=["Launch application", "Exercise approved invalid and boundary inputs", "Verify validation and recovery feedback"],
-                    expected=["Invalid input is rejected with specific feedback and no invalid state is committed"],
-                    requires_test_data=True,
-                    dependency="Approved negative fixtures, acceptance criteria, backend/oracle access and reset capability are required.",
-                    evidence_required=["negative-path screenshots", "error/oracle evidence", "cleanup result"],
-                ),
-                AutopilotTest(
-                    id="QT-AUTO-UAT-POS-001",
-                    suite="UAT · Positive",
-                    bucket="uat",
-                    title="Business acceptance — positive journey",
-                    priority="critical",
-                    objective="Run the signed-off UAT happy path for each approved business role and compare every acceptance criterion.",
-                    steps=["Load signed-off acceptance criteria", "Authenticate as the approved UAT role", "Execute the positive business scenario", "Verify acceptance outcomes"],
-                    expected=["Every positive acceptance criterion has a traceable pass/fail result and evidence"],
-                    requires_auth=True,
-                    requires_test_data=True,
-                    dependency="Signed-off acceptance criteria, a non-production role, synthetic data, environment and cleanup hook are required.",
-                    evidence_required=["acceptance trace", "journey screenshots", "business oracle"],
-                ),
-                AutopilotTest(
-                    id="QT-AUTO-UAT-NEG-001",
-                    suite="UAT · Negative",
-                    bucket="uat",
-                    title="Business acceptance — negative and recovery journey",
-                    priority="high",
-                    objective="Confirm the signed-off UAT behavior for invalid input, boundary conditions and recoverable errors.",
-                    steps=["Load signed-off negative acceptance criteria", "Exercise approved invalid and boundary scenarios", "Verify recovery and user guidance"],
-                    expected=["Negative acceptance criteria are met without corrupting business state"],
-                    requires_test_data=True,
-                    dependency="Signed-off negative acceptance criteria, synthetic fixtures, backend/oracle access and cleanup are required.",
-                    evidence_required=["acceptance trace", "error screenshots", "oracle evidence"],
-                ),
-                AutopilotTest(
-                    id="QT-AUTO-UI-POS-001",
-                    suite="UI · Positive",
-                    bucket="ui_positive",
-                    title="UI baseline — positive interaction states",
-                    priority="medium",
-                    objective="Validate that observed screens render readable labels, usable controls and stable positive states.",
-                    steps=["Inspect the discovered UI hierarchy", "Verify the primary safe control", "Capture visual evidence"],
-                    expected=["Observed positive states have no clipping, overlap, unreadable labels or disabled safe controls"],
-                    dependency="Runtime screen discovery and an approved viewport/device baseline are required.",
-                    evidence_required=["screen screenshots", "UI hierarchy"],
-                ),
-                AutopilotTest(
-                    id="QT-AUTO-UI-NEG-001",
-                    suite="UI · Negative",
-                    bucket="ui_negative",
-                    title="UI validation — error and empty states",
-                    priority="medium",
-                    objective="Validate visual clarity and accessibility of validation, empty, loading and recoverable error states.",
-                    steps=["Inspect the discovered UI hierarchy", "Exercise an approved invalid or empty state", "Capture visual evidence"],
-                    expected=["Error and empty states are understandable, accessible and do not overlap or clip primary controls"],
-                    requires_test_data=True,
-                    dependency="Runtime discovery, approved negative fixtures and visual baselines are required.",
-                    evidence_required=["error-state screenshots", "UI hierarchy"],
-                ),
-                AutopilotTest(
-                    id="QT-AUTO-SIT-POS-001",
-                    suite="SIT · Positive",
-                    bucket="sit",
-                    title="System integration — positive contract path",
-                    priority="high",
-                    objective="Validate UI-to-API and third-party integration contracts for the approved happy path.",
-                    steps=["Execute the approved integration journey", "Correlate UI results with the API/oracle", "Verify persisted state"],
-                    expected=["UI, service and persistence outcomes agree for the positive integration path"],
-                    requires_test_data=True,
-                    dependency="Non-production endpoints, API/oracle reference, synthetic data and reset capability are required.",
-                    evidence_required=["request/response evidence", "UI screenshot", "persistence/oracle result"],
-                ),
-                AutopilotTest(
-                    id="QT-AUTO-SIT-NEG-001",
-                    suite="SIT · Negative",
-                    bucket="sit",
-                    title="System integration — timeout and contract failure path",
-                    priority="high",
-                    objective="Validate timeout, malformed response, dependency outage and retry behavior at system boundaries.",
-                    steps=["Inject an approved non-production integration failure", "Observe timeout and retry behavior", "Verify recovery and data integrity"],
-                    expected=["Integration failures are surfaced safely, retried according to contract and never corrupt state"],
-                    requires_test_data=True,
-                    dependency="Non-production fault-injection controls, API/oracle reference, synthetic data and reset capability are required.",
-                    evidence_required=["failure request/response", "retry telemetry", "cleanup result"],
-                ),
-            ]
-        )
+        # UAT, SIT and other business-specific journeys are intentionally not
+        # guessed from a binary manifest.  Runtime Discovery adds them only
+        # after it observes a concrete authenticated or service-backed flow.
         return tests
 
     @staticmethod
@@ -2065,10 +1997,12 @@ class AutopilotPrototypeService:
         because it cannot infer product behavior from a binary alone. Once a
         device provider returns screens and semantic controls, this method
         creates bounded cases for each observed surface across positive,
-        negative, UI, accessibility, UAT and SIT coverage. Every interaction
-        is derived from a discovered label/locator; input, business and
-        integration cases retain their setup gates and are never silently
-        promoted to pass.
+        negative, UI and accessibility coverage. UAT/SIT coverage is added only
+        when a concrete credential form is observed, which makes the first
+        public pass useful without guessing business workflows. Every
+        interaction is derived from a discovered label/locator; input,
+        business and integration cases retain their setup gates and are never
+        silently promoted to pass.
         """
         if discovery is None or not discovery.screens:
             return analysis
@@ -2100,6 +2034,60 @@ class AutopilotPrototypeService:
             "sit_positive": [],
             "sit_negative": [],
         }
+        # Business-acceptance and system-integration cases are a second-stage
+        # expansion.  They are eligible only when discovery actually observes
+        # a credential form; a public page with a contact/search field is not
+        # evidence of UAT, SIT, SIP, investment or vault workflows.
+        def screen_has_auth_checkpoint(screen: DiscoveredScreen) -> bool:
+            # A lone email field (newsletter/contact/search) is ordinary
+            # public test data, not a login.  Authentication becomes a real
+            # checkpoint only when the live screen exposes a sign-in control,
+            # or a conventional username + password pair.  This keeps UAT/
+            # SIT expansion evidence-driven instead of profile-driven.
+            # Import lazily because the discovery adapter imports this service
+            # for its execution helpers.
+            from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+            credentials = [
+                control
+                for control in screen.controls
+                if control.enabled and control.input_capable and control.input_kind == "credential"
+            ]
+            # A public "Log in"/"Sign in" link can simply be navigation to a
+            # separate route. It is not a credential checkpoint until the live
+            # screen exposes at least one credential field. This prevents a
+            # header link from promoting UAT/SIT cases before the form is
+            # actually reached.
+            if not credentials:
+                return False
+            if AutopilotDiscoveryService._auth_submit_control(screen.controls) is None:
+                # A conventional username + password pair is sufficient even
+                # when the submit control uses a product-specific label.
+                hints: set[str] = set()
+                for control in credentials:
+                    semantic = " ".join(
+                        [
+                            control.semantic_label or "",
+                            control.content_description or "",
+                            control.resource_id or "",
+                            control.class_name or "",
+                        ]
+                    ).casefold()
+                    hints.add(
+                        "password"
+                        if any(
+                            token in semantic
+                            for token in ("password", "passcode", "secret", "pin", "secure")
+                        )
+                        else "username"
+                    )
+                return "password" in hints and "username" in hints
+            # An explicit sign-in/continue control plus one credential field
+            # is enough: many products collect User ID first and ask for the
+            # password on the following screen.
+            return True
+
+        auth_observed = any(screen_has_auth_checkpoint(screen) for screen in screens)
 
         for screen_index, screen in enumerate(screens, start=1):
             screen_label = cls._runtime_screen_label(screen, screen_index)
@@ -2136,68 +2124,73 @@ class AutopilotPrototypeService:
                     )
                 )
 
-            # UAT and SIT are intentionally represented per observed screen so
-            # the eventual plan can be traced back to a concrete surface.
-            queues["uat_positive"].append(
-                AutopilotTest(
-                    id=cls._runtime_case_id("UAT-POS", screen.screen_id),
-                    suite="UAT · Positive",
-                    bucket="uat",
-                    title=f"UAT candidate: navigation reaches {screen_label}",
-                    priority="high",
-                    objective="Replay the observed navigation journey and verify its destination. Business acceptance remains subject to approved criteria.",
-                    steps=[*navigation, f"Verify {anchor_label or screen_label}"] if screen.screen_id in paths else [f"Navigate to {screen_label}"],
-                    expected=[f"The observed destination control {anchor_label or screen_label} is visible"],
-                    autonomous_candidate=bool(anchor_label and screen.screen_id in paths),
-                    dependency=None if screen.screen_id in paths else "A replayable navigation path to this screen is required.",
-                    evidence_required=["acceptance trace", "journey screenshot", "business oracle"],
+            if auth_observed:
+                # UAT and SIT are intentionally represented per observed
+                # screen only after a concrete sign-in control was found.
+                queues["uat_positive"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("UAT-POS", screen.screen_id),
+                        suite="UAT · Positive",
+                        bucket="uat",
+                        title=f"UAT candidate: navigation reaches {screen_label}",
+                        priority="high",
+                        objective="Replay the observed navigation journey and verify its destination. Business acceptance remains subject to approved criteria.",
+                        steps=[*navigation, f"Verify {anchor_label or screen_label}"] if screen.screen_id in paths else [f"Navigate to {screen_label}"],
+                        expected=[f"The observed destination control {anchor_label or screen_label} is visible"],
+                        requires_auth=True,
+                        autonomous_candidate=bool(anchor_label and screen.screen_id in paths),
+                        dependency=None if screen.screen_id in paths else "A replayable navigation path to this screen is required.",
+                        evidence_required=["acceptance trace", "journey screenshot", "business oracle"],
+                    )
                 )
-            )
-            queues["uat_negative"].append(
-                AutopilotTest(
-                    id=cls._runtime_case_id("UAT-NEG", screen.screen_id),
-                    suite="UAT · Negative",
-                    bucket="uat",
-                    title=f"UAT negative: recover safely from {screen_label} validation",
-                    priority="high",
-                    objective="Validate signed-off rejection, boundary and recovery behavior associated with this observed screen.",
-                    steps=[f"Navigate to {screen_label}", "Exercise an approved invalid or boundary scenario", "Verify recovery feedback"],
-                    expected=[f"The negative acceptance criteria for {screen_label} are satisfied without invalid state"],
-                    requires_test_data=True,
-                    dependency="Signed-off negative acceptance criteria, approved synthetic fixtures, oracle access and cleanup are required.",
-                    evidence_required=["acceptance trace", "error screenshot", "oracle result"],
+                queues["uat_negative"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("UAT-NEG", screen.screen_id),
+                        suite="UAT · Negative",
+                        bucket="uat",
+                        title=f"UAT negative: recover safely from {screen_label} validation",
+                        priority="high",
+                        objective="Validate signed-off rejection, boundary and recovery behavior associated with this observed screen.",
+                        steps=[f"Navigate to {screen_label}", "Exercise an approved invalid or boundary scenario", "Verify recovery feedback"],
+                        expected=[f"The negative acceptance criteria for {screen_label} are satisfied without invalid state"],
+                        requires_auth=True,
+                        requires_test_data=True,
+                        dependency="Signed-off negative acceptance criteria, approved synthetic fixtures, oracle access and cleanup are required.",
+                        evidence_required=["acceptance trace", "error screenshot", "oracle result"],
+                    )
                 )
-            )
-            queues["sit_positive"].append(
-                AutopilotTest(
-                    id=cls._runtime_case_id("SIT-POS", screen.screen_id),
-                    suite="SIT · Positive",
-                    bucket="sit",
-                    title=f"SIT positive: service contract supports {screen_label}",
-                    priority="high",
-                    objective="Correlate the observed screen outcome with the approved backend and third-party contract.",
-                    steps=[f"Navigate to {screen_label}", "Correlate the UI outcome with the API/oracle", "Verify persisted state"],
-                    expected=[f"The service and UI outcomes agree for the {screen_label} path"],
-                    requires_test_data=True,
-                    dependency="Non-production endpoints, API/oracle reference, synthetic data and reset capability are required.",
-                    evidence_required=["request/response evidence", "UI screenshot", "persistence result"],
+                queues["sit_positive"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("SIT-POS", screen.screen_id),
+                        suite="SIT · Positive",
+                        bucket="sit",
+                        title=f"SIT positive: service contract supports {screen_label}",
+                        priority="high",
+                        objective="Correlate the observed screen outcome with the approved backend and third-party contract.",
+                        steps=[f"Navigate to {screen_label}", "Correlate the UI outcome with the API/oracle", "Verify persisted state"],
+                        expected=[f"The service and UI outcomes agree for the {screen_label} path"],
+                        requires_auth=True,
+                        requires_test_data=True,
+                        dependency="Non-production endpoints, API/oracle reference, synthetic data and reset capability are required.",
+                        evidence_required=["request/response evidence", "UI screenshot", "persistence result"],
+                    )
                 )
-            )
-            queues["sit_negative"].append(
-                AutopilotTest(
-                    id=cls._runtime_case_id("SIT-NEG", screen.screen_id),
-                    suite="SIT · Negative",
-                    bucket="sit",
-                    title=f"SIT negative: dependency failure recovery on {screen_label}",
-                    priority="high",
-                    objective="Validate timeout, malformed response and recoverable dependency failures at this observed screen.",
-                    steps=[f"Navigate to {screen_label}", "Inject an approved non-production dependency failure", "Verify retry and recovery behavior"],
-                    expected=[f"The {screen_label} flow surfaces a controlled error and preserves data integrity"],
-                    requires_test_data=True,
-                    dependency="Approved non-production fault injection, API/oracle reference, synthetic data and reset capability are required.",
-                    evidence_required=["failure request/response", "retry telemetry", "cleanup result"],
+                queues["sit_negative"].append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("SIT-NEG", screen.screen_id),
+                        suite="SIT · Negative",
+                        bucket="sit",
+                        title=f"SIT negative: dependency failure recovery on {screen_label}",
+                        priority="high",
+                        objective="Validate timeout, malformed response and recoverable dependency failures at this observed screen.",
+                        steps=[f"Navigate to {screen_label}", "Inject an approved non-production dependency failure", "Verify retry and recovery behavior"],
+                        expected=[f"The {screen_label} flow surfaces a controlled error and preserves data integrity"],
+                        requires_auth=True,
+                        requires_test_data=True,
+                        dependency="Approved non-production fault injection, API/oracle reference, synthetic data and reset capability are required.",
+                        evidence_required=["failure request/response", "retry telemetry", "cleanup result"],
+                    )
                 )
-            )
 
             safe_controls = [
                 control
@@ -2313,7 +2306,7 @@ class AutopilotPrototypeService:
                         evidence_required=["error-state screenshot", "UI hierarchy"],
                     )
                 )
-                if input_candidate:
+                if auth_observed and input_candidate:
                     queues["uat_negative"].append(
                         AutopilotTest(
                             id=cls._runtime_case_id("UAT-NEG-INPUT", screen.screen_id, control.control_id),
@@ -2374,11 +2367,6 @@ class AutopilotPrototypeService:
     @staticmethod
     def _build_web_tests(meta: Dict[str, Any]) -> List[AutopilotTest]:
         """Create a complete, honest website coverage plan from HTML evidence."""
-        form_note = (
-            "The target exposes HTML forms; an approved non-production credential/data reference is required for authenticated journeys."
-            if meta.get("web_form_count")
-            else "No HTML forms were observed on the initial public page; authenticated journeys still require explicit setup."
-        )
         tests = [
             AutopilotTest(
                 id="QT-WEB-SMOKE-001",
@@ -2434,17 +2422,15 @@ class AutopilotPrototypeService:
             ),
             AutopilotTest(
                 id="QT-WEB-FUNC-001",
-                suite="Functional / UAT",
-                bucket="functional",
-                title="Authenticated end-to-end business journey",
+                suite="Functional · Positive",
+                bucket="functional_positive",
+                title="Public entry and navigation baseline",
                 priority="critical",
-                objective="Validate the release-critical user journey through authenticated, non-production pages and integrations.",
-                steps=["Authenticate with an approved non-production account", "Execute the configured business journey", "Verify UI and API/oracle outcomes", "Run approved cleanup"],
-                expected=["The journey completes with correct state and traceable evidence"],
-                requires_auth=True,
-                requires_test_data=True,
-                dependency=f"{form_note} Provide credential, role, test-data, environment and reset references.",
-                evidence_required=["journey screenshots", "API or business oracle", "cleanup result"],
+                objective="Exercise only the public entry point and same-origin navigation that static HTML/runtime evidence exposes.",
+                steps=["Open the configured website URL", "Follow observed same-origin links without submitting forms", "Capture each reachable page and response", "Record any concrete login or input checkpoint when encountered"],
+                expected=["The public entry point renders", "Observed links reach the expected same-origin page or produce a clear error", "No credential or business workflow is assumed before runtime evidence"],
+                dependency="Runtime browser discovery is required before page-level locators or authenticated journeys are emitted.",
+                evidence_required=["page screenshots", "HTML/response evidence", "navigation trace"],
             ),
             AutopilotTest(
                 id="QT-WEB-PERF-001",
@@ -2469,91 +2455,34 @@ class AutopilotPrototypeService:
                 dependency="A prior completed baseline run is required.",
             ),
         ]
-        # Keep the web plan aligned with mobile: positive/negative functional,
-        # UAT and SIT intent is visible before authenticated runtime discovery,
-        # while the dependencies keep those cases pending until evidence is
-        # supplied.
+        # Add a public positive/negative baseline without treating a form as a
+        # login.  Field-level cases (and their exact input questions) are
+        # created by Runtime Discovery when a concrete control is reached.
         tests.extend(
             [
                 AutopilotTest(
                     id="QT-WEB-FUNC-POS-001",
                     suite="Functional · Positive",
                     bucket="functional_positive",
-                    title="Website business journey — positive path",
+                    title="Public navigation — reachable link flow",
                     priority="critical",
-                    objective="Validate the primary supported web journey from entry through its expected safe completion state.",
-                    steps=["Authenticate with an approved non-production account", "Execute the configured primary journey", "Verify the expected completion state"],
-                    expected=["The primary web journey completes with traceable UI and service evidence"],
-                    requires_auth=True,
-                    requires_test_data=True,
-                    dependency="An approved non-production account, synthetic data, environment and reset/cleanup reference are required.",
-                    evidence_required=["journey screenshots", "API/business oracle", "cleanup result"],
+                    objective="Exercise same-origin links observed in the public HTML and verify the destination evidence.",
+                    steps=["Open the configured website URL", "Follow a bounded sample of observed same-origin links", "Capture each destination page and response"],
+                    expected=["Observed links reach the expected same-origin destination or produce a clear error", "No login or business workflow is assumed without runtime evidence"],
+                    dependency="Runtime browser discovery is required to resolve and exercise each observed link.",
+                    evidence_required=["page screenshots", "HTML/response evidence", "navigation trace"],
                 ),
                 AutopilotTest(
                     id="QT-WEB-FUNC-NEG-001",
                     suite="Functional · Negative",
                     bucket="functional_negative",
-                    title="Website validation and recovery — negative path",
+                    title="Public navigation — unavailable link handling",
                     priority="high",
-                    objective="Validate invalid, boundary and recoverable web form behavior without committing invalid state.",
-                    steps=["Exercise approved invalid and boundary inputs", "Verify validation and recovery feedback"],
-                    expected=["Invalid web input is rejected with specific feedback and no invalid state is committed"],
-                    requires_test_data=True,
-                    dependency="Approved negative fixtures, acceptance criteria, API/oracle access and reset capability are required.",
-                    evidence_required=["validation screenshot", "error/oracle evidence"],
-                ),
-                AutopilotTest(
-                    id="QT-WEB-UAT-POS-001",
-                    suite="UAT · Positive",
-                    bucket="uat",
-                    title="Website UAT acceptance — positive journey",
-                    priority="high",
-                    objective="Validate signed-off web acceptance criteria for the approved customer role and journey.",
-                    steps=["Load signed-off acceptance criteria", "Execute the positive UAT journey", "Verify acceptance outcomes"],
-                    expected=["Every positive acceptance criterion has a traceable result and evidence"],
-                    requires_auth=True,
-                    requires_test_data=True,
-                    dependency="Signed-off acceptance criteria, non-production credentials, synthetic data and cleanup are required.",
-                    evidence_required=["acceptance trace", "journey screenshots"],
-                ),
-                AutopilotTest(
-                    id="QT-WEB-UAT-NEG-001",
-                    suite="UAT · Negative",
-                    bucket="uat",
-                    title="Website UAT acceptance — negative and recovery",
-                    priority="high",
-                    objective="Validate signed-off web rejection, boundary and recovery acceptance criteria.",
-                    steps=["Load signed-off negative acceptance criteria", "Exercise approved invalid scenarios", "Verify recovery guidance"],
-                    expected=["Negative web acceptance criteria are met without corrupting business state"],
-                    requires_test_data=True,
-                    dependency="Signed-off negative acceptance criteria, synthetic fixtures, oracle access and cleanup are required.",
-                    evidence_required=["acceptance trace", "error screenshots"],
-                ),
-                AutopilotTest(
-                    id="QT-WEB-SIT-POS-001",
-                    suite="SIT · Positive",
-                    bucket="sit",
-                    title="Website system integration — positive contract path",
-                    priority="high",
-                    objective="Correlate web UI outcomes with approved REST/GraphQL and third-party contracts.",
-                    steps=["Execute the approved web integration journey", "Correlate UI results with the API/oracle", "Verify persisted state"],
-                    expected=["Web UI, service and persistence outcomes agree for the positive path"],
-                    requires_test_data=True,
-                    dependency="Non-production endpoints, API/oracle reference, synthetic data and reset capability are required.",
-                    evidence_required=["request/response evidence", "UI screenshot"],
-                ),
-                AutopilotTest(
-                    id="QT-WEB-SIT-NEG-001",
-                    suite="SIT · Negative",
-                    bucket="sit",
-                    title="Website system integration — timeout and contract failure",
-                    priority="high",
-                    objective="Validate web timeout, malformed response, dependency outage and retry behavior.",
-                    steps=["Inject an approved non-production integration failure", "Observe timeout and retry behavior", "Verify recovery and data integrity"],
-                    expected=["Web integration failures are controlled and do not corrupt state"],
-                    requires_test_data=True,
-                    dependency="Approved fault-injection controls, API/oracle reference, synthetic data and reset capability are required.",
-                    evidence_required=["failure response", "retry telemetry", "cleanup result"],
+                    objective="Detect broken, blocked or server-error public links without submitting forms or performing writes.",
+                    steps=["Open the configured website URL", "Inspect a bounded sample of observed same-origin links", "Record 4xx/5xx responses, redirect loops or client errors"],
+                    expected=["Unavailable routes are reported with their response evidence", "No unsafe action or credential prompt is introduced"],
+                    dependency="Runtime browser discovery is required to resolve and verify each observed link.",
+                    evidence_required=["response evidence", "navigation trace"],
                 ),
             ]
         )
@@ -2596,8 +2525,14 @@ class AutopilotPrototypeService:
                         "cover positive and negative functional paths, UAT acceptance, SIT/integration contracts, "
                         "UI visual/error states, accessibility, page-level navigation, resilience and security. "
                         "Generate up to 50 distinct high-value cases when the artifact/context supports them; "
-                        "do not invent screens, workflows or business rules. Each test must contain title, suite, "
-                        "priority, objective, steps, expected, destructive. Never assume credentials or real transaction permission."
+                        "do not invent screens, workflows or business rules. During the initial static pass, emit only "
+                        "safe public/platform baselines; do not create login, UAT, SIT, payment or business cases from "
+                        "profile wording alone. Those cases are added after Runtime Discovery observes the corresponding "
+                        "control or service. During this initial pass, clarification_questions may ask only about the test "
+                        "environment, prohibited actions, approval scope or release criteria; never ask for credentials, "
+                        "field values or business fixtures until the runtime screen has exposed that exact checkpoint. "
+                        "Each test must contain title, suite, priority, objective, steps, expected, "
+                        "destructive. Never assume credentials or real transaction permission."
                     ),
                 ),
                 LLMMessage(role="user", content=json.dumps(prompt, ensure_ascii=False)),
@@ -2660,6 +2595,145 @@ class AutopilotPrototypeService:
             return {"_ai_used": False}
 
     @staticmethod
+    def _filter_unobserved_ai_tests(
+        tests: Iterable[AutopilotTest],
+        meta: Dict[str, Any],
+    ) -> tuple[list[AutopilotTest], int]:
+        """Keep the initial AI plan honest until runtime controls are observed.
+
+        A profile/brief is useful scope, but it is not proof that a product has
+        a login, SIP, investment, vault or payment workflow.  AI cases that
+        need credentials, data, approval or service oracles therefore stay out
+        of the first plan. Static package/HTML strings are inventory evidence,
+        not proof of a reachable business flow. Runtime Discovery is the only
+        path that can add those cases later.
+        """
+        if meta.get("runtime_evidence"):
+            return list(tests or []), 0
+
+        setup_buckets = {"uat", "sit", "integration"}
+        unobserved_business_terms = (
+            "sip",
+            "systematic investment",
+            "investment workflow",
+            "vault",
+            "portfolio",
+            "credit card",
+            "payment",
+            "transfer",
+            "transaction",
+            "checkout",
+            "withdraw",
+            "deposit",
+            "trade",
+            "trading",
+            "kyc",
+            "otp",
+            "login",
+            "sign in",
+            "authentication",
+            # Product nouns are not proof that the corresponding journey is
+            # reachable. Keep AI-described account/customer/form workflows
+            # behind Runtime Discovery as well; otherwise a banking profile
+            # can turn its vocabulary into invented checkpoints.
+            "account",
+            "customer",
+            "onboarding",
+            "registration",
+            "register",
+            "sign up",
+            "profile",
+            "dashboard",
+            "beneficiary",
+            "wallet",
+            "loan",
+            "statement",
+            "order",
+            "cart",
+            "booking",
+            "reservation",
+            "subscription",
+            "invoice",
+            "support ticket",
+            "form",
+        )
+
+        kept: list[AutopilotTest] = []
+        held_back = 0
+        for test in list(tests or []):
+            semantic = " ".join(
+                [test.suite, test.title, test.objective, *test.steps]
+            ).casefold()
+            if (
+                test.requires_auth
+                or test.requires_test_data
+                or test.destructive
+                or test.bucket in setup_buckets
+                # Static package/HTML strings are inventory evidence only; they
+                # do not prove a reachable business workflow.  Hold every
+                # business-specific AI case until Runtime Discovery observes
+                # the corresponding controls or service-backed flow.
+                or any(
+                    re.search(
+                        rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])",
+                        semantic,
+                    )
+                    for term in unobserved_business_terms
+                )
+            ):
+                held_back += 1
+                continue
+            kept.append(test)
+        return kept, held_back
+
+    @staticmethod
+    def _filter_initial_clarification_questions(
+        questions: Any,
+        meta: Dict[str, Any],
+    ) -> list[str]:
+        """Remove speculative input prompts from the static analysis pass.
+
+        AI clarification text is advisory, but it is displayed next to the
+        generated plan.  Before Runtime Discovery, a question about a User ID,
+        password, payment fixture or SIP workflow would look like an invented
+        checkpoint.  Keep only operational guardrails until a live screen has
+        exposed a concrete field.
+        """
+        if not isinstance(questions, list):
+            return []
+        cleaned = [str(item).strip()[:500] for item in questions if str(item).strip()]
+        if meta.get("runtime_evidence"):
+            return cleaned[:6]
+        speculative_terms = (
+            "user id",
+            "username",
+            "password",
+            "credential",
+            "sign in",
+            "login",
+            "authentication",
+            "otp",
+            "test data",
+            "fixture",
+            "seeded",
+            "reset hook",
+            "api/oracle",
+            "acceptance criteria",
+            "sip",
+            "investment",
+            "vault",
+            "portfolio",
+            "payment",
+            "transfer",
+            "transaction",
+        )
+        return [
+            question
+            for question in cleaned
+            if not any(term in question.casefold() for term in speculative_terms)
+        ][:6]
+
+    @staticmethod
     def _classify_test_bucket(suite: str, semantic_text: str):
         """Map variable AI suite labels to QTXpert's stable coverage taxonomy."""
         suite_text = suite.lower()
@@ -2695,7 +2769,14 @@ class AutopilotPrototypeService:
     def _ai_dependency(bucket: str, requires_auth: bool, requires_test_data: bool, destructive: bool) -> str | None:
         needs: list[str] = []
         if requires_auth:
-            needs.extend(["non-production User ID/email and Password (or a secure vault credential reference)", "account role", "safe authentication approval"])
+            needs.append("non-production User ID/email and Password (or a secure vault credential reference)")
+            # The first pass only needs to sign in and observe reversible
+            # journeys. A business role is requested when the generated case
+            # is explicitly UAT-scoped, where acceptance criteria depend on
+            # that role's entitlements.
+            if bucket == "uat":
+                needs.append("account role")
+            needs.append("safe authentication approval")
         if requires_test_data:
             needs.extend(["synthetic test data", "reset/cleanup reference"])
         if bucket == "uat":
@@ -2737,14 +2818,14 @@ class AutopilotPrototypeService:
                 f"QTXpert inspected the public surface of {name}. The initial target returned "
                 f"HTTP {meta.get('web_status_code') or 'unknown'} with {meta.get('web_link_count', 0)} link(s), "
                 f"{meta.get('web_form_count', 0)} form(s) and {meta.get('web_input_count', 0)} input control(s). "
-                "Authenticated and business-critical outcomes remain pending until approved test setup is provided."
+                "The first pass stays public and read-only; authenticated or business-critical outcomes are added only after runtime discovery observes the relevant checkpoint."
             )
         name = meta.get("app_name") or meta.get("package_name") or ("iOS application" if meta.get("platform") == "ios" else "Android application")
         return (
             f"QTXpert identified {name} as an {('iOS' if meta.get('platform') == 'ios' else 'Android')} application with "
             f"{len(meta.get('activities', []))} activities, {len(meta.get('services', []))} services and "
             f"{len(meta.get('permissions', []))} declared permissions. The first Autopilot pass will remain "
-            "non-destructive until test credentials and permitted business actions are supplied."
+            "non-destructive; credentials and permitted business actions are requested only when runtime discovery observes them."
         )
 
     @staticmethod
@@ -2752,10 +2833,10 @@ class AutopilotPrototypeService:
         if meta.get("platform") == "web":
             journeys = ["Public entry-page render", "Same-origin navigation surface", "Semantic control and accessibility scan"]
             if meta.get("web_form_count"):
-                journeys.append("Authenticated form and business journey (setup required)")
+                journeys.append("Public forms and validation surface (runtime input checkpoints only)")
             return journeys
         journeys = ["Install and cold launch", "First-screen rendering", "Background/foreground recovery"]
-        if "android.permission.INTERNET" in meta.get("permissions", []):
+        if meta.get("platform") == "ios" or "android.permission.INTERNET" in meta.get("permissions", []):
             journeys.append("Network-dependent user journey and recovery")
         if meta.get("main_activity"):
             journeys.append(f"Entry journey through {meta['main_activity'].split('.')[-1]}")
@@ -2766,19 +2847,18 @@ class AutopilotPrototypeService:
         if meta.get("platform") == "web":
             return [
                 "Which non-production environment and approved URL may QTXpert test?",
-                "Provide the non-production User ID/email and Password (or a vault credential reference) and account role for authenticated journeys.",
+                "No credentials are requested in the public-first pass; Autopilot will pause only if runtime discovery observes a sign-in form.",
                 "Which business actions are prohibited or require explicit approval?",
                 "Which pages and integrations are release-critical?",
-                "Provide synthetic test data and a reset/cleanup reference.",
                 "Which browsers, viewport sizes and performance thresholds are in scope?",
             ]
         questions = [
             "Which environment may QTXpert test (dev, QA, UAT, staging or production)?",
-            "Provide non-production test credentials/roles needed to access authenticated journeys.",
+            "No credentials are inferred from the binary; if runtime discovery observes a sign-in form, Autopilot will ask for the exact fields then.",
             "Which actions are prohibited or require explicit approval (payments, deletion, notifications, real OTP, etc.)?",
             "Which business journeys are release-critical?",
         ]
-        if "android.permission.INTERNET" in meta.get("permissions", []):
+        if meta.get("platform") == "ios" or "android.permission.INTERNET" in meta.get("permissions", []):
             questions.append("Which external APIs/integrated systems should be validated end to end?")
         return questions[:6]
 
@@ -2789,7 +2869,7 @@ class AutopilotPrototypeService:
             if meta.get("web_status_code", 200) >= 400:
                 risks.append(f"Initial website request returned HTTP {meta.get('web_status_code')}; availability requires investigation.")
             if meta.get("web_form_count"):
-                risks.append("Authenticated and form-driven journeys were discovered but not executed without approved credentials and synthetic data.")
+                risks.append("Public forms were observed; input-dependent checks will be requested only when runtime discovery reaches a concrete field.")
             return risks or ["Business rules, authenticated journeys and backend integrations require approved setup and runtime evidence."]
         risks = []
         if meta.get("debuggable") is True:
@@ -2811,10 +2891,13 @@ class AutopilotPrototypeService:
                 "ai_test_design": True,
             }
         permissions = set(meta.get("permissions", []))
+        platform = str(meta.get("platform") or "android").strip().lower()
         return {
-            "static_apk_analysis": True,
+            "static_apk_analysis": platform != "ios",
+            "static_ipa_analysis": platform == "ios",
             "appium_smoke_execution": True,
-            "network_test_candidate": "android.permission.INTERNET" in permissions,
+            "runtime_app_discovery": True,
+            "network_test_candidate": platform == "ios" or "android.permission.INTERNET" in permissions,
             "camera_test_candidate": "android.permission.CAMERA" in permissions,
             "location_test_candidate": bool({"android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"} & permissions),
             "notification_test_candidate": "android.permission.POST_NOTIFICATIONS" in permissions,

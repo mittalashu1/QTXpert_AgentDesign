@@ -615,7 +615,8 @@ class AutopilotSuiteService:
             elif step.action == "inspect_ui":
                 source = driver.page_source or ""
                 if not source.strip():
-                    raise AssertionError("No readable Android UI hierarchy was returned")
+                    platform_label = "iOS" if target_kind == "ios" else "Android"
+                    raise AssertionError(f"No readable {platform_label} UI hierarchy was returned")
             elif step.action == "background_app":
                 if target_kind == "ios":
                     try:
@@ -646,7 +647,13 @@ class AutopilotSuiteService:
                     raise AssertionError(f"Resolved control is not visible: {step.target}")
             elif step.action == "fill":
                 input_key = step.input_key
-                value = step.value if test.autonomous_candidate else input_values.get(input_key or "")
+                # Synthetic values are embedded only for non-sensitive
+                # evidence-scoped probes.  Runtime fields (including the
+                # User ID/password fills injected before sign-in) deliberately
+                # have no ``step.value`` and must always resolve through the
+                # encrypted, write-only input map, even when the surrounding
+                # case is marked as an autonomous candidate.
+                value = step.value if step.value is not None else input_values.get(input_key or "")
                 if not input_key or value is None or not str(value).strip():
                     raise AssertionError(
                         f"Encrypted runtime input is unavailable for {step.target or 'the requested field'}"
@@ -697,7 +704,16 @@ class AutopilotSuiteService:
                     screenshot = evidence_dir / f"step-{index:02d}.png"
                     source_path = evidence_dir / f"step-{index:02d}.xml"
                     driver.get_screenshot_as_file(str(screenshot))
-                    source_path.write_text(driver.page_source or "", encoding="utf-8")
+                    # Native hierarchies may echo a typed username, token or
+                    # custom-field value in ``text``/``value`` attributes.
+                    # Keep the same value-redaction contract as Runtime
+                    # Discovery before persisting any XML evidence.
+                    from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+                    source_path.write_text(
+                        AutopilotDiscoveryService._redact_page_source(driver.page_source or ""),
+                        encoding="utf-8",
+                    )
             else:
                 raise RuntimeError(f"IR action is not permitted by the safe suite runner: {step.action}")
             action_evidence = {

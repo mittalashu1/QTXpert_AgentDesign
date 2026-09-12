@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 from types import SimpleNamespace
 
-from app.schemas.autopilot import AutopilotDiscoveryRequest
+from app.schemas.autopilot import AutopilotDiscoveryRequest, DiscoveredControl, DiscoveryLocator
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 
 
@@ -27,6 +27,26 @@ LABELLED_LOGIN_XML = '''
     <node index="4" text="Password" class="android.view.View" clickable="false" enabled="true" />
     <node index="5" text="*" class="android.view.View" clickable="false" enabled="true" />
     <node index="6" text="" class="android.widget.EditText" clickable="true" enabled="true" bounds="[10,200][300,250]" />
+  </node>
+</hierarchy>
+'''
+
+GENERIC_LOGIN_XML = '''
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" clickable="false" enabled="true">
+    <node index="0" text="" class="android.widget.EditText" clickable="true" enabled="true" resource-id="com.qtx:id/field_1" bounds="[10,100][300,150]" />
+    <node index="1" text="" class="android.widget.EditText" clickable="true" enabled="true" resource-id="com.qtx:id/field_2" bounds="[10,200][300,250]" />
+    <node index="2" text="Continue" class="android.widget.Button" clickable="true" enabled="true" resource-id="com.qtx:id/continue" bounds="[10,280][300,340]" />
+  </node>
+</hierarchy>
+'''
+
+GENERIC_SUBMIT_LOGIN_XML = '''
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.FrameLayout" clickable="false" enabled="true">
+    <node index="0" text="" class="android.widget.EditText" clickable="true" enabled="true" resource-id="com.qtx:id/field_1" bounds="[10,100][300,150]" />
+    <node index="1" text="" class="android.widget.EditText" clickable="true" enabled="true" resource-id="com.qtx:id/field_2" bounds="[10,200][300,250]" />
+    <node index="2" text="Submit" class="android.widget.Button" clickable="true" enabled="true" resource-id="com.qtx:id/submit" bounds="[10,280][300,340]" />
   </node>
 </hierarchy>
 '''
@@ -70,6 +90,34 @@ def test_runtime_input_requests_are_reference_only():
     assert requests[0].format_hint
 
 
+def test_runtime_input_requests_auto_select_bounded_synthetic_data_for_public_fields():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-public-form",
+        fingerprint="public-form",
+        controls=[
+            DiscoveredControl(
+                control_id="address",
+                semantic_label="Address line 1",
+                class_name="android.widget.EditText",
+                input_capable=True,
+                input_kind="test_data",
+                locators=[DiscoveryLocator(strategy="id", value="com.qtx:id/address", confidence=0.95)],
+            ),
+        ],
+    )
+
+    requests = AutopilotDiscoveryService.runtime_input_requests([screen])
+
+    assert len(requests) == 1
+    assert requests[0].category == "test_data"
+    assert requests[0].sensitive is False
+    assert requests[0].status == "random"
+    assert requests[0].reference_present is True
+    assert "bounded synthetic" in requests[0].reason.lower()
+
+
 def test_runtime_input_requests_use_accessibility_sibling_labels():
     controls = AutopilotDiscoveryService.parse_controls(LABELLED_LOGIN_XML)
 
@@ -81,6 +129,51 @@ def test_runtime_input_requests_use_accessibility_sibling_labels():
         "credential",
         "credential",
     ]
+
+
+def test_unlabelled_login_fields_are_promoted_to_user_id_and_password():
+    controls = AutopilotDiscoveryService.parse_controls(GENERIC_LOGIN_XML)
+    normalized = AutopilotDiscoveryService._ensure_auth_input_semantics(controls)
+    inputs = [control for control in normalized if control.input_capable]
+
+    assert [control.semantic_label for control in inputs] == ["User ID / email", "Password"]
+    assert [control.input_kind for control in inputs] == ["credential", "credential"]
+
+
+def test_ambiguous_generic_submit_does_not_guess_authentication():
+    controls = AutopilotDiscoveryService.parse_controls(GENERIC_SUBMIT_LOGIN_XML)
+    normalized = AutopilotDiscoveryService._ensure_auth_input_semantics(controls)
+    inputs = [control for control in normalized if control.input_capable]
+
+    # Resource IDs are retained as readable labels for ambiguous fields, but
+    # their semantics must remain ordinary text (not guessed credentials).
+    assert [control.semantic_label for control in inputs] == ["field 1", "field 2"]
+    assert [control.input_kind for control in inputs] == ["test_data", "test_data"]
+    assert AutopilotDiscoveryService._auth_submit_control(normalized) is None
+
+
+def test_generic_continue_with_public_search_field_is_not_authentication():
+    controls = [
+        DiscoveredControl(
+            control_id="search",
+            semantic_label="Search",
+            class_name="android.widget.EditText",
+            input_capable=True,
+            input_kind="test_data",
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx:id/search", confidence=0.95)],
+        ),
+        DiscoveredControl(
+            control_id="continue",
+            semantic_label="Continue",
+            class_name="android.widget.Button",
+            clickable=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx:id/continue", confidence=0.95)],
+        ),
+    ]
+
+    assert AutopilotDiscoveryService._auth_submit_control(controls) is None
+    assert AutopilotDiscoveryService._ensure_auth_input_semantics(controls)[0].input_kind == "test_data"
 
 
 def test_loading_screen_detection_is_conservative():
@@ -108,6 +201,17 @@ def test_transactional_control_is_blocked_before_navigation():
     safe = AutopilotDiscoveryService._select_safe_control(controls, set())
     assert safe is not None
     assert safe.semantic_label in {"Sign in", "Settings"}
+
+
+def test_persisted_mobile_hierarchy_redacts_input_values():
+    source = (
+        '<hierarchy><node class="android.widget.EditText" text="qa@example.test" '
+        'value="qa@example.test" password="hunter2" content-desc="User ID" /></hierarchy>'
+    )
+    redacted = AutopilotDiscoveryService._redact_page_source(source)
+    assert "qa@example.test" not in redacted
+    assert "hunter2" not in redacted
+    assert "User ID" in redacted
 
 
 def test_screen_fingerprint_ignores_control_order():

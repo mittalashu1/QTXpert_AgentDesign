@@ -9,7 +9,7 @@ import { createTheme, ThemeOptions } from "@mui/material/styles";
  */
 const shared: ThemeOptions = {
   typography: {
-    fontFamily: '"IBM Plex Sans", "Inter", "Segoe UI", sans-serif',
+    fontFamily: '"Inter", "IBM Plex Sans", "Segoe UI", sans-serif',
     // The workspace is evidence-dense by design. Keep hierarchy clear without
     // making every label compete with the data on screen.
     fontSize: 14,
@@ -26,7 +26,7 @@ const shared: ThemeOptions = {
     button: { textTransform: "none", fontWeight: 650, fontSize: ".8rem" },
     caption: { fontFamily: '"IBM Plex Mono", monospace', fontSize: ".69rem", lineHeight: 1.45 },
   },
-  shape: { borderRadius: 9 },
+  shape: { borderRadius: 10 },
 };
 
 /**
@@ -42,8 +42,8 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
       styleOverrides: {
         body: {
           backgroundImage: dark
-            ? "radial-gradient(circle at 12% -8%, rgba(18, 199, 192, .12), transparent 34%), radial-gradient(circle at 92% 8%, rgba(232, 160, 61, .08), transparent 26%)"
-            : "radial-gradient(circle at 12% -8%, rgba(14, 124, 119, .10), transparent 34%), radial-gradient(circle at 92% 8%, rgba(232, 160, 61, .08), transparent 26%)",
+            ? "radial-gradient(circle at 12% -8%, rgba(18, 199, 192, .10), transparent 32%), radial-gradient(circle at 92% 8%, rgba(232, 160, 61, .06), transparent 24%)"
+            : "radial-gradient(circle at 12% -8%, rgba(14, 124, 119, .06), transparent 32%), radial-gradient(circle at 92% 8%, rgba(232, 160, 61, .045), transparent 24%)",
           backgroundAttachment: "fixed",
         },
         // Keep long content usable while preserving readable line lengths.
@@ -86,17 +86,18 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     MuiCard: {
       styleOverrides: {
         root: {
-          borderRadius: 12,
+          borderRadius: 10,
           backgroundImage: "none",
-          boxShadow: dark ? "0 8px 20px rgba(0, 0, 0, .14)" : "0 8px 20px rgba(15, 27, 45, .045)",
+          boxShadow: dark ? "0 4px 14px rgba(0, 0, 0, .16)" : "0 2px 10px rgba(15, 27, 45, .035)",
+          transition: "border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease",
         },
       },
     },
     MuiCardContent: {
       styleOverrides: {
         root: {
-          padding: 16,
-          "&:last-child": { paddingBottom: 16 },
+          padding: 14,
+          "&:last-child": { paddingBottom: 14 },
         },
       },
     },
@@ -110,7 +111,7 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     MuiButton: {
       styleOverrides: {
         root: {
-          borderRadius: 9,
+          borderRadius: 8,
           minHeight: 34,
           padding: "6px 12px",
           transition: "transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease",
@@ -169,7 +170,7 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     },
     MuiTab: {
       styleOverrides: {
-        root: { minHeight: 40, padding: "8px 12px", fontSize: ".76rem", textTransform: "none" },
+        root: { minHeight: 40, padding: "8px 12px", fontSize: ".76rem", textTransform: "none", fontWeight: 650 },
       },
     },
     MuiTextField: {

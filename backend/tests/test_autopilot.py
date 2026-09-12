@@ -13,13 +13,17 @@ from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
     AutopilotExecutionRequest,
+    AutopilotInputRequest,
+    AutopilotSetupProfile,
     AutopilotSuiteResult,
     AutopilotSuiteTestResult,
+    AutopilotTest,
     DiscoveredControl,
     DiscoveredScreen,
     DiscoveryLocator,
 )
 from app.api.routes.autopilot import (
+    _pending_runtime_auth_requests,
     _remove_local_report_data,
     _sanitize_discovery_assets,
     _strip_suite_evidence_paths,
@@ -68,11 +72,12 @@ def test_autopilot_generates_core_and_permission_tests(tmp_path):
     assert {
         "installation",
         "page_level",
-        "functional",
-        "uat",
+        "functional_positive",
+        "functional_negative",
         "ui",
         "accessibility",
-        "integration",
+        "ui_positive",
+        "ui_negative",
         "performance",
         "security",
         "compatibility",
@@ -82,16 +87,58 @@ def test_autopilot_generates_core_and_permission_tests(tmp_path):
     }.issubset({test.bucket for test in tests})
 
 
-def test_autopilot_initial_plan_exposes_positive_negative_uat_and_sit(tmp_path):
+def test_autopilot_initial_plan_is_safe_and_defers_business_workflows(tmp_path):
     service = _service(tmp_path)
     tests = service._build_deterministic_tests({"permissions": []})
 
-    assert len(tests) >= 20
-    assert {"functional_positive", "functional_negative", "uat", "sit", "ui_positive", "ui_negative"}.issubset(
-        {test.bucket for test in tests}
-    )
+    # The static mobile pass is intentionally limited to evidence-backed
+    # platform/read-only baselines.  Business UAT/SIT anchors are added only
+    # after Runtime Discovery observes the corresponding controls or service.
+    assert len(tests) >= 13
+    buckets = {test.bucket for test in tests}
+    assert {"functional_positive", "functional_negative", "ui_positive", "ui_negative"}.issubset(buckets)
+    assert "uat" not in buckets
+    assert "sit" not in buckets
+    assert "integration" not in buckets
+    assert all(not test.requires_auth and not test.requires_test_data for test in tests)
     assert any(test.suite == "UI · Positive" for test in tests)
     assert any(test.suite == "UI · Negative" for test in tests)
+
+
+def test_ios_baseline_uses_ipa_and_ios_device_language(tmp_path):
+    service = _service(tmp_path)
+    tests = service._build_deterministic_tests({"platform": "ios", "permissions": []})
+
+    smoke = next(test for test in tests if test.id == "QT-AUTO-SMOKE-001")
+    compatibility = next(test for test in tests if test.id == "QT-AUTO-COMPAT-001")
+
+    assert smoke.title == "Install and cold-launch iOS application"
+    assert "uploaded IPA" in smoke.steps[0]
+    assert "iOS device" in smoke.steps[0]
+    assert compatibility.dependency == "A signed iOS build is required for iOS coverage."
+
+    capabilities = service._capabilities({"platform": "ios", "permissions": []})
+    assert capabilities["static_ipa_analysis"] is True
+    assert capabilities["static_apk_analysis"] is False
+    assert capabilities["runtime_app_discovery"] is True
+    assert capabilities["network_test_candidate"] is True
+
+
+def test_pending_auth_guard_includes_compact_plan_credential_bundle():
+    bundle = AutopilotInputRequest(
+        key="credential_reference",
+        label="Sign-in · User ID / email + Password",
+        category="credential",
+        reason="A non-production sign-in is required.",
+        credential_bundle=True,
+        status="pending",
+    )
+    setup = AutopilotSetupProfile(
+        job_id="11111111-1111-1111-1111-111111111111",
+        input_requests=[bundle],
+    )
+
+    assert _pending_runtime_auth_requests(setup) == [bundle]
 
 
 def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
@@ -150,10 +197,140 @@ def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
 
     assert len(expanded.tests) > len(baseline)
     assert len(expanded.tests) <= 100
+    # A credential field is a concrete runtime checkpoint, so the deeper UAT
+    # and SIT queues become eligible only in this observed branch.
     assert {"functional_positive", "functional_negative", "uat", "sit"}.issubset(buckets)
     assert any("Sign in" in test.title for test in expanded.tests)
     assert any(test.requires_test_data for test in expanded.tests)
     assert any("Runtime Discovery added" in item for item in expanded.analysis_basis)
+
+
+def test_runtime_discovery_does_not_guess_uat_or_sit_for_public_surface(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="33333333-3333-3333-3333-333333333333",
+        filename="public.apk",
+        sha256="2" * 64,
+        tests=service._build_deterministic_tests({"permissions": []}),
+    )
+    help_control = DiscoveredControl(
+        control_id="help",
+        semantic_label="Help",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        input_capable=False,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/help", confidence=0.99)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-05T00:00:00+00:00",
+        finished_at="2026-09-05T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screen_count=1,
+        control_count=1,
+        safe_control_count=1,
+        screens=[DiscoveredScreen(screen_id="home", fingerprint="c" * 64, controls=[help_control])],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    buckets = {test.bucket for test in expanded.tests}
+
+    assert "uat" not in buckets
+    assert "sit" not in buckets
+    assert not any(test.requires_test_data for test in expanded.tests)
+
+
+def test_runtime_discovery_does_not_treat_login_link_as_auth_checkpoint(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="44444444-4444-4444-4444-444444444444",
+        filename="public.apk",
+        sha256="4" * 64,
+        tests=service._build_deterministic_tests({"permissions": []}),
+    )
+    login_link = DiscoveredControl(
+        control_id="login-link",
+        semantic_label="Log in",
+        class_name="android.widget.TextView",
+        clickable=True,
+        enabled=True,
+        input_capable=False,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/login", confidence=0.99)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-05T00:00:00+00:00",
+        finished_at="2026-09-05T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screen_count=1,
+        control_count=1,
+        safe_control_count=1,
+        screens=[DiscoveredScreen(screen_id="home", fingerprint="d" * 64, controls=[login_link])],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+
+    assert not any(test.bucket in {"uat", "sit"} for test in expanded.tests)
+    assert not any(test.requires_auth for test in expanded.tests)
+
+
+def test_runtime_discovery_treats_public_email_form_as_test_data_not_auth(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="55555555-5555-5555-5555-555555555555",
+        filename="public.apk",
+        sha256="5" * 64,
+        tests=service._build_deterministic_tests({"permissions": []}),
+    )
+    email = DiscoveredControl(
+        control_id="newsletter-email",
+        semantic_label="Email",
+        class_name="android.widget.EditText",
+        clickable=False,
+        enabled=True,
+        input_capable=True,
+        input_kind="test_data",
+        risk="review",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/email", confidence=0.98)],
+    )
+    subscribe = DiscoveredControl(
+        control_id="subscribe",
+        semantic_label="Subscribe",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        input_capable=False,
+        risk="review",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/subscribe", confidence=0.98)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-05T00:00:00+00:00",
+        finished_at="2026-09-05T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screen_count=1,
+        control_count=2,
+        safe_control_count=0,
+        screens=[DiscoveredScreen(screen_id="home", fingerprint="e" * 64, controls=[email, subscribe])],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+
+    assert not any(test.bucket in {"uat", "sit"} for test in expanded.tests)
+    assert not any(test.requires_auth for test in expanded.tests)
+    assert any(test.requires_test_data for test in expanded.tests)
 
 
 def test_runtime_expansion_promotes_deterministic_observed_cases(tmp_path):
@@ -311,6 +488,99 @@ def test_autopilot_questions_remain_guardrail_focused(tmp_path):
     assert "credentials" in joined
     assert "prohibited" in joined
     assert "external" in joined
+
+
+def test_ai_business_cases_are_held_until_runtime_evidence(tmp_path):
+    service = _service(tmp_path)
+    cases = [
+        AutopilotTest(
+            id="QT-AI-001",
+            suite="Functional",
+            bucket="functional",
+            title="SIP investment journey",
+            objective="Create a SIP investment",
+            steps=["Log in", "Submit investment"],
+            source="ai",
+            requires_auth=True,
+            requires_test_data=True,
+        ),
+        AutopilotTest(
+            id="QT-AI-002",
+            suite="Accessibility",
+            bucket="accessibility",
+            title="Public heading semantics",
+            objective="Check headings on the observed page",
+            steps=["Inspect headings"],
+            source="ai",
+        ),
+        AutopilotTest(
+            id="QT-AI-003",
+            suite="Functional",
+            bucket="functional",
+            title="Account overview journey",
+            objective="Open the customer's account overview",
+            steps=["Open account overview"],
+            source="ai",
+        ),
+    ]
+
+    kept, held_back = service._filter_unobserved_ai_tests(
+        cases,
+        {"platform": "web", "web_title": "Public home", "web_url": "https://example.test"},
+    )
+
+    assert [test.id for test in kept] == ["QT-AI-002"]
+    assert held_back == 2
+
+
+def test_initial_ai_questions_do_not_become_guessed_checkpoints(tmp_path):
+    service = _service(tmp_path)
+    questions = service._filter_initial_clarification_questions(
+        [
+            "Which environment should be tested?",
+            "Please provide the login password.",
+            "Do you have SIP test data?",
+            "Which actions are prohibited?",
+        ],
+        {"platform": "web", "web_url": "https://example.test"},
+    )
+
+    assert questions == [
+        "Which environment should be tested?",
+        "Which actions are prohibited?",
+    ]
+
+
+def test_public_web_plan_has_no_guessed_checkpoint_inputs(tmp_path):
+    service = _service(tmp_path)
+    tests = service._build_deterministic_tests(
+        {
+            "platform": "web",
+            "web_title": "InvestNation public home",
+            "web_url": "https://investnation.com",
+            "web_link_count": 12,
+            "web_form_count": 2,
+            "web_input_count": 3,
+            "web_button_count": 4,
+            "web_links": [{"text": "Help Center", "href": "/help-center/"}],
+        }
+    )
+
+    assert tests
+    assert all(not test.requires_auth and not test.requires_test_data for test in tests)
+    assert not {test.bucket for test in tests} & {"uat", "sit", "integration"}
+    bundle = AutopilotIRCompiler().compile_bundle(
+        AutopilotAnalysis(
+            job_id="44444444-4444-4444-4444-444444444444",
+            filename="investnation.com",
+            platform="web",
+            target_kind="web",
+            target_url="https://investnation.com",
+            sha256="3" * 64,
+            tests=tests,
+        )
+    )
+    assert bundle.setup_missing_fields == []
 
 
 def test_appium_connection_errors_are_blocked_not_product_failures():
@@ -778,7 +1048,7 @@ async def test_completed_background_analysis_returns_saved_result(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_analysis_pauses_for_inputs_and_resumes_after_references(tmp_path, monkeypatch):
+async def test_analysis_enters_runtime_discovery_before_static_references(tmp_path, monkeypatch):
     service = _service(tmp_path)
     job_id, _ = await service.save_upload("investnation.apk", b"x" * 2048, "owner")
 
@@ -807,15 +1077,12 @@ async def test_analysis_pauses_for_inputs_and_resumes_after_references(tmp_path,
     await service.analyze_safely(job_id)
 
     pending = await service.get_job_status(job_id)
-    assert pending.status == "waiting_for_input"
-    assert pending.analysis is not None
-    assert {item.key for item in pending.input_requests} == {
-        "credential_reference",
-        "account_role",
-        "safe_authentication_approved",
-        "test_data_reference",
-        "reset_hook_reference",
-    }
+    # Static analysis cannot know whether the target actually exposes a login
+    # form. Runtime Discovery must invoke it first and surface field-level
+    # User ID/password questions from the observed screen.
+    assert pending.status == "analyzed"
+    assert pending.checkpoint_stage == "ready_for_discovery"
+    assert pending.input_requests == []
 
     await service.update_job(
         job_id,
@@ -829,7 +1096,7 @@ async def test_analysis_pauses_for_inputs_and_resumes_after_references(tmp_path,
             "safe_authentication_approved": True,
         },
     )
-    await service.resume_analysis(job_id)
+    await service.resume_analysis(job_id, allow_runtime_discovery=True)
     resumed = await service.get_job_status(job_id)
     assert resumed.status == "analyzed"
     assert resumed.checkpoint_stage == "ready_for_discovery"

@@ -1,6 +1,7 @@
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
+    AutopilotInputRequest,
     AutopilotSavedInput,
     AutopilotSetupProfile,
     AutopilotTest,
@@ -202,6 +203,129 @@ def test_runtime_discovery_promotes_resolved_safe_journey():
     assert generated.steps[1].screen_id == "screen-002"
     assert generated.steps[0].locator_confidence == 0.97
     compile(generated.appium_python, "<qtx-generated>", "exec")
+
+
+def test_authentication_steps_are_injected_before_observed_sign_in():
+    username = DiscoveredControl(
+        control_id="user",
+        semantic_label="User ID / email",
+        class_name="android.widget.EditText",
+        resource_id="com.qtxpert.demo:id/user",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtxpert.demo:id/user", confidence=0.97)],
+    )
+    password = DiscoveredControl(
+        control_id="password",
+        semantic_label="Password",
+        class_name="android.widget.EditText",
+        resource_id="com.qtxpert.demo:id/password",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtxpert.demo:id/password", confidence=0.97)],
+    )
+    sign_in = _control("sign-in", "Sign in")
+    dashboard = _control("dashboard", "Dashboard")
+    discovery = _discovery().model_copy(update={
+        "screens": [
+            _discovery().screens[0].model_copy(update={"controls": [username, password, sign_in]}),
+            _discovery().screens[1].model_copy(update={"controls": [dashboard]}),
+        ],
+        "transitions": [
+            DiscoveredTransition(
+                from_screen_id="screen-001",
+                to_screen_id="screen-002",
+                control_id="sign-in",
+                control_label="Sign in",
+            )
+        ],
+    })
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AI-AUTH-REPLAY",
+            suite="Functional · Positive",
+            title="Authenticate and open the dashboard",
+            priority="critical",
+            objective="Validate a safe non-production sign-in journey.",
+            steps=["Launch application", "Tap Sign in", "Verify Dashboard"],
+            expected=["Dashboard is visible"],
+            source="ai",
+            requires_auth=True,
+        )
+    ])
+    setup = AutopilotSetupProfile(
+        job_id=analysis.job_id,
+        credential_reference="qtxpert://credentials/uat",
+        safe_authentication_approved=True,
+    )
+
+    generated = AutopilotIRCompiler().compile_bundle(
+        analysis,
+        discovery,
+        setup,
+        input_values={"__username": "qa@example.test", "__password": "not-a-real-secret"},
+    ).tests[0]
+
+    assert generated.readiness == "executable"
+    assert [step.action for step in generated.steps[:5]] == [
+        "launch_app", "fill", "fill", "tap", "assert_visible",
+    ]
+    assert all(step.value is None for step in generated.steps if step.action == "fill")
+    assert "not-a-real-secret" not in generated.model_dump_json()
+    assert "not-a-real-secret" not in generated.appium_python
+    compile(generated.appium_python, "<qtx-generated>", "exec")
+
+
+def test_generic_submit_is_only_auth_safe_with_credential_controls():
+    compiler = AutopilotIRCompiler()
+    username = DiscoveredControl(
+        control_id="user",
+        semantic_label="field1",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtxpert.demo:id/user", confidence=0.97)],
+    )
+    password = DiscoveredControl(
+        control_id="password",
+        semantic_label="field2",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtxpert.demo:id/password", confidence=0.97)],
+    )
+    submit = _control("submit", "Submit", risk="blocked")
+    screen = DiscoveredScreen(
+        screen_id="screen-login",
+        fingerprint="c" * 64,
+        controls=[username, password, submit],
+    )
+
+    assert compiler._is_auth_submit_control(submit, screen.controls) is True
+    assert compiler._best_control(screen, "Submit", interaction=True) is submit
+
+
+def test_generic_submit_with_unknown_fields_does_not_inject_authentication():
+    compiler = AutopilotIRCompiler()
+    fields = [
+        DiscoveredControl(
+            control_id="field-1",
+            semantic_label="field1",
+            class_name="input",
+            input_capable=True,
+            locators=[DiscoveryLocator(strategy="id", value="field1", confidence=0.97)],
+        ),
+        DiscoveredControl(
+            control_id="field-2",
+            semantic_label="field2",
+            class_name="input",
+            input_capable=True,
+            locators=[DiscoveryLocator(strategy="id", value="field2", confidence=0.97)],
+        ),
+    ]
+    submit = _control("submit", "Submit", risk="blocked")
+
+    assert compiler._is_auth_submit_control(submit, [*fields, submit]) is False
 
 
 def test_input_dependent_journey_remains_discovery_required_after_discovery():
@@ -451,6 +575,49 @@ def test_legacy_credential_reference_decision_does_not_hide_sign_in_fields():
     requests = build_input_requests(analysis, setup)
     assert requests[0].key == "credential_reference"
     assert requests[0].credential_bundle is True
+
+
+def test_runtime_sign_in_requires_encrypted_value_for_each_field():
+    username = AutopilotInputRequest(
+        key="runtime_user",
+        label="Sign-in · Username · User ID / email",
+        category="credential",
+        reason="A non-production sign-in value is required.",
+        source="runtime",
+        input_hint="username",
+        screen_id="screen-001",
+        control_id="user",
+        field_type="credential",
+    )
+    password = username.model_copy(
+        update={
+            "key": "runtime_password",
+            "label": "Sign-in · Password",
+            "input_hint": "password",
+            "control_id": "password",
+        }
+    )
+    base = dict(
+        job_id="11111111-1111-1111-1111-111111111111",
+        credential_reference="legacy://reference",
+        runtime_input_requests=[username, password],
+        input_decisions={"runtime_user": "provide", "runtime_password": "provide"},
+    )
+    incomplete = AutopilotSetupProfile(
+        **base,
+        saved_inputs=[AutopilotSavedInput(key="runtime_user", label=username.label, category="credential", decision="provide", has_value=True)],
+    )
+    assert credential_value_available(incomplete) is False
+
+    complete = incomplete.model_copy(
+        update={
+            "saved_inputs": [
+                AutopilotSavedInput(key="runtime_user", label=username.label, category="credential", decision="provide", has_value=True),
+                AutopilotSavedInput(key="runtime_password", label=password.label, category="credential", decision="provide", has_value=True),
+            ]
+        }
+    )
+    assert credential_value_available(complete) is True
 
 
 def test_safe_authentication_input_decision_counts_as_approval():

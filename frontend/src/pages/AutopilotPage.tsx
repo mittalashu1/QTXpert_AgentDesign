@@ -26,6 +26,7 @@ import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
 import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
 import DefectLogDialog, { type DefectSubmission } from "@/components/DefectLogDialog";
+import PageHeader from "@/components/PageHeader";
 import type { Defect } from "@/types/domain";
 
 type TestBucket =
@@ -197,6 +198,8 @@ function buildInputDrafts(profile: SetupProfile | null | undefined): Record<stri
       ? "skip"
       : prior === "random"
         ? "random"
+        : request.status === "random"
+          ? "random"
         : (prior === "reuse" || savedRecord?.save_for_reuse ? "reuse" : "provide");
     return [request.key, {
       decision,
@@ -1267,24 +1270,45 @@ export default function AutopilotPage() {
         })),
       };
       const response = await apiClient.put<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", payload, { timeout: 20000 });
+      // Keep the pre-save checkpoint in a local value. React state updates
+      // below are asynchronous, but this flag tells the resume request that a
+      // prior discovery stopped on sign-in and must be replayed with the newly
+      // saved credentials.
+      const priorAuthCheckpoint = Boolean(
+        (discovery?.input_requests || []).some((item) => item.category === "credential" && item.status === "pending")
+        || (setupDraft.runtime_input_requests || []).some((item) => item.category === "credential" && item.status === "pending"),
+      );
       setSetup(response.data);
       const pending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])]
         .filter((item) => item.status === "pending");
+      const responsePendingAuth = pending.some(
+        (item) => item.category === "credential" && item.source === "runtime",
+      );
+      const responsePendingPermission = pending.some(
+        (item) => item.category === "approval" && item.key === "safe_authentication_approved",
+      );
       setSetupDraft(response.data);
       setInputDrafts(buildInputDrafts(response.data));
-      if (pending.length > 0) {
-        // Keep the checkpoint open when only part of the requested setup was
-        // supplied, so the user can see exactly what remains and why.
+      if (responsePendingAuth || responsePendingPermission || (Boolean(discovery) && pending.length > 0 && !priorAuthCheckpoint)) {
+        // A discovered sign-in (or a later discovered field) is a hard
+        // checkpoint. Keep the dialog open when only part of it was supplied.
         const firstPending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])].findIndex((item) => item.status === "pending");
         setCheckpointStep(firstPending >= 0 ? firstPending : 0);
         setSetupDraft((current) => ({ ...current, input_requests: response.data.input_requests || [], missing_fields: response.data.missing_fields }));
         setContextNotice(`${pending.length} setup item${pending.length === 1 ? "" : "s"} still required. Complete the highlighted checkpoint inputs to continue.`);
         return;
       }
+      if (pending.length > 0) {
+        // With no live field checkpoint yet, continue into discovery. The
+        // remaining static references (role, fixture, reset hook, oracle) are
+        // requested after the target has revealed its actual screens.
+        setContextNotice("Setup saved. Runtime Discovery will inspect the target first and request any remaining field inputs afterward.");
+      }
       setSetupOpen(false);
       await refreshAutomation(analysis.job_id);
       setResumeBusy(true);
       try {
+        const pendingAuthCheckpoint = priorAuthCheckpoint || responsePendingAuth;
         const resumeResponse = await apiClient.post<AnalysisJob>(
           `/autopilot/${analysis.job_id}/resume`,
           {
@@ -1292,7 +1316,10 @@ export default function AutopilotPage() {
             // The first checkpoint chains into discovery. Once a screen map
             // already exists, keep it and validate the newly supplied field
             // inputs instead of launching a duplicate discovery run.
-            run_runtime_discovery: !discovery,
+            // A discovery that stopped on a sign-in screen must be resumed
+            // with the newly saved values. Reusing the prior map without a
+            // second pass would leave the user in the login checkpoint loop.
+            run_runtime_discovery: !discovery || pendingAuthCheckpoint,
             discovery_provider: executionPayload().provider,
             auto_run_safe_suite: autoRunFirstPass,
             discovery_device_name: deviceName,
@@ -1333,15 +1360,27 @@ export default function AutopilotPage() {
           } catch { /* background job is still running; retry */ }
           await new Promise((resolve) => window.setTimeout(resolve, 3000));
         }
+        let latestPending = false;
         try {
           const latestSetup = (await apiClient.get<SetupProfile>(`/autopilot/${analysis.job_id}/setup`, { timeout: 15000 })).data;
           setSetup(latestSetup);
           setSetupDraft(latestSetup);
           setInputDrafts(buildInputDrafts(latestSetup));
+          const latestRequests = [...(latestSetup.input_requests || []), ...(latestSetup.runtime_input_requests || [])];
+          const pendingLatest = latestRequests.filter((item) => item.status === "pending");
+          latestPending = pendingLatest.length > 0;
+          if (latestPending) {
+            const firstPending = latestRequests.findIndex((item) => item.status === "pending");
+            setCheckpointStep(firstPending >= 0 ? firstPending : 0);
+            setSetupOpen(true);
+            setContextNotice(
+              "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue.",
+            );
+          }
         } catch { /* keep the saved checkpoint visible */ }
         await refreshAutomation(analysis.job_id);
         await refreshReport(analysis.job_id);
-        if (!discoveryReady) setContextNotice("Setup validated. Runtime Discovery is continuing in the background; refresh this tab to see its evidence.");
+        if (!discoveryReady && !latestPending) setContextNotice("Setup validated. Runtime Discovery is continuing in the background; refresh this tab to see its evidence.");
       } finally {
         setResumeBusy(false);
       }
@@ -1374,17 +1413,41 @@ export default function AutopilotPage() {
         max_actions: discoveryMode === "observe" ? 0 : 50,
       }, { timeout: 660000 });
       setDiscovery(response.data);
+      let checkpointPending = Boolean(
+        (response.data.input_requests || []).some((item) => item.status === "pending"),
+      );
+      let runtimeAuthPending = false;
       try {
         const nextSetup = (await apiClient.get<SetupProfile>(`/autopilot/${jobId}/setup`, { timeout: 15000 })).data;
         setSetup(nextSetup);
         setSetupDraft(nextSetup);
         setInputDrafts(buildInputDrafts(nextSetup));
         const nextRequests = [...(nextSetup.input_requests || []), ...(nextSetup.runtime_input_requests || [])];
+        // A discovered login is represented as a compact plan-level
+        // credential bundle in the setup profile. Include both plan and
+        // field-level requests here so the first checkpoint always pauses
+        // before any automatic safe-suite handoff.
+        runtimeAuthPending = nextRequests.some(
+          (item) => item.category === "credential" && item.status === "pending",
+        );
         const firstPending = nextRequests.findIndex((item) => item.status === "pending");
         if (firstPending >= 0) setCheckpointStep(firstPending);
+        checkpointPending = checkpointPending || nextRequests.some(
+          (item) => item.status === "pending",
+        );
       } catch { /* discovery evidence remains visible */ }
       await refreshAutomation(jobId);
       await refreshReport(jobId);
+      if (checkpointPending) {
+        setSetupOpen(true);
+        setContextNotice(
+          "Runtime checkpoint found. Review the exact field or setup item observed on the target; enter, reuse, randomize or skip it before dependent cases continue.",
+        );
+        // A live credential checkpoint is a hard stop. Other pending items
+        // describe deferred UAT/SIT evidence; safe cases can still run while
+        // those references remain available in the checkpoint dialog.
+        if (runtimeAuthPending) return;
+      }
       if (autoRunFirstPass && discoveryMode === "safe" && response.data.screens.length > 0) await runSuite(jobId);
     } catch (err) { setError(readableError(err, "Runtime discovery failed")); }
     finally { setDiscoveryBusy(false); }
@@ -1542,6 +1605,9 @@ export default function AutopilotPage() {
     ...(activeSetup.runtime_input_requests || []),
   ];
   const pendingCheckpointRequests = checkpointRequests.filter((item) => item.status === "pending");
+  const runtimeInputRequests = activeSetup.runtime_input_requests || [];
+  const runtimePendingCount = runtimeInputRequests.filter((item) => item.status === "pending").length;
+  const runtimeSyntheticCount = runtimeInputRequests.filter((item) => item.category === "test_data" && item.status === "random").length;
   const activeCheckpointIndex = checkpointRequests.length > 0
     ? Math.min(Math.max(checkpointStep, 0), checkpointRequests.length - 1)
     : 0;
@@ -1563,13 +1629,15 @@ export default function AutopilotPage() {
           ? `Analyze stored ${selectedStoredApk.extension.toUpperCase()}`
           : "Start analysis";
 
-  return <Stack spacing={2}>
-    <Box>
-      <Stack direction="row" spacing={1} alignItems="center"><AutoAwesomeIcon color="primary" fontSize="small" /><Typography variant="h3" fontWeight={800}>Autopilot</Typography></Stack>
-      <Typography variant="body2" color="text.secondary" sx={{ mt: .5, maxWidth: 920 }}>Inspect a target, generate coverage, discover safe journeys and retain evidence-backed outcomes.</Typography>
-    </Box>
+  return <Stack spacing={1.5} className="qtxpert-autopilot">
+    <PageHeader
+      eyebrow="AUTONOMOUS TESTING"
+      title="Autopilot"
+      description="Inspect a target, generate coverage, discover safe journeys and retain evidence-backed outcomes."
+      actions={<Chip size="small" icon={<AutoAwesomeIcon />} label={activeTargetKind === "web" ? "Web" : activeTargetKind === "ios" ? "iOS" : "Android"} color="primary" variant="outlined" />}
+    />
 
-    <Paper variant="outlined" sx={{ p: { xs: 1.5, md: 2 }, borderRadius: 2.5 }}>
+    <Paper variant="outlined" sx={{ p: { xs: 1.25, md: 1.5 }, borderRadius: 2 }}>
       <Box sx={{ mb: 1.75 }}>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} justifyContent="space-between">
           <Box>
@@ -1881,7 +1949,7 @@ export default function AutopilotPage() {
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent>
-        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, delete, submit, confirm and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : "Run discovery"}</Button></Stack></Stack>
+        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, destructive submits, confirmations and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : "Run discovery"}</Button></Stack></Stack>
         {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
         {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.screens.length > 0 && <Grid container spacing={1.5} sx={{ mt: .5 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Screen</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.slice(0, 150).map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen}-${control.control_id}`} hover><TableCell>{screen}</TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
@@ -1926,7 +1994,7 @@ export default function AutopilotPage() {
             {(automation?.setup_missing_fields || []).slice(0, 6).map((field) => <Chip key={field} size="small" label={"Pending: " + field} color="warning" variant="outlined" />)}
           </Stack>
           {pendingCheckpointRequests.slice(0, 6).map((request) => <Box key={request.key} sx={{ mt: 1, p: 1, borderRadius: 1.5, bgcolor: "warning.lighter", border: "1px solid", borderColor: "warning.light" }}><Stack direction="row" spacing={.75} alignItems="center"><Chip size="small" label={inputCategoryLabel(request.category)} variant="outlined" /><Typography variant="body2" fontWeight={700}>{request.label}</Typography></Stack><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .35 }}>{request.question || request.reason}</Typography><Typography variant="caption" color="text.secondary">Needed for: {requestDependentTitles(request, analysis.tests).join(" · ") || "this checkpoint"}</Typography></Box>)}
-          {(activeSetup.runtime_input_requests || []).length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: "info.lighter", border: "1px solid", borderColor: "info.light" }}><Typography variant="body2" fontWeight={700}>Runtime fields mapped</Typography><Typography variant="caption" color="text.secondary">{(activeSetup.runtime_input_requests || []).length} field{(activeSetup.runtime_input_requests || []).length === 1 ? "" : "s"} were found on the live screen map. Click “Review required inputs” above to enter the exact User ID, Password, Address or other field value.</Typography></Box>}
+          {runtimeInputRequests.length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: runtimePendingCount > 0 ? "warning.lighter" : "info.lighter", border: "1px solid", borderColor: runtimePendingCount > 0 ? "warning.light" : "info.light" }}><Typography variant="body2" fontWeight={700}>Runtime fields mapped</Typography><Typography variant="caption" color="text.secondary">{runtimeInputRequests.length} field{runtimeInputRequests.length === 1 ? "" : "s"} were found on the live screen map. {runtimePendingCount > 0 ? `The ${runtimePendingCount} credential or sensitive field${runtimePendingCount === 1 ? " is" : "s are"} waiting for you in the checkpoint above.` : `${runtimeSyntheticCount || "These"} non-sensitive field${runtimeInputRequests.length === 1 ? " is" : "s are"} ready for bounded synthetic data on the first pass.`} Open the checkpoint to override a value, save a non-production fixture, generate a different value, or skip a dependent check.</Typography></Box>}
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · plan capped at 100 cases</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 100).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
@@ -2071,7 +2139,7 @@ export default function AutopilotPage() {
                 <Grid container spacing={1.25} sx={{ mt: .5 }}>
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" label="User ID / email" placeholder="qa.investor@example.test" value={activeCheckpointDraft.username} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { username: event.target.value })} autoComplete="off" helperText="Use the non-production account ID or email." /></Grid>
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" type="password" label="Password" placeholder="Password for this UAT account" value={activeCheckpointDraft.password} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { password: event.target.value })} autoComplete="new-password" helperText="Encrypted immediately; never echoed or sent to the model." /></Grid>
-                  <Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save this sign-in securely for this target" /></Grid>
+                  <Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save this sign-in securely for this target" /><FormControlLabel sx={{ ml: { sm: 2 } }} control={<Switch size="small" checked={setupDraft.safe_authentication_approved} onChange={(event) => updateSetup("safe_authentication_approved", event.target.checked)} />} label="Approve safe, non-transactional sign-in" /></Grid>
                 </Grid>
               </> : activeCheckpointDraft.decision === "provide" && <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1 }}><TextField fullWidth size="small" type={activeCheckpointRequest.input_hint === "password" || activeCheckpointRequest.input_hint === "otp" ? "password" : "text"} label={activeCheckpointRequest.input_hint === "password" ? "Password" : activeCheckpointRequest.input_hint === "otp" ? "One-time code" : activeCheckpointRequest.input_hint === "username" ? "User ID / email" : "Value or reference"} placeholder={activeCheckpointRequest.placeholder || undefined} value={activeCheckpointDraft.value} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { value: event.target.value })} autoComplete="off" helperText={activeCheckpointRequest.format_hint || "Use synthetic/non-production data only."} /><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save encrypted" /></Stack>}
             </>}

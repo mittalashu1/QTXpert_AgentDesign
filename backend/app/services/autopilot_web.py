@@ -1,10 +1,10 @@
 """Bounded, read-only website runtime discovery for Autopilot.
 
 The website adapter deliberately uses Playwright only for navigation, DOM
-inspection and evidence capture. It never submits forms or clicks controls that
-look like authentication, payment, transfer, deletion or other irreversible
-actions. Authenticated journeys remain setup-gated until a future vault
-connector is configured.
+inspection and evidence capture. It may submit an explicitly identified,
+approved sign-in form after the user supplies non-production credentials, but
+never clicks payment, transfer, deletion or other irreversible controls.
+Authenticated journeys remain setup-gated until those values are approved.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urldefrag, urljoin, urlparse
 
 from app.config import Settings
@@ -32,8 +32,18 @@ from app.services.autopilot import AutopilotPrototypeService
 
 
 _BLOCKED_TERMS = (
-    "logout", "log out", "delete", "remove", "payment", "pay", "transfer", "send money",
+    "logout", "log out", "delete", "remove", "payment", "payments", "pay", "transfer", "transfers", "send money",
     "purchase", "buy", "checkout", "submit", "confirm", "otp", "password", "reset",
+)
+_AUTH_SUBMIT_TERMS = (
+    "sign in", "sign-in", "log in", "login", "continue to account", "continue",
+    "next", "unlock", "authenticate",
+)
+_SAFE_INTERACTIVE_TERMS = (
+    "menu", "more", "settings", "help", "about", "search", "filter", "sort",
+    "back", "home", "privacy", "terms", "language", "profile", "dashboard",
+    "explore", "learn", "view", "detail", "tab", "accordion", "expand", "collapse",
+    "previous", "next", "open",
 )
 
 
@@ -55,9 +65,32 @@ def _safe_css(value: str) -> str:
 def _blocked_label(label: str, href: str = "") -> tuple[str, str | None]:
     haystack = f"{label} {href}".lower()
     for term in _BLOCKED_TERMS:
-        if term in haystack:
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", haystack):
             return "blocked", f"Blocked business/destructive term matched: {term}"
     return "safe", None
+
+
+def _redact_html(html: str) -> str:
+    """Redact DOM value attributes before HTML evidence is persisted."""
+    # Values are never needed to replay a locator.  Removing all value-like
+    # attributes is deliberately broader than only password fields so a typed
+    # username, search term or token cannot leak through a custom control.
+    redacted = re.sub(
+        r"(\s(?:value|aria-valuetext|data-value|data-input-value)\s*=\s*)([\"']).*?\2",
+        r"\1\2\2",
+        html or "",
+        flags=re.I | re.S,
+    )
+    # Contenteditable controls keep their value as text between the opening
+    # and closing tags instead of in a ``value`` attribute. Replace that text
+    # as well so rich-text login/search widgets cannot leak typed input.
+    redacted = re.sub(
+        r"(<[^>]*\bcontenteditable\s*=\s*[\"']true[\"'][^>]*>).*?(</[^>]+>)",
+        r"\1[REDACTED]\2",
+        redacted,
+        flags=re.I | re.S,
+    )
+    return redacted
 
 
 async def _capture_screenshot(page: Any, path: Path) -> tuple[str | None, str | None]:
@@ -105,6 +138,184 @@ class AutopilotWebService:
             raise RuntimeError(f"Unsupported Playwright browser: {browser_name}")
         return await browser_type.launch(headless=True)
 
+    @staticmethod
+    def _credential_hint(control: DiscoveredControl) -> str:
+        haystack = " ".join(
+            [control.semantic_label, control.content_description, control.resource_id, control.class_name]
+        ).lower().replace("_", " ").replace("-", " ")
+        if any(term in haystack for term in ("otp", "one time", "mfa", "verification code", "passcode")):
+            return "otp"
+        if any(term in haystack for term in ("password", "secret", "pin", "securetextfield", "passwordtext", "passwd", "pwd")) or re.search(r"\bpass\b", haystack):
+            return "password"
+        return "username"
+
+    @classmethod
+    def _credential_value(
+        cls,
+        screen_id: str,
+        control: DiscoveredControl,
+        input_values: Mapping[str, str],
+    ) -> Optional[str]:
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        field_type = control.input_kind or "credential"
+        key = AutopilotDiscoveryService.runtime_input_key(screen_id, control.control_id, field_type)
+        value = input_values.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+        hint = cls._credential_hint(control)
+        value = input_values.get(f"__{hint}")
+        return str(value) if value is not None and str(value).strip() else None
+
+    @classmethod
+    def _auth_submit_control(cls, controls: Iterable[DiscoveredControl]) -> Optional[DiscoveredControl]:
+        controls = list(controls)
+        inputs = [
+            control
+            for control in controls
+            if control.enabled and control.input_capable and control.locators
+        ]
+        credentialish = any(
+            control.input_kind == "credential"
+            or re.search(
+                r"\b(?:user\s*(?:id|name)|uid|userid|username|password|passcode|otp|mfa|login)\b",
+                " ".join(
+                    [
+                        control.semantic_label or "",
+                        control.content_description or "",
+                        control.resource_id or "",
+                        control.class_name or "",
+                    ]
+                ).lower(),
+            )
+            for control in inputs
+        )
+        candidates: list[DiscoveredControl] = []
+        for control in controls:
+            if not control.enabled or not control.clickable or control.input_capable or not control.locators:
+                continue
+            label = (control.semantic_label or "").strip().lower()
+            generic_continue = label in {"continue", "next"}
+            non_auth_form = any(
+                any(term in " ".join(
+                    [
+                        item.semantic_label or "",
+                        item.content_description or "",
+                        item.resource_id or "",
+                    ]
+                ).casefold() for term in ("search", "query", "filter", "newsletter", "subscribe"))
+                for item in inputs
+            )
+            auth_label = any(
+                re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", label)
+                for term in _AUTH_SUBMIT_TERMS
+            )
+            # A generic two-field form is ambiguous (contact/newsletter/data
+            # entry). Only a Submit button with a credential-labelled input is
+            # an authentication signal; otherwise wait for an explicit
+            # sign-in/login control instead of guessing.
+            contextual_submit = label == "submit" and credentialish
+            if generic_continue and not credentialish and (len(inputs) < 2 or non_auth_form):
+                auth_label = False
+            if (auth_label and control.risk != "blocked") or (contextual_submit and control.risk == "blocked"):
+                candidates.append(control)
+        candidates.sort(key=lambda item: (-max(locator.confidence for locator in item.locators), item.semantic_label.lower()))
+        return candidates[0] if candidates else None
+
+    @staticmethod
+    def _is_generic_input_label(label: str, class_name: str) -> bool:
+        normalized = re.sub(r"\s+", "", (label or "").strip().lower())
+        class_short = (class_name or "").rsplit(".", 1)[-1].lower().replace(" ", "")
+        return (
+            not normalized
+            or normalized in {"input", "textarea", "select", "textfield", "searchfield", "control", class_short}
+            or bool(re.fullmatch(r"(?:field|input|text|control)[_-]?\d*", normalized))
+        )
+
+    @classmethod
+    def _ensure_auth_input_semantics(
+        cls,
+        controls: list[DiscoveredControl],
+    ) -> list[DiscoveredControl]:
+        """Promote conventional but unlabeled web login fields to a checkpoint.
+
+        Some SPA forms expose only ``<input>`` elements with generated names.
+        When a safe sign-in/continue control is present, treating generic
+        fields as User ID and Password gives the user an actionable first
+        checkpoint instead of silently crawling past authentication. Search or
+        other clearly non-auth fields are left unchanged unless the form has
+        two generic inputs and a generic Continue/Next submit.
+        """
+        inputs = [
+            control
+            for control in controls
+            if control.enabled and control.input_capable and control.locators
+        ]
+        submit = cls._auth_submit_control(controls)
+        if not inputs or submit is None:
+            return controls
+        submit_label = re.sub(r"\s+", " ", (submit.semantic_label or "").strip().lower())
+        explicit_auth_submit = any(
+            re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", submit_label)
+            for term in _AUTH_SUBMIT_TERMS
+            if term not in {"continue", "next"}
+        )
+        labelled_auth_input = any(
+            re.search(
+                r"\b(?:user\s*(?:id|name)|uid|userid|username|email|password|passcode|otp|mfa|login)\b",
+                (control.semantic_label or "").lower(),
+            )
+            for control in inputs
+        )
+        if not explicit_auth_submit and not labelled_auth_input and len(inputs) < 2:
+            return controls
+
+        updated: list[DiscoveredControl] = []
+        input_ids = {control.control_id for control in inputs}
+        credential_positions = {
+            index for index, control in enumerate(inputs) if control.input_kind == "credential"
+        }
+        input_position = 0
+        for control in controls:
+            if control.control_id not in input_ids:
+                updated.append(control)
+                continue
+            position = input_position
+            input_position += 1
+            if control.input_kind == "credential":
+                updated.append(control)
+                continue
+            label = control.semantic_label or ""
+            # Do not reinterpret an explicitly named search/query field as a
+            # login field. Generic generated names/classes remain eligible.
+            lower_label = label.lower()
+            clearly_non_auth = any(term in lower_label for term in ("search", "query", "filter"))
+            if clearly_non_auth and not cls._is_generic_input_label(label, control.class_name):
+                updated.append(control)
+                continue
+            if position == 0 and not credential_positions:
+                semantic_label = "User ID / email"
+            elif position == 0 and credential_positions:
+                semantic_label = label
+            elif position == 1 and not credential_positions:
+                semantic_label = "Password"
+            elif position == 1:
+                semantic_label = "Password" if any(
+                    cls._credential_hint(item) == "username" for item in inputs[:position]
+                ) else label
+            else:
+                semantic_label = label
+            updated.append(control.model_copy(update={"semantic_label": semantic_label, "input_kind": "credential"}))
+        return updated
+
+    @staticmethod
+    def _safe_probe_control(control: DiscoveredControl) -> bool:
+        """Allow only reversible UI/navigation probes beyond ordinary links."""
+        if not control.enabled or not control.clickable or control.input_capable or control.risk != "safe" or not control.locators:
+            return False
+        label = (control.semantic_label or "").strip().lower()
+        return any(term in label for term in _SAFE_INTERACTIVE_TERMS)
+
     async def smoke(self, job_id: str, request) -> dict[str, Any]:
         """Run a single non-mutating page-load smoke and capture evidence."""
         job = await self.prototype.load_job(job_id)
@@ -135,7 +346,10 @@ class AutopilotWebService:
                     pass
                 captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
                 html = await page.content()
-                source_path.write_text(html, encoding="utf-8")
+                # Static smoke evidence must follow the same redaction policy
+                # as discovered pages. A login/search widget can keep typed
+                # values in value, aria-valuetext or contenteditable text.
+                source_path.write_text(_redact_html(html), encoding="utf-8")
                 status_code = response.status if response is not None else None
                 title = await page.title()
                 evidence = {
@@ -163,7 +377,12 @@ class AutopilotWebService:
             finally:
                 await context.close()
 
-    async def discover(self, job_id: str, request: AutopilotDiscoveryRequest) -> AutopilotDiscoveryResult:
+    async def discover(
+        self,
+        job_id: str,
+        request: AutopilotDiscoveryRequest,
+        input_values: Optional[Mapping[str, str]] = None,
+    ) -> AutopilotDiscoveryResult:
         job = await self.prototype.load_job(job_id)
         target_url = request.target_url or job.get("target_url")
         if not target_url:
@@ -180,11 +399,53 @@ class AutopilotWebService:
         warnings: list[str] = []
         visited: set[str] = set()
         queue: list[str] = [target_url]
+        probed_controls: set[str] = set()
         actions = 0
+        stop_override: Optional[str] = None
+        input_values = input_values or {}
+
         async with self._playwright_context() as (manager, browser):
             context = await browser.new_context(ignore_https_errors=False)
             await context.route("**/*", self._safe_route)
             page = await context.new_page()
+
+            async def append_screen(*, status_code: Optional[int] = None, persist_evidence: bool = True):
+                html = await page.content()
+                title = (await page.title())[:300]
+                # Normalize unlabeled/generated login fields before computing
+                # the screen fingerprint. This makes authentication a
+                # first-class, login-first checkpoint for web targets too.
+                controls = self._ensure_auth_input_semantics(await self._controls(page))
+                fingerprint = hashlib.sha256(
+                    f"{page.url}|{title}|{','.join(item.control_id for item in controls)}".encode("utf-8")
+                ).hexdigest()
+                existing = next((item for item in screens if item.fingerprint == fingerprint), None)
+                if existing is not None:
+                    return existing, True
+                screen_id = f"screen-{len(screens) + 1:03d}"
+                screenshot_path = evidence_root / f"{screen_id}.png"
+                source_path = evidence_root / f"{screen_id}.html"
+                captured_screenshot = None
+                if persist_evidence:
+                    captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
+                    if screenshot_warning:
+                        warnings.append(f"{screen_id}: {screenshot_warning}")
+                    # Remove typed value attributes before the HTML reaches the
+                    # repository. The immediate post-auth screen is not saved at
+                    # all, so user identifiers never become evidence.
+                    source_path.write_text(_redact_html(html), encoding="utf-8")
+                screen = DiscoveredScreen(
+                    screen_id=screen_id,
+                    fingerprint=fingerprint,
+                    url=page.url,
+                    title=title or None,
+                    screenshot_path=captured_screenshot if persist_evidence else None,
+                    page_source_path=str(source_path) if persist_evidence else None,
+                    controls=controls,
+                )
+                screens.append(screen)
+                return screen, False
+
             try:
                 while queue and len(screens) < min(request.max_screens, self.settings.AUTOPILOT_WEB_MAX_PAGES):
                     current_url = queue.pop(0)
@@ -199,39 +460,116 @@ class AutopilotWebService:
                             timeout=self.settings.AUTOPILOT_WEB_TIMEOUT_SECONDS * 1000,
                         )
                         status_code = response.status if response is not None else None
-                        html = await page.content()
-                        title = (await page.title())[:300]
-                        controls = await self._controls(page)
-                        screen_id = f"screen-{len(screens) + 1:03d}"
-                        fingerprint = hashlib.sha256(
-                            f"{page.url}|{title}|{','.join(item.control_id for item in controls)}".encode("utf-8")
-                        ).hexdigest()
-                        screenshot_path = evidence_root / f"{screen_id}.png"
-                        source_path = evidence_root / f"{screen_id}.html"
-                        captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
-                        if screenshot_warning:
-                            warnings.append(f"{screen_id}: {screenshot_warning}")
-                        source_path.write_text(html, encoding="utf-8")
-                        screens.append(
-                            DiscoveredScreen(
-                                screen_id=screen_id,
-                                fingerprint=fingerprint,
-                                url=page.url,
-                                title=title or None,
-                                screenshot_path=captured_screenshot,
-                                page_source_path=str(source_path),
-                                controls=controls,
-                            )
-                        )
+                        current, _ = await append_screen(status_code=status_code)
                         if status_code is not None and status_code >= 400:
                             warnings.append(f"{page.url} returned HTTP {status_code}")
                         if request.observe_only:
                             break
+
+                        # Stop on the first sign-in form. The checkpoint is
+                        # returned with exact field labels, before unrelated
+                        # pages are explored, so the next run can continue with
+                        # the same session scope and saved UAT values.
+                        auth_rounds = 0
+                        while True:
+                            credential_controls = [
+                                control for control in current.controls
+                                if control.input_capable and control.input_kind == "credential"
+                            ]
+                            if not credential_controls:
+                                break
+                            auth_rounds += 1
+                            if auth_rounds > 3:
+                                stop_override = "Authentication has more than three sequential checkpoints; continue under supervision."
+                                break
+                            auth_approved = str(input_values.get("__auth_approved") or "") == "1"
+                            missing_controls = [
+                                control
+                                for control in credential_controls
+                                if self._credential_hint(control) != "otp"
+                                and self._credential_value(current.screen_id, control, input_values) is None
+                            ]
+                            otp_controls = [
+                                control
+                                for control in credential_controls
+                                if self._credential_hint(control) == "otp"
+                            ]
+                            if not auth_approved or missing_controls or otp_controls:
+                                stop_override = (
+                                    "Authentication checkpoint detected. Enter the non-production User ID and Password "
+                                    "(and provide an approved OTP only when the flow permits it) before Autopilot continues."
+                                )
+                                break
+                            if actions >= request.max_actions:
+                                stop_override = f"Authentication values are ready, but max_actions={request.max_actions} was reached"
+                                break
+                            submit = self._auth_submit_control(current.controls)
+                            if submit is None:
+                                stop_override = "Credentials were supplied, but no safe sign-in control was found"
+                                break
+                            try:
+                                for control in credential_controls:
+                                    value = self._credential_value(current.screen_id, control, input_values)
+                                    if value is None:
+                                        continue
+                                    locator = page.locator(control.locators[0].value)
+                                    if await locator.count() != 1 or not await locator.is_visible():
+                                        raise RuntimeError(f"Sign-in field is missing or hidden: {control.semantic_label}")
+                                    await locator.fill(value)
+                                submit_locator = page.locator(submit.locators[0].value)
+                                if await submit_locator.count() != 1 or not await submit_locator.is_visible():
+                                    raise RuntimeError("Safe sign-in control is missing or hidden")
+                                await submit_locator.click(timeout=10000)
+                                actions += 1
+                                try:
+                                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                                except Exception:
+                                    pass
+                                # Avoid persisting the DOM/screenshot immediately
+                                # after typing credentials. The next stable page
+                                # is captured after this checkpoint succeeds.
+                                post_auth, duplicate = await append_screen(persist_evidence=False)
+                                transitions.append(
+                                    {
+                                        "from_screen_id": current.screen_id,
+                                        "to_screen_id": post_auth.screen_id,
+                                        "control_id": submit.control_id,
+                                        "control_label": submit.semantic_label,
+                                        "action": "tap",
+                                        "duplicate_state": duplicate,
+                                    }
+                                )
+                                remaining_credentials = [
+                                    control for control in post_auth.controls
+                                    if control.input_capable and control.input_kind == "credential"
+                                ]
+                                if duplicate:
+                                    stop_override = (
+                                        "Sign-in returned to the same page; credentials may be invalid or the flow needs supervision."
+                                    )
+                                    break
+                                if remaining_credentials:
+                                    # User ID → password (or a similar
+                                    # sequential form) remains part of the same
+                                    # login checkpoint. Repeat with the same
+                                    # in-memory approved values; OTP is gated.
+                                    current = post_auth
+                                    continue
+                                current = post_auth
+                                break
+                            except Exception as exc:
+                                warnings.append(f"Could not safely submit the approved sign-in form: {type(exc).__name__}")
+                                stop_override = "Authentication could not be completed safely; review the sign-in checkpoint"
+                                break
+                        if stop_override:
+                            break
                         if actions >= request.max_actions:
                             break
+
                         links = await page.locator("a[href]").evaluate_all(
                             "els => els.slice(0, 100).map(a => ({href: a.href, text: (a.innerText || a.getAttribute('aria-label') || '').trim()}))"
                         )
+                        link_items: list[tuple[str, str]] = []
                         for link in links:
                             href = str(link.get("href") or "")
                             label = str(link.get("text") or "")
@@ -239,21 +577,88 @@ class AutopilotWebService:
                                 continue
                             risk, _ = _blocked_label(label, href)
                             if risk == "safe" and href not in visited and href not in queue:
-                                queue.append(urldefrag(href)[0])
+                                link_items.append((href, label))
+                        # Visit sign-in/account links before the rest of the
+                        # public site so authentication is always the first
+                        # user-facing checkpoint.
+                        link_items.sort(key=lambda item: 0 if any(term in item[1].lower() for term in _AUTH_SUBMIT_TERMS) else 1)
+                        for href, _label in link_items:
+                            if actions >= request.max_actions:
+                                break
+                            queue.append(urldefrag(href)[0])
+                            actions += 1
+
+                        # Links do not represent the whole UI. Probe a bounded
+                        # set of reversible menus, tabs, filters and accordions
+                        # and return to the original URL after each probe.
+                        for control in current.controls:
+                            if actions >= request.max_actions or len(screens) >= request.max_screens:
+                                break
+                            if not self._safe_probe_control(control):
+                                continue
+                            probe_key = f"{current.screen_id}:{control.control_id}"
+                            if probe_key in probed_controls:
+                                continue
+                            probed_controls.add(probe_key)
+                            locator = page.locator(control.locators[0].value)
+                            try:
+                                if await locator.count() != 1 or not await locator.is_visible():
+                                    continue
+                                base_url = page.url
+                                await locator.click(timeout=10000)
                                 actions += 1
-                                if actions >= request.max_actions:
+                                try:
+                                    await page.wait_for_load_state("domcontentloaded", timeout=3000)
+                                except Exception:
+                                    pass
+                                probe_screen, duplicate = await append_screen()
+                                transitions.append(
+                                    {
+                                        "from_screen_id": current.screen_id,
+                                        "to_screen_id": probe_screen.screen_id,
+                                        "control_id": control.control_id,
+                                        "control_label": control.semantic_label,
+                                        "action": "tap",
+                                        "duplicate_state": duplicate,
+                                    }
+                                )
+                                if any(
+                                    item.input_capable and item.input_kind == "credential"
+                                    for item in probe_screen.controls
+                                ):
+                                    stop_override = (
+                                        "Authentication checkpoint detected. Enter the non-production User ID and Password "
+                                        "before Autopilot continues."
+                                    )
                                     break
+                                if probe_screen.url and _same_origin(target_url, probe_screen.url):
+                                    normalized_probe_url = urldefrag(probe_screen.url)[0]
+                                    if normalized_probe_url not in visited and normalized_probe_url not in queue:
+                                        queue.append(normalized_probe_url)
+                                await page.goto(
+                                    base_url,
+                                    wait_until="domcontentloaded",
+                                    timeout=self.settings.AUTOPILOT_WEB_TIMEOUT_SECONDS * 1000,
+                                )
+                            except Exception as exc:
+                                warnings.append(
+                                    f"Could not safely probe {control.semantic_label}: {type(exc).__name__}: {str(exc)[:120]}"
+                                )
+                        if stop_override:
+                            break
                     except Exception as exc:
                         warnings.append(f"Could not inspect {current_url}: {type(exc).__name__}: {str(exc)[:180]}")
-                stop_reason = (
+                stop_reason = stop_override or (
                     "Observe-only discovery captured the initial page"
                     if request.observe_only
                     else f"Reached max_screens={request.max_screens}"
                     if len(screens) >= request.max_screens
                     else f"Reached max_actions={request.max_actions}"
                     if actions >= request.max_actions
-                    else "No additional safe same-origin pages were available"
+                    else "No additional safe same-origin pages or controls were available"
                 )
+                if stop_override and stop_override not in warnings:
+                    warnings.append(stop_override)
             finally:
                 await context.close()
         finished_at = datetime.now(timezone.utc)
@@ -282,7 +687,14 @@ class AutopilotWebService:
             error=None if screens else "No website page could be inspected.",
         )
 
-    async def safe_suite(self, job_id: str, request: AutopilotSuiteRequest, tests: list[QTXTestIR]) -> AutopilotSuiteResult:
+    async def safe_suite(
+        self,
+        job_id: str,
+        request: AutopilotSuiteRequest,
+        tests: list[QTXTestIR],
+        input_values: Optional[Mapping[str, str]] = None,
+        sensitive_input_keys: Optional[set[str]] = None,
+    ) -> AutopilotSuiteResult:
         """Execute non-mutating web checks and retain per-case evidence."""
         job = await self.prototype.load_job(job_id)
         target_url = request.target_url or job.get("target_url")
@@ -294,6 +706,8 @@ class AutopilotWebService:
         started_at = datetime.now(timezone.utc)
         started = time.perf_counter()
         results: list[AutopilotSuiteTestResult] = []
+        input_values = input_values or {}
+        sensitive_input_keys = sensitive_input_keys or set()
         async with self._playwright_context() as (manager, browser):
             for test in tests:
                 test_started = time.perf_counter()
@@ -317,6 +731,12 @@ class AutopilotWebService:
                     test.requires_auth
                     or any(step.action == "fill" and not step.value for step in test.steps)
                 )
+                if sensitive_case:
+                    # Never start a recording for a journey that can contain a
+                    # user-provided credential/OTP or other saved sensitive
+                    # value. Functional evidence remains available for the
+                    # non-sensitive continuation cases.
+                    video_requested = False
                 video_status: str | None = None
                 context = None
                 page = None
@@ -388,26 +808,37 @@ class AutopilotWebService:
                             if not _same_origin(target_url, page.url):
                                 raise AssertionError("Journey navigated outside the selected website")
                         elif step.action == "fill":
-                            if step.value is None or not str(step.value).strip():
+                            value = step.value or input_values.get(step.input_key or "")
+                            if value is None or not str(value).strip():
                                 raise AssertionError(
-                                    f"A non-sensitive synthetic value is unavailable for {step.target or 'the field'}"
+                                    f"No approved value is available for {step.target or 'the field'}"
                                 )
-                            await element.fill(str(step.value))
+                            await element.fill(str(value))
                             # Trigger client-side blur/validation without
                             # submitting the form or changing server state.
                             await element.evaluate("el => el.blur()")
                     # Every executed web case gets its own screenshot and HTML
                     # snapshot.  The API replaces these temporary paths with
                     # repository asset IDs before returning the result.
-                    screenshot_path = evidence_dir / "screenshot.png"
-                    page_source_path = evidence_dir / "page-source.html"
-                    captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
-                    if captured_screenshot:
-                        evidence["screenshot_path"] = captured_screenshot
-                    if screenshot_warning:
-                        evidence["screenshot_warning"] = screenshot_warning
-                    page_source_path.write_text(await page.content(), encoding="utf-8")
-                    evidence["page_source_path"] = str(page_source_path)
+                    # A journey that typed a password, OTP or another saved
+                    # sensitive value is still executed, but its post-input
+                    # screenshot/DOM/video are deliberately suppressed.
+                    touched_sensitive = any(
+                        step.action == "fill" and step.input_key in sensitive_input_keys
+                        for step in test.steps
+                    )
+                    if touched_sensitive:
+                        evidence["sensitive_input_evidence_suppressed"] = True
+                    else:
+                        screenshot_path = evidence_dir / "screenshot.png"
+                        page_source_path = evidence_dir / "page-source.html"
+                        captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
+                        if captured_screenshot:
+                            evidence["screenshot_path"] = captured_screenshot
+                        if screenshot_warning:
+                            evidence["screenshot_warning"] = screenshot_warning
+                        page_source_path.write_text(_redact_html(await page.content()), encoding="utf-8")
+                        evidence["page_source_path"] = str(page_source_path)
                     if status_code is not None and status_code >= 400:
                         raise AssertionError(f"Website returned HTTP {status_code}")
                     if test.bucket == "accessibility":
@@ -500,7 +931,7 @@ class AutopilotWebService:
         )
 
     async def _controls(self, page: Any) -> list[DiscoveredControl]:
-        elements = await page.locator("a,button,input,select,textarea,[role=button]").all()
+        elements = await page.locator('a,button,input,select,textarea,[role=button],[contenteditable="true"]').all()
         controls: list[DiscoveredControl] = []
         seen: set[str] = set()
         for index, element in enumerate(elements[:120]):
@@ -511,10 +942,24 @@ class AutopilotWebService:
                 aria = await element.get_attribute("aria-label") or ""
                 title = await element.get_attribute("title") or ""
                 placeholder = await element.get_attribute("placeholder") or ""
+                input_type = await element.get_attribute("type") or ""
+                contenteditable = (await element.get_attribute("contenteditable") or "").strip().lower()
+                input_capable = tag in {"input", "select", "textarea"} or contenteditable == "true"
                 # Select/input values can be user data; use only labels and
                 # metadata when classifying a runtime entry point.
-                text = (await element.inner_text())[:200] if tag not in {"input", "textarea", "select"} else ""
+                text = (await element.inner_text())[:200] if not input_capable else ""
                 label = (aria or placeholder or text or title or name or element_id or tag).strip()[:160]
+                # Password controls are often exposed without a visible label
+                # (for example ``id=pass``). Promote the semantic label so the
+                # checkpoint asks for a password instead of treating it as a
+                # second username field. The actual DOM value is never read.
+                normalized_input_type = input_type.strip().lower()
+                if normalized_input_type == "password" and (
+                    not label or label.strip().lower() in {"input", "password", "pass", "pwd", "passwd"}
+                ):
+                    label = "Password"
+                elif normalized_input_type == "email" and label.strip().lower() in {"input", "email"}:
+                    label = "User ID / email"
                 href = await element.get_attribute("href") or ""
                 signature = f"{tag}|{element_id}|{name}|{aria}|{text}|{href}"
                 control_id = hashlib.sha1(signature.encode("utf-8", errors="ignore")).hexdigest()[:16]
@@ -522,7 +967,23 @@ class AutopilotWebService:
                     continue
                 seen.add(control_id)
                 risk, reason = _blocked_label(label, href)
-                locator_value = _safe_css(element_id) if element_id else f"{tag}[name=\"{name.replace(chr(34), '')[:120]}\"]" if name else f"{tag}"
+                if element_id:
+                    locator_value = _safe_css(element_id)
+                    locator_confidence = 0.95
+                elif name:
+                    locator_value = f"{tag}[name=\"{name.replace(chr(34), '')[:120]}\"]"
+                    locator_confidence = 0.88
+                elif text and tag in {"button", "a"}:
+                    # A text-scoped locator lets Runtime Discovery inspect
+                    # iconless menus/tabs without treating every button on the
+                    # page as the same control. Ambiguous matches are still
+                    # rejected at interaction time.
+                    escaped_text = text.replace("\\", "\\\\").replace('"', '\\"')[:120]
+                    locator_value = f'{tag}:has-text("{escaped_text}")'
+                    locator_confidence = 0.82
+                else:
+                    locator_value = f"{tag}"
+                    locator_confidence = 0.55
                 controls.append(
                     DiscoveredControl(
                         control_id=control_id,
@@ -533,7 +994,7 @@ class AutopilotWebService:
                         resource_id=element_id,
                         clickable=tag in {"a", "button"} or await element.get_attribute("role") == "button",
                         enabled=(await element.is_enabled()),
-                        input_capable=tag in {"input", "select", "textarea"},
+                        input_capable=input_capable,
                         input_kind=(
                             self._runtime_input_kind(
                                 tag,
@@ -542,14 +1003,14 @@ class AutopilotWebService:
                                 element_id,
                                 aria,
                                 placeholder,
-                                await element.get_attribute("type") or "",
+                                input_type,
                             )
-                            if tag in {"input", "select", "textarea"}
+                            if input_capable
                             else None
                         ),
                         risk=risk,
                         risk_reason=reason,
-                        locators=[DiscoveryLocator(strategy="css", value=locator_value, confidence=0.95 if element_id else 0.72)],
+                        locators=[DiscoveryLocator(strategy="css", value=locator_value, confidence=locator_confidence)],
                     )
                 )
             except Exception:
@@ -566,6 +1027,18 @@ class AutopilotWebService:
         placeholder: str,
         input_type: str,
     ) -> str:
+        # An email field is common on public newsletter/contact forms and is
+        # not, by itself, proof of authentication.  Treat it as ordinary test
+        # data until the surrounding controls (for example a Sign in button or
+        # a paired password field) provide concrete login evidence.  The
+        # auth-semantic pass below promotes it when that evidence is present.
+        if input_type.strip().lower() == "email":
+            auth_signal = " ".join([label, name, element_id, aria, placeholder]).casefold()
+            if not any(
+                token in auth_signal
+                for token in ("user", "username", "user id", "login", "sign in", "password")
+            ):
+                return "test_data"
         # Import lazily to keep the web adapter's import graph lightweight and
         # to share exactly the same credential/test-data classification as
         # mobile discovery.

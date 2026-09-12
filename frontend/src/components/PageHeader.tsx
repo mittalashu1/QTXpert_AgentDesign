@@ -12,11 +12,11 @@ export default function PageHeader({ eyebrow, title, description, actions }: {
     ? `${description.slice(0, 122).replace(/\s+\S*$/, "")}…`
     : description;
   return (
-    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: { xs: "flex-start", md: "center" }, gap: 1.5, mb: 2 }}>
+    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: { xs: "flex-start", md: "center" }, gap: 1.5, mb: 1.5, pb: 1, borderBottom: "1px solid", borderColor: "divider" }}>
       <Box>
-        <Typography variant="overline" color="primary.main" sx={{ fontWeight: 700, letterSpacing: ".12em", lineHeight: 1.2 }}>{eyebrow}</Typography>
-        <Typography variant="h4" sx={{ mt: -0.25 }}>{title}</Typography>
-        <Stack direction="row" spacing={0.25} alignItems="center" sx={{ mt: 0.35 }}>
+        <Typography variant="overline" color="primary.main" sx={{ fontWeight: 750, letterSpacing: ".1em", lineHeight: 1.2 }}>{eyebrow}</Typography>
+        <Typography variant="h4" sx={{ mt: -0.2, fontWeight: 750 }}>{title}</Typography>
+        <Stack direction="row" spacing={0.25} alignItems="center" sx={{ mt: 0.25 }}>
           <Typography variant="body2" color="text.secondary">{conciseDescription}</Typography>
           {conciseDescription !== description && <Tooltip title={description} placement="right"><IconButton size="small" aria-label={`More about ${title}`} sx={{ p: 0.35 }}><InfoOutlinedIcon sx={{ fontSize: 15 }} /></IconButton></Tooltip>}
         </Stack>

@@ -28,6 +28,7 @@ import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { uploadsApi } from "@/services/api";
 import { isReusableProjectDocument, UploadedAsset } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
+import PageHeader from "@/components/PageHeader";
 
 export type RepositoryMode = "test_data" | "documents";
 
@@ -183,22 +184,16 @@ export default function UploadsPage({ mode = "test_data" }: UploadsPageProps) {
     : "Structured fixtures and datasets kept separate from project documents and application builds.";
 
   return (
-    <Stack spacing={2}>
-      <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" gap={2}>
-        <Box>
-          <Stack direction="row" spacing={1.2} alignItems="center">
-            <FolderOutlinedIcon color="primary" />
-            <Typography variant="h3" fontWeight={800}>{title}</Typography>
-          </Stack>
-          <Typography color="text.secondary" sx={{ mt: 0.5 }}>
-            {description} Files belong to <b>{selectedProject?.name || "the active project"}</b> only.
-          </Typography>
-        </Box>
-        <Button component="label" variant="contained" startIcon={<CloudUploadOutlinedIcon />} sx={{ alignSelf: { xs: "flex-start", md: "center" } }} disabled={uploadMutation.isPending}>
+    <Stack spacing={1.5} className={isDocumentRepository ? "qtxpert-documents-repository" : "qtxpert-test-data"}>
+      <PageHeader
+        eyebrow={isDocumentRepository ? "PROJECT REPOSITORY" : "TEST DATA"}
+        title={title}
+        description={`${description} Files belong to ${selectedProject?.name || "the active project"} only.`}
+        actions={<Button component="label" variant="contained" startIcon={<CloudUploadOutlinedIcon />} disabled={uploadMutation.isPending}>
           Add {isDocumentRepository ? "documents or app builds" : "test data"}
           <input hidden multiple type="file" accept={isDocumentRepository ? DOCUMENT_ACCEPT : TEST_DATA_ACCEPT} onChange={uploadFiles} />
-        </Button>
-      </Stack>
+        </Button>}
+      />
 
       {error && <Alert severity="error" onClose={() => setError("")}>{error}</Alert>}
       <Alert severity="info">

@@ -196,6 +196,22 @@ def test_suite_interpreter_fills_input_and_suppresses_sensitive_evidence(tmp_pat
     assert "do-not-log" not in str(evidence)
 
 
+def test_suite_interpreter_redacts_native_hierarchy_values(tmp_path):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _Driver()
+    driver.page_source = (
+        '<hierarchy><node class="android.widget.EditText" text="qa@example.test" '
+        'value="qa@example.test" password="not-a-secret" /></hierarchy>'
+    )
+    test = _test_ir([QTXIRStep(action="capture_evidence", description="Capture evidence")])
+
+    service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    xml = next(path for path in tmp_path.iterdir() if path.suffix == ".xml").read_text(encoding="utf-8")
+    assert "qa@example.test" not in xml
+    assert "not-a-secret" not in xml
+
+
 def test_functional_video_recording_is_bounded_and_optional(tmp_path):
     service = AutopilotSuiteService(Settings(), prototype=object())
     driver = _RecordingDriver()

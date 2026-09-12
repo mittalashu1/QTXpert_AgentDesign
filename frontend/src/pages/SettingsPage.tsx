@@ -50,6 +50,7 @@ import {
   IntegrationUserPreferences,
 } from "@/types/domain";
 import { useNavigate } from "react-router-dom";
+import PageHeader from "@/components/PageHeader";
 
 type SettingsTab = "overview" | "integrations" | "preferences" | "access";
 
@@ -288,17 +289,13 @@ export default function SettingsPage() {
   const busy = createMutation.isPending || updateMutation.isPending;
 
   return (
-    <Stack spacing={2}>
-      <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" alignItems={{ md: "center" }} spacing={2}>
-        <Box>
-          <Typography variant="overline" color="primary.main" sx={{ letterSpacing: ".12em", fontWeight: 700 }}>WORKSPACE CONTROL</Typography>
-          <Typography variant="h3" sx={{ fontWeight: 700 }}>Settings</Typography>
-          <Typography variant="body2" color="text.secondary">Connections, preferences and access in one place.</Typography>
-        </Box>
-        <Button variant="outlined" startIcon={<SettingsSuggestOutlinedIcon />} onClick={() => navigate("/settings/api-configuration")}>
-          API configuration
-        </Button>
-      </Stack>
+    <Stack spacing={1.5} className="qtxpert-settings">
+      <PageHeader
+        eyebrow="WORKSPACE CONTROL"
+        title="Settings"
+        description="Connections, preferences and access in one place."
+        actions={<Button variant="outlined" startIcon={<SettingsSuggestOutlinedIcon />} onClick={() => navigate("/settings/api-configuration")}>API configuration</Button>}
+      />
 
       {notice && <Alert severity={notice.severity} onClose={() => setNotice(null)}>{notice.text}</Alert>}
       {(overviewQuery.isError || catalogQuery.isError) && (

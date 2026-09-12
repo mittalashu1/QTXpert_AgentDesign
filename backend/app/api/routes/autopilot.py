@@ -214,7 +214,12 @@ async def _resume_analysis_background(
     service = _service(settings)
     try:
         await _prepare_resume_target(settings, job_id, owner_id)
-        await service.resume_analysis(job_id)
+        # Runtime Discovery must be able to start before static plan
+        # references (account role, reset hook, UAT oracle, etc.) are known.
+        # The live target is what reveals the concrete login and field
+        # checkpoints. The service still hard-stops when a discovered
+        # credential request is pending.
+        await service.resume_analysis(job_id, allow_runtime_discovery=True)
     except Exception as exc:  # pragma: no cover - provider/storage specific
         logger.exception("Autopilot background resume failed job_id=%s", job_id)
         try:
@@ -923,6 +928,18 @@ def _setup_profile(
             source_requests = discovered_requests or list(discovery.input_requests)
             credential_bundle_available = credential_value_available(normalized_setup)
             for item in source_requests:
+                runtime_hint = str(item.input_hint or "").strip().lower()
+                if runtime_hint not in {"username", "password", "otp", "text"}:
+                    item_label = str(item.label or "").lower()
+                    runtime_hint = (
+                        "otp"
+                        if any(term in item_label for term in ("otp", "one-time", "one time", "mfa", "verification code"))
+                        else "password"
+                        if any(term in item_label for term in ("password", "passcode", "secure"))
+                        else "username"
+                        if any(term in item_label for term in ("user id", "username", "email"))
+                        else "text"
+                    )
                 reference_present = bool(
                     str(normalized_setup.runtime_input_references.get(item.key) or "").strip()
                     or decisions.get(item.key) in {"provide", "reuse", "random"}
@@ -931,14 +948,43 @@ def _setup_profile(
                     # fields.  Generic test-data references do not hide a
                     # field-level prompt: each field must be mapped, provided
                     # or explicitly randomized on its own.
-                    or (item.category == "credential" and credential_bundle_available)
+                    # A plan-level bundle contains only user ID/email and
+                    # password. It must never mark a newly observed OTP/MFA
+                    # field complete; that checkpoint remains supervised.
+                    or (
+                        item.category == "credential"
+                        and credential_bundle_available
+                        and runtime_hint in {"username", "password"}
+                    )
                 )
                 decision = decisions.get(item.key)
+                # Runtime discovery can surface many ordinary fields (search,
+                # address, amount, date, etc.).  Do not block the first pass
+                # on each one: the IR compiler has a bounded, non-secret
+                # synthetic-data strategy for test-data fields.  A user can
+                # still open the checkpoint and replace this default with a
+                # supplied, encrypted non-production value.  Credential and
+                # OTP fields deliberately remain pending until provided,
+                # reused, randomized explicitly, or skipped.
+                auto_synthetic = (
+                    item.category == "test_data"
+                    and not item.sensitive
+                    and not decision
+                )
+                reference_present = reference_present or auto_synthetic
                 runtime_requests.append(
                     item.model_copy(
                         update={
                             "reference_present": reference_present,
-                            "status": "skipped" if decision == "skip" else "random" if decision == "random" else "provided" if reference_present else "pending",
+                            "status": (
+                                "skipped"
+                                if decision == "skip"
+                                else "random"
+                                if decision == "random" or auto_synthetic
+                                else "provided"
+                                if reference_present
+                                else "pending"
+                            ),
                         }
                     )
                 )
@@ -947,6 +993,54 @@ def _setup_profile(
         raw["runtime_input_requests"] = [item.model_dump(mode="json") for item in runtime_requests]
         pending_requests = [item for item in normalized_requests if item.status == "pending"]
         pending_runtime_requests = [item for item in runtime_requests if item.status == "pending"]
+        pending_runtime_credentials = [
+            item for item in pending_runtime_requests if item.category == "credential"
+        ]
+        if pending_runtime_credentials:
+            # Login is the first checkpoint in a live journey. Keep unrelated
+            # UAT/SIT/data references out of the dialog until the user has
+            # supplied (or explicitly skipped) the concrete sign-in fields.
+            # They are recomputed on the next setup read once authentication
+            # is complete, so no dependency is lost.
+            # Prefer the single plan-level credential bundle when it exists.
+            # It renders the exact User ID/email + Password pair in one
+            # checkpoint instead of exposing two generic runtime text boxes.
+            # The encrypted bundle is split only inside the discovery runner;
+            # it is never returned or copied into the analysis context.
+            credential_bundle_request = next(
+                (
+                    item
+                    for item in normalized_requests
+                    if item.key == "credential_reference"
+                    and item.category == "credential"
+                    and item.status == "pending"
+                ),
+                None,
+            )
+            credential_bundle_skipped = decisions.get("credential_reference") == "skip"
+            normalized_requests = [credential_bundle_request] if credential_bundle_request else []
+            pending_requests = [item for item in normalized_requests if item.status == "pending"]
+            runtime_requests = [
+                item.model_copy(update={"status": "skipped", "reference_present": False})
+                if credential_bundle_skipped and item.category == "credential"
+                else item
+                for item in runtime_requests
+                if (
+                    item.status != "pending"
+                    or item.category != "credential"
+                    or credential_bundle_request is None
+                    or credential_bundle_skipped
+                )
+            ]
+            pending_runtime_requests = [
+                item for item in runtime_requests if item.status == "pending"
+            ]
+            raw["runtime_input_requests"] = [item.model_dump(mode="json") for item in runtime_requests]
+            raw["input_requests"] = [item.model_dump(mode="json") for item in normalized_requests]
+            raw["missing_fields"] = [
+                *[item.label for item in pending_requests],
+                *[item.label for item in pending_runtime_requests],
+            ]
         # ``missing_fields`` drives the compact dashboard badge as well as the
         # checkpoint dialog. Include field-level requests discovered at
         # runtime; otherwise a post-discovery sign-in/address prompt can be
@@ -1141,6 +1235,98 @@ async def _resolve_suite_input_values(
     return values, sensitive_keys
 
 
+async def _resolve_discovery_input_values(
+    db: AsyncSession,
+    settings: Settings,
+    record: Optional[AutopilotJob],
+    setup: Optional[AutopilotSetupProfile],
+) -> tuple[dict[str, str], set[str]]:
+    """Resolve approved checkpoint values for a live discovery session.
+
+    Discovery accepts the values only as an in-memory mapping.  The special
+    ``__username``/``__password`` keys are internal hand-off aliases used by
+    the web and mobile adapters; they never enter an API response, job
+    manifest, prompt or log line. Authentication values are withheld until the
+    explicit safe-authentication approval is present.
+    """
+    values, sensitive_keys = await _resolve_suite_input_values(db, settings, record, setup)
+    if record is None or setup is None or not setup.safe_authentication_approved:
+        return values, sensitive_keys
+
+    # Runtime requests are the preferred source because they remain stable when
+    # a login screen is rediscovered. Map each saved field to a private hint so
+    # an adapter can fill a form before its first authenticated page is stored.
+    for request in setup.runtime_input_requests or []:
+        if request.category != "credential":
+            continue
+        value = values.get(request.key)
+        if value is None or not value.strip():
+            continue
+        hint = str(request.input_hint or "").strip().lower()
+        if hint not in {"username", "password", "otp"}:
+            label = str(request.label or "").lower()
+            hint = "password" if "password" in label else "username" if any(term in label for term in ("user id", "username", "email")) else "otp"
+        values.setdefault(f"__{hint}", value)
+        sensitive_keys.add(request.key)
+
+    # A plan-level credential bundle is split only inside this route. It is
+    # useful when an older checkpoint was saved before runtime field keys were
+    # generated, and remains encrypted at rest.
+    try:
+        surface_key = (record.surface_key or record.job_id or "autopilot")[:128]
+        credential_bundle = await resolve_value(
+            db,
+            settings,
+            record.owner_id,
+            record.project_id,
+            surface_key,
+            "credential_reference",
+        )
+        if credential_bundle and credential_bundle.lstrip().startswith("{"):
+            parsed = json.loads(credential_bundle)
+            if isinstance(parsed, dict):
+                for hint in ("username", "password", "otp"):
+                    value = parsed.get(hint)
+                    if value is not None and str(value).strip():
+                        values.setdefault(f"__{hint}", str(value))
+    except Exception:
+        # A missing/rotated encryption key should surface as a normal input
+        # checkpoint, not abort discovery or expose the storage exception.
+        logger.info("Autopilot discovery credential resolution skipped job_id=%s", record.job_id, exc_info=True)
+
+    values["__auth_approved"] = "1"
+    return values, sensitive_keys
+
+
+def _pending_runtime_auth_requests(setup: Optional[AutopilotSetupProfile]) -> list:
+    """Return unresolved live or bundled sign-in checkpoints.
+
+    A plan-level ``credential_reference`` is the compact UI bundle shown for
+    a discovered login form.  It may temporarily replace the individual
+    runtime username/password requests, so checking only
+    ``runtime_input_requests`` would incorrectly auto-run a suite before the
+    first credential checkpoint was answered.
+    """
+    if setup is None:
+        return []
+    return [
+        item
+        for item in [*(setup.input_requests or []), *(setup.runtime_input_requests or [])]
+        if item.category == "credential" and item.status == "pending"
+    ]
+
+
+def _pending_checkpoint_requests(setup: Optional[AutopilotSetupProfile]) -> list:
+    """Return every unresolved plan or live-field checkpoint."""
+    if setup is None:
+        return []
+    return [
+        item
+        for item in [*(setup.input_requests or []), *(setup.runtime_input_requests or [])]
+        if item.status == "pending"
+    ]
+
+
 async def _resume_and_discover_background(
     job_id: str,
     owner_id: UUID,
@@ -1158,7 +1344,11 @@ async def _resume_and_discover_background(
     service = _service(settings)
     try:
         await _prepare_resume_target(settings, job_id, owner_id)
-        await service.resume_analysis(job_id)
+        # Static UAT/SIT references are intentionally collected after the live
+        # target has revealed its real sign-in and form controls. The resume
+        # gate still stops on any pending credential field, but it must not
+        # prevent this first Runtime Discovery pass from starting.
+        await service.resume_analysis(job_id, allow_runtime_discovery=True)
         current = await service.get_job_status(job_id)
         if current.status != "analyzed":
             logger.info(
@@ -1181,6 +1371,27 @@ async def _resume_and_discover_background(
                 return
             job = await _require_owned_job(service, job_id, user)
             target_kind = str(job.get("target_kind") or "android")
+            # Rehydrate the current setup and decrypt approved values only for
+            # this live discovery call. They are never copied to the job JSON.
+            record = await _safe_job_record(db, job_id, user.id)
+            if target_kind != "web":
+                await _ensure_local_artifact(db, service, job_id, user)
+                record = await _safe_job_record(db, job_id, user.id)
+            analysis_for_discovery = await service.load_analysis(job_id)
+            existing_discovery = _record_discovery(record)
+            setup_for_discovery = await _setup_with_input_metadata(
+                db,
+                record,
+                job_id,
+                analysis_for_discovery,
+                existing_discovery,
+            )
+            discovery_input_values, _ = await _resolve_discovery_input_values(
+                db,
+                settings,
+                record,
+                setup_for_discovery,
+            )
             provider = resume_payload.discovery_provider
             if target_kind == "web":
                 provider = "playwright"
@@ -1202,10 +1413,17 @@ async def _resume_and_discover_background(
                 max_actions=50,
             )
             if target_kind == "web":
-                result = await AutopilotWebService(settings, service).discover(job_id, request)
+                result = await AutopilotWebService(settings, service).discover(
+                    job_id,
+                    request,
+                    input_values=discovery_input_values,
+                )
             else:
-                await _ensure_local_artifact(db, service, job_id, user)
-                result = await AutopilotDiscoveryService(settings, service).run(job_id, request)
+                result = await AutopilotDiscoveryService(settings, service).run(
+                    job_id,
+                    request,
+                    input_values=discovery_input_values,
+                )
             # Runtime Discovery is the point at which the plan can become
             # app-specific. Expand the bounded baseline from the observed
             # screens/controls, then persist that snapshot together with the
@@ -1262,19 +1480,60 @@ async def _resume_and_discover_background(
                         pass
                     await db.commit()
             job_changes: dict[str, object] = {"discovery": result.model_dump(mode="json")}
-            if expanded_analysis is not None:
-                job_changes["analysis"] = expanded_analysis.model_dump(mode="json")
-            if record is not None and getattr(record, "setup_profile", None) is not None:
-                job_changes["setup_profile"] = record.setup_profile
+            persisted_analysis = expanded_analysis
+            persisted_setup = None
+            pending_checkpoints: list = []
+            if record is not None:
+                try:
+                    persisted_analysis = expanded_analysis or await service.load_analysis(job_id)
+                    persisted_setup = await _setup_with_input_metadata(
+                        db,
+                        record,
+                        job_id,
+                        persisted_analysis,
+                        result,
+                    )
+                    pending_checkpoints = _pending_checkpoint_requests(persisted_setup)
+                    if pending_checkpoints:
+                        persisted_analysis = persisted_analysis.model_copy(
+                            update={
+                                "checkpoint_stage": "input_collection",
+                                "input_requests": pending_checkpoints,
+                            }
+                        )
+                    else:
+                        persisted_analysis = persisted_analysis.model_copy(
+                            update={"checkpoint_stage": "ready_for_execution", "input_requests": []}
+                        )
+                    record.setup_profile = persisted_setup.model_dump(mode="json")
+                    record.analysis = persisted_analysis.model_dump(mode="json")
+                    job_changes["setup_profile"] = record.setup_profile
+                    job_changes["analysis"] = record.analysis
+                except FileNotFoundError:
+                    pass
+            if persisted_analysis is not None and "analysis" not in job_changes:
+                job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
+            pending_auth = _pending_runtime_auth_requests(persisted_setup)
             await service.update_job(
                 job_id,
                 **job_changes,
-                stage="ready_for_execution" if result.screens else "runtime_discovery",
-                checkpoint_stage="ready" if result.screens else "runtime_discovery",
+                status="waiting_for_input" if pending_checkpoints else "analyzed",
+                stage="input_collection" if pending_checkpoints else "ready_for_execution" if result.screens else "runtime_discovery",
+                progress=85 if pending_checkpoints else 100,
+                checkpoint_stage="input_collection" if pending_checkpoints else "ready" if result.screens else "runtime_discovery",
                 checkpoint_message=(
-                    "Runtime Discovery completed. Review the discovered map and run safe execution."
+                    "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
+                    if pending_auth
+                    else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
+                    if pending_checkpoints
+                    else "Runtime Discovery completed. Review the discovered map and run safe execution."
                     if result.screens
                     else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+                ),
+                input_requests=(
+                    [item.model_dump(mode="json") for item in pending_checkpoints]
+                    if pending_checkpoints
+                    else []
                 ),
             )
             logger.info(
@@ -1284,7 +1543,13 @@ async def _resume_and_discover_background(
                 result.screen_count,
                 len(result.input_requests),
             )
-            if resume_payload.auto_run_safe_suite and result.screens:
+            # Plan-level UAT/SIT references (role, acceptance criteria, API
+            # oracle or reset hook) are a second-stage checkpoint. They must
+            # not hold up the safe, evidence-backed functional/UI subset once
+            # Runtime Discovery has completed and no live credential field is
+            # still unresolved. The suite compiler keeps those dependent
+            # cases deferred and reports their exact dependencies.
+            if resume_payload.auto_run_safe_suite and result.screens and not pending_auth:
                 await execute_autopilot_suite(
                     job_id,
                     AutopilotSuiteRequest(**request.model_dump(exclude={"observe_only", "max_screens", "max_actions"})),
@@ -2643,7 +2908,21 @@ async def resume_autopilot_checkpoint(
         for item in [*(setup.input_requests or []), *(setup.runtime_input_requests or [])]
         if item.status == "pending"
     ]
-    if pending_inputs:
+    pending_runtime_credentials = [
+        item
+        for item in (setup.runtime_input_requests or [])
+        if item.category == "credential" and item.status == "pending"
+    ]
+    # A first discovery pass is intentionally allowed with non-credential
+    # plan references still pending. Those references describe UAT/SIT data
+    # and reset hooks, but they cannot reveal whether the target actually has
+    # a login form or which exact fields it exposes. Once Runtime Discovery
+    # has found credentials, they remain a hard stop until the user supplies
+    # or explicitly skips them.
+    allow_discovery_with_pending_setup = bool(
+        payload.run_runtime_discovery and not pending_runtime_credentials
+    )
+    if pending_inputs and not allow_discovery_with_pending_setup:
         current = await service.get_job_status(job_id)
         current.checkpoint_stage = "input_collection"
         current.checkpoint_message = "Choose Enter, Skip, Reuse or Random for each pending input before continuing."
@@ -2689,15 +2968,59 @@ async def run_autopilot_discovery(
     service = _service(settings)
     job = await _require_owned_job(service, job_id, user)
     target_kind = str(job.get("target_kind") or "android")
+    record = await _safe_job_record(db, job_id, user.id)
+    try:
+        analysis_for_discovery = await service.load_analysis(job_id)
+    except FileNotFoundError:
+        analysis_for_discovery = None
+    existing_discovery = _record_discovery(record)
+    setup_for_discovery = await _setup_with_input_metadata(
+        db,
+        record,
+        job_id,
+        analysis_for_discovery,
+        existing_discovery,
+    )
+    discovery_input_values, _ = await _resolve_discovery_input_values(
+        db,
+        settings,
+        record,
+        setup_for_discovery,
+    )
     if target_kind == "web":
         web_request = payload.model_copy(update={
             "target_kind": "web",
             "provider": "playwright",
             "target_url": payload.target_url or job.get("target_url"),
         })
-        result = await AutopilotWebService(settings, service).discover(job_id, web_request)
+        result = await AutopilotWebService(settings, service).discover(
+            job_id,
+            web_request,
+            input_values=discovery_input_values,
+        )
     else:
         await _ensure_local_artifact(db, service, job_id, user)
+        # Repository materialization can expire the SQLAlchemy row; reload the
+        # scalar job record before resolving encrypted checkpoint values.
+        record = await _safe_job_record(db, job_id, user.id)
+        try:
+            analysis_for_discovery = await service.load_analysis(job_id)
+        except FileNotFoundError:
+            analysis_for_discovery = None
+        existing_discovery = _record_discovery(record)
+        setup_for_discovery = await _setup_with_input_metadata(
+            db,
+            record,
+            job_id,
+            analysis_for_discovery,
+            existing_discovery,
+        )
+        discovery_input_values, _ = await _resolve_discovery_input_values(
+            db,
+            settings,
+            record,
+            setup_for_discovery,
+        )
         if target_kind == "ios" and payload.provider == "appium" and not payload.appium_app:
             # A hosted Appium endpoint cannot see a Render-local IPA path. The
             # BrowserStack adapter materializes the repository asset itself;
@@ -2705,7 +3028,11 @@ async def run_autopilot_discovery(
             record = await _safe_job_record(db, job_id, user.id)
             if settings.APP_ENV != "local" and record is not None and record.repository_asset_id and not payload.appium_app:
                 raise HTTPException(status_code=400, detail="Hosted custom Appium requires a remote IPA reference for iOS discovery.")
-        result = await AutopilotDiscoveryService(settings, service).run(job_id, payload)
+        result = await AutopilotDiscoveryService(settings, service).run(
+            job_id,
+            payload,
+            input_values=discovery_input_values,
+        )
     expanded_analysis = None
     try:
         discovered_analysis = await service.load_analysis(job_id)
@@ -2757,20 +3084,54 @@ async def run_autopilot_discovery(
             logger.warning("Autopilot discovery durable write skipped", exc_info=True)
     try:
         job_changes: dict[str, object] = {"discovery": result.model_dump(mode="json")}
-        if expanded_analysis is not None:
-            job_changes["analysis"] = expanded_analysis.model_dump(mode="json")
-        if record is not None and getattr(record, "setup_profile", None) is not None:
-            job_changes["setup_profile"] = record.setup_profile
+        persisted_analysis = expanded_analysis
+        persisted_setup = None
+        pending_checkpoints: list = []
+        if record is not None:
+            try:
+                persisted_analysis = expanded_analysis or await service.load_analysis(job_id)
+                persisted_setup = await _setup_with_input_metadata(
+                    db,
+                    record,
+                    job_id,
+                    persisted_analysis,
+                    result,
+                )
+                pending_checkpoints = _pending_checkpoint_requests(persisted_setup)
+                if pending_checkpoints:
+                    persisted_analysis = persisted_analysis.model_copy(
+                        update={"checkpoint_stage": "input_collection", "input_requests": pending_checkpoints}
+                    )
+                else:
+                    persisted_analysis = persisted_analysis.model_copy(
+                        update={"checkpoint_stage": "ready_for_execution", "input_requests": []}
+                    )
+                record.setup_profile = persisted_setup.model_dump(mode="json")
+                record.analysis = persisted_analysis.model_dump(mode="json")
+                job_changes["setup_profile"] = record.setup_profile
+                job_changes["analysis"] = record.analysis
+            except FileNotFoundError:
+                pass
+        if persisted_analysis is not None and "analysis" not in job_changes:
+            job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
+        pending_auth = _pending_runtime_auth_requests(persisted_setup)
         await service.update_job(
             job_id,
             **job_changes,
-            stage="ready_for_execution" if result.screens else "runtime_discovery",
-            checkpoint_stage="ready" if result.screens else "runtime_discovery",
+            status="waiting_for_input" if pending_checkpoints else "analyzed",
+            stage="input_collection" if pending_checkpoints else "ready_for_execution" if result.screens else "runtime_discovery",
+            progress=85 if pending_checkpoints else 100,
+            checkpoint_stage="input_collection" if pending_checkpoints else "ready" if result.screens else "runtime_discovery",
             checkpoint_message=(
-                "Runtime Discovery completed. Generated an evidence-scoped coverage plan; review it and run safe execution."
+                "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
+                if pending_auth
+                else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
+                if pending_checkpoints
+                else "Runtime Discovery completed. Generated an evidence-scoped coverage plan; review it and run safe execution."
                 if result.screens
                 else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
             ),
+            input_requests=[item.model_dump(mode="json") for item in pending_checkpoints] if pending_checkpoints else [],
         )
     except Exception:
         logger.warning("Autopilot discovery manifest update skipped job_id=%s", job_id, exc_info=True)
@@ -2954,7 +3315,7 @@ async def execute_autopilot_suite(
         analysis = await service.load_analysis(job_id)
         discovery = _record_discovery(record)
         setup = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
-        input_values, _ = await _resolve_suite_input_values(db, settings, record, setup)
+        input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
         bundle = AutopilotIRCompiler().compile_bundle(
             analysis,
             discovery,
@@ -2997,7 +3358,13 @@ async def execute_autopilot_suite(
                 "provider": "playwright",
                 "target_url": payload.target_url or job.get("target_url"),
             })
-            result = await AutopilotWebService(settings, service).safe_suite(job_id, web_request, candidates)
+            result = await AutopilotWebService(settings, service).safe_suite(
+                job_id,
+                web_request,
+                candidates,
+                input_values=input_values,
+                sensitive_input_keys=sensitive_input_keys,
+            )
             deferred_results = AutopilotSuiteService._deferred_results(deferred) if payload.include_deferred else []
             result = result.model_copy(update={
                 "selected_count": len(selected),

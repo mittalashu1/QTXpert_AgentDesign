@@ -28,6 +28,27 @@ from app.schemas.autopilot import (
 )
 
 
+_AUTH_SUBMIT_TERMS = (
+    "sign in", "sign-in", "log in", "login", "continue to account", "continue",
+    "next", "unlock", "authenticate",
+)
+
+
+def _runtime_input_hint(request: AutopilotInputRequest) -> str:
+    """Return the stable non-secret semantic hint for a runtime field."""
+    hint = str(request.input_hint or "").strip().lower()
+    if hint in {"username", "password", "otp", "text"}:
+        return hint
+    label = str(request.label or "").lower()
+    if any(term in label for term in ("otp", "one-time", "one time", "mfa", "verification code")):
+        return "otp"
+    if any(term in label for term in ("password", "passcode", "secure")):
+        return "password"
+    if any(term in label for term in ("user id", "username", "email")):
+        return "username"
+    return "text"
+
+
 _INPUT_REQUEST_METADATA: dict[str, tuple[str, str, str, bool]] = {
     "credential reference": (
         "credential_reference",
@@ -144,20 +165,58 @@ def credential_value_available(setup: Optional[AutopilotSetupProfile]) -> bool:
     """
     if setup is None:
         return False
-    if str(getattr(setup, "credential_reference", "") or "").strip():
-        return True
-    decision = (getattr(setup, "input_decisions", {}) or {}).get("credential_reference")
-    if decision not in {"provide", "reuse"}:
-        return False
     current_label = _INPUT_REQUEST_METADATA["credential reference"][1].strip().casefold()
-    for item in getattr(setup, "saved_inputs", []) or []:
-        if (
-            item.key == "credential_reference"
+    decisions = getattr(setup, "input_decisions", {}) or {}
+    saved_inputs = list(getattr(setup, "saved_inputs", []) or [])
+
+    # A current plan-level credential bundle is already validated as containing
+    # both username and password by ``apply_submissions``. It can therefore map
+    # to the field-level runtime requests without exposing the bundle here.
+    generic_bundle = next(
+        (
+            item
+            for item in saved_inputs
+            if item.key == "credential_reference"
             and item.has_value
             and str(item.label or "").strip().casefold() == current_label
+        ),
+        None,
+    )
+
+    runtime_requests = [
+        item
+        for item in [*(getattr(setup, "runtime_input_requests", []) or [])]
+        if item.category == "credential"
+    ]
+    if runtime_requests:
+        # A username/password bundle cannot satisfy a later OTP/MFA screen.
+        # Keep that field visible as a fresh, supervised checkpoint even when
+        # the user chose to reuse the saved credential bundle.
+        if generic_bundle is not None and not any(
+            _runtime_input_hint(item) == "otp" for item in runtime_requests
         ):
             return True
-    return False
+
+        # Runtime discovery creates separate, stable username/password keys.
+        # Every non-OTP credential field must have an encrypted value with an
+        # accepted decision; a stale decision alone must never unblock a login.
+        for request in runtime_requests:
+            hint = _runtime_input_hint(request)
+            if hint == "otp":
+                return False
+            decision = decisions.get(request.key)
+            metadata = next((item for item in saved_inputs if item.key == request.key), None)
+            if decision not in {"provide", "reuse"} or metadata is None or not metadata.has_value:
+                return False
+        return True
+
+    # Legacy/direct vault references remain valid when no field-level runtime
+    # checkpoint exists. Once a live form is observed, the branch above takes
+    # precedence and requires the concrete fields (or the validated bundle).
+    if str(getattr(setup, "credential_reference", "") or "").strip():
+        return True
+    decision = decisions.get("credential_reference")
+    return decision in {"provide", "reuse"} and generic_bundle is not None
 
 
 def build_input_requests(
@@ -315,7 +374,7 @@ class AutopilotIRCompiler:
             readiness = "discovery_required"
             readiness_reason = "Runtime screen/element discovery is required before deterministic locators can be emitted."
 
-        ir_steps = resolved_steps if resolved_steps is not None else self._ir_steps(test)
+        ir_steps = resolved_steps if resolved_steps is not None else self._ir_steps(test, analysis)
         generated = QTXTestIR(
             test_id=test.id,
             title=test.title,
@@ -365,7 +424,13 @@ class AutopilotIRCompiler:
             # decisions must reopen the credential checkpoint.
             if not credential_value_available(setup):
                 missing.append("credential reference")
-            if not has_value("account_role"):
+            # A role is useful context for signed-off UAT assertions, but it
+            # is not needed to open a non-production session and map its safe
+            # screens. Requiring it for every authenticated functional case
+            # caused the first-pass login checkpoint to stall before runtime
+            # discovery could inspect the app. Ask for it when UAT coverage
+            # actually depends on the business role.
+            if test.bucket == "uat" and not has_value("account_role"):
                 missing.append("test account role")
             # The checkpoint UI records the approval as an input decision. It
             # is not a secret and therefore does not need a value/reference;
@@ -394,7 +459,16 @@ class AutopilotIRCompiler:
             missing.append("API/oracle reference")
         return missing
 
-    def _ir_steps(self, test: AutopilotTest) -> list[QTXIRStep]:
+    def _ir_steps(
+        self,
+        test: AutopilotTest,
+        analysis: Optional[AutopilotAnalysis] = None,
+    ) -> list[QTXIRStep]:
+        # Keep generated intent truthful for iOS as well as Android.  The
+        # action set is shared, but the evidence and provider labels should
+        # never tell an iOS user that an Android hierarchy was inspected.
+        platform_label = "iOS" if analysis and analysis.target_kind == "ios" else "Android"
+        artifact_label = "IPA" if platform_label == "iOS" else "APK"
         if test.id.startswith("QT-WEB-"):
             return [
                 QTXIRStep(action="inspect_ui", description="Inspect the rendered website DOM and interactive surface."),
@@ -402,7 +476,7 @@ class AutopilotIRCompiler:
             ]
         if test.id == "QT-AUTO-SMOKE-001":
             return [
-                QTXIRStep(action="launch_app", description="Create an Android automation session and launch the uploaded application."),
+                QTXIRStep(action="launch_app", description=f"Create a {platform_label} automation session and launch the uploaded {artifact_label}."),
                 QTXIRStep(action="inspect_ui", description="Confirm the application reaches a readable foreground UI."),
                 QTXIRStep(action="capture_evidence", description="Capture screenshot, UI hierarchy, package, activity and orientation."),
             ]
@@ -415,7 +489,7 @@ class AutopilotIRCompiler:
             ]
         if test.id == "QT-AUTO-UX-001":
             return [
-                QTXIRStep(action="inspect_ui", description="Read Android UI hierarchy and enumerate semantic controls."),
+                QTXIRStep(action="inspect_ui", description=f"Read the {platform_label} UI hierarchy and enumerate semantic controls."),
                 QTXIRStep(action="capture_evidence", description="Record UI hierarchy for accessibility and semantic analysis."),
             ]
         if test.id == "QT-AUTO-UI-001":
@@ -452,6 +526,10 @@ class AutopilotIRCompiler:
         }
         resolved: list[QTXIRStep] = []
         assertion_count = 0
+        # A generated journey often says only “Tap Sign in”. Keep track of
+        # explicit input steps so the auth handoff below can inject missing
+        # User ID/password fills exactly once before that submit action.
+        filled_input_keys: set[str] = set()
 
         for raw_step in test.steps:
             step = re.sub(r"^\s*\d+[.)-]?\s*", "", raw_step.strip())
@@ -509,6 +587,7 @@ class AutopilotIRCompiler:
                         locator_confidence=locator.confidence,
                     )
                 )
+                filled_input_keys.add(input_key)
                 continue
             if re.search(r"\b(?:launch|start)\s+(?:the\s+)?(?:application|app)\b", step, re.I):
                 resolved.append(QTXIRStep(action="launch_app", description=raw_step, screen_id=current.screen_id))
@@ -523,6 +602,58 @@ class AutopilotIRCompiler:
                 if locator is None:
                     return None, f"No deterministic locator is strong enough for: {control.semantic_label}"
                 transition = transitions.get((current.screen_id, control.control_id))
+
+                # Runtime Discovery deliberately stops at the first sign-in
+                # form.  The generated plan may not contain literal “enter
+                # username/password” steps, so make the safe authentication
+                # handoff explicit in the replay IR immediately before the
+                # observed sign-in/continue control. Values are referenced by
+                # stable runtime keys and are resolved only inside the runner;
+                # they are never serialized into this bundle.
+                if self._is_auth_submit_control(control, current.controls):
+                    credential_controls = [
+                        item
+                        for item in current.controls
+                        if item.enabled and item.input_capable and item.input_kind == "credential"
+                    ]
+                    for credential in credential_controls:
+                        hint = self._credential_hint(credential)
+                        if hint == "otp":
+                            return None, (
+                                "One-time verification is still supervised; complete the OTP checkpoint before "
+                                f"the journey can submit {control.semantic_label}."
+                            )
+                        field_type = credential.input_kind or "credential"
+                        input_key = self._runtime_input_key(current.screen_id, credential.control_id, field_type)
+                        if input_key in filled_input_keys:
+                            continue
+                        credential_locator = self._best_locator(credential, interaction=False)
+                        if credential_locator is None:
+                            return None, (
+                                f"No deterministic locator is strong enough for the authentication field "
+                                f"{credential.semantic_label}."
+                            )
+                        approved_value = (input_values or {}).get(input_key)
+                        if approved_value is None or not str(approved_value).strip():
+                            approved_value = (input_values or {}).get(f"__{hint}")
+                        if approved_value is None or not str(approved_value).strip():
+                            return None, (
+                                f"Authentication input value is not available for {credential.semantic_label} "
+                                f"({input_key}). Complete the User ID/password checkpoint before continuing."
+                            )
+                        resolved.append(
+                            QTXIRStep(
+                                action="fill",
+                                description=f"Enter {credential.semantic_label} before {control.semantic_label}.",
+                                target=credential.semantic_label,
+                                screen_id=current.screen_id,
+                                input_key=input_key,
+                                locator_strategy=credential_locator.strategy,
+                                locator_value=credential_locator.value,
+                                locator_confidence=credential_locator.confidence,
+                            )
+                        )
+                        filled_input_keys.add(input_key)
                 resolved.append(
                     QTXIRStep(
                         action="tap",
@@ -588,6 +719,66 @@ class AutopilotIRCompiler:
 
         resolved.append(QTXIRStep(action="capture_evidence", description="Capture evidence after the resolved semantic journey.", screen_id=current.screen_id))
         return resolved, "All runtime interactions and at least one assertion were resolved from the discovered screen graph with safe deterministic locators."
+
+    @staticmethod
+    def _credential_hint(control: DiscoveredControl) -> str:
+        """Classify a discovered credential field without reading its value."""
+        haystack = " ".join(
+            [
+                control.semantic_label or "",
+                control.text or "",
+                control.content_description or "",
+                control.resource_id or "",
+                control.class_name or "",
+            ]
+        ).lower().replace("_", " ").replace("-", " ")
+        if any(term in haystack for term in ("otp", "one time", "mfa", "verification code", "passcode")):
+            return "otp"
+        if any(term in haystack for term in ("password", "secret", "pin", "securetextfield", "passwordtext", "passwd", "pwd")) or re.search(r"\bpass\b", haystack):
+            return "password"
+        return "username"
+
+    @staticmethod
+    def _is_auth_submit_control(
+        control: DiscoveredControl,
+        controls: Optional[list[DiscoveredControl]] = None,
+    ) -> bool:
+        if not control.enabled or not control.clickable or control.input_capable:
+            return False
+        label = re.sub(r"\s+", " ", (control.semantic_label or "").strip().lower())
+        auth_label = any(
+            re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", label)
+            for term in _AUTH_SUBMIT_TERMS
+        )
+        if auth_label:
+            return control.risk != "blocked"
+        if label != "submit" or control.risk != "blocked" or not controls:
+            return False
+        inputs = [
+            item
+            for item in controls
+            if item.enabled and item.input_capable and item.locators
+        ]
+        credentialish = any(
+            item.input_kind == "credential"
+            or re.search(
+                r"\b(?:user\s*(?:id|name)|uid|userid|username|email|password|passcode|otp|mfa|login)\b",
+                " ".join(
+                    [
+                        item.semantic_label or "",
+                        item.content_description or "",
+                        item.resource_id or "",
+                        item.class_name or "",
+                    ]
+                ).lower(),
+            )
+            for item in inputs
+        )
+        # Two unlabeled fields are not enough to infer authentication: they
+        # may be a contact, newsletter or public data-entry form. The
+        # discovery adapters apply the same rule, so the compiler must not
+        # inject credential fills for a generic blocked Submit either.
+        return credentialish
 
     @staticmethod
     def _synthetic_input_value(control: DiscoveredControl, *, invalid: bool = False) -> Optional[str]:
@@ -699,7 +890,13 @@ class AutopilotIRCompiler:
         for control in screen.controls:
             if not control.enabled or not control.locators:
                 continue
-            if interaction and (not control.clickable or control.risk != "safe"):
+            if interaction and (
+                not control.clickable
+                or (
+                    control.risk != "safe"
+                    and not self._is_auth_submit_control(control, screen.controls)
+                )
+            ):
                 continue
             score = self._semantic_score(phrase, control)
             if score >= (0.78 if interaction else 0.72):
