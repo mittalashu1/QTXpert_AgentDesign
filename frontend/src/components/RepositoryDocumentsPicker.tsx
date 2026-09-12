@@ -24,7 +24,7 @@ import CloudUploadOutlinedIcon from "@mui/icons-material/CloudUploadOutlined";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { uploadsApi } from "@/services/api";
-import { UploadedAsset } from "@/types/domain";
+import { isReusableProjectDocument, UploadedAsset } from "@/types/domain";
 import { useRepositoryAssets } from "@/components/repositoryAssets";
 
 const DOCUMENT_EXTENSIONS = new Set([
@@ -89,13 +89,16 @@ export default function RepositoryDocumentsPicker({
   const [error, setError] = useState("");
   const documentsQuery = useRepositoryAssets({
     projectId,
-    categories: ["document"],
+    // Fetch the project metadata without a server-side category filter. Older
+    // repository rows may be classified as `test_data` or `other` even though
+    // their extension/source makes them reusable documents. The shared client
+    // predicate below recovers those rows safely.
     cacheKey: "repository-documents",
     enabled: providedAssets === undefined,
   });
 
   const documents = useMemo(
-    () => (providedAssets ?? documentsQuery.assets).filter((asset) => asset.category === "document" && asset.source_module !== "test_data" && asset.status === "ready"),
+    () => (providedAssets ?? documentsQuery.assets).filter(isReusableProjectDocument),
     [documentsQuery.assets, providedAssets],
   );
   const documentsLoading = providedAssets === undefined ? documentsQuery.isLoading || documentsQuery.isFetching : Boolean(assetsLoading);

@@ -33,7 +33,7 @@ import AccountTreeOutlinedIcon from "@mui/icons-material/AccountTreeOutlined";
 import AssessmentOutlinedIcon from "@mui/icons-material/AssessmentOutlined";
 import { useNavigate } from "react-router-dom";
 import { documentIntelligenceApi } from "@/services/api";
-import { DocumentAnalysisRun, DocumentFinding, DocumentFindingStatus, DocumentProfile, DocumentTraceability, UploadedAsset } from "@/types/domain";
+import { DocumentAnalysisRun, DocumentFinding, DocumentFindingStatus, DocumentProfile, DocumentTraceability, isReusableProjectDocument, UploadedAsset } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 import { useRepositoryAssets } from "@/components/repositoryAssets";
@@ -141,7 +141,9 @@ export default function DocumentIntelligencePage() {
 
   const uploadsQuery = useRepositoryAssets({
     projectId: selectedProjectId,
-    categories: ["document"],
+    // Do not narrow by the stored category here. Documents uploaded before
+    // the repository split can have a legacy category, while the extension
+    // and source boundary still prove they are reusable document inputs.
     cacheKey: "document-intelligence-assets",
   });
 
@@ -168,9 +170,9 @@ export default function DocumentIntelligencePage() {
   });
 
   const projectAssets = useMemo(
-    // Test data and application builds have their own repositories. Document
-    // Intelligence should only review assets classified as documents.
-    () => uploadsQuery.assets.filter((asset) => asset.category === "document" && asset.source_module !== "test_data" && !EXCLUDED.has(asset.extension.toLowerCase())),
+    // Test data and application builds have their own repositories. The
+    // shared predicate also recovers legacy document categories safely.
+    () => uploadsQuery.assets.filter((asset) => isReusableProjectDocument(asset) && !EXCLUDED.has(asset.extension.toLowerCase())),
     [uploadsQuery.assets]
   );
   const analyzableAssets = useMemo(

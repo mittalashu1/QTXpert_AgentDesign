@@ -27,6 +27,7 @@ import DeleteOutlineOutlinedIcon from "@mui/icons-material/DeleteOutlineOutlined
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { uploadsApi } from "@/services/api";
 import { isReusableProjectDocument, UploadedAsset } from "@/types/domain";
+import { repositoryAssetExtension } from "@/components/repositoryAssets";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
 
@@ -58,8 +59,23 @@ function categoryLabel(category: string) {
 }
 
 function isExecutionEvidence(asset: UploadedAsset) {
-  return ["autopilot_evidence", "execution_evidence"].includes(asset.category)
-    || ["autopilot_evidence", "execution_report"].includes(asset.source_module);
+  const category = String(asset.category || "").trim().toLowerCase();
+  const source = String(asset.source_module || "").trim().toLowerCase();
+  return ["autopilot_evidence", "execution_evidence"].includes(category)
+    || ["autopilot_evidence", "execution_report"].includes(source);
+}
+
+function isMobileBuild(asset: UploadedAsset) {
+  const category = String(asset.category || "").trim().toLowerCase();
+  return MOBILE_EXTENSIONS.has(category) || MOBILE_EXTENSIONS.has(repositoryAssetExtension(asset));
+}
+
+function isDocumentRepositoryAsset(asset: UploadedAsset) {
+  const source = String(asset.source_module || "").trim().toLowerCase();
+  if (isExecutionEvidence(asset) || source === "test_data") return false;
+  // isReusableProjectDocument intentionally recognizes legacy categories by
+  // extension/source, so documents remain visible after the repository split.
+  return isReusableProjectDocument(asset) || isMobileBuild(asset);
 }
 
 function errorMessage(reason: unknown, fallback: string) {
@@ -125,19 +141,23 @@ export default function UploadsPage({ mode = "test_data" }: UploadsPageProps) {
 
   const rows = useMemo(() => {
     const assets = (uploadsQuery.data ?? []).filter((asset) => {
-      if (isExecutionEvidence(asset)) return false;
-      if (isDocumentRepository) return ["document", "apk", "ipa"].includes(asset.category) && asset.source_module !== "test_data";
-      return asset.category === "test_data" || asset.source_module === "test_data";
+      if (isDocumentRepository) return isDocumentRepositoryAsset(asset);
+      const source = String(asset.source_module || "").trim().toLowerCase();
+      const assetCategory = String(asset.category || "").trim().toLowerCase();
+      return !isExecutionEvidence(asset) && (assetCategory === "test_data" || source === "test_data");
     });
     if (category === "all" || (!isDocumentRepository && category === "test_data")) return assets;
     if (isDocumentRepository && category === "document") return assets.filter(isReusableProjectDocument);
-    return assets.filter((asset) => asset.category === category);
+    return assets.filter((asset) => {
+      const normalizedCategory = String(asset.category || "").trim().toLowerCase();
+      return normalizedCategory === category || (category === "apk" || category === "ipa") && repositoryAssetExtension(asset) === category;
+    });
   }, [category, isDocumentRepository, uploadsQuery.data]);
 
   const summary = useMemo(() => ({
     files: rows.length,
     documents: rows.filter(isReusableProjectDocument).length,
-    mobile: rows.filter((item) => MOBILE_EXTENSIONS.has(item.category) || MOBILE_EXTENSIONS.has(item.extension.toLowerCase())).length,
+    mobile: rows.filter(isMobileBuild).length,
     bytes: rows.reduce((total, item) => total + item.size_bytes, 0),
   }), [rows]);
 
