@@ -119,7 +119,7 @@ export default function LoginPage() {
 
   if (isAuthLoading || user) {
     return (
-      <Box sx={{ minHeight: "100vh", display: "grid", placeItems: "center", bgcolor: "#F6F8FC" }}>
+      <Box sx={{ minHeight: "100vh", display: "grid", placeItems: "center", bgcolor: "#F8F9FF" }}>
         <CircularProgress aria-label="Loading your QTXpert workspace" />
       </Box>
     );
@@ -132,7 +132,7 @@ export default function LoginPage() {
         minHeight: "100vh",
         display: "grid",
         gridTemplateColumns: { xs: "1fr", md: "minmax(430px, 1.05fr) minmax(500px, 0.95fr)" },
-        bgcolor: "#F6F8FC",
+        bgcolor: "#F8F9FF",
       }}
     >
       <Box
@@ -148,7 +148,7 @@ export default function LoginPage() {
           p: { md: 6, lg: 8 },
           color: "white",
           background:
-            "radial-gradient(circle at 78% 18%, rgba(34,211,238,.22), transparent 26%), radial-gradient(circle at 18% 82%, rgba(99,102,241,.35), transparent 34%), linear-gradient(145deg, #101828 0%, #1E1B4B 58%, #312E81 100%)",
+            "radial-gradient(circle at 78% 18%, rgba(34,211,238,.22), transparent 26%), radial-gradient(circle at 18% 82%, rgba(109,99,242,.35), transparent 34%), linear-gradient(145deg, #182033 0%, #121322 58%, #1D1B4F 100%)",
         }}
       >
         <Box
@@ -240,7 +240,7 @@ export default function LoginPage() {
           px: { xs: 2, sm: 4, lg: 8 },
           py: 4,
           background:
-            "radial-gradient(circle at 90% 8%, rgba(79,70,229,.08), transparent 30%), #F6F8FC",
+            "radial-gradient(circle at 90% 8%, rgba(109,99,242,.08), transparent 30%), #F8F9FF",
         }}
       >
         <Box sx={{ width: "100%", maxWidth: 470 }}>
@@ -252,13 +252,13 @@ export default function LoginPage() {
             elevation={0}
             sx={{
               borderRadius: 4,
-              border: "1px solid #E4E7EC",
+              border: "1px solid rgba(15,23,42,.10)",
               boxShadow: "0 24px 70px rgba(16,24,40,.10)",
               bgcolor: "rgba(255,255,255,.96)",
             }}
           >
             <CardContent sx={{ p: { xs: 3, sm: 5 } }}>
-              <Typography component="h2" sx={{ color: "#101828", fontSize: 30, fontWeight: 750, letterSpacing: "-0.035em" }}>
+              <Typography component="h2" sx={{ color: "#182033", fontSize: 30, fontWeight: 750, letterSpacing: "-0.035em" }}>
                 Welcome back
               </Typography>
               <Typography sx={{ mt: 1, mb: 3.5, color: "#667085" }}>
@@ -344,7 +344,7 @@ export default function LoginPage() {
                       sx={{ color: "#475467", m: 0 }}
                     />
                     <Link
-                      href="mailto:qtxpert.ai@gmail.com?subject=QTXpert%20password%20assistance"
+                      href="mailto:info@qtxpert.com?subject=QTXpert%20password%20assistance"
                       underline="hover"
                       variant="body2"
                       sx={{ fontWeight: 650, whiteSpace: "nowrap" }}
@@ -363,8 +363,8 @@ export default function LoginPage() {
                       borderRadius: 2.5,
                       fontWeight: 750,
                       textTransform: "none",
-                      boxShadow: "0 10px 22px rgba(79,70,229,.24)",
-                      "&:hover": { boxShadow: "0 12px 28px rgba(79,70,229,.32)" },
+                      boxShadow: "0 10px 22px rgba(109,99,242,.24)",
+                      "&:hover": { boxShadow: "0 12px 28px rgba(109,99,242,.32)" },
                     }}
                   >
                     {isSubmitting ? (
@@ -381,7 +381,7 @@ export default function LoginPage() {
 
               <Typography variant="body2" align="center" sx={{ mt: 3, color: "#667085" }}>
                 Need help?{" "}
-                <Link href="mailto:qtxpert.ai@gmail.com?subject=QTXpert%20workspace%20support" underline="hover" sx={{ fontWeight: 650 }}>
+                <Link href="mailto:info@qtxpert.com?subject=QTXpert%20workspace%20support" underline="hover" sx={{ fontWeight: 650 }}>
                   Contact your workspace administrator
                 </Link>
               </Typography>
