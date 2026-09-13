@@ -58,18 +58,37 @@ export default function AppLayout() {
     borderRadius: 1.5,
     mb: 0.5,
     position: "relative",
+    transition: "background-color 160ms ease, color 160ms ease, transform 160ms ease",
+    "&:hover": {
+      bgcolor: mode === "dark" ? "rgba(165, 173, 255, .12)" : "rgba(109, 99, 242, .08)",
+    },
     "&.active": {
-      bgcolor: "action.selected",
+      bgcolor: mode === "dark" ? "rgba(165, 173, 255, .14)" : "rgba(109, 99, 242, .10)",
       color: "primary.main",
       borderLeft: "3px solid",
       borderColor: "primary.main",
+      boxShadow: mode === "dark"
+        ? "0 8px 20px rgba(109, 99, 242, .10)"
+        : "0 8px 20px rgba(109, 99, 242, .08)",
       "& .MuiListItemIcon-root": { color: "inherit" },
     },
   } as const;
 
   return (
-    <Box sx={{ minHeight: "100vh", bgcolor: "background.default" }}>
-      <AppBar position="fixed" elevation={0} sx={{ zIndex: (theme) => theme.zIndex.drawer + 1, borderBottom: "1px solid", borderColor: "divider", bgcolor: "background.paper", color: "text.primary" }}>
+    <Box className="qtxpert-workspace-shell" sx={{ minHeight: "100vh", bgcolor: "transparent" }}>
+      <AppBar
+        position="fixed"
+        elevation={0}
+        sx={{
+          zIndex: (theme) => theme.zIndex.drawer + 1,
+          borderBottom: "1px solid",
+          borderColor: "divider",
+          backgroundColor: (theme) => theme.palette.mode === "dark" ? "rgba(12, 13, 26, .72)" : "rgba(255, 255, 255, .76)",
+          color: "text.primary",
+          backdropFilter: "blur(18px) saturate(140%)",
+          WebkitBackdropFilter: "blur(18px) saturate(140%)",
+        }}
+      >
         <Toolbar sx={{ gap: 1.75, px: { xs: 1.5, md: 2 } }}>
           <Box
             component="img"
@@ -103,10 +122,16 @@ export default function AppLayout() {
             boxSizing: "border-box",
             borderRight: "1px solid",
             borderRightColor: "divider",
-            bgcolor: "background.paper",
+            backgroundColor: (theme) => theme.palette.mode === "dark" ? "rgba(12, 13, 26, .80)" : "rgba(255, 255, 255, .82)",
             overflowX: "hidden",
             transition: "width 180ms ease, box-shadow 180ms ease",
-            boxShadow: navExpanded && wideViewport ? "8px 0 26px rgba(15, 27, 45, .10)" : "none",
+            backdropFilter: "blur(18px) saturate(135%)",
+            WebkitBackdropFilter: "blur(18px) saturate(135%)",
+            boxShadow: navExpanded && wideViewport
+              ? (theme) => theme.palette.mode === "dark"
+                ? "8px 0 30px rgba(0, 0, 0, .28)"
+                : "8px 0 30px rgba(91, 69, 224, .10)"
+              : "none",
             zIndex: (theme) => theme.zIndex.drawer + 2,
           },
         }}
@@ -123,7 +148,7 @@ export default function AppLayout() {
                 {navExpanded && item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}
               </ListItemButton>
             ))}
-            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={!navExpanded ? "Repositories" : undefined} sx={{ borderRadius: 1.5, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined, justifyContent: navExpanded ? undefined : "center", px: navExpanded ? undefined : 1 }}>
+            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={!navExpanded ? "Repositories" : undefined} sx={{ borderRadius: 1.5, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? (mode === "dark" ? "rgba(165, 173, 255, .14)" : "rgba(109, 99, 242, .10)") : undefined, color: location.pathname.startsWith("/test-data") ? "primary.main" : undefined, justifyContent: navExpanded ? undefined : "center", px: navExpanded ? undefined : 1 }}>
               <ListItemIcon sx={{ minWidth: navExpanded ? 38 : "auto", color: "text.secondary", justifyContent: "center" }}><StorageOutlinedIcon /></ListItemIcon>
               {navExpanded && <ListItemText primary="Repositories" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
               {navExpanded && (testDataOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />)}
@@ -151,7 +176,7 @@ export default function AppLayout() {
           </List>
         </Box>
       </Drawer>
-      <Box component="main" className="qtxpert-workspace-main" sx={{ ml: `${drawerRootWidth}px`, p: { xs: 1.5, md: 2.25 }, minHeight: "100vh", transition: "margin-left 180ms ease" }}><Toolbar /><Outlet /></Box>
+      <Box component="main" className="qtxpert-workspace-main" sx={{ ml: `${drawerRootWidth}px`, p: { xs: 1.5, md: 2.25 }, minHeight: "100vh", minWidth: 0, bgcolor: "transparent", transition: "margin-left 180ms ease" }}><Toolbar /><Outlet /></Box>
     </Box>
   );
 }
