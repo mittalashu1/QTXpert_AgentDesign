@@ -314,6 +314,10 @@ const components = (mode: ThemeMode): ThemeOptions["components"] => {
       styleOverrides: {
         root: { minHeight: 40 },
         flexContainer: { minHeight: 40 },
+        indicator: {
+          background: "linear-gradient(90deg, #6D63F2, #22D3EE)",
+          height: 2,
+        },
       },
     },
     MuiTab: {
@@ -325,10 +329,6 @@ const components = (mode: ThemeMode): ThemeOptions["components"] => {
           textTransform: "none",
           fontWeight: 700,
           "&.Mui-selected": { color: brand },
-        },
-        indicator: {
-          background: "linear-gradient(90deg, #6D63F2, #22D3EE)",
-          height: 2,
         },
       },
     },
