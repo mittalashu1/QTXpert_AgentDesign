@@ -444,10 +444,10 @@ export default function DashboardPage() {
           mb: 1.5,
           overflow: "hidden",
           borderRadius: 2.5,
-          borderColor: "rgba(14, 124, 119, .28)",
+          borderColor: "rgba(109, 99, 242, .28)",
           background: (theme) => theme.palette.mode === "dark"
-            ? "linear-gradient(135deg, rgba(18, 199, 192, .12), rgba(17, 30, 46, .82) 58%, rgba(232, 160, 61, .06))"
-            : "linear-gradient(135deg, rgba(14, 124, 119, .10), rgba(255, 255, 255, .86) 58%, rgba(232, 160, 61, .08))",
+            ? "linear-gradient(135deg, rgba(109, 99, 242, .14), rgba(18, 19, 34, .82) 58%, rgba(34, 211, 238, .06))"
+            : "linear-gradient(135deg, rgba(109, 99, 242, .10), rgba(255, 255, 255, .86) 58%, rgba(34, 211, 238, .08))",
         }}
       >
         <CardContent sx={{ p: { xs: 1.5, md: 1.75 }, "&:last-child": { pb: { xs: 1.5, md: 1.75 } } }}>
@@ -474,7 +474,7 @@ export default function DashboardPage() {
                 sx={{
                   p: 1.25,
                   borderRadius: 2,
-                  backgroundColor: (theme) => theme.palette.mode === "dark" ? "rgba(7, 18, 29, .46)" : "rgba(255, 255, 255, .64)",
+                  backgroundColor: (theme) => theme.palette.mode === "dark" ? "rgba(8, 9, 20, .46)" : "rgba(255, 255, 255, .64)",
                   backdropFilter: "blur(14px)",
                   WebkitBackdropFilter: "blur(14px)",
                 }}
