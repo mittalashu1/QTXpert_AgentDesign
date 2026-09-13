@@ -28,6 +28,7 @@ from app.schemas.autopilot import (
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import safe_app_identity, safe_page_source, safe_quit
+from app.services.autopilot_labels import input_probe_guidance, observed_journey_label, observed_page_label
 
 
 _BLOCKED_TERMS = {
@@ -319,6 +320,11 @@ class AutopilotDiscoveryService:
                         question=question,
                         placeholder=placeholder,
                         format_hint=format_hint,
+                        journey=screen.journey or observed_journey_label(screen),
+                        page_label=screen.page_label or observed_page_label(screen),
+                        page_url=screen.url,
+                        field_label=normalized_label[:120].title() or "Text field",
+                        probe_guidance=input_probe_guidance(normalized_label, field_type),
                     )
                 )
                 if len(requests) >= 40:
@@ -864,6 +870,26 @@ class AutopilotDiscoveryService:
                 fingerprint=fp,
                 package_name=package_name,
                 activity_name=activity_name,
+                journey=observed_journey_label(
+                    DiscoveredScreen(
+                        screen_id=screen_id,
+                        fingerprint=fp,
+                        package_name=package_name,
+                        activity_name=activity_name,
+                        controls=controls,
+                    ),
+                    index,
+                ),
+                page_label=observed_page_label(
+                    DiscoveredScreen(
+                        screen_id=screen_id,
+                        fingerprint=fp,
+                        package_name=package_name,
+                        activity_name=activity_name,
+                        controls=controls,
+                    ),
+                    index,
+                ),
                 screenshot_path=str(screenshot_path) if persist_evidence and screenshot_path.exists() else None,
                 page_source_path=str(source_path) if persist_evidence else None,
                 controls=controls,

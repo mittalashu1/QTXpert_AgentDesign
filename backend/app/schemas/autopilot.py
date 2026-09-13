@@ -117,6 +117,21 @@ class AutopilotInputRequest(BaseModel):
     placeholder: Optional[str] = None
     format_hint: Optional[str] = None
     credential_bundle: bool = False
+    # Evidence context for a checkpoint. These labels let the UI point to the
+    # exact observed journey/page/field instead of showing an opaque test ID.
+    journey: Optional[str] = None
+    page_label: Optional[str] = None
+    page_url: Optional[str] = None
+    field_label: Optional[str] = None
+    probe_guidance: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class AutopilotDataProbe(BaseModel):
+    """A non-secret positive/negative/boundary strategy for one field."""
+
+    kind: Literal["positive", "negative", "boundary"]
+    label: str
+    guidance: str
 
 
 class AutopilotTest(BaseModel):
@@ -145,6 +160,12 @@ class AutopilotTest(BaseModel):
     synthetic_data_strategy: Optional[str] = None
     dependency: Optional[str] = None
     evidence_required: List[str] = Field(default_factory=list)
+    # Human-facing grouping metadata derived only from observed target
+    # evidence. URLs and opaque screen IDs stay out of the title.
+    journey: Optional[str] = None
+    page_label: Optional[str] = None
+    page_url: Optional[str] = None
+    data_probes: List[AutopilotDataProbe] = Field(default_factory=list)
 
 
 class AutopilotAnalysis(BaseModel):
@@ -510,6 +531,10 @@ class QTXTestIR(BaseModel):
     steps: List[QTXIRStep] = Field(default_factory=list)
     assertions: List[str] = Field(default_factory=list)
     appium_python: str = ""
+    journey: Optional[str] = None
+    page_label: Optional[str] = None
+    page_url: Optional[str] = None
+    data_probes: List[AutopilotDataProbe] = Field(default_factory=list)
 
 
 class AutopilotAutomationBundle(BaseModel):
@@ -629,6 +654,10 @@ class DiscoveredScreen(BaseModel):
     activity_name: Optional[str] = None
     url: Optional[str] = None
     title: Optional[str] = None
+    # Human-facing labels are derived from the observed title/activity/controls
+    # and never replace the stable screen ID used for replay.
+    journey: Optional[str] = None
+    page_label: Optional[str] = None
     screenshot_path: Optional[str] = None
     page_source_path: Optional[str] = None
     screenshot_asset_id: Optional[UUID] = None
@@ -697,6 +726,9 @@ class AutopilotSuiteTestResult(BaseModel):
     duration_seconds: float = 0
     error: Optional[str] = None
     evidence: Dict[str, Any] = Field(default_factory=dict)
+    journey: Optional[str] = None
+    page_label: Optional[str] = None
+    page_url: Optional[str] = None
 
 
 class AutopilotSuiteResult(BaseModel):

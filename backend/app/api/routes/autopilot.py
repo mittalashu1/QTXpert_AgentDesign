@@ -1049,10 +1049,26 @@ def _setup_profile(
             *[item.label for item in pending_requests],
             *[item.label for item in pending_runtime_requests],
         ]
-        if pending_requests or pending_runtime_requests:
+        # Only a live authentication/sensitive field or explicit approval is
+        # allowed to pause the autonomous first pass.  UAT acceptance, oracle,
+        # fixture and reset references remain visible as optional follow-ups;
+        # keeping them in ``missing_fields`` preserves transparency without
+        # presenting a misleading blocking checkpoint banner.
+        blocking_pending_requests = [
+            item
+            for item in [*pending_requests, *pending_runtime_requests]
+            if item.category in {"credential", "approval"}
+            or (item.source == "runtime" and item.sensitive)
+        ]
+        if blocking_pending_requests:
             raw["checkpoint_stage"] = "input_collection"
             raw["checkpoint_message"] = (
-                "Choose Enter, Skip, Reuse or Random for each checkpoint input before dependent cases continue."
+                "Authentication or sensitive input needs a decision before dependent cases continue."
+            )
+        elif pending_requests or pending_runtime_requests:
+            raw["checkpoint_stage"] = "ready"
+            raw["checkpoint_message"] = (
+                "Safe first pass is ready. Optional UAT/SIT references can be reviewed after the observed journeys are mapped."
             )
         elif normalized_requests and any(item.status == "skipped" for item in normalized_requests):
             raw["checkpoint_stage"] = "ready"
@@ -1327,6 +1343,24 @@ def _pending_checkpoint_requests(setup: Optional[AutopilotSetupProfile]) -> list
     ]
 
 
+def _blocking_checkpoint_requests(setup: Optional[AutopilotSetupProfile]) -> list:
+    """Return only checkpoints that must pause autonomous exploration.
+
+    A live credential, OTP or explicit authentication approval is a real
+    safety boundary. UAT acceptance criteria, oracle, fixture and reset
+    references are useful follow-ups, but they must not stop the evidence-led
+    functional/UI first pass after the user has supplied the initial login.
+    """
+    if setup is None:
+        return []
+    return [
+        item
+        for item in _pending_checkpoint_requests(setup)
+        if item.category in {"credential", "approval"}
+        or (item.source == "runtime" and item.sensitive)
+    ]
+
+
 async def _resume_and_discover_background(
     job_id: str,
     owner_id: UUID,
@@ -1493,7 +1527,7 @@ async def _resume_and_discover_background(
                         persisted_analysis,
                         result,
                     )
-                    pending_checkpoints = _pending_checkpoint_requests(persisted_setup)
+                    pending_checkpoints = _blocking_checkpoint_requests(persisted_setup)
                     if pending_checkpoints:
                         persisted_analysis = persisted_analysis.model_copy(
                             update={
@@ -2903,11 +2937,7 @@ async def resume_autopilot_checkpoint(
     setup = await _setup_with_input_metadata(db, record, job_id, analysis, _record_discovery(record))
     if not payload.confirm_saved_inputs:
         return await service.get_job_status(job_id)
-    pending_inputs = [
-        item
-        for item in [*(setup.input_requests or []), *(setup.runtime_input_requests or [])]
-        if item.status == "pending"
-    ]
+    pending_inputs = _blocking_checkpoint_requests(setup)
     pending_runtime_credentials = [
         item
         for item in (setup.runtime_input_requests or [])
@@ -3097,7 +3127,7 @@ async def run_autopilot_discovery(
                     persisted_analysis,
                     result,
                 )
-                pending_checkpoints = _pending_checkpoint_requests(persisted_setup)
+                pending_checkpoints = _blocking_checkpoint_requests(persisted_setup)
                 if pending_checkpoints:
                     persisted_analysis = persisted_analysis.model_copy(
                         update={"checkpoint_stage": "input_collection", "input_requests": pending_checkpoints}

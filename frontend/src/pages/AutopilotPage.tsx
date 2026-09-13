@@ -1,4 +1,4 @@
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Dialog, DialogActions,
@@ -18,6 +18,7 @@ import TravelExploreOutlinedIcon from "@mui/icons-material/TravelExploreOutlined
 import SmartToyOutlinedIcon from "@mui/icons-material/SmartToyOutlined";
 import FactCheckOutlinedIcon from "@mui/icons-material/FactCheckOutlined";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
+import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import { apiClient } from "@/services/apiClient";
 import { autopilotDefectsApi, documentIntelligenceApi, uploadsApi } from "@/services/api";
 import { DocumentContext } from "@/types/domain";
@@ -42,6 +43,8 @@ type TestCase = {
   requires_auth?: boolean; requires_test_data?: boolean; dependency?: string | null;
   autonomous_candidate?: boolean; synthetic_data_strategy?: string | null;
   evidence_required?: string[];
+  journey?: string | null; page_label?: string | null; page_url?: string | null;
+  data_probes?: Array<{ kind: "positive" | "negative" | "boundary"; label: string; guidance: string }>;
 };
 type Analysis = {
   job_id: string; filename: string; status: string; platform?: TargetKind; target_kind?: TargetKind; target_url?: string | null; app_name?: string; package_name?: string;
@@ -109,7 +112,7 @@ type DiscoveredControl = {
 };
 type DiscoveredScreen = {
   screen_id: string; fingerprint: string; package_name?: string; activity_name?: string;
-  url?: string | null; title?: string | null;
+  url?: string | null; title?: string | null; journey?: string | null; page_label?: string | null;
   screenshot_path?: string; page_source_path?: string; screenshot_asset_id?: string | null;
   page_source_asset_id?: string | null; controls: DiscoveredControl[];
 };
@@ -126,6 +129,7 @@ type AutomationTest = {
   bucket?: TestBucket; requires_auth?: boolean; requires_test_data?: boolean;
   autonomous_candidate?: boolean; synthetic_data_strategy?: string | null;
   dependency?: string | null; promoted_by_discovery: boolean; readiness_reason?: string | null;
+  journey?: string | null; page_label?: string | null; page_url?: string | null;
 };
 type AutomationBundle = {
   job_id: string; schema_version: string; discovery_used: boolean; promoted_count: number;
@@ -138,6 +142,7 @@ type SuiteTestResult = {
   bucket?: TestBucket; readiness?: "executable" | "discovery_required" | "approval_required" | null;
   dependency?: string | null; duration_seconds: number; error?: string | null;
   evidence?: Record<string, unknown>;
+  journey?: string | null; page_label?: string | null; page_url?: string | null;
 };
 type SuiteResult = {
   job_id: string; status: "passed" | "failed" | "partial" | "blocked";
@@ -160,6 +165,8 @@ type AutopilotInputRequest = {
   reason: string; required_for: string[]; sensitive: boolean; status: "pending" | "provided" | "validated" | "skipped" | "saved" | "random"; reference_present: boolean;
   source?: "plan" | "runtime"; screen_id?: string | null; control_id?: string | null; field_type?: string | null; input_hint?: "username" | "password" | "otp" | "text" | null; locator?: string | null;
   question?: string | null; placeholder?: string | null; format_hint?: string | null; credential_bundle?: boolean;
+  journey?: string | null; page_label?: string | null; page_url?: string | null; field_label?: string | null;
+  probe_guidance?: Array<{ kind: "positive" | "negative" | "boundary"; label: string; guidance: string }>;
 };
 type InputDecision = "provide" | "skip" | "reuse" | "random";
 type RandomSpec = { kind: "number" | "digits" | "text" | "email" | "phone" | "date" | "amount"; length: number; minimum?: number; maximum?: number; seed?: string };
@@ -386,10 +393,22 @@ function inputCategoryLabel(category: AutopilotInputRequest["category"]) {
   }[category];
 }
 
+function isBlockingCheckpoint(request: AutopilotInputRequest) {
+  if (request.status !== "pending") return false;
+  // The only automatic pause is a real live authentication/sensitive-field
+  // checkpoint. UAT acceptance, oracle, fixture and reset references remain
+  // visible as deferred follow-ups while safe observed coverage proceeds.
+  return request.category === "credential"
+    || request.category === "approval"
+    || (request.source === "runtime" && request.sensitive);
+}
+
 function requestDependentTitles(request: AutopilotInputRequest, tests: TestCase[]) {
+  const location = [request.journey, request.page_label, request.field_label].filter(Boolean).join(" · ");
+  if (location) return [location];
   return request.required_for.map((id) => {
     const test = tests.find((item) => item.id === id);
-    return test ? `${test.title} (${test.id})` : id;
+    return test ? test.title : id;
   });
 }
 
@@ -499,8 +518,13 @@ function RuntimeScreenPreview({ screen }: { screen: DiscoveredScreen }) {
     <Box sx={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "action.hover", borderRadius: 2, overflow: "hidden" }}>
       {imageUrl ? <Box component="img" src={imageUrl} alt={screen.screen_id} sx={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <Typography variant="caption" color="text.secondary">Screenshot evidence pending</Typography>}
     </Box>
-    <Typography variant="subtitle2" fontWeight={800} sx={{ mt: 1 }}>{screen.title || screen.screen_id}</Typography>
-    <Typography variant="caption" color="text.secondary" display="block">{screen.url || screen.package_name || "Target identity pending"}{screen.activity_name ? " · " + screen.activity_name : ""}</Typography>
+    <Stack direction="row" spacing={.75} alignItems="center" sx={{ mt: 1 }}>
+      <Typography variant="subtitle2" fontWeight={800}>{screen.page_label || screen.title || screen.journey || "Observed page"}</Typography>
+      {screen.journey && <Chip size="small" label={screen.journey} color="primary" variant="outlined" />}
+    </Stack>
+    <Typography variant="caption" color="text.secondary" display="block" noWrap title={screen.url || screen.activity_name || screen.package_name || ""}>
+      {screen.activity_name || screen.package_name || "Observed target surface"}
+    </Typography>
     <Stack direction="row" spacing={.75} sx={{ mt: 1 }}><Chip size="small" label={screen.controls.length + " controls"} variant="outlined" />{screen.page_source_asset_id && <Chip size="small" label="UI hierarchy saved" color="success" variant="outlined" />}</Stack>
   </CardContent></Card>;
 }
@@ -604,6 +628,7 @@ export default function AutopilotPage() {
   const [appiumApp, setAppiumApp] = useState("");
   const [autoGrantPermissions, setAutoGrantPermissions] = useState(true);
   const [testBucketFilter, setTestBucketFilter] = useState<"all" | TestBucket>("all");
+  const [journeyFilter, setJourneyFilter] = useState("all");
   const [suiteBucket, setSuiteBucket] = useState<"all" | TestBucket>("all");
   const [suiteMaxTests, setSuiteMaxTests] = useState(20);
 
@@ -961,13 +986,13 @@ export default function AutopilotPage() {
       setSetupDraft(resolvedWithFallback);
       setInputDrafts(buildInputDrafts(resolvedWithFallback));
       const pending = [...(resolvedWithFallback.input_requests || []), ...(resolvedWithFallback.runtime_input_requests || [])]
-        .filter((item) => item.status === "pending");
+        .filter(isBlockingCheckpoint);
       // A checkpoint can be returned as a terminal/analyzed job after a
       // restart or an older deployment has normalized its stage. The pending
       // request itself is the source of truth, so do not hide the dialog just
       // because the stage label was not persisted on that response.
       if (pending.length > 0) {
-        const firstPending = [...(resolvedWithFallback.input_requests || []), ...(resolvedWithFallback.runtime_input_requests || [])].findIndex((item) => item.status === "pending");
+        const firstPending = [...(resolvedWithFallback.input_requests || []), ...(resolvedWithFallback.runtime_input_requests || [])].findIndex(isBlockingCheckpoint);
         setCheckpointStep(firstPending >= 0 ? firstPending : 0);
         setSetupOpen(true);
       }
@@ -985,10 +1010,10 @@ export default function AutopilotPage() {
         ? setupDraft
         : null;
     if (!candidate) return;
-    const pending = [...(candidate.input_requests || []), ...(candidate.runtime_input_requests || [])]
-      .some((item) => item.status === "pending");
-    if (pending) {
-      const firstPending = [...(candidate.input_requests || []), ...(candidate.runtime_input_requests || [])].findIndex((item) => item.status === "pending");
+    const requests = [...(candidate.input_requests || []), ...(candidate.runtime_input_requests || [])];
+    const pending = requests.filter(isBlockingCheckpoint);
+    if (pending.length > 0) {
+      const firstPending = requests.findIndex(isBlockingCheckpoint);
       setCheckpointStep(firstPending >= 0 ? firstPending : 0);
       setSetupOpen(true);
     }
@@ -1023,6 +1048,21 @@ export default function AutopilotPage() {
     () => analysis?.tests.filter((test) => testBucketFilter === "all" || normalizedBucket(test) === testBucketFilter) ?? [],
     [analysis, testBucketFilter],
   );
+  const journeyOptions = useMemo(
+    () => Array.from(new Set(visibleTests.map((test) => test.journey || "General coverage"))).sort((left, right) => left.localeCompare(right)),
+    [visibleTests],
+  );
+  const journeyGroups = useMemo(() => {
+    const groups = new Map<string, TestCase[]>();
+    for (const test of visibleTests) {
+      const journey = test.journey || "General coverage";
+      if (journeyFilter !== "all" && journey !== journeyFilter) continue;
+      const current = groups.get(journey) || [];
+      current.push(test);
+      groups.set(journey, current);
+    }
+    return Array.from(groups.entries());
+  }, [visibleTests, journeyFilter]);
   const suiteExecutableCount = useMemo(
     () => automation?.tests.filter((test) => test.readiness === "executable" && (suiteBucket === "all" || normalizedBucket(test) === suiteBucket)).length ?? 0,
     [automation, suiteBucket],
@@ -1032,7 +1072,7 @@ export default function AutopilotPage() {
     || file?.name?.replace(/\.(apk|ipa)$/i, "")
     || analysis?.app_name
     || null;
-  const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen: screen.screen_id, control }))) ?? [], [discovery]);
+  const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen, control }))) ?? [], [discovery]);
 
   const resetResult = () => { clearRunState(); setSetupOpen(false); };
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1208,7 +1248,7 @@ export default function AutopilotPage() {
     setSetupDraft(nextSetup);
     setInputDrafts(buildInputDrafts(nextSetup));
     const nextRequests = [...(nextSetup.input_requests || []), ...(nextSetup.runtime_input_requests || [])];
-    const firstPending = nextRequests.findIndex((item) => item.status === "pending");
+    const firstPending = nextRequests.findIndex(isBlockingCheckpoint);
     setCheckpointStep(firstPending >= 0 ? firstPending : 0);
     setSetupOpen(true);
   };
@@ -1279,8 +1319,9 @@ export default function AutopilotPage() {
         || (setupDraft.runtime_input_requests || []).some((item) => item.category === "credential" && item.status === "pending"),
       );
       setSetup(response.data);
-      const pending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])]
+      const allPending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])]
         .filter((item) => item.status === "pending");
+      const pending = allPending.filter(isBlockingCheckpoint);
       const responsePendingAuth = pending.some(
         (item) => item.category === "credential" && item.source === "runtime",
       );
@@ -1292,13 +1333,13 @@ export default function AutopilotPage() {
       if (responsePendingAuth || responsePendingPermission || (Boolean(discovery) && pending.length > 0 && !priorAuthCheckpoint)) {
         // A discovered sign-in (or a later discovered field) is a hard
         // checkpoint. Keep the dialog open when only part of it was supplied.
-        const firstPending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])].findIndex((item) => item.status === "pending");
+        const firstPending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])].findIndex(isBlockingCheckpoint);
         setCheckpointStep(firstPending >= 0 ? firstPending : 0);
         setSetupDraft((current) => ({ ...current, input_requests: response.data.input_requests || [], missing_fields: response.data.missing_fields }));
         setContextNotice(`${pending.length} setup item${pending.length === 1 ? "" : "s"} still required. Complete the highlighted checkpoint inputs to continue.`);
         return;
       }
-      if (pending.length > 0) {
+      if (allPending.length > 0) {
         // With no live field checkpoint yet, continue into discovery. The
         // remaining static references (role, fixture, reset hook, oracle) are
         // requested after the target has revealed its actual screens.
@@ -1367,10 +1408,10 @@ export default function AutopilotPage() {
           setSetupDraft(latestSetup);
           setInputDrafts(buildInputDrafts(latestSetup));
           const latestRequests = [...(latestSetup.input_requests || []), ...(latestSetup.runtime_input_requests || [])];
-          const pendingLatest = latestRequests.filter((item) => item.status === "pending");
+          const pendingLatest = latestRequests.filter(isBlockingCheckpoint);
           latestPending = pendingLatest.length > 0;
           if (latestPending) {
-            const firstPending = latestRequests.findIndex((item) => item.status === "pending");
+            const firstPending = latestRequests.findIndex(isBlockingCheckpoint);
             setCheckpointStep(firstPending >= 0 ? firstPending : 0);
             setSetupOpen(true);
             setContextNotice(
@@ -1414,7 +1455,7 @@ export default function AutopilotPage() {
       }, { timeout: 660000 });
       setDiscovery(response.data);
       let checkpointPending = Boolean(
-        (response.data.input_requests || []).some((item) => item.status === "pending"),
+        (response.data.input_requests || []).some(isBlockingCheckpoint),
       );
       let runtimeAuthPending = false;
       try {
@@ -1430,11 +1471,9 @@ export default function AutopilotPage() {
         runtimeAuthPending = nextRequests.some(
           (item) => item.category === "credential" && item.status === "pending",
         );
-        const firstPending = nextRequests.findIndex((item) => item.status === "pending");
+        const firstPending = nextRequests.findIndex(isBlockingCheckpoint);
         if (firstPending >= 0) setCheckpointStep(firstPending);
-        checkpointPending = checkpointPending || nextRequests.some(
-          (item) => item.status === "pending",
-        );
+        checkpointPending = checkpointPending || nextRequests.some(isBlockingCheckpoint);
       } catch { /* discovery evidence remains visible */ }
       await refreshAutomation(jobId);
       await refreshReport(jobId);
@@ -1604,7 +1643,9 @@ export default function AutopilotPage() {
     ...((activeSetup.input_requests || []).length > 0 ? activeSetup.input_requests : analysis?.input_requests || []),
     ...(activeSetup.runtime_input_requests || []),
   ];
-  const pendingCheckpointRequests = checkpointRequests.filter((item) => item.status === "pending");
+  const pendingInputRequests = checkpointRequests.filter((item) => item.status === "pending");
+  const pendingCheckpointRequests = pendingInputRequests.filter(isBlockingCheckpoint);
+  const deferredInputRequests = pendingInputRequests.filter((item) => !isBlockingCheckpoint(item));
   const runtimeInputRequests = activeSetup.runtime_input_requests || [];
   const runtimePendingCount = runtimeInputRequests.filter((item) => item.status === "pending").length;
   const runtimeSyntheticCount = runtimeInputRequests.filter((item) => item.category === "test_data" && item.status === "random").length;
@@ -1886,6 +1927,13 @@ export default function AutopilotPage() {
               onClick={() => setTestBucketFilter(bucket)}
             />
           ))}
+          {journeyOptions.length > 0 && <FormControl size="small" sx={{ minWidth: 190 }}>
+            <InputLabel id="autopilot-journey-filter-label">Journey</InputLabel>
+            <Select labelId="autopilot-journey-filter-label" label="Journey" value={journeyOptions.includes(journeyFilter) ? journeyFilter : "all"} onChange={(event) => setJourneyFilter(event.target.value)}>
+              <MenuItem value="all">All journeys</MenuItem>
+              {journeyOptions.map((journey) => <MenuItem key={journey} value={journey}>{journey}</MenuItem>)}
+            </Select>
+          </FormControl>}
         </Stack>
         <Alert severity="info" sx={{ mt: 1.5 }}>
           A generated case is a plan, not a pass. Authenticated journeys require a non-production User ID/email and Password
@@ -1913,11 +1961,14 @@ export default function AutopilotPage() {
           </Typography>}
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
             <Typography variant="caption" color="text.secondary">
-              Input checkpoint: {pendingCheckpointRequests.length ? `${pendingCheckpointRequests.length} item${pendingCheckpointRequests.length === 1 ? "" : "s"} pending` : "no pending items"}.
+              Input checkpoint: {pendingCheckpointRequests.length ? `${pendingCheckpointRequests.length} live item${pendingCheckpointRequests.length === 1 ? "" : "s"} pending` : "no blocking items"}.
               {pendingCheckpointRequests.length ? ` ${pendingCheckpointRequests.slice(0, 3).map((item) => item.label).join(" · ")}${pendingCheckpointRequests.length > 3 ? " · …" : ""}` : " Safe deterministic cases can be run now."}
             </Typography>
-            {pendingCheckpointRequests.length > 0 && <Button size="small" variant="text" onClick={openSetup}>Review inputs</Button>}
+            {(pendingCheckpointRequests.length > 0 || deferredInputRequests.length > 0) && <Button size="small" variant="text" onClick={openSetup}>Review field data</Button>}
           </Stack>
+          {deferredInputRequests.length > 0 && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>
+            {deferredInputRequests.length} observed field/reference item{deferredInputRequests.length === 1 ? " is" : "s are"} optional follow-up. Bounded synthetic probes run first; a value is requested only when a field cannot be validated automatically.
+          </Typography>}
         </Box>
         <TableContainer sx={{ mt: 1.5, maxHeight: 460 }}>
           <Table stickyHeader size="small">
@@ -1926,23 +1977,45 @@ export default function AutopilotPage() {
               <TableCell>Source</TableCell><TableCell>Execution state</TableCell>
             </TableRow></TableHead>
             <TableBody>
-              {visibleTests.map((test) => {
-                const bucket = normalizedBucket(test);
-                const setupRequired = Boolean(!test.autonomous_candidate && (test.requires_auth || test.requires_test_data || test.dependency));
-                return <TableRow key={test.id} hover>
-                  <TableCell sx={{ minWidth: 320 }}>
-                    <Typography fontWeight={700} variant="body2">{test.title}</Typography>
-                    <Typography variant="caption" color="text.secondary">{test.id} · {test.objective}</Typography>
+              {journeyGroups.map(([journey, tests]) => <Fragment key={`journey-group-${journey}`}>
+                <TableRow key={`journey-${journey}`} sx={{ bgcolor: "action.hover" }}>
+                  <TableCell colSpan={5} sx={{ py: .75 }}>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Typography variant="subtitle2" fontWeight={800}>{journey}</Typography>
+                      <Chip size="small" label={`${tests.length} case${tests.length === 1 ? "" : "s"}`} variant="outlined" />
+                      <Tooltip title="Journey names come from observed page titles, activities and controls. They are not inferred from URL paths alone.">
+                        <InfoOutlinedIcon sx={{ fontSize: 16, color: "text.secondary" }} />
+                      </Tooltip>
+                    </Stack>
                   </TableCell>
-                  <TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell>
-                  <TableCell><Chip size="small" label={test.priority.toUpperCase()} color={priorityColor[test.priority]} variant="outlined" /></TableCell>
-                  <TableCell>{test.source === "ai" ? "AI" : "RULE"}</TableCell>
-                  <TableCell sx={{ minWidth: 250 }}>
-                    <Chip size="small" label={testModeLabel(test)} color={test.destructive ? "warning" : setupRequired ? "info" : "success"} variant="outlined" />
-                    {test.dependency && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>{test.dependency}</Typography>}
-                  </TableCell>
-                </TableRow>;
-              })}
+                </TableRow>
+                {tests.map((test) => {
+                  const bucket = normalizedBucket(test);
+                  const setupRequired = Boolean(!test.autonomous_candidate && (test.requires_auth || test.requires_test_data || test.dependency));
+                  const probes = test.data_probes || [];
+                  return <TableRow key={test.id} hover>
+                    <TableCell sx={{ minWidth: 320 }}>
+                      <Stack direction="row" spacing={.5} alignItems="flex-start">
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography fontWeight={700} variant="body2">{test.title}</Typography>
+                          <Typography variant="caption" color="text.secondary" display="block">{test.page_label ? `${test.page_label} · ` : ""}{test.id}</Typography>
+                          <Typography variant="caption" color="text.secondary" display="block">{test.objective}</Typography>
+                        </Box>
+                        {probes.length > 0 && <Tooltip title={<Box>{probes.map((probe) => <Typography key={probe.kind} variant="caption" display="block"><b>{probe.label}:</b> {probe.guidance}</Typography>)}</Box>} placement="right">
+                          <IconButton size="small" aria-label={`Data probes for ${test.title}`} sx={{ p: .25 }}><InfoOutlinedIcon sx={{ fontSize: 16 }} /></IconButton>
+                        </Tooltip>}
+                      </Stack>
+                    </TableCell>
+                    <TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell>
+                    <TableCell><Chip size="small" label={test.priority.toUpperCase()} color={priorityColor[test.priority]} variant="outlined" /></TableCell>
+                    <TableCell>{test.source === "ai" ? "AI" : "RULE"}</TableCell>
+                    <TableCell sx={{ minWidth: 250 }}>
+                      <Chip size="small" label={testModeLabel(test)} color={test.destructive ? "warning" : setupRequired ? "info" : "success"} variant="outlined" />
+                      {test.dependency && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>{test.dependency}</Typography>}
+                    </TableCell>
+                  </TableRow>;
+                })}
+              </Fragment>)}
             </TableBody>
           </Table>
         </TableContainer>
@@ -1951,7 +2024,7 @@ export default function AutopilotPage() {
       <Card variant="outlined"><CardContent>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, destructive submits, confirmations and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : "Run discovery"}</Button></Stack></Stack>
         {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
-        {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.screens.length > 0 && <Grid container spacing={1.5} sx={{ mt: .5 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Screen</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.slice(0, 150).map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen}-${control.control_id}`} hover><TableCell>{screen}</TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+        {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.screens.length > 0 && <Grid container spacing={1.5} sx={{ mt: .5 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Journey / page</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.slice(0, 150).map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen.screen_id}-${control.control_id}`} hover><TableCell><Typography variant="body2" fontWeight={700}>{screen.page_label || screen.title || screen.journey || "Observed page"}</Typography><Typography variant="caption" color="text.secondary">{screen.journey || "Observed journey"} · {screen.screen_id}</Typography></TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent>
@@ -1994,11 +2067,11 @@ export default function AutopilotPage() {
             {(automation?.setup_missing_fields || []).slice(0, 6).map((field) => <Chip key={field} size="small" label={"Pending: " + field} color="warning" variant="outlined" />)}
           </Stack>
           {pendingCheckpointRequests.slice(0, 6).map((request) => <Box key={request.key} sx={{ mt: 1, p: 1, borderRadius: 1.5, bgcolor: "warning.lighter", border: "1px solid", borderColor: "warning.light" }}><Stack direction="row" spacing={.75} alignItems="center"><Chip size="small" label={inputCategoryLabel(request.category)} variant="outlined" /><Typography variant="body2" fontWeight={700}>{request.label}</Typography></Stack><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .35 }}>{request.question || request.reason}</Typography><Typography variant="caption" color="text.secondary">Needed for: {requestDependentTitles(request, analysis.tests).join(" · ") || "this checkpoint"}</Typography></Box>)}
-          {runtimeInputRequests.length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: runtimePendingCount > 0 ? "warning.lighter" : "info.lighter", border: "1px solid", borderColor: runtimePendingCount > 0 ? "warning.light" : "info.light" }}><Typography variant="body2" fontWeight={700}>Runtime fields mapped</Typography><Typography variant="caption" color="text.secondary">{runtimeInputRequests.length} field{runtimeInputRequests.length === 1 ? "" : "s"} were found on the live screen map. {runtimePendingCount > 0 ? `The ${runtimePendingCount} credential or sensitive field${runtimePendingCount === 1 ? " is" : "s are"} waiting for you in the checkpoint above.` : `${runtimeSyntheticCount || "These"} non-sensitive field${runtimeInputRequests.length === 1 ? " is" : "s are"} ready for bounded synthetic data on the first pass.`} Open the checkpoint to override a value, save a non-production fixture, generate a different value, or skip a dependent check.</Typography></Box>}
+          {runtimeInputRequests.length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: runtimePendingCount > 0 ? "warning.lighter" : "info.lighter", border: "1px solid", borderColor: runtimePendingCount > 0 ? "warning.light" : "info.light" }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}><Box><Typography variant="body2" fontWeight={700}>Runtime fields mapped</Typography><Typography variant="caption" color="text.secondary">{runtimeInputRequests.length} field{runtimeInputRequests.length === 1 ? "" : "s"} were found on the live screen map. {runtimePendingCount > 0 ? `The ${runtimePendingCount} credential or sensitive field${runtimePendingCount === 1 ? " is" : "s are"} waiting for you in the checkpoint above.` : `${runtimeSyntheticCount || "These"} non-sensitive field${runtimeInputRequests.length === 1 ? " is" : "s are"} ready for bounded synthetic data on the first pass.`}</Typography></Box><Button size="small" variant="outlined" onClick={openSetup}>Review probes</Button></Stack></Box>}
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
-        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · plan capped at 100 cases</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 100).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
-        {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe batch: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The evidence-scoped plan is capped at 100 cases. This run can include up to {suiteMaxTests} eligible deterministic cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{test.test_id}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · plan capped at 100 cases</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 100).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
+      {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe batch: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The evidence-scoped plan is capped at 100 cases. This run can include up to {suiteMaxTests} eligible deterministic cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>
@@ -2094,10 +2167,12 @@ export default function AutopilotPage() {
         </Stack>
       </DialogTitle>
       <DialogContent>
-        <Alert severity={pendingCheckpointRequests.length > 0 ? "warning" : "info"} sx={{ mb: 2 }}>
+        <Alert severity={pendingCheckpointRequests.length > 0 ? "warning" : pendingInputRequests.length > 0 ? "info" : "success"} sx={{ mb: 2 }}>
           {pendingCheckpointRequests.length > 0
-            ? `${pendingCheckpointRequests.length} input${pendingCheckpointRequests.length === 1 ? "" : "s"} still need a decision.`
-            : "All checkpoint inputs have a decision. Save to continue to Runtime Discovery."}
+            ? `${pendingCheckpointRequests.length} live authentication or sensitive input${pendingCheckpointRequests.length === 1 ? "" : "s"} still need a decision.`
+            : pendingInputRequests.length > 0
+              ? `${pendingInputRequests.length} optional data/reference item${pendingInputRequests.length === 1 ? "" : "s"} can be reviewed; they do not block the safe first pass.`
+              : "All checkpoint inputs have a decision. Save to continue to Runtime Discovery."}
           {" "}Use only non-production data. Values are encrypted in the Autopilot checkpoint store, never returned, added to context, or written to logs. They are separate from uploaded Test Data files. Choose Skip when the case is not in scope for this run.
         </Alert>
         {activeCheckpointRequest && activeCheckpointDraft && <>
@@ -2108,10 +2183,19 @@ export default function AutopilotPage() {
           </Stack>
           <Box sx={{ p: 2, border: "1px solid", borderColor: activeCheckpointDraft.decision === "skip" ? "divider" : "info.light", bgcolor: activeCheckpointDraft.decision === "skip" ? "action.hover" : "info.lighter", borderRadius: 2 }}>
             <Typography variant="subtitle1" fontWeight={800}>{activeCheckpointRequest.label}</Typography>
+            {(activeCheckpointRequest.journey || activeCheckpointRequest.page_label) && <Stack direction="row" spacing={.75} useFlexGap flexWrap="wrap" sx={{ mt: .75 }}>
+              {activeCheckpointRequest.journey && <Chip size="small" label={`Journey: ${activeCheckpointRequest.journey}`} color="primary" variant="outlined" />}
+              {activeCheckpointRequest.page_label && <Chip size="small" label={`Page: ${activeCheckpointRequest.page_label}`} variant="outlined" />}
+              {activeCheckpointRequest.page_url && <Button size="small" variant="text" onClick={() => window.open(activeCheckpointRequest.page_url || "", "_blank", "noopener,noreferrer")}>Open observed page</Button>}
+            </Stack>}
             <Typography variant="body2" sx={{ mt: .5 }}>{activeCheckpointRequest.question || "What should Autopilot use for this setup item?"}</Typography>
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{activeCheckpointRequest.format_hint || activeCheckpointRequest.reason}</Typography>
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Needed for: {requestDependentTitles(activeCheckpointRequest, analysis?.tests || []).join(" · ") || "this checkpoint"}</Typography>
             {activeCheckpointRequest.screen_id && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Screen: {activeCheckpointRequest.screen_id}{activeCheckpointRequest.locator ? ` · Control: ${activeCheckpointRequest.locator}` : ""}</Typography>}
+            {(activeCheckpointRequest.probe_guidance || []).length > 0 && <Box sx={{ mt: 1.25, p: 1, borderRadius: 1.5, bgcolor: "background.paper", border: "1px solid", borderColor: "divider" }}>
+              <Typography variant="caption" fontWeight={800} color="text.secondary">What will be checked</Typography>
+              {(activeCheckpointRequest.probe_guidance || []).map((probe) => <Typography key={probe.kind} variant="caption" display="block" sx={{ mt: .35 }}><b>{probe.label}:</b> {probe.guidance}</Typography>)}
+            </Box>}
             {activeCheckpointSaved?.save_for_reuse && <Alert severity="success" sx={{ mt: 1.25 }}>A saved encrypted value exists for this field. Choose “Reuse saved” to use it without revealing it.</Alert>}
             {activeCheckpointRequest.category === "approval" ? <Alert severity="info" sx={{ mt: 1.5 }}>
               <Typography variant="body2" fontWeight={700}>Authentication permission</Typography>

@@ -392,6 +392,10 @@ class AutopilotIRCompiler:
             readiness_reason=readiness_reason,
             steps=ir_steps,
             assertions=list(test.expected),
+            journey=test.journey,
+            page_label=test.page_label,
+            page_url=test.page_url,
+            data_probes=list(test.data_probes),
         )
         generated.appium_python = self._appium_script(test, analysis, generated)
         return generated

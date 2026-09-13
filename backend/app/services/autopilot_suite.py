@@ -193,6 +193,9 @@ class AutopilotSuiteService:
                     readiness=test.readiness,
                     dependency=test.dependency,
                     error=connector_error,
+                    journey=test.journey,
+                    page_label=test.page_label,
+                    page_url=test.page_url,
                 )
                 for test in candidates
             ]
@@ -274,6 +277,9 @@ class AutopilotSuiteService:
                 readiness=test.readiness,
                 dependency=test.dependency or test.readiness_reason,
                 error=test.readiness_reason or "This case is pending setup or safe deterministic locators.",
+                journey=test.journey,
+                page_label=test.page_label,
+                page_url=test.page_url,
             )
             for test in tests
         ]
@@ -543,6 +549,9 @@ class AutopilotSuiteService:
                         duration_seconds=round(time.perf_counter() - test_started, 2),
                         error=error,
                         evidence=evidence,
+                        journey=test.journey,
+                        page_label=test.page_label,
+                        page_url=test.page_url,
                     )
                 )
             return results

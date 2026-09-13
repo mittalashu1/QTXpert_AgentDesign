@@ -50,6 +50,7 @@ from app.schemas.autopilot import (
 )
 from app.services.appium_compat import safe_app_identity, safe_page_source, safe_quit
 from app.services.autopilot_context import default_context, get_profile, sanitize_target_url
+from app.services.autopilot_labels import input_probe_guidance, observed_journey_label, observed_page_label
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -1981,9 +1982,10 @@ class AutopilotPrototypeService:
 
     @staticmethod
     def _runtime_screen_label(screen: DiscoveredScreen, index: int) -> str:
-        value = screen.title or screen.activity_name or screen.url or screen.screen_id or f"screen {index}"
-        value = re.sub(r"\s+", " ", str(value)).strip()
-        return f"{value[:80]} · {screen.screen_id}" or f"screen {index}"
+        # Keep raw screen IDs/URLs as replay metadata, never as the name shown
+        # to an end user. The label is derived from observed title/activity or
+        # a meaningful control and remains honest when a page is unnamed.
+        return screen.page_label or observed_page_label(screen, index) or f"Observed page {index}"
 
     @classmethod
     def expand_discovered_coverage(
@@ -2091,6 +2093,7 @@ class AutopilotPrototypeService:
 
         for screen_index, screen in enumerate(screens, start=1):
             screen_label = cls._runtime_screen_label(screen, screen_index)
+            journey_label = screen.journey or observed_journey_label(screen, screen_index)
             controls = [control for control in screen.controls if control.enabled and control.locators and not control.resource_id.startswith("android:id/")]
             anchor = next((control for control in controls if control.semantic_label), None)
             anchor_label = anchor.semantic_label if anchor else None
@@ -2102,12 +2105,15 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("PAGE", screen.screen_id),
                         suite="Page-level",
                         bucket="page_level",
-                        title=f"Page-level: render and inspect {screen_label}",
+                        title=f"{journey_label} — Open and inspect {screen_label}",
                         priority="high",
                         objective="Verify the observed screen renders and exposes at least one deterministic interactive or semantic control.",
                         steps=[*navigation, f"Verify {anchor_label}"],
                         expected=[f"{anchor_label} is visible on {screen_label}"],
                         evidence_required=["screen screenshot", "UI hierarchy"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
                     )
                 )
                 queues["ui_positive"].append(
@@ -2115,12 +2121,15 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("UI", screen.screen_id, anchor.control_id),
                         suite="UI · Positive",
                         bucket="ui_positive",
-                        title=f"UI positive: readable {anchor_label} on {screen_label}",
+                        title=f"{journey_label} — UI positive: verify {anchor_label} on {screen_label}",
                         priority="medium",
                         objective="Check an observed screen's primary control for stable visibility, readable semantics and safe interaction readiness.",
                         steps=[*navigation, f"Verify {anchor_label}"],
                         expected=[f"{anchor_label} is visible, labelled and usable on {screen_label}"],
                         evidence_required=["screen screenshot", "UI hierarchy"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
                     )
                 )
 
@@ -2132,7 +2141,7 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("UAT-POS", screen.screen_id),
                         suite="UAT · Positive",
                         bucket="uat",
-                        title=f"UAT candidate: navigation reaches {screen_label}",
+                        title=f"{journey_label} — UAT positive: reach {screen_label}",
                         priority="high",
                         objective="Replay the observed navigation journey and verify its destination. Business acceptance remains subject to approved criteria.",
                         steps=[*navigation, f"Verify {anchor_label or screen_label}"] if screen.screen_id in paths else [f"Navigate to {screen_label}"],
@@ -2141,6 +2150,9 @@ class AutopilotPrototypeService:
                         autonomous_candidate=bool(anchor_label and screen.screen_id in paths),
                         dependency=None if screen.screen_id in paths else "A replayable navigation path to this screen is required.",
                         evidence_required=["acceptance trace", "journey screenshot", "business oracle"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
                     )
                 )
                 queues["uat_negative"].append(
@@ -2148,7 +2160,7 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("UAT-NEG", screen.screen_id),
                         suite="UAT · Negative",
                         bucket="uat",
-                        title=f"UAT negative: recover safely from {screen_label} validation",
+                        title=f"{journey_label} — UAT negative: recover from {screen_label} validation",
                         priority="high",
                         objective="Validate signed-off rejection, boundary and recovery behavior associated with this observed screen.",
                         steps=[f"Navigate to {screen_label}", "Exercise an approved invalid or boundary scenario", "Verify recovery feedback"],
@@ -2157,6 +2169,9 @@ class AutopilotPrototypeService:
                         requires_test_data=True,
                         dependency="Signed-off negative acceptance criteria, approved synthetic fixtures, oracle access and cleanup are required.",
                         evidence_required=["acceptance trace", "error screenshot", "oracle result"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
                     )
                 )
                 queues["sit_positive"].append(
@@ -2164,7 +2179,7 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("SIT-POS", screen.screen_id),
                         suite="SIT · Positive",
                         bucket="sit",
-                        title=f"SIT positive: service contract supports {screen_label}",
+                        title=f"{journey_label} — SIT positive: correlate {screen_label} with its service",
                         priority="high",
                         objective="Correlate the observed screen outcome with the approved backend and third-party contract.",
                         steps=[f"Navigate to {screen_label}", "Correlate the UI outcome with the API/oracle", "Verify persisted state"],
@@ -2173,6 +2188,9 @@ class AutopilotPrototypeService:
                         requires_test_data=True,
                         dependency="Non-production endpoints, API/oracle reference, synthetic data and reset capability are required.",
                         evidence_required=["request/response evidence", "UI screenshot", "persistence result"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
                     )
                 )
                 queues["sit_negative"].append(
@@ -2180,7 +2198,7 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("SIT-NEG", screen.screen_id),
                         suite="SIT · Negative",
                         bucket="sit",
-                        title=f"SIT negative: dependency failure recovery on {screen_label}",
+                        title=f"{journey_label} — SIT negative: recover from a service failure on {screen_label}",
                         priority="high",
                         objective="Validate timeout, malformed response and recoverable dependency failures at this observed screen.",
                         steps=[f"Navigate to {screen_label}", "Inject an approved non-production dependency failure", "Verify retry and recovery behavior"],
@@ -2189,6 +2207,9 @@ class AutopilotPrototypeService:
                         requires_test_data=True,
                         dependency="Approved non-production fault injection, API/oracle reference, synthetic data and reset capability are required.",
                         evidence_required=["failure request/response", "retry telemetry", "cleanup result"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
                     )
                 )
 
@@ -2221,12 +2242,15 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("FUNC-POS", screen.screen_id, control.control_id),
                         suite="Functional · Positive",
                         bucket="functional_positive",
-                        title=f"Functional positive: activate {label} on {screen_label}",
+                        title=f"{journey_label} — Functional positive: activate {label} on {screen_label}",
                         priority="high",
                         objective="Exercise one observed safe control and verify the resulting evidence-backed state.",
                         steps=[*navigation, f"Tap {label}", f"Verify {assertion_label}"],
                         expected=[f"Activating {label} reaches a stable state with {assertion_label} visible"],
                         evidence_required=["before/after screenshots", "UI hierarchy"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
                     )
                 )
                 queues["accessibility"].append(
@@ -2234,12 +2258,15 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("A11Y", screen.screen_id, control.control_id),
                         suite="Accessibility",
                         bucket="accessibility",
-                        title=f"Accessibility: semantic name for {label} on {screen_label}",
+                        title=f"{journey_label} — Accessibility: semantic name for {label} on {screen_label}",
                         priority="medium",
                         objective="Verify that the observed safe control has a deterministic accessible name and can be located safely.",
                         steps=[*navigation, f"Verify {label}"],
                         expected=[f"{label} has an accessible name and stable locator"],
                         evidence_required=["UI hierarchy", "locator evidence"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
                     )
                 )
 
@@ -2260,7 +2287,7 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("FUNC-INPUT-POS", screen.screen_id, control.control_id),
                         suite="Functional · Positive",
                         bucket="functional_positive",
-                        title=f"Functional positive: accept valid {label} on {screen_label}",
+                        title=f"{journey_label} — Functional positive: accept valid {label} on {screen_label}",
                         priority="high",
                         objective="Verify an observed input accepts an approved synthetic value and advances the safe journey.",
                         steps=[*input_navigation, f"Enter a valid value into {label}", f"Verify {label} is accepted"],
@@ -2270,6 +2297,10 @@ class AutopilotPrototypeService:
                         synthetic_data_strategy="valid_field_probe" if input_candidate else None,
                         dependency=input_dependency,
                         evidence_required=["input-state screenshot", "validation evidence", "cleanup result"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
+                        data_probes=input_probe_guidance(label, control.input_kind),
                     )
                 )
                 queues["functional_negative"].append(
@@ -2277,7 +2308,7 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("FUNC-INPUT-NEG", screen.screen_id, control.control_id),
                         suite="Functional · Negative",
                         bucket="functional_negative",
-                        title=f"Functional negative: reject invalid {label} on {screen_label}",
+                        title=f"{journey_label} — Functional negative: reject invalid {label} on {screen_label}",
                         priority="high",
                         objective="Verify invalid, empty and boundary values for an observed input are rejected safely.",
                         steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
@@ -2287,6 +2318,10 @@ class AutopilotPrototypeService:
                         synthetic_data_strategy="invalid_field_probe" if input_candidate else None,
                         dependency=input_dependency or "An approved invalid fixture and reset/cleanup reference are required.",
                         evidence_required=["validation screenshot", "error/oracle evidence", "cleanup result"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
+                        data_probes=input_probe_guidance(label, control.input_kind),
                     )
                 )
                 queues["ui_negative"].append(
@@ -2294,7 +2329,7 @@ class AutopilotPrototypeService:
                         id=cls._runtime_case_id("UI-NEG", screen.screen_id, control.control_id),
                         suite="UI · Negative",
                         bucket="ui_negative",
-                        title=f"UI negative: error state for {label} on {screen_label}",
+                        title=f"{journey_label} — UI negative: show {label} validation state on {screen_label}",
                         priority="medium",
                         objective="Check that the observed field's invalid and empty states remain readable and accessible.",
                         steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
@@ -2304,6 +2339,10 @@ class AutopilotPrototypeService:
                         synthetic_data_strategy="invalid_field_probe" if input_candidate else None,
                         dependency=input_dependency or "An approved invalid fixture and visual baseline are required.",
                         evidence_required=["error-state screenshot", "UI hierarchy"],
+                        journey=journey_label,
+                        page_label=screen_label,
+                        page_url=screen.url,
+                        data_probes=input_probe_guidance(label, control.input_kind),
                     )
                 )
                 if auth_observed and input_candidate:
@@ -2312,7 +2351,7 @@ class AutopilotPrototypeService:
                             id=cls._runtime_case_id("UAT-NEG-INPUT", screen.screen_id, control.control_id),
                             suite="UAT · Negative",
                             bucket="uat",
-                            title=f"UAT negative: validate {label} on {screen_label}",
+                            title=f"{journey_label} — UAT negative: validate {label} on {screen_label}",
                             priority="high",
                             objective="Probe an observed field with a bounded invalid value and expose the product's recovery guidance for UAT review.",
                             steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
@@ -2322,6 +2361,10 @@ class AutopilotPrototypeService:
                             synthetic_data_strategy="invalid_field_probe",
                             dependency=None,
                             evidence_required=["validation screenshot", "UI hierarchy", "acceptance trace"],
+                            journey=journey_label,
+                            page_label=screen_label,
+                            page_url=screen.url,
+                            data_probes=input_probe_guidance(label, control.input_kind),
                         )
                     )
 
@@ -2362,7 +2405,21 @@ class AutopilotPrototypeService:
             f"{_MAX_GENERATED_AUTOPILOT_TESTS} cases."
         )
         basis.append(expansion_note)
-        return analysis.model_copy(update={"tests": merged, "analysis_basis": basis})
+        observed_journeys: list[str] = []
+        for index, screen in enumerate(screens, start=1):
+            label = screen.journey or observed_journey_label(screen, index)
+            if label and label not in observed_journeys:
+                observed_journeys.append(label)
+        journey_note = "Observed journeys: " + ", ".join(observed_journeys[:20]) + "."
+        basis = [item for item in basis if not str(item).startswith("Observed journeys:")]
+        basis.append(journey_note)
+        return analysis.model_copy(
+            update={
+                "tests": merged,
+                "analysis_basis": basis,
+                "critical_journeys": observed_journeys[:20] or analysis.critical_journeys,
+            }
+        )
 
     @staticmethod
     def _build_web_tests(meta: Dict[str, Any]) -> List[AutopilotTest]:

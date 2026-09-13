@@ -29,6 +29,7 @@ from app.schemas.autopilot import (
     QTXTestIR,
 )
 from app.services.autopilot import AutopilotPrototypeService
+from app.services.autopilot_labels import observed_journey_label, observed_page_label
 
 
 _BLOCKED_TERMS = (
@@ -439,6 +440,24 @@ class AutopilotWebService:
                     fingerprint=fingerprint,
                     url=page.url,
                     title=title or None,
+                    journey=observed_journey_label(
+                        DiscoveredScreen(
+                            screen_id=screen_id,
+                            fingerprint=fingerprint,
+                            url=page.url,
+                            title=title or None,
+                            controls=controls,
+                        )
+                    ),
+                    page_label=observed_page_label(
+                        DiscoveredScreen(
+                            screen_id=screen_id,
+                            fingerprint=fingerprint,
+                            url=page.url,
+                            title=title or None,
+                            controls=controls,
+                        )
+                    ),
                     screenshot_path=captured_screenshot if persist_evidence else None,
                     page_source_path=str(source_path) if persist_evidence else None,
                     controls=controls,
@@ -904,6 +923,9 @@ class AutopilotWebService:
                         duration_seconds=round(time.perf_counter() - test_started, 2),
                         error=error,
                         evidence=evidence,
+                        journey=test.journey,
+                        page_label=test.page_label,
+                        page_url=test.page_url,
                     )
                 )
         passed = sum(item.status == "passed" for item in results)
