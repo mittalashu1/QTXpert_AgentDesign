@@ -792,6 +792,58 @@ class DocumentIntelligenceService:
             "security approval or compliance conclusion until execution supplies evidence."
         )
         context = "\n".join(lines)
+        # Keep a structured, bounded section index for downstream scope
+        # compilers.  The hand-off contains headings and short summaries only;
+        # the repository remains the source of the original document bytes.
+        section_labels = {
+            "business_rules": "Business rules",
+            "functional_requirements": "Functional requirements",
+            "user_journeys": "Critical journeys",
+            "acceptance_criteria": "Acceptance criteria",
+            "integrations": "Service connections",
+            "dependencies": "Dependencies",
+            "validation_rules": "Validation rules",
+            "regulatory_requirements": "Regulatory expectations",
+            "non_functional_requirements": "Quality expectations",
+            "security_controls": "Security controls",
+            "data_rules": "Data rules",
+            "error_recovery_rules": "Error and recovery rules",
+            "open_questions": "Open questions",
+        }
+        sections: list[dict[str, Any]] = []
+        for key, label in section_labels.items():
+            values = knowledge.get(key)
+            if not isinstance(values, list):
+                continue
+            for index, value in enumerate(values[:5], start=1):
+                safe_value = self._safe_context_text(value, 360)
+                if safe_value:
+                    sections.append({
+                        "key": f"{key}:{index}",
+                        "title": label,
+                        "summary": safe_value,
+                        "source": "document",
+                        "source_refs": [f"document:{value}" for value in (run.asset_ids or [])[:20]],
+                    })
+        change_impact = [
+            self._safe_context_text(item.testing_impact or item.description, 360)
+            for item in open_findings
+            if any(term in f"{item.title} {item.description} {item.testing_impact}".casefold() for term in ("change", "release", "impact", "updated", "regression"))
+        ]
+        change_impact = list(dict.fromkeys(item for item in change_impact if item))[:12]
+        if change_impact:
+            # Keep the change signal in the bounded hand-off as well as the
+            # structured response. Autopilot's scope compiler consumes this
+            # hand-off, while the original finding remains in the repository.
+            context = (
+                f"{context}\nChange impact signals: "
+                + " | ".join(change_impact[:8])
+            )[:7000]
+        if sections:
+            context = (
+                f"{context}\nDocument sections retained: "
+                + " | ".join(f"{item['title']}: {item['summary']}" for item in sections[:12])
+            )[:7000]
         return {
             "run_id": run.id,
             "project_id": run.project_id,
@@ -804,6 +856,8 @@ class DocumentIntelligenceService:
             "open_finding_count": len(open_findings),
             "critical_finding_count": sum(1 for item in open_findings if item.severity == "critical"),
             "high_finding_count": sum(1 for item in open_findings if item.severity == "high"),
+            "sections": sections[:50],
+            "change_impact": change_impact,
         }
 
     async def get_context(self, run_id: UUID, owner_id: UUID) -> dict[str, Any]:
@@ -1060,4 +1114,5 @@ class DocumentIntelligenceService:
             source_document_analysis_id=analysis_run.id,
         )
         return analysis_run, requirement, generation
+
 

@@ -616,5 +616,13 @@ def build_test_audit_report(
         recommendations=recommendations,
         evidence=evidence,
         evidence_assets=evidence_assets,
+        # Older analysis snapshots deserialize with an empty default scope;
+        # keep their report layout unchanged until a new scope is compiled.
+        scope=(
+            analysis.scope
+            if analysis.scope.summary or analysis.scope.sources or analysis.scope.scope_sections
+            else None
+        ),
     )
+
 

@@ -45,6 +45,7 @@ type TestCase = {
   evidence_required?: string[];
   journey?: string | null; page_label?: string | null; page_url?: string | null;
   data_probes?: Array<{ kind: "positive" | "negative" | "boundary"; label: string; guidance: string }>;
+  provenance?: Array<{ kind: ScopeSource["kind"]; label: string; reference?: string | null; observed: boolean }>;
 };
 type Analysis = {
   job_id: string; filename: string; status: string; platform?: TargetKind; target_kind?: TargetKind; target_url?: string | null; app_name?: string; package_name?: string;
@@ -57,6 +58,7 @@ type Analysis = {
   coverage_counts?: Record<string, number>; generation_policy?: string[]; input_summary?: string[];
   context_considered?: boolean; ai_enrichment_used?: boolean; analysis_basis?: string[];
   document_asset_ids?: string[]; document_analysis_run_id?: string | null;
+  scope?: AutopilotScope;
   checkpoint_stage?: string; input_requests?: AutopilotInputRequest[];
 };
 type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; playwright_available?: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: Provider };
@@ -89,7 +91,7 @@ type AuditReport = {
     environment: string[]; evidence_state: string;
   };
   functional_testing: ReportCheck[]; non_functional_testing: ReportCheck[]; compliance_verification: ReportCheck[];
-  risk_matrix: ReportRisk[]; recommendations: string[]; evidence: string[];
+  risk_matrix: ReportRisk[]; recommendations: string[]; evidence: string[]; scope?: AutopilotScope | null;
   evidence_assets?: Array<{ asset_id: string; filename: string; kind: "screenshot" | "page_source" | "video" | "other"; bucket?: TestBucket | null; test_id?: string | null; title?: string | null; scope?: "test" | "suite" | "smoke" }>;
 };
 type Execution = {
@@ -154,7 +156,14 @@ type SuiteResult = {
 type ProfileOption = {
   id: string; name: string; description: string; brief_context: string;
 };
-type ContextResponse = { context: string; source: "default" | "ai" | "fallback"; profile_id?: string; warning?: string | null };
+type ScopeSource = { kind: "profile" | "user_context" | "document" | "internet" | "target" | "runtime" | "system"; label: string; reference?: string | null; summary: string; observed: boolean; retrieved_at?: string | null };
+type ScopeSection = { key: string; title: string; summary: string; source: ScopeSource["kind"]; source_refs: string[]; status: "planned" | "observed" | "deferred" | "not_applicable"; requested: boolean; editable: boolean };
+type AutopilotScope = {
+  schema_version: string; summary: string; target: string;
+  functional_scope: string[]; non_functional_scope: string[]; requested_test_types: string[]; change_impact: string[];
+  document_sections: ScopeSection[]; scope_sections: ScopeSection[]; sources: ScopeSource[]; authentication_gate: string; runtime_observed: boolean; login_observed: boolean; editable: boolean;
+};
+type ContextResponse = { context: string; source: "default" | "ai" | "fallback"; profile_id?: string; warning?: string | null; scope?: AutopilotScope; research_sources?: ScopeSource[] };
 type ReportTab = {
   report_tab_key?: string; surface_key: string; surface_identity: string; profile_id: string; target_kind: TargetKind;
   target_url?: string | null; filename: string; latest_job_id: string; latest_status: string;
@@ -166,6 +175,7 @@ type AutopilotInputRequest = {
   source?: "plan" | "runtime"; screen_id?: string | null; control_id?: string | null; field_type?: string | null; input_hint?: "username" | "password" | "otp" | "text" | null; locator?: string | null;
   question?: string | null; placeholder?: string | null; format_hint?: string | null; credential_bundle?: boolean;
   journey?: string | null; page_label?: string | null; page_url?: string | null; field_label?: string | null;
+  screenshot_asset_id?: string | null; page_source_asset_id?: string | null;
   probe_guidance?: Array<{ kind: "positive" | "negative" | "boundary"; label: string; guidance: string }>;
 };
 type InputDecision = "provide" | "skip" | "reuse" | "random";
@@ -398,9 +408,19 @@ function isBlockingCheckpoint(request: AutopilotInputRequest) {
   // The only automatic pause is a real live authentication/sensitive-field
   // checkpoint. UAT acceptance, oracle, fixture and reset references remain
   // visible as deferred follow-ups while safe observed coverage proceeds.
-  return request.category === "credential"
+  return (request.category === "credential" && (request.key === "credential_reference" || request.source === "runtime"))
     || request.category === "approval"
     || (request.source === "runtime" && request.sensitive);
+}
+
+function concreteCheckpointRequests(requests: AutopilotInputRequest[] | undefined) {
+  // A legacy static snapshot may contain speculative plan dependencies even
+  // though the target has never been invoked. Do not resurrect that old
+  // questionnaire after a refresh; runtime evidence (or a page-scoped
+  // credential bundle) is the source of truth for the first checkpoint.
+  return (requests || []).filter((request) => request.source === "runtime" || (
+    request.key === "credential_reference" && Boolean(request.screen_id || request.page_label || request.journey)
+  ));
 }
 
 function requestDependentTitles(request: AutopilotInputRequest, tests: TestCase[]) {
@@ -529,6 +549,35 @@ function RuntimeScreenPreview({ screen }: { screen: DiscoveredScreen }) {
   </CardContent></Card>;
 }
 
+function CheckpointEvidencePreview({ request }: { request: AutopilotInputRequest }) {
+  const [imageUrl, setImageUrl] = useState("");
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    if (!request.screenshot_asset_id) {
+      setImageUrl("");
+      return () => { active = false; };
+    }
+    uploadsApi.download(request.screenshot_asset_id).then((response) => {
+      if (!active) return;
+      objectUrl = URL.createObjectURL(response.data);
+      setImageUrl(objectUrl);
+    }).catch(() => { if (active) setImageUrl(""); });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [request.screenshot_asset_id]);
+  if (!request.screenshot_asset_id) return null;
+  return <Box sx={{ mt: 1.25, p: 1, borderRadius: 1.5, bgcolor: "background.paper", border: "1px solid", borderColor: "divider" }}>
+    <Typography variant="caption" fontWeight={800} color="text.secondary" display="block">Observed screen</Typography>
+    <Box sx={{ mt: .75, height: 180, display: "flex", alignItems: "center", justifyContent: "center", bgcolor: "action.hover", borderRadius: 1, overflow: "hidden" }}>
+      {imageUrl ? <Box component="img" src={imageUrl} alt={request.page_label || request.journey || "Observed screen"} sx={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <Typography variant="caption" color="text.secondary">Loading screenshot evidence…</Typography>}
+    </Box>
+    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Use this page preview to confirm the field before entering a value.</Typography>
+  </Box>;
+}
+
 type SuiteEvidenceAsset = { asset_id: string; filename?: string; kind?: string };
 
 function evidenceAssetLabel(kind?: string) {
@@ -583,6 +632,7 @@ export default function AutopilotPage() {
   const [profileId, setProfileId] = useState(DEFAULT_PROFILE_ID);
   const [context, setContext] = useState(DEFAULT_AUTOPILOT_CONTEXT);
   const [contextSource, setContextSource] = useState<"default" | "ai" | "fallback" | "custom">("default");
+  const [contextScope, setContextScope] = useState<AutopilotScope | null>(null);
   const [contextBusy, setContextBusy] = useState(false);
   const [contextNotice, setContextNotice] = useState("");
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -600,6 +650,10 @@ export default function AutopilotPage() {
   const [setupDraft, setSetupDraft] = useState<SetupProfile>(emptySetup());
   const [inputDrafts, setInputDrafts] = useState<Record<string, InputDraft>>({});
   const [setupOpen, setSetupOpen] = useState(false);
+  // Keep the first checkpoint focused on the concrete live gate (normally
+  // sign-in). Plan-level UAT/SIT references remain available behind an
+  // explicit disclosure once the autonomous first pass has mapped the target.
+  const [showAdvancedSetup, setShowAdvancedSetup] = useState(false);
   const [checkpointStep, setCheckpointStep] = useState(0);
   const [setupBusy, setSetupBusy] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
@@ -648,12 +702,14 @@ export default function AutopilotPage() {
     setDefectError("");
     setSetup(null);
     setSetupDraft(emptySetup());
+    setShowAdvancedSetup(false);
     setInputDrafts({});
     setCheckpointStep(0);
     setArtifactAvailable(true);
     setAnalysisProgress(0);
     setAnalysisStage("");
     setContextNotice("");
+    setContextScope(null);
     setError("");
     if (options.clearSurface) {
       setReportTabs([]);
@@ -867,7 +923,7 @@ export default function AutopilotPage() {
       // leave the user looking at an empty checkpoint panel.
       if (job.status === "waiting_for_input") {
         const jobRequests = job.input_requests || [];
-        const requests = jobRequests.length > 0 ? jobRequests : (job.analysis.input_requests || []);
+        const requests = concreteCheckpointRequests(jobRequests.length > 0 ? jobRequests : job.analysis.input_requests);
         if (requests.length > 0) {
           const checkpointSetup = {
             ...emptySetup(job.job_id),
@@ -976,9 +1032,10 @@ export default function AutopilotPage() {
       // profile shell without copying the request list from the job manifest.
       // Keep the job's pending requests as a safe fallback so the banner and
       // dialog never disappear while the durable setup is being rehydrated.
-      const resolvedWithFallback = resolvedSetup.input_requests.length > 0 || (resolvedSetup.runtime_input_requests || []).length > 0 || !(analysis.input_requests || []).length
+      const analysisRequests = concreteCheckpointRequests(analysis.input_requests);
+      const resolvedWithFallback = resolvedSetup.input_requests.length > 0 || (resolvedSetup.runtime_input_requests || []).length > 0 || analysisRequests.length === 0
         ? resolvedSetup
-        : { ...resolvedSetup, input_requests: analysis.input_requests || [], missing_fields: (analysis.input_requests || []).map((item) => item.label) };
+        : { ...resolvedSetup, input_requests: analysisRequests, missing_fields: analysisRequests.map((item) => item.label) };
       setSetup(resolvedWithFallback);
       // setupDraft drives both the banner and the dialog. Keep it in sync with
       // the durable setup response instead of leaving the initial empty form in
@@ -1109,6 +1166,7 @@ export default function AutopilotPage() {
       setContext(contextForTarget(selectedProfile, targetKind, selectedApplicationName, targetUrl));
       setContextSource("default");
       setContextNotice(`${selectedProfile.name} brief applied. Review it before running.`);
+      setContextScope(null);
       return;
     }
     setContextBusy(true); setContextNotice(""); setError("");
@@ -1139,12 +1197,19 @@ export default function AutopilotPage() {
           } : {}),
         },
         focus: `${selectedProfile.name} release readiness, functional QA and evidence-led reporting`,
+        use_internet: true,
+        document_asset_ids: selectedDocumentAssetIds,
+        document_analysis_run_id: documentAnalysisRunId || undefined,
       }, { timeout: 90000 });
       resetResult();
       setContext(response.data.context);
       setProfileId(response.data.profile_id || profileId);
       setContextSource(response.data.source);
-      setContextNotice(response.data.warning || (response.data.source === "ai" ? "AI-generated context applied. Review it before analysis." : "Safe fallback context applied."));
+      setContextScope(response.data.scope || null);
+      const referenceNotice = response.data.research_sources?.length
+        ? ` ${response.data.research_sources.length} public reference signal${response.data.research_sources.length === 1 ? "" : "s"} added as hypotheses.`
+        : "";
+      setContextNotice(response.data.warning || ((response.data.source === "ai" ? "AI-generated context applied. Review it before analysis." : "Safe fallback context applied.") + referenceNotice));
     } catch (err) {
       setError(readableError(err, "Context generation failed"));
     } finally { setContextBusy(false); }
@@ -1232,8 +1297,8 @@ export default function AutopilotPage() {
       ...(sourceSetup || {}),
       checkpoint_stage: analysis.checkpoint_stage || "input_collection",
       checkpoint_message: "Analysis paused safely. Review the required inputs before continuing.",
-      input_requests: analysis.input_requests || [],
-      missing_fields: (analysis.input_requests || []).map((item) => item.label),
+      input_requests: concreteCheckpointRequests(analysis.input_requests),
+      missing_fields: concreteCheckpointRequests(analysis.input_requests).map((item) => item.label),
       runtime_input_requests: [],
     };
     const nextSetup = {
@@ -1249,6 +1314,10 @@ export default function AutopilotPage() {
     setInputDrafts(buildInputDrafts(nextSetup));
     const nextRequests = [...(nextSetup.input_requests || []), ...(nextSetup.runtime_input_requests || [])];
     const firstPending = nextRequests.findIndex(isBlockingCheckpoint);
+    // If discovery has finished and only optional references remain, open the
+    // advanced section directly. When a live sign-in gate exists, keep the
+    // dialog focused on that single actionable checkpoint.
+    setShowAdvancedSetup(firstPending < 0);
     setCheckpointStep(firstPending >= 0 ? firstPending : 0);
     setSetupOpen(true);
   };
@@ -1469,7 +1538,9 @@ export default function AutopilotPage() {
         // field-level requests here so the first checkpoint always pauses
         // before any automatic safe-suite handoff.
         runtimeAuthPending = nextRequests.some(
-          (item) => item.category === "credential" && item.status === "pending",
+          (item) => item.status === "pending"
+            && item.category === "credential"
+            && (item.key === "credential_reference" || item.source === "runtime"),
         );
         const firstPending = nextRequests.findIndex(isBlockingCheckpoint);
         if (firstPending >= 0) setCheckpointStep(firstPending);
@@ -1639,13 +1710,16 @@ export default function AutopilotPage() {
   const activeSetup = setupCandidates.find((candidate) => (candidate.input_requests || []).length > 0 || (candidate.runtime_input_requests || []).length > 0)
     || setupCandidates[0]
     || emptySetup(analysis?.job_id || "");
-  const checkpointRequests = [
-    ...((activeSetup.input_requests || []).length > 0 ? activeSetup.input_requests : analysis?.input_requests || []),
+  const allCheckpointRequests = [
+    ...((activeSetup.input_requests || []).length > 0 ? activeSetup.input_requests : concreteCheckpointRequests(analysis?.input_requests)),
     ...(activeSetup.runtime_input_requests || []),
   ];
-  const pendingInputRequests = checkpointRequests.filter((item) => item.status === "pending");
+  const pendingInputRequests = allCheckpointRequests.filter((item) => item.status === "pending");
   const pendingCheckpointRequests = pendingInputRequests.filter(isBlockingCheckpoint);
   const deferredInputRequests = pendingInputRequests.filter((item) => !isBlockingCheckpoint(item));
+  const checkpointRequests = showAdvancedSetup
+    ? allCheckpointRequests
+    : allCheckpointRequests.filter(isBlockingCheckpoint);
   const runtimeInputRequests = activeSetup.runtime_input_requests || [];
   const runtimePendingCount = runtimeInputRequests.filter((item) => item.status === "pending").length;
   const runtimeSyntheticCount = runtimeInputRequests.filter((item) => item.category === "test_data" && item.status === "random").length;
@@ -1757,13 +1831,22 @@ export default function AutopilotPage() {
            : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 2, p: 1.75, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 32, color: "primary.main" }} /><Typography variant="body2" fontWeight={700} display="block">{file?.name || `Choose a ${targetKind === "ios" ? "iOS IPA" : "Android APK"}`}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1 }}><Button component="label" variant="outlined" disabled={busy}>Choose build<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
-           <TextField fullWidth multiline minRows={4} maxRows={10} inputProps={{ maxLength: 8000 }} label="Testing context" placeholder="Profile brief, target and key workflows." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); }} helperText={`${context.length.toLocaleString()} / 8,000 characters · Stored with this report; never paste secrets.`} />
+          <TextField fullWidth multiline minRows={4} maxRows={10} inputProps={{ maxLength: 8000 }} label="Testing context" placeholder="Profile brief, target and key workflows." value={context} onChange={(event) => { setContext(event.target.value); setContextSource("custom"); setContextNotice(""); setContextScope(null); }} helperText={`${context.length.toLocaleString()} / 8,000 characters · Stored with this report; never paste secrets.`} />
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
             <Button size="small" variant="outlined" onClick={() => void generateContext("default")} disabled={contextBusy}>Reset to profile brief</Button>
             <Button size="small" variant="outlined" onClick={() => void generateContext(context.trim() ? "improve" : "generate")} disabled={contextBusy} startIcon={contextBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon />}>{contextBusy ? "Writing context…" : context.trim() ? "Improve with AI" : "Generate with AI"}</Button>
             <Chip size="small" label={`Context: ${contextSource}`} color={contextSource === "ai" ? "primary" : "default"} variant="outlined" />
           </Stack>
           {contextNotice && <Alert severity="info" sx={{ mt: 1.5 }}>{contextNotice}</Alert>}
+          {contextScope && <Card variant="outlined" sx={{ mt: 1.5, bgcolor: "action.hover" }}><CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+            <Stack direction="row" spacing={.75} alignItems="center" justifyContent="space-between">
+              <Box><Typography variant="subtitle2" fontWeight={800}>Scope preview</Typography><Typography variant="caption" color="text.secondary">This is the short coverage plan created from your brief, documents and public signals.</Typography></Box>
+              <Tooltip title={contextScope.authentication_gate}><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
+            </Stack>
+            <Typography variant="body2" sx={{ mt: .75 }}>{contextScope.summary}</Typography>
+            <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .75 }}>{[...contextScope.functional_scope, ...contextScope.non_functional_scope].slice(0, 8).map((item) => <Chip key={item} size="small" label={item} variant="outlined" />)}</Stack>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>Requested: {contextScope.requested_test_types.join(" · ") || "Core journeys"} · Documents: {contextScope.document_sections.length} · Public signals: {contextScope.sources.filter((item) => item.kind === "internet").length}</Typography>
+          </CardContent></Card>}
            <Tooltip title="The target and brief guide coverage. Claims stay separate from observed evidence; missing metrics remain pending." placement="bottom-start"><Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, cursor: "help", textDecoration: "underline", textDecorationStyle: "dotted" }}>How this run is scoped</Typography></Tooltip>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
             <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || resumeBusy || !selectedProjectId} onClick={checkpointWaiting ? openSetup : () => void analyze()} variant="contained" size="large" startIcon={busy || resumeBusy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{analysisButtonLabel}</Button>
@@ -1863,6 +1946,14 @@ export default function AutopilotPage() {
             </Button>)}
           </Stack>
         </Box>}
+        {report.scope && <Box sx={{ mt: 1.5, p: 1.25, border: "1px solid", borderColor: "divider", borderRadius: 2, bgcolor: "action.hover" }}>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}>
+            <Box><Typography variant="subtitle2" fontWeight={800}>Scope summary</Typography><Typography variant="caption" color="text.secondary">{report.scope.summary}</Typography></Box>
+            <Tooltip title={report.scope.authentication_gate}><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
+          </Stack>
+          <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .75 }}>{[...report.scope.functional_scope, ...report.scope.non_functional_scope].slice(0, 10).map((item) => <Chip key={item} size="small" label={item} variant="outlined" />)}</Stack>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>Sources: {report.scope.sources.length} · Documents retained: {report.scope.document_sections.length} · Scope sections: {report.scope.scope_sections.length} · Runtime observed: {report.scope.runtime_observed ? "yes" : "not yet"} · Sign-in observed: {report.scope.login_observed ? "yes" : "no"}</Typography>
+        </Box>}
         {!reportPending && report.executive_findings.length > 0 && <Stack spacing={.5} sx={{ mt: 1.5 }}>{report.executive_findings.map((finding) => <Typography key={finding} variant="body2">• {finding}</Typography>)}</Stack>}
         {!reportPending && report.reported_issues.length > 0 && <Alert severity="warning" sx={{ mt: 1.5 }}><b>Context-reported status (unverified):</b><Stack spacing={.25} sx={{ mt: .5 }}>{report.reported_issues.map((issue) => <Typography key={issue} variant="body2">• {issue}</Typography>)}</Stack></Alert>}
         {reportPending ? <Grid container spacing={1.25} sx={{ mt: 2 }}>
@@ -1904,6 +1995,39 @@ export default function AutopilotPage() {
          <Grid item xs={12} lg={8}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><AccountTreeOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Application intelligence</Typography></Stack><Typography sx={{ mt: 1.5 }}>{analysis.app_summary}</Typography><Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1.5 }}><Chip size="small" label={contextBadge.label} color={contextBadge.color} variant="outlined" /><Chip size="small" label={aiBadge.label} color={aiBadge.color} variant="outlined" /></Stack>{analysis.analysis_basis && analysis.analysis_basis.length > 0 && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Basis: {analysis.analysis_basis.join(" · ")}</Typography>}<Divider sx={{ my: 2 }} /><Grid container spacing={2}><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Application</Typography><Typography fontWeight={700}>{analysis.app_name || "Unknown"}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Domain</Typography><Typography fontWeight={700}>{analysis.inferred_domain}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Version</Typography><Typography fontWeight={700}>{analysis.version_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Package</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.package_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Main activity</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.main_activity || "—"}</Typography></Grid></Grid></CardContent></Card></Grid>
         <Grid item xs={12} lg={4}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><SecurityOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Guardrails</Typography></Stack><Stack spacing={1} sx={{ mt: 1.5 }}><Chip label="Safe discovery: enabled" color="success" variant="outlined" /><Chip label="Transactions / destructive actions: blocked" color="warning" variant="outlined" /><Chip label={`Debuggable: ${analysis.debuggable === true ? "YES" : analysis.debuggable === false ? "No" : "Unknown"}`} variant="outlined" /></Stack></CardContent></Card></Grid>
       </Grid>
+
+      {analysis.scope && (analysis.scope.summary || analysis.scope.sources.length > 0 || analysis.scope.scope_sections.length > 0) && <Card variant="outlined"><CardContent>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}>
+          <Box>
+            <Typography variant="h6" fontWeight={800}>Scope at a glance</Typography>
+            <Typography variant="body2" color="text.secondary">A short, editable view of what Autopilot will check and where each decision came from.</Typography>
+          </Box>
+          <Stack direction="row" spacing={.75} alignItems="center">
+            <Chip size="small" label={analysis.scope.login_observed ? "Sign-in observed" : analysis.scope.runtime_observed ? "Public surface" : "Awaiting runtime"} color={analysis.scope.login_observed ? "warning" : analysis.scope.runtime_observed ? "success" : "default"} variant="outlined" />
+            <Tooltip title={analysis.scope.authentication_gate} placement="left"><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
+          </Stack>
+        </Stack>
+        <Typography variant="body2" sx={{ mt: 1 }}>{analysis.scope.summary}</Typography>
+        <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Edit the Testing context above and run Improve with AI to refresh this scope.</Typography>
+        <Grid container spacing={1.25} sx={{ mt: .25 }}>
+          <Grid item xs={12} md={6}><Box sx={{ p: 1.25, height: "100%", bgcolor: "action.hover", borderRadius: 1.5 }}>
+            <Typography variant="subtitle2" fontWeight={800}>Functional coverage</Typography>
+            <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .75 }}>{analysis.scope.functional_scope.map((item) => <Chip key={item} size="small" label={item} variant="outlined" />)}</Stack>
+          </Box></Grid>
+          <Grid item xs={12} md={6}><Box sx={{ p: 1.25, height: "100%", bgcolor: "action.hover", borderRadius: 1.5 }}>
+            <Typography variant="subtitle2" fontWeight={800}>Quality coverage</Typography>
+            <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .75 }}>{analysis.scope.non_functional_scope.map((item) => <Chip key={item} size="small" label={item} variant="outlined" />)}</Stack>
+          </Box></Grid>
+        </Grid>
+        <Stack spacing={.75} sx={{ mt: 1.25 }}>
+          <Typography variant="caption" color="text.secondary"><b>Requested focus:</b> {analysis.scope.requested_test_types.join(" · ") || "Core journeys"}</Typography>
+          <Typography variant="caption" color="text.secondary"><b>Change focus:</b> {analysis.scope.change_impact.join(" · ")}</Typography>
+          <Stack direction="row" spacing={.75} alignItems="center">
+            <Typography variant="caption" color="text.secondary"><b>Source trail:</b> {analysis.scope.sources.length} source{analysis.scope.sources.length === 1 ? "" : "s"} · {analysis.scope.document_sections.length} document section{analysis.scope.document_sections.length === 1 ? "" : "s"} · {analysis.scope.scope_sections.length} scope section{analysis.scope.scope_sections.length === 1 ? "" : "s"}</Typography>
+            <Tooltip title={<Box>{analysis.scope.sources.slice(0, 8).map((source) => <Typography key={`${source.kind}-${source.reference}`} variant="caption" display="block"><b>{source.label}</b>{source.summary ? ` — ${source.summary}` : ""}</Typography>)}</Box>} placement="right"><InfoOutlinedIcon sx={{ fontSize: 16, color: "text.secondary" }} /></Tooltip>
+          </Stack>
+        </Stack>
+      </CardContent></Card>}
 
       <Card variant="outlined"><CardContent>
         <Stack direction="row" spacing={1} alignItems="center">
@@ -2008,7 +2132,12 @@ export default function AutopilotPage() {
                     </TableCell>
                     <TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell>
                     <TableCell><Chip size="small" label={test.priority.toUpperCase()} color={priorityColor[test.priority]} variant="outlined" /></TableCell>
-                    <TableCell>{test.source === "ai" ? "AI" : "RULE"}</TableCell>
+                    <TableCell>
+                      <Stack direction="row" spacing={.5} alignItems="center">
+                        <Typography variant="caption">{test.source === "ai" ? "AI" : "RULE"}</Typography>
+                        {(test.provenance || []).length > 0 && <Tooltip title={<Box>{(test.provenance || []).map((item) => <Typography key={`${item.kind}-${item.reference}`} variant="caption" display="block"><b>{item.label}</b>{item.observed ? " · observed" : " · scope"}</Typography>)}</Box>}><InfoOutlinedIcon sx={{ fontSize: 15, color: "text.secondary" }} /></Tooltip>}
+                      </Stack>
+                    </TableCell>
                     <TableCell sx={{ minWidth: 250 }}>
                       <Chip size="small" label={testModeLabel(test)} color={test.destructive ? "warning" : setupRequired ? "info" : "success"} variant="outlined" />
                       {test.dependency && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>{test.dependency}</Typography>}
@@ -2162,8 +2291,8 @@ export default function AutopilotPage() {
     <Dialog open={setupOpen} onClose={() => !setupBusy && !resumeBusy && setSetupOpen(false)} fullWidth maxWidth="md">
       <DialogTitle>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
-          <Box><Typography variant="h6" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">Confirm each input before the dependent tests continue.</Typography></Box>
-          {checkpointRequests.length > 0 && <Chip size="small" color="primary" variant="outlined" label={`Input ${activeCheckpointIndex + 1} of ${checkpointRequests.length}`} />}
+          <Box><Typography variant="h6" fontWeight={800}>{activeCheckpointRequest?.category === "credential" ? "Sign in to continue" : "Autopilot checkpoint"}</Typography><Typography variant="caption" color="text.secondary">Autopilot explores safe coverage first; only an observed gate needs your input.</Typography></Box>
+          {checkpointRequests.length > 0 && <Chip size="small" color="primary" variant="outlined" label={checkpointRequests.length === 1 && activeCheckpointRequest?.category === "credential" ? "Live sign-in gate" : `Input ${activeCheckpointIndex + 1} of ${checkpointRequests.length}`} />}
         </Stack>
       </DialogTitle>
       <DialogContent>
@@ -2171,9 +2300,9 @@ export default function AutopilotPage() {
           {pendingCheckpointRequests.length > 0
             ? `${pendingCheckpointRequests.length} live authentication or sensitive input${pendingCheckpointRequests.length === 1 ? "" : "s"} still need a decision.`
             : pendingInputRequests.length > 0
-              ? `${pendingInputRequests.length} optional data/reference item${pendingInputRequests.length === 1 ? "" : "s"} can be reviewed; they do not block the safe first pass.`
-              : "All checkpoint inputs have a decision. Save to continue to Runtime Discovery."}
-          {" "}Use only non-production data. Values are encrypted in the Autopilot checkpoint store, never returned, added to context, or written to logs. They are separate from uploaded Test Data files. Choose Skip when the case is not in scope for this run.
+              ? `${pendingInputRequests.length} optional data/reference item${pendingInputRequests.length === 1 ? "" : "s"} can be reviewed after the safe first pass.`
+              : "All live checkpoint inputs have a decision. Save to continue."}
+          {" "}Use only non-production data. Values are encrypted in the Autopilot checkpoint store, never returned, added to context, or written to logs. Choose Skip when a later case is not in scope.
         </Alert>
         {activeCheckpointRequest && activeCheckpointDraft && <>
           <Stack direction="row" spacing={.75} alignItems="center" sx={{ mb: 1 }}>
@@ -2192,6 +2321,7 @@ export default function AutopilotPage() {
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{activeCheckpointRequest.format_hint || activeCheckpointRequest.reason}</Typography>
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Needed for: {requestDependentTitles(activeCheckpointRequest, analysis?.tests || []).join(" · ") || "this checkpoint"}</Typography>
             {activeCheckpointRequest.screen_id && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Screen: {activeCheckpointRequest.screen_id}{activeCheckpointRequest.locator ? ` · Control: ${activeCheckpointRequest.locator}` : ""}</Typography>}
+            <CheckpointEvidencePreview request={activeCheckpointRequest} />
             {(activeCheckpointRequest.probe_guidance || []).length > 0 && <Box sx={{ mt: 1.25, p: 1, borderRadius: 1.5, bgcolor: "background.paper", border: "1px solid", borderColor: "divider" }}>
               <Typography variant="caption" fontWeight={800} color="text.secondary">What will be checked</Typography>
               {(activeCheckpointRequest.probe_guidance || []).map((probe) => <Typography key={probe.kind} variant="caption" display="block" sx={{ mt: .35 }}><b>{probe.label}:</b> {probe.guidance}</Typography>)}
@@ -2237,24 +2367,31 @@ export default function AutopilotPage() {
             <Typography variant="caption" color="text.secondary">You can revisit any input before saving.</Typography>
           </Stack>
         </>}
-        <Typography variant="overline" color="text.secondary" fontWeight={800} display="block" sx={{ mt: 2 }}>Optional setup references</Typography>
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>Use these only when your team already has a vault, fixture, reset hook or oracle reference. Direct values entered above are enough for this checkpoint.</Typography>
-        <Grid container spacing={2}>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Vault credential reference (optional)" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Example: qtxpert://credentials/uat · never paste a password" /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Test account role (optional)" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / relationship manager" /></Grid>
+        <Divider sx={{ mt: 2, mb: 1.25 }} />
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
+          <Box>
+            <Typography variant="overline" color="text.secondary" fontWeight={800}>Advanced setup (optional)</Typography>
+            <Typography variant="caption" color="text.secondary" display="block">Vaults, fixtures, reset hooks and UAT/SIT references are requested only when a discovered journey needs them.</Typography>
+          </Box>
+          <Button size="small" variant="outlined" onClick={() => setShowAdvancedSetup((value) => !value)}>{showAdvancedSetup ? "Hide advanced setup" : "Show advanced setup"}</Button>
+        </Stack>
+        {showAdvancedSetup && <Grid container spacing={2} sx={{ mt: .25 }}>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Saved credential reference (optional)" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Use a vault reference, never paste a password here." /></Grid>
+          <Grid item xs={12} md={6}><TextField fullWidth label="Test account role (optional)" value={setupDraft.account_role} onChange={(event) => updateSetup("account_role", event.target.value)} placeholder="Retail investor / UAT customer" /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Environment name (optional)" value={setupDraft.environment_name} onChange={(event) => updateSetup("environment_name", event.target.value)} placeholder="UAT" /></Grid>
-          <Grid item xs={12} md={6}><TextField fullWidth label="Environment URL / identifier (optional)" value={setupDraft.environment_url} onChange={(event) => updateSetup("environment_url", event.target.value)} /></Grid>
+          {activeTargetKind === "web" && <Grid item xs={12} md={6}><TextField fullWidth label="Environment URL / identifier (optional)" value={setupDraft.environment_url} onChange={(event) => updateSetup("environment_url", event.target.value)} helperText="Only needed when the observed web target uses a separate environment." /></Grid>}
           <Grid item xs={12} md={6}><TextField fullWidth label="Synthetic test-data reference (optional)" value={setupDraft.test_data_reference} onChange={(event) => updateSetup("test_data_reference", event.target.value)} /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Reset / cleanup reference (optional)" value={setupDraft.reset_hook_reference} onChange={(event) => updateSetup("reset_hook_reference", event.target.value)} /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="Acceptance-criteria reference (optional)" value={setupDraft.acceptance_criteria_reference} onChange={(event) => updateSetup("acceptance_criteria_reference", event.target.value)} /></Grid>
           <Grid item xs={12} md={6}><TextField fullWidth label="API / oracle reference (optional)" value={setupDraft.api_oracle_reference} onChange={(event) => updateSetup("api_oracle_reference", event.target.value)} /></Grid>
-          <Grid item xs={12}><TextField fullWidth multiline minRows={3} label="Safe navigation and data notes" value={setupDraft.navigation_notes} onChange={(event) => updateSetup("navigation_notes", event.target.value)} helperText="Describe seeded users, permitted paths and expected reset behavior. Never include secret values." /></Grid>
-          <Grid item xs={12}><FormControlLabel control={<Switch checked={setupDraft.safe_authentication_approved} onChange={(event) => updateSetup("safe_authentication_approved", event.target.checked)} />} label="Approve safe non-transactional authentication in this UAT environment" /></Grid>
-        </Grid>
+          <Grid item xs={12}><TextField fullWidth multiline minRows={2} label="Safe navigation notes (optional)" value={setupDraft.navigation_notes} onChange={(event) => updateSetup("navigation_notes", event.target.value)} helperText="Describe permitted paths and reset behavior. Never include secret values." /></Grid>
+          <Grid item xs={12}><FormControlLabel control={<Switch checked={setupDraft.safe_authentication_approved} onChange={(event) => updateSetup("safe_authentication_approved", event.target.checked)} />} label="Approve safe, non-transactional sign-in in this non-production environment" /></Grid>
+        </Grid>}
       </DialogContent>
       <DialogActions><Button onClick={() => setSetupOpen(false)} disabled={setupBusy || resumeBusy}>Cancel</Button><Button variant="contained" onClick={saveSetup} disabled={setupBusy || resumeBusy}>{setupBusy ? "Saving…" : resumeBusy ? "Continuing…" : "Save and continue"}</Button></DialogActions>
     </Dialog>
   </Stack>;
 }
+
 
 

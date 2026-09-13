@@ -49,6 +49,25 @@ def _runtime_input_hint(request: AutopilotInputRequest) -> str:
     return "text"
 
 
+def is_blocking_input_request(request: AutopilotInputRequest) -> bool:
+    """Return whether a checkpoint must pause the autonomous first pass.
+
+    A plan-level account role is metadata, not a login gate. Only the
+    credential bundle, a concrete runtime credential field, an explicit safe
+    authentication approval, or another sensitive runtime field may stop the
+    target from being explored.
+    """
+    if request.status != "pending":
+        return False
+    if request.category == "approval":
+        return True
+    if request.category == "credential" and (
+        request.key == "credential_reference" or request.source == "runtime"
+    ):
+        return True
+    return bool(request.source == "runtime" and request.sensitive)
+
+
 _INPUT_REQUEST_METADATA: dict[str, tuple[str, str, str, bool]] = {
     "credential reference": (
         "credential_reference",
@@ -434,7 +453,7 @@ class AutopilotIRCompiler:
             # caused the first-pass login checkpoint to stall before runtime
             # discovery could inspect the app. Ask for it when UAT coverage
             # actually depends on the business role.
-            if test.bucket == "uat" and not has_value("account_role"):
+            if test.bucket == "uat" and not test.autonomous_candidate and not has_value("account_role"):
                 missing.append("test account role")
             # The checkpoint UI records the approval as an input decision. It
             # is not a secret and therefore does not need a value/reference;
@@ -1111,5 +1130,6 @@ class AutopilotIRCompiler:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in test_id)
         safe = "_".join(part for part in safe.split("_") if part)
         return f"test_{safe}"
+
 
 

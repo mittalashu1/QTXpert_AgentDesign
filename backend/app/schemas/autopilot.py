@@ -43,6 +43,74 @@ AutopilotInputDecision = Literal["provide", "skip", "reuse", "random"]
 AutopilotRandomKind = Literal["number", "digits", "text", "email", "phone", "date", "amount"]
 
 
+AutopilotScopeSourceKind = Literal[
+    "profile",
+    "user_context",
+    "document",
+    "internet",
+    "target",
+    "runtime",
+    "system",
+]
+
+
+class AutopilotScopeSource(BaseModel):
+    """A safe, human-readable source used by the scope compiler.
+
+    Sources contain references and short summaries only.  They deliberately do
+    not carry document bodies, credentials or runtime secrets.
+    """
+
+    kind: AutopilotScopeSourceKind
+    label: str
+    reference: Optional[str] = None
+    summary: str = ""
+    observed: bool = False
+    retrieved_at: Optional[str] = None
+
+
+class AutopilotScopeSection(BaseModel):
+    """One editable scope section kept in its original evidence context."""
+
+    key: str
+    title: str
+    summary: str
+    source: AutopilotScopeSourceKind = "system"
+    source_refs: List[str] = Field(default_factory=list)
+    status: Literal["planned", "observed", "deferred", "not_applicable"] = "planned"
+    requested: bool = False
+    editable: bool = True
+
+
+class AutopilotScope(BaseModel):
+    """Concise scope contract shared by context, analysis and reports.
+
+    The scope compiler translates technical evidence into plain-language
+    coverage while retaining the original document sections, change signals
+    and source references for auditability.
+    """
+
+    schema_version: str = "qtx-scope/1.0"
+    summary: str = ""
+    target: str = ""
+    functional_scope: List[str] = Field(default_factory=list)
+    non_functional_scope: List[str] = Field(default_factory=list)
+    requested_test_types: List[str] = Field(default_factory=list)
+    change_impact: List[str] = Field(default_factory=list)
+    # Document-only sections stay separate from the complete scope index so
+    # the UI can show both the source documents and the runtime-observed map
+    # without conflating them.
+    document_sections: List[AutopilotScopeSection] = Field(default_factory=list)
+    scope_sections: List[AutopilotScopeSection] = Field(default_factory=list)
+    sources: List[AutopilotScopeSource] = Field(default_factory=list)
+    authentication_gate: str = (
+        "Runtime Discovery must observe a real sign-in form before authenticated execution."
+    )
+    runtime_observed: bool = False
+    login_observed: bool = False
+    editable: bool = True
+
+
 class AutopilotRandomSpec(BaseModel):
     """A bounded, non-secret recipe for generating synthetic test data."""
 
@@ -123,6 +191,11 @@ class AutopilotInputRequest(BaseModel):
     page_label: Optional[str] = None
     page_url: Optional[str] = None
     field_label: Optional[str] = None
+    # Opaque repository evidence references for the exact screen that
+    # surfaced this checkpoint. They are safe to return; the UI downloads the
+    # image through the authenticated uploads endpoint when the user opens it.
+    screenshot_asset_id: Optional[UUID] = None
+    page_source_asset_id: Optional[UUID] = None
     probe_guidance: List[Dict[str, str]] = Field(default_factory=list)
 
 
@@ -132,6 +205,15 @@ class AutopilotDataProbe(BaseModel):
     kind: Literal["positive", "negative", "boundary"]
     label: str
     guidance: str
+
+
+class AutopilotTestProvenance(BaseModel):
+    """A compact source trail explaining why a test exists."""
+
+    kind: AutopilotScopeSourceKind
+    label: str
+    reference: Optional[str] = None
+    observed: bool = False
 
 
 class AutopilotTest(BaseModel):
@@ -166,6 +248,7 @@ class AutopilotTest(BaseModel):
     page_label: Optional[str] = None
     page_url: Optional[str] = None
     data_probes: List[AutopilotDataProbe] = Field(default_factory=list)
+    provenance: List[AutopilotTestProvenance] = Field(default_factory=list)
 
 
 class AutopilotAnalysis(BaseModel):
@@ -216,6 +299,9 @@ class AutopilotAnalysis(BaseModel):
     # generated plan without exposing credentials or test-data values.
     checkpoint_stage: str = "complete"
     input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
+    # The compiled scope is deliberately stored inside the versioned analysis
+    # JSON so older database rows remain readable without a migration.
+    scope: AutopilotScope = Field(default_factory=AutopilotScope)
 
 
 ReportCheckStatus = Literal["pass", "fail", "warning", "pending", "not_assessed"]
@@ -243,6 +329,16 @@ class AutopilotContextRequest(BaseModel):
     build_name: Optional[str] = Field(default=None, max_length=500)
     observed_metadata: Dict[str, Any] = Field(default_factory=dict)
     focus: Optional[str] = Field(default=None, max_length=500)
+    # Internet research is bounded, public and read-only.  It contributes
+    # hypotheses and plain-language feature signals; it is never execution
+    # evidence and can be disabled by an API client that needs an offline run.
+    use_internet: bool = True
+    document_asset_ids: List[UUID] = Field(default_factory=list, max_length=20)
+    document_analysis_run_id: Optional[UUID] = None
+    # The server may supply a redacted Document Intelligence hand-off here.
+    # Direct clients should leave it empty; document IDs remain the durable
+    # lineage reference.
+    document_context: str = Field(default="", max_length=8000)
 
 
 class AutopilotContextResponse(BaseModel):
@@ -250,6 +346,8 @@ class AutopilotContextResponse(BaseModel):
     source: Literal["default", "ai", "fallback"]
     profile_id: str = "uae_fintech"
     warning: Optional[str] = None
+    scope: AutopilotScope = Field(default_factory=AutopilotScope)
+    research_sources: List[AutopilotScopeSource] = Field(default_factory=list)
 
 
 class AutopilotReportCheck(BaseModel):
@@ -331,6 +429,7 @@ class AutopilotTestAuditReport(BaseModel):
     recommendations: List[str] = Field(default_factory=list)
     evidence: List[str] = Field(default_factory=list)
     evidence_assets: List[AutopilotReportEvidenceAsset] = Field(default_factory=list)
+    scope: Optional[AutopilotScope] = None
 
 
 class AutopilotReportDeletionResult(BaseModel):
@@ -751,4 +850,5 @@ class AutopilotSuiteResult(BaseModel):
     bucket_counts: Dict[str, int] = Field(default_factory=dict)
     error: Optional[str] = None
     tests: List[AutopilotSuiteTestResult] = Field(default_factory=list)
+
 

@@ -63,7 +63,12 @@ from app.services.autopilot import (
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_web import AutopilotWebService
 from app.services.autopilot_context import default_context, get_profile, list_profiles
-from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests, credential_value_available
+from app.services.autopilot_ir import (
+    AutopilotIRCompiler,
+    build_input_requests,
+    credential_value_available,
+    is_blocking_input_request,
+)
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata, resolve_value
@@ -248,14 +253,19 @@ def _effective_context(
     """Ensure every entry point uses a safe context, including direct API clients."""
     cleaned = (value or "").strip()
     if cleaned:
-        return cleaned[:8000]
+        # Context is copied to the durable job snapshot and sent to the
+        # planning model.  Apply the same redaction boundary used by the
+        # service before either operation so a pasted password/token cannot
+        # survive in a manifest, rerun or prompt.
+        return AutopilotPrototypeService._redact_context(cleaned[:8000])
     platform = "Web" if target_kind == "web" else "iOS" if target_kind == "ios" else "Android"
-    return default_context(
+    generated = default_context(
         application_name=application_name,
         platform=platform,
         profile_id=profile_id,
         target_url=target_url,
     )
+    return AutopilotPrototypeService._redact_context(generated[:8000])
 
 
 def _parse_document_asset_ids(value: object) -> list[UUID]:
@@ -907,15 +917,69 @@ def _setup_profile(
     raw["provided_fields"] = provided
     if analysis is not None:
         normalized_setup = AutopilotSetupProfile.model_validate({**raw, "job_id": job_id})
-        requests = [] if analysis.checkpoint_stage == "ready_for_discovery" and discovery is None else build_input_requests(analysis, normalized_setup)
+        # Static planning cannot prove that a target has a login form.  Never
+        # turn profile wording (UAT role, fixture, oracle, environment URL)
+        # into an upfront questionnaire.  The first pass must invoke the
+        # target and let Runtime Discovery surface a concrete credential or
+        # field.  If a runtime map is unavailable after a restart, retain only
+        # already-persisted runtime requests; plan-level references are
+        # re-hydrated after a screen is observed.
+        discovered_requests_for_setup = (
+            AutopilotDiscoveryService.runtime_input_requests(discovery.screens)
+            if discovery is not None
+            else []
+        )
+        runtime_auth_observed = any(
+            item.category == "credential"
+            for item in discovered_requests_for_setup
+        )
+        requests = build_input_requests(analysis, normalized_setup) if discovery is not None else []
+        if discovery is not None and not runtime_auth_observed:
+            # The static plan may still contain a speculative authenticated
+            # case from an older model response. A live public screen is the
+            # source of truth: do not turn that stale plan wording into a
+            # credential or approval prompt when no login controls were
+            # observed.
+            requests = [
+                item
+                for item in requests
+                if item.key not in {"credential_reference", "safe_authentication_approved"}
+            ]
         decisions = normalized_setup.input_decisions or {}
+        saved_by_key = {
+            item.key: item
+            for item in (normalized_setup.saved_inputs or [])
+        }
         normalized_requests = []
         for item in requests:
             decision = decisions.get(item.key)
             if decision == "skip":
                 item = item.model_copy(update={"status": "skipped", "reference_present": False})
-            elif decision in {"provide", "reuse", "random"}:
-                item = item.model_copy(update={"status": "random" if decision == "random" else "provided", "reference_present": True})
+            elif decision == "random":
+                # Random values are generated and encrypted by the input
+                # store; the decision itself is therefore sufficient to mark
+                # this non-secret field ready.
+                item = item.model_copy(update={"status": "random", "reference_present": True})
+            elif decision in {"provide", "reuse"}:
+                # A decision is not proof that a value exists. Require an
+                # actual non-secret reference, a runtime reference, or
+                # encrypted-input metadata before a stale browser snapshot
+                # can suppress the checkpoint. This is especially important
+                # for credentials after a key rotation or expired saved row.
+                direct_reference = str(getattr(normalized_setup, item.key, "") or "").strip()
+                runtime_reference = str(
+                    (normalized_setup.runtime_input_references or {}).get(item.key) or ""
+                ).strip()
+                saved_value = saved_by_key.get(item.key)
+                reference_present = bool(
+                    direct_reference
+                    or runtime_reference
+                    or (saved_value is not None and saved_value.has_value)
+                )
+                item = item.model_copy(update={
+                    "status": "provided" if reference_present else "pending",
+                    "reference_present": reference_present,
+                })
             normalized_requests.append(item)
         raw["input_requests"] = [item.model_dump(mode="json") for item in normalized_requests]
         raw["missing_fields"] = [item.label for item in normalized_requests if item.status == "pending"]
@@ -924,7 +988,7 @@ def _setup_profile(
             # Rebuild field-level requests from the current screen map so a
             # discovery captured by an older deployment receives the current
             # direct-input labels, password/OTP hints and safe actions.
-            discovered_requests = AutopilotDiscoveryService.runtime_input_requests(discovery.screens)
+            discovered_requests = discovered_requests_for_setup
             source_requests = discovered_requests or list(discovery.input_requests)
             credential_bundle_available = credential_value_available(normalized_setup)
             for item in source_requests:
@@ -940,9 +1004,14 @@ def _setup_profile(
                         if any(term in item_label for term in ("user id", "username", "email"))
                         else "text"
                     )
-                reference_present = bool(
+                saved_runtime_value = saved_by_key.get(item.key)
+                runtime_reference_present = bool(
                     str(normalized_setup.runtime_input_references.get(item.key) or "").strip()
-                    or decisions.get(item.key) in {"provide", "reuse", "random"}
+                    or (
+                        decisions.get(item.key) in {"provide", "reuse", "random"}
+                        and saved_runtime_value is not None
+                        and saved_runtime_value.has_value
+                    )
                     # A saved plan-level credential bundle intentionally
                     # satisfies both the discovered username and password
                     # fields.  Generic test-data references do not hide a
@@ -971,7 +1040,7 @@ def _setup_profile(
                     and not item.sensitive
                     and not decision
                 )
-                reference_present = reference_present or auto_synthetic
+                reference_present = runtime_reference_present or auto_synthetic
                 runtime_requests.append(
                     item.model_copy(
                         update={
@@ -989,7 +1058,68 @@ def _setup_profile(
                     )
                 )
         elif raw.get("runtime_input_requests"):
-            runtime_requests = list(normalized_setup.runtime_input_requests)
+            # A restart may have a persisted runtime map but no fresh
+            # discovery payload yet. Recompute each field's status from the
+            # current encrypted metadata instead of trusting a stale
+            # ``provided``/``random`` flag in the old job snapshot.
+            credential_bundle_available = credential_value_available(normalized_setup)
+            runtime_requests = []
+            for item in normalized_setup.runtime_input_requests:
+                decision = decisions.get(item.key)
+                saved_runtime_value = saved_by_key.get(item.key)
+                direct_reference = str(
+                    (normalized_setup.runtime_input_references or {}).get(item.key) or ""
+                ).strip()
+                runtime_hint = str(item.input_hint or "").strip().lower()
+                if runtime_hint not in {"username", "password", "otp", "text"}:
+                    item_label = str(item.label or "").lower()
+                    runtime_hint = (
+                        "otp"
+                        if any(term in item_label for term in ("otp", "one-time", "one time", "mfa", "verification code"))
+                        else "password"
+                        if any(term in item_label for term in ("password", "passcode", "secure"))
+                        else "username"
+                        if any(term in item_label for term in ("user id", "username", "email"))
+                        else "text"
+                    )
+                runtime_reference_present = bool(
+                    direct_reference
+                    or (
+                        decision in {"provide", "reuse", "random"}
+                        and saved_runtime_value is not None
+                        and saved_runtime_value.has_value
+                    )
+                    # A current encrypted plan-level bundle maps to the
+                    # discovered username/password fields only. OTP/MFA is a
+                    # separate live checkpoint and must remain supervised.
+                    or (
+                        item.category == "credential"
+                        and credential_bundle_available
+                        and runtime_hint in {"username", "password"}
+                    )
+                )
+                auto_synthetic = (
+                    item.category == "test_data"
+                    and not item.sensitive
+                    and not decision
+                )
+                reference_present = runtime_reference_present or auto_synthetic
+                runtime_requests.append(
+                    item.model_copy(
+                        update={
+                            "reference_present": reference_present,
+                            "status": (
+                                "skipped"
+                                if decision == "skip"
+                                else "random"
+                                if ((decision == "random" and runtime_reference_present) or auto_synthetic)
+                                else "provided"
+                                if reference_present
+                                else "pending"
+                            ),
+                        }
+                    )
+                )
         raw["runtime_input_requests"] = [item.model_dump(mode="json") for item in runtime_requests]
         pending_requests = [item for item in normalized_requests if item.status == "pending"]
         pending_runtime_requests = [item for item in runtime_requests if item.status == "pending"]
@@ -1057,8 +1187,7 @@ def _setup_profile(
         blocking_pending_requests = [
             item
             for item in [*pending_requests, *pending_runtime_requests]
-            if item.category in {"credential", "approval"}
-            or (item.source == "runtime" and item.sensitive)
+            if is_blocking_input_request(item)
         ]
         if blocking_pending_requests:
             raw["checkpoint_stage"] = "input_collection"
@@ -1328,7 +1457,9 @@ def _pending_runtime_auth_requests(setup: Optional[AutopilotSetupProfile]) -> li
     return [
         item
         for item in [*(setup.input_requests or []), *(setup.runtime_input_requests or [])]
-        if item.category == "credential" and item.status == "pending"
+        if item.status == "pending"
+        and item.category == "credential"
+        and (item.key == "credential_reference" or item.source == "runtime")
     ]
 
 
@@ -1356,8 +1487,7 @@ def _blocking_checkpoint_requests(setup: Optional[AutopilotSetupProfile]) -> lis
     return [
         item
         for item in _pending_checkpoint_requests(setup)
-        if item.category in {"credential", "approval"}
-        or (item.source == "runtime" and item.sensitive)
+        if is_blocking_input_request(item)
     ]
 
 
@@ -2004,10 +2134,33 @@ async def generate_autopilot_context(
     payload: AutopilotContextRequest,
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
-    """Return the default UAE-fintech profile or an AI-refined context."""
-    _ = user
-    return await _service(settings).generate_context(payload)
+    """Return an AI-refined context and its structured, source-aware scope."""
+    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    selected_document_ids = list(dict.fromkeys(payload.document_asset_ids or []))[:20]
+    baseline_id, baseline_asset_ids, baseline_context = await _document_analysis_baseline(
+        db, user, settings, payload.document_analysis_run_id, project_id
+    )
+    selected_document_ids = _merge_document_asset_ids(baseline_asset_ids, selected_document_ids)
+    if selected_document_ids:
+        selected_document_ids, document_excerpt = await _document_context(
+            db, user, project_id, selected_document_ids, settings
+        )
+        document_context = "\n\n".join(
+            item for item in (baseline_context, document_excerpt, payload.document_context) if item
+        )[:8000]
+    else:
+        document_context = "\n\n".join(
+            item for item in (baseline_context, payload.document_context) if item
+        )[:8000]
+    enriched_payload = payload.model_copy(update={
+        "document_asset_ids": selected_document_ids,
+        "document_analysis_run_id": baseline_id,
+        "document_context": document_context,
+    })
+    return await _service(settings).generate_context(enriched_payload)
 
 
 @router.get("/profiles", response_model=list[AutopilotProfileOption])
@@ -4166,4 +4319,5 @@ async def rerun_autopilot_smoke(
         job_id=job_id,
         request=request,
     )
+
 

@@ -90,6 +90,30 @@ def test_runtime_input_requests_are_reference_only():
     assert requests[0].format_hint
 
 
+def test_runtime_checkpoint_keeps_observed_screen_evidence_reference():
+    from uuid import UUID
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-evidence",
+        fingerprint="e" * 64,
+        screenshot_asset_id=UUID("11111111-1111-1111-1111-111111111111"),
+        page_source_asset_id=UUID("22222222-2222-2222-2222-222222222222"),
+        controls=[DiscoveredControl(
+            control_id="email",
+            semantic_label="Email",
+            class_name="android.widget.EditText",
+            input_capable=True,
+            input_kind="credential",
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx:id/email", confidence=0.95)],
+        )],
+    )
+
+    request = AutopilotDiscoveryService.runtime_input_requests([screen])[0]
+    assert str(request.screenshot_asset_id) == "11111111-1111-1111-1111-111111111111"
+    assert str(request.page_source_asset_id) == "22222222-2222-2222-2222-222222222222"
+
+
 def test_runtime_input_requests_auto_select_bounded_synthetic_data_for_public_fields():
     from app.schemas.autopilot import DiscoveredScreen
 
@@ -284,4 +308,5 @@ async def test_browserstack_discovery_does_not_resolve_custom_appium(tmp_path, m
     assert captured["url"] == settings.BROWSERSTACK_HUB_URL
     assert captured["app"] == "bs://demo"
     assert captured["options"]["userName"] == "user"
+
 

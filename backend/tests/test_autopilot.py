@@ -23,9 +23,12 @@ from app.schemas.autopilot import (
     DiscoveryLocator,
 )
 from app.api.routes.autopilot import (
+    _blocking_checkpoint_requests,
+    _effective_context,
     _pending_runtime_auth_requests,
     _remove_local_report_data,
     _sanitize_discovery_assets,
+    _setup_profile,
     _strip_suite_evidence_paths,
 )
 from app.services.autopilot import (
@@ -48,6 +51,174 @@ from app.services.autopilot_report import build_test_audit_report
 def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
     settings = Settings(AUTOPILOT_STORAGE_PATH=str(tmp_path), **overrides)
     return AutopilotPrototypeService(settings)
+
+
+def test_initial_checkpoint_is_target_driven_and_does_not_show_plan_references():
+    analysis = AutopilotAnalysis(
+        job_id="11111111-1111-1111-1111-111111111111",
+        filename="investnation.apk",
+        sha256="a" * 64,
+        checkpoint_stage="input_collection",
+        tests=[AutopilotTest(
+            id="QT-AUTO-UAT-001",
+            suite="UAT",
+            title="Authenticated customer journey",
+            objective="Validate the customer journey",
+            requires_auth=True,
+            requires_test_data=True,
+            bucket="uat",
+        )],
+    )
+    setup = _setup_profile(
+        analysis.job_id,
+        {"account_role": "UAT investor", "acceptance_criteria_reference": "qtxpert://criteria/uat"},
+        analysis,
+        discovery=None,
+    )
+    assert setup.input_requests == []
+    assert setup.runtime_input_requests == []
+    assert setup.checkpoint_stage == "runtime_discovery"
+
+
+def test_speculative_auth_plan_does_not_prompt_on_public_discovery():
+    analysis = AutopilotAnalysis(
+        job_id="12121212-1212-1212-1212-121212121212",
+        filename="public.apk",
+        sha256="d" * 64,
+        tests=[AutopilotTest(
+            id="QT-AUTO-UAT-002",
+            suite="UAT",
+            title="Authenticated customer journey",
+            objective="Validate a contextual journey",
+            requires_auth=True,
+            bucket="uat",
+        )],
+    )
+    public_control = DiscoveredControl(
+        control_id="help",
+        semantic_label="Help",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        input_capable=False,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/help", confidence=0.99)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-13T00:00:00+00:00",
+        finished_at="2026-09-13T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="test",
+        screens=[DiscoveredScreen(screen_id="home", fingerprint="f" * 64, controls=[public_control])],
+    )
+
+    setup = _setup_profile(analysis.job_id, {}, analysis, discovery)
+
+    assert not any(item.key in {"credential_reference", "safe_authentication_approved"} for item in setup.input_requests)
+    assert _blocking_checkpoint_requests(setup) == []
+    assert setup.checkpoint_stage == "ready"
+
+
+def test_account_role_is_not_a_blocking_authentication_checkpoint():
+    role = AutopilotInputRequest(
+        key="account_role",
+        label="Test account role",
+        category="credential",
+        reason="Optional role metadata",
+    )
+    credential = role.model_copy(update={"key": "credential_reference", "label": "UAT sign-in credentials", "sensitive": True})
+    setup = AutopilotSetupProfile(job_id="22222222-2222-2222-2222-222222222222", input_requests=[role, credential])
+    assert [item.key for item in _blocking_checkpoint_requests(setup)] == ["credential_reference"]
+    assert [item.key for item in _pending_runtime_auth_requests(setup)] == ["credential_reference"]
+
+
+def test_stale_provided_decision_cannot_hide_missing_credential_value():
+    analysis = AutopilotAnalysis(
+        job_id="33333333-3333-3333-3333-333333333333",
+        filename="investnation.apk",
+        sha256="b" * 64,
+        tests=[AutopilotTest(
+            id="QT-AUTO-AUTH-001",
+            suite="Functional",
+            title="Authenticate customer",
+            objective="Validate sign-in",
+            requires_auth=True,
+        )],
+    )
+    setup = _setup_profile(
+        analysis.job_id,
+        {"input_decisions": {"credential_reference": "provide"}},
+        analysis,
+        discovery=AutopilotDiscoveryResult(
+            job_id=analysis.job_id,
+            status="completed",
+            provider="appium",
+            started_at="2026-09-13T00:00:00+00:00",
+            finished_at="2026-09-13T00:00:01+00:00",
+                duration_seconds=1,
+                device_name="test",
+                screens=[DiscoveredScreen(
+                    screen_id="login",
+                    fingerprint="g" * 64,
+                    controls=[DiscoveredControl(
+                        control_id="username",
+                        semantic_label="User ID / email",
+                        class_name="android.widget.EditText",
+                        input_capable=True,
+                        input_kind="credential",
+                        locators=[DiscoveryLocator(strategy="id", value="com.example:id/username", confidence=0.99)],
+                    )],
+                )],
+            ),
+        )
+    credential = next(item for item in setup.input_requests if item.key == "credential_reference")
+    assert credential.status == "pending"
+    assert credential.reference_present is False
+    # The credential bundle is the single live checkpoint shown to the user;
+    # the safe-authentication approval is rendered alongside it as a switch.
+    assert [item.key for item in _blocking_checkpoint_requests(setup)] == ["credential_reference"]
+
+
+def test_persisted_runtime_checkpoint_is_reopened_when_value_metadata_is_missing():
+    analysis = AutopilotAnalysis(
+        job_id="44444444-4444-4444-4444-444444444444",
+        filename="investnation.apk",
+        sha256="c" * 64,
+        tests=[],
+    )
+    runtime_request = AutopilotInputRequest(
+        key="runtime_username",
+        label="User ID / email",
+        category="credential",
+        reason="Observed login field",
+        source="runtime",
+        sensitive=True,
+        input_hint="username",
+        status="provided",
+        reference_present=True,
+    )
+    setup = _setup_profile(
+        analysis.job_id,
+        {
+            "input_decisions": {"runtime_username": "provide"},
+            "runtime_input_requests": [runtime_request.model_dump(mode="json")],
+        },
+        analysis,
+        discovery=None,
+    )
+    reopened = setup.runtime_input_requests[0]
+    assert reopened.status == "pending"
+    assert reopened.reference_present is False
+    assert [item.key for item in _blocking_checkpoint_requests(setup)] == ["runtime_username"]
+
+
+def test_context_boundary_redacts_natural_language_secrets():
+    safe = _effective_context("Use username qa@example.test and password as SuperSecret!", "general_mobile")
+    assert "SuperSecret!" not in safe
+    assert "password [REDACTED]" in safe
 
 
 def test_autopilot_generates_core_and_permission_tests(tmp_path):
@@ -1277,5 +1448,6 @@ async def test_execution_history_files_are_per_run_and_reusable(tmp_path):
     restored = _execution_record_from_file(records[0], job_id)
     assert restored is not None
     assert restored.execution_id == result.execution_id
+
 
 

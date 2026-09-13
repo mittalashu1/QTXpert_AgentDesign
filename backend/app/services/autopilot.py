@@ -44,6 +44,7 @@ from app.schemas.autopilot import (
     AutopilotExecutionResult,
     AutopilotJobStatus,
     AutopilotTest,
+    AutopilotScopeSource,
     AutopilotDiscoveryResult,
     DiscoveredControl,
     DiscoveredScreen,
@@ -51,6 +52,9 @@ from app.schemas.autopilot import (
 from app.services.appium_compat import safe_app_identity, safe_page_source, safe_quit
 from app.services.autopilot_context import default_context, get_profile, sanitize_target_url
 from app.services.autopilot_labels import input_probe_guidance, observed_journey_label, observed_page_label
+from app.services.autopilot_ir import is_blocking_input_request
+from app.services.autopilot_research import AutopilotResearchService
+from app.services.autopilot_scope import add_test_provenance, compile_scope, update_scope_with_discovery
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -220,6 +224,17 @@ class AutopilotPrototypeService:
             r"(?im)(?P<key>[\"']?\b(password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key)\b[\"']?)\s*(?P<sep>[:=])\s*(?P<value>[\"'][^\"']*[\"']|[^,;\s}\]]+)"
         )
         redacted = sensitive.sub(lambda match: f"{match.group('key')}{match.group('sep')}[REDACTED]", value)
+        # People often paste a natural-language checkpoint ("password is …"
+        # or "token as …") instead of a JSON/key-value pair.  Treat those
+        # forms as secrets too, while retaining the field name so the context
+        # still explains which input is needed.
+        natural_language_secret = re.compile(
+            r"(?im)(?P<key>\b(?:password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key)\b)\s+(?:is|as)\s+(?P<value>[\"'][^\"']*[\"']|[^,;\s}\]]+)"
+        )
+        redacted = natural_language_secret.sub(
+            lambda match: f"{match.group('key')} [REDACTED]",
+            redacted,
+        )
         query_secret = re.compile(
             r"(?i)([?&](?:password|passcode|token|secret|otp|api[_-]?key|access[_-]?key)=)[^&#\s]+"
         )
@@ -333,10 +348,29 @@ class AutopilotPrototypeService:
             build_name=request.build_name,
         )
         if request.mode == "default":
-            return AutopilotContextResponse(context=baseline, source="default", profile_id=profile.id)
+            scope = compile_scope(
+                profile_id=profile.id,
+                profile_name=profile.name,
+                target_kind=request.platform,
+                target_url=request.target_url,
+                application_name=request.application_name or request.build_name,
+                package_name=request.package_name,
+                context=baseline,
+                document_asset_ids=[str(value) for value in request.document_asset_ids],
+                document_analysis_run_id=str(request.document_analysis_run_id) if request.document_analysis_run_id else None,
+                document_context=request.document_context,
+            )
+            return AutopilotContextResponse(context=baseline, source="default", profile_id=profile.id, scope=scope)
 
-        current = request.current_context.strip()
+        # The editable brief is user-controlled and is persisted by the
+        # caller.  Redact it before including it in the enrichment prompt as
+        # well as before returning the generated text.
+        current = self._redact_context(request.current_context.strip())
         observed_target, target_warnings = await self._inspect_context_target(request)
+        research_sources, research_warnings = await AutopilotResearchService().research(
+            request,
+            profile_name=profile.name,
+        )
         safe_target_url = sanitize_target_url(request.target_url)
         prompt = {
             "application_name": request.application_name,
@@ -355,6 +389,8 @@ class AutopilotPrototypeService:
             "profile_brief": profile.brief_context,
             "current_context": current[:8000],
             "default_profile": baseline,
+            "public_reference_signals": [item.model_dump(mode="json") for item in research_sources[:6]],
+            "document_context": self._redact_context(request.document_context[:8000]),
         }
         try:
             provider = get_llm_provider()
@@ -372,6 +408,8 @@ class AutopilotPrototypeService:
                             "Keep payments, transfers, OTP and destructive actions approval-gated. Include "
                             "application overview, target audience, core features, critical journeys, "
                             "environment/device scope, test data and compliance/reporting expectations."
+                            " Use public reference signals only as hypotheses: never copy an external site's claims as observed facts,"
+                            " and keep the final scope concise with plain-language functional and non-functional sections."
                         ),
                     ),
                     LLMMessage(role="user", content=json.dumps(prompt, ensure_ascii=False)),
@@ -384,11 +422,27 @@ class AutopilotPrototypeService:
             generated = self._redact_context(str(data.get("context") or "").strip())
             if generated:
                 generated = self._ensure_context_identity(generated, baseline)
+                generated = self._append_research_signals(generated, research_sources)
+                scope = compile_scope(
+                    profile_id=profile.id,
+                    profile_name=profile.name,
+                    target_kind=request.platform,
+                    target_url=request.target_url,
+                    application_name=request.application_name or request.build_name,
+                    package_name=request.package_name,
+                    context=generated,
+                    document_asset_ids=[str(value) for value in request.document_asset_ids],
+                    document_analysis_run_id=str(request.document_analysis_run_id) if request.document_analysis_run_id else None,
+                    document_context=request.document_context,
+                    research_sources=research_sources,
+                )
                 return AutopilotContextResponse(
                     context=generated[:2400],
                     source="ai",
                     profile_id=profile.id,
-                    warning=" ".join(target_warnings) if target_warnings else None,
+                    warning=" ".join(target_warnings + research_warnings) if (target_warnings + research_warnings) else None,
+                    scope=scope,
+                    research_sources=research_sources,
                 )
         except Exception as exc:  # pragma: no cover - provider availability is environment-specific
             logger.info("Autopilot context AI generation unavailable: %s", exc)
@@ -398,12 +452,45 @@ class AutopilotPrototypeService:
         fallback = self._redact_context(current or baseline)
         if current and not current.lower().startswith("profile category:"):
             fallback = f"Profile category: {profile.name}\n{self._redact_context(current)}"
+        fallback = self._append_research_signals(fallback[:2400], research_sources)
+        scope = compile_scope(
+            profile_id=profile.id,
+            profile_name=profile.name,
+            target_kind=request.platform,
+            target_url=request.target_url,
+            application_name=request.application_name or request.build_name,
+            package_name=request.package_name,
+            context=fallback,
+            document_asset_ids=[str(value) for value in request.document_asset_ids],
+            document_analysis_run_id=str(request.document_analysis_run_id) if request.document_analysis_run_id else None,
+            document_context=request.document_context,
+            research_sources=research_sources,
+        )
         return AutopilotContextResponse(
             context=fallback[:2400],
             source="fallback",
             profile_id=profile.id,
-            warning=" ".join(target_warnings + ["AI context generation was unavailable; a safe deterministic profile was applied."]),
+            warning=" ".join(target_warnings + research_warnings + ["AI context generation was unavailable; a safe deterministic profile was applied."]),
+            scope=scope,
+            research_sources=research_sources,
         )
+
+    @staticmethod
+    def _append_research_signals(context: str, sources: list[AutopilotScopeSource]) -> str:
+        """Persist only short public source labels/URLs with the editable brief."""
+
+        if not sources:
+            return context[:2400]
+        signal = "; ".join(
+            f"{item.label} ({item.reference})"
+            for item in sources[:4]
+            if item.reference
+        )
+        if not signal:
+            return context[:2400]
+        # Keep the source trail separate from the prose so the scope compiler
+        # and the report can distinguish public hypotheses from user claims.
+        return f"{context[:2050].rstrip()}\nPublic reference signals (hypotheses, not evidence): {signal}"[:2400]
 
     @property
     def _durable_results_enabled(self) -> bool:
@@ -1139,7 +1226,8 @@ class AutopilotPrototypeService:
                 requests = [
                     item
                     for item in build_input_requests(analysis, setup)
-                    if not setup or (setup.input_decisions or {}).get(item.key) != "skip"
+                    if (not setup or (setup.input_decisions or {}).get(item.key) != "skip")
+                    and is_blocking_input_request(item)
                 ]
                 if not requests and setup is not None:
                     ready_analysis = analysis.model_copy(
@@ -1292,7 +1380,8 @@ class AutopilotPrototypeService:
             requests = [
                 item
                 for item in build_input_requests(analysis, setup)
-                if not setup or (setup.input_decisions or {}).get(item.key) != "skip"
+                if (not setup or (setup.input_decisions or {}).get(item.key) != "skip")
+                and is_blocking_input_request(item)
             ]
             pending_runtime_credentials = [
                 item
@@ -1420,6 +1509,50 @@ class AutopilotPrototypeService:
                 deduped.append(test)
                 seen.add(key)
 
+        # Compile the scope before persistence so the same editable brief,
+        # document lineage and public research signals explain both the plan
+        # and every individual test.  Runtime Discovery enriches this object
+        # later; it never replaces the static/document sources.
+        research_sources = []
+        for source in compile_scope(
+            profile_id=job.get("profile_id"),
+            profile_name=get_profile(job.get("profile_id")).name,
+            target_kind=target_kind,
+            target_url=job.get("target_url"),
+            application_name=metadata.get("app_name") or job.get("filename"),
+            package_name=metadata.get("package_name"),
+            context=context_text,
+            document_asset_ids=[str(value) for value in (job.get("document_asset_ids") or [])],
+            document_analysis_run_id=str(job.get("document_analysis_run_id")) if job.get("document_analysis_run_id") else None,
+            document_context=context_text,
+        ).sources:
+            if source.kind == "internet":
+                research_sources.append(source)
+        scope = compile_scope(
+            profile_id=job.get("profile_id"),
+            profile_name=get_profile(job.get("profile_id")).name,
+            target_kind=target_kind,
+            target_url=job.get("target_url"),
+            application_name=metadata.get("app_name") or job.get("filename"),
+            package_name=metadata.get("package_name"),
+            context=context_text,
+            document_asset_ids=[str(value) for value in (job.get("document_asset_ids") or [])],
+            document_analysis_run_id=str(job.get("document_analysis_run_id")) if job.get("document_analysis_run_id") else None,
+            document_context=context_text,
+            research_sources=research_sources,
+        )
+        deduped = [
+            add_test_provenance(
+                test,
+                target_kind=target_kind,
+                profile_id=str(job.get("profile_id") or "uae_fintech"),
+                context_present=bool(context_text),
+                document_asset_ids=[str(value) for value in (job.get("document_asset_ids") or [])],
+                research_sources=research_sources,
+            )
+            for test in deduped
+        ]
+
         coverage_counts: dict[str, int] = {}
         for test in deduped[:_MAX_GENERATED_AUTOPILOT_TESTS]:
             coverage_counts[test.bucket] = coverage_counts.get(test.bucket, 0) + 1
@@ -1456,6 +1589,15 @@ class AutopilotPrototypeService:
             if ai_enrichment_used
             else "LLM enrichment unavailable; deterministic fallback retained the selected scope",
         ]
+        analysis_basis.append(
+            f"Scope compiler v1 preserved {len(scope.document_sections)} document section(s) and "
+            f"{len(scope.scope_sections)} scope section(s), "
+            f"{len(scope.requested_test_types)} requested test type(s) and {len(scope.sources)} source reference(s)"
+        )
+        if research_sources:
+            analysis_basis.append(
+                f"{len(research_sources)} public reference signal(s) informed context hypotheses; they are not runtime evidence"
+            )
         if held_back_ai_cases:
             analysis_basis.append(
                 f"Held back {held_back_ai_cases} AI-generated setup-gated or unobserved business case(s) until Runtime Discovery observes the relevant controls; profile/context alone never creates a checkpoint"
@@ -1519,6 +1661,7 @@ class AutopilotPrototypeService:
             analysis_basis=analysis_basis,
             document_asset_ids=document_asset_ids,
             document_analysis_run_id=document_analysis_run_id,
+            scope=scope,
         )
         await asyncio.to_thread(self._metadata_path(job_id).write_text, analysis.model_dump_json(indent=2), "utf-8")
         await self._persist_job(job, analysis=analysis.model_dump(mode="json"))
@@ -2413,11 +2556,23 @@ class AutopilotPrototypeService:
         journey_note = "Observed journeys: " + ", ".join(observed_journeys[:20]) + "."
         basis = [item for item in basis if not str(item).startswith("Observed journeys:")]
         basis.append(journey_note)
+        scope = update_scope_with_discovery(analysis.scope, discovery)
+        merged = [
+            add_test_provenance(
+                test,
+                target_kind=str(analysis.target_kind or analysis.platform or "android"),
+                profile_id=None,
+                context_present=False,
+                runtime_discovery=discovery,
+            )
+            for test in merged
+        ]
         return analysis.model_copy(
             update={
                 "tests": merged,
                 "analysis_basis": basis,
                 "critical_journeys": observed_journeys[:20] or analysis.critical_journeys,
+                "scope": scope,
             }
         )
 
@@ -2562,7 +2717,10 @@ class AutopilotPrototypeService:
                     "target_sdk": meta.get("target_sdk"),
                     "debuggable": meta.get("debuggable"),
                 },
-                "user_context": context[:8000],
+                # ``context`` normally comes from the redacted job boundary,
+                # but reruns and direct service callers can bypass the API.
+                # Re-apply the guard immediately before the model call.
+                "user_context": self._redact_context(context[:8000]),
                 "context_role": (
                     "Treat user_context as a first-class testing scope. Derive relevant journeys, controls, "
                     "risks and clarification questions from it, while labeling its claims as user-supplied "
@@ -3308,4 +3466,5 @@ class AutopilotPrototypeService:
                 "authentication",
             )
         )
+
 

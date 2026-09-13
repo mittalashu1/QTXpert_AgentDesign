@@ -324,6 +324,8 @@ class AutopilotDiscoveryService:
                         page_label=screen.page_label or observed_page_label(screen),
                         page_url=screen.url,
                         field_label=normalized_label[:120].title() or "Text field",
+                        screenshot_asset_id=screen.screenshot_asset_id,
+                        page_source_asset_id=screen.page_source_asset_id,
                         probe_guidance=input_probe_guidance(normalized_label, field_type),
                     )
                 )
@@ -1145,3 +1147,4 @@ class AutopilotDiscoveryService:
             }
         finally:
             safe_quit(driver)
+

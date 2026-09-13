@@ -499,6 +499,33 @@ def test_setup_references_resolve_data_gate_before_discovery_promotion():
     assert ready.setup_missing_fields == []
 
 
+def test_observed_autonomous_uat_does_not_wait_for_business_role_metadata():
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-RUNTIME-UAT-POS",
+            suite="UAT · Positive",
+            title="Reach the observed help journey",
+            priority="high",
+            objective="Replay the observed read-only journey",
+            steps=["Tap Help", "Verify Support"],
+            expected=["Support is visible"],
+            bucket="uat",
+            requires_auth=True,
+            autonomous_candidate=True,
+        )
+    ])
+    setup = AutopilotSetupProfile(
+        job_id=analysis.job_id,
+        credential_reference="qtxpert://credentials/uat",
+        safe_authentication_approved=True,
+    )
+
+    bundle = AutopilotIRCompiler().compile_bundle(analysis, _discovery(), setup)
+
+    assert bundle.setup_missing_fields == []
+    assert bundle.tests[0].readiness == "executable"
+
+
 def test_input_checkpoint_groups_dependencies_by_safe_reference():
     analysis = _analysis([
         AutopilotTest(
@@ -646,4 +673,5 @@ def test_safe_authentication_input_decision_counts_as_approval():
 
     assert bundle.tests[0].readiness == "executable"
     assert "safe authentication approval" not in bundle.setup_missing_fields
+
 
