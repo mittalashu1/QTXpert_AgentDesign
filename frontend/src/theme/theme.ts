@@ -1,58 +1,122 @@
 import { createTheme, ThemeOptions } from "@mui/material/styles";
 
+type ThemeMode = "light" | "dark";
+
 /**
- * QTXpert.ai design tokens.
- * Palette: deep slate/navy (#0F1B2D, #16283F) for surfaces, a precise
- * signal-teal (#0FB5AE) for primary actions/automation cues, and a
- * calibrated amber (#E8A03D) reserved for risk/priority signals only -
- * so color itself carries meaning instead of decorating the UI.
+ * QTXpert workspace tokens.
+ *
+ * These values intentionally match the public QTXpert site: a quiet ink
+ * canvas, violet-to-cyan brand accents, restrained glass surfaces, and
+ * semantic status colors that remain reserved for test state.
  */
 const shared: ThemeOptions = {
   typography: {
-    fontFamily: '"Inter", "IBM Plex Sans", "Segoe UI", sans-serif',
-    // The workspace is evidence-dense by design. Keep hierarchy clear without
-    // making every label compete with the data on screen.
+    fontFamily: '"Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
     fontSize: 14,
-    h1: { fontSize: "2rem", lineHeight: 1.15, fontWeight: 650, letterSpacing: "-0.025em" },
-    h2: { fontSize: "1.7rem", lineHeight: 1.2, fontWeight: 650, letterSpacing: "-0.02em" },
-    h3: { fontSize: "1.45rem", lineHeight: 1.2, fontWeight: 650, letterSpacing: "-0.015em" },
-    h4: { fontSize: "1.3rem", lineHeight: 1.25, fontWeight: 650, letterSpacing: "-0.01em" },
-    h5: { fontSize: "1.12rem", lineHeight: 1.3, fontWeight: 650 },
-    h6: { fontSize: ".98rem", lineHeight: 1.35, fontWeight: 650 },
-    subtitle1: { fontSize: ".95rem", lineHeight: 1.4 },
-    subtitle2: { fontSize: ".84rem", lineHeight: 1.4 },
-    body1: { fontSize: ".88rem", lineHeight: 1.48 },
-    body2: { fontSize: ".8rem", lineHeight: 1.45 },
-    button: { textTransform: "none", fontWeight: 650, fontSize: ".8rem" },
-    caption: { fontFamily: '"IBM Plex Mono", monospace', fontSize: ".69rem", lineHeight: 1.45 },
+    h1: {
+      fontFamily: '"Sora", "Inter", "Segoe UI", sans-serif',
+      fontSize: "2rem",
+      lineHeight: 1.12,
+      fontWeight: 700,
+      letterSpacing: "-0.04em",
+    },
+    h2: {
+      fontFamily: '"Sora", "Inter", "Segoe UI", sans-serif',
+      fontSize: "1.7rem",
+      lineHeight: 1.16,
+      fontWeight: 700,
+      letterSpacing: "-0.035em",
+    },
+    h3: {
+      fontFamily: '"Sora", "Inter", "Segoe UI", sans-serif',
+      fontSize: "1.45rem",
+      lineHeight: 1.2,
+      fontWeight: 700,
+      letterSpacing: "-0.025em",
+    },
+    h4: {
+      fontFamily: '"Sora", "Inter", "Segoe UI", sans-serif',
+      fontSize: "1.3rem",
+      lineHeight: 1.24,
+      fontWeight: 700,
+      letterSpacing: "-0.02em",
+    },
+    h5: {
+      fontFamily: '"Sora", "Inter", "Segoe UI", sans-serif',
+      fontSize: "1.12rem",
+      lineHeight: 1.3,
+      fontWeight: 700,
+    },
+    h6: {
+      fontFamily: '"Sora", "Inter", "Segoe UI", sans-serif',
+      fontSize: ".98rem",
+      lineHeight: 1.35,
+      fontWeight: 700,
+    },
+    subtitle1: { fontSize: ".95rem", lineHeight: 1.42 },
+    subtitle2: { fontSize: ".84rem", lineHeight: 1.42 },
+    body1: { fontSize: ".88rem", lineHeight: 1.5 },
+    body2: { fontSize: ".8rem", lineHeight: 1.46 },
+    button: { textTransform: "none", fontWeight: 700, fontSize: ".8rem" },
+    caption: {
+      fontFamily: '"IBM Plex Mono", "SFMono-Regular", Consolas, monospace',
+      fontSize: ".69rem",
+      lineHeight: 1.45,
+    },
   },
   shape: { borderRadius: 10 },
 };
 
-/**
- * A restrained glass treatment for the workspace shell. The material is kept
- * on navigation and containers only; content remains opaque and high contrast
- * so the interface stays useful for dense QA evidence and reduced-transparency
- * accessibility settings.
- */
-const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
+const components = (mode: ThemeMode): ThemeOptions["components"] => {
   const dark = mode === "dark";
+  const brand = dark ? "#8B87FB" : "#5B45E0";
+  const brandSoft = dark ? "rgba(165, 173, 255, .14)" : "rgba(109, 99, 242, .10)";
+  const surface = dark ? "rgba(18, 19, 34, .74)" : "rgba(255, 255, 255, .82)";
+  const surfaceStrong = dark ? "rgba(18, 19, 34, .94)" : "rgba(255, 255, 255, .96)";
+
   return {
     MuiCssBaseline: {
       styleOverrides: {
-        body: {
-          backgroundImage: dark
-            ? "radial-gradient(circle at 12% -8%, rgba(18, 199, 192, .10), transparent 32%), radial-gradient(circle at 92% 8%, rgba(232, 160, 61, .06), transparent 24%)"
-            : "radial-gradient(circle at 12% -8%, rgba(14, 124, 119, .06), transparent 32%), radial-gradient(circle at 92% 8%, rgba(232, 160, 61, .045), transparent 24%)",
-          backgroundAttachment: "fixed",
+        html: {
+          colorScheme: mode,
+          scrollBehavior: "smooth",
         },
-        // Keep long content usable while preserving readable line lengths.
+        body: {
+          minHeight: "100vh",
+          overflowX: "hidden",
+          backgroundColor: dark ? "#06070F" : "#F8F9FF",
+          backgroundImage: dark
+            ? 'linear-gradient(180deg, rgba(6, 7, 15, .68), rgba(6, 7, 15, .91)), url("/qtxpert-workspace-atmosphere.svg")'
+            : 'linear-gradient(180deg, rgba(248, 249, 255, .84), rgba(248, 249, 255, .96)), url("/qtxpert-workspace-atmosphere.svg")',
+          backgroundAttachment: "fixed",
+          backgroundPosition: "center top",
+          backgroundRepeat: "no-repeat",
+          backgroundSize: "cover",
+          transition: "background-color 220ms ease, color 220ms ease",
+        },
+        "body::before": {
+          content: '""',
+          position: "fixed",
+          inset: 0,
+          pointerEvents: "none",
+          zIndex: -1,
+          background: dark
+            ? "radial-gradient(50% 44% at 8% 0%, rgba(109, 99, 242, .16), transparent 68%), radial-gradient(42% 40% at 92% 4%, rgba(34, 211, 238, .10), transparent 72%)"
+            : "radial-gradient(50% 44% at 8% 0%, rgba(109, 99, 242, .10), transparent 68%), radial-gradient(42% 40% at 92% 4%, rgba(34, 211, 238, .08), transparent 72%)",
+        },
+        "::selection": {
+          background: dark ? "rgba(165, 173, 255, .28)" : "rgba(109, 99, 242, .18)",
+        },
         ".qtxpert-workspace-main": {
+          minWidth: 0,
           "& .MuiTypography-root": { maxWidth: "100%" },
           "& .MuiTableCell-root": { verticalAlign: "top" },
         },
+        ".qtxpert-workspace-shell": {
+          minHeight: "100vh",
+        },
         "*, *::before, *::after": {
-          scrollbarColor: dark ? "#2A4658 transparent" : "#B8C8CE transparent",
+          scrollbarColor: dark ? "#3A326D transparent" : "#C5C7F2 transparent",
           scrollbarWidth: "thin",
         },
         "@media (prefers-reduced-motion: reduce)": {
@@ -68,7 +132,8 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     MuiAppBar: {
       styleOverrides: {
         root: {
-          backgroundColor: dark ? "rgba(17, 30, 46, .82)" : "rgba(255, 255, 255, .80)",
+          backgroundColor: dark ? "rgba(12, 13, 26, .72)" : "rgba(255, 255, 255, .76)",
+          borderBottom: "1px solid " + (dark ? "rgba(255, 255, 255, .08)" : "rgba(15, 23, 42, .08)"),
           backdropFilter: "blur(18px) saturate(140%)",
           WebkitBackdropFilter: "blur(18px) saturate(140%)",
         },
@@ -77,19 +142,24 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     MuiDrawer: {
       styleOverrides: {
         paper: {
-          backgroundColor: dark ? "rgba(17, 30, 46, .88)" : "rgba(255, 255, 255, .86)",
-          backdropFilter: "blur(18px) saturate(130%)",
-          WebkitBackdropFilter: "blur(18px) saturate(130%)",
+          backgroundColor: dark ? "rgba(12, 13, 26, .80)" : "rgba(255, 255, 255, .82)",
+          borderRightColor: dark ? "rgba(255, 255, 255, .08)" : "rgba(15, 23, 42, .08)",
+          backdropFilter: "blur(18px) saturate(135%)",
+          WebkitBackdropFilter: "blur(18px) saturate(135%)",
         },
       },
     },
     MuiCard: {
       styleOverrides: {
         root: {
-          borderRadius: 10,
+          borderRadius: 14,
+          backgroundColor: surface,
           backgroundImage: "none",
-          boxShadow: dark ? "0 4px 14px rgba(0, 0, 0, .16)" : "0 2px 10px rgba(15, 27, 45, .035)",
-          transition: "border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease",
+          borderColor: dark ? "rgba(255, 255, 255, .08)" : "rgba(15, 23, 42, .09)",
+          boxShadow: dark
+            ? "0 12px 34px rgba(0, 0, 0, .18), 0 1px 0 rgba(255, 255, 255, .04) inset"
+            : "0 12px 30px rgba(91, 69, 224, .06), 0 1px 0 rgba(255, 255, 255, .72) inset",
+          transition: "border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease",
         },
       },
     },
@@ -108,21 +178,68 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
         },
       },
     },
+    MuiDialog: {
+      styleOverrides: {
+        paper: {
+          backgroundColor: surfaceStrong,
+          border: "1px solid " + (dark ? "rgba(255, 255, 255, .09)" : "rgba(15, 23, 42, .10)"),
+          boxShadow: dark
+            ? "0 28px 80px rgba(0, 0, 0, .45)"
+            : "0 28px 80px rgba(15, 23, 42, .16)",
+        },
+      },
+    },
     MuiButton: {
+      defaultProps: {
+        disableElevation: true,
+      },
       styleOverrides: {
         root: {
-          borderRadius: 8,
           minHeight: 34,
           padding: "6px 12px",
-          transition: "transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease",
+          borderRadius: 9,
+          transition: "transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease, border-color 160ms ease",
         },
-        contained: {
-          boxShadow: "none",
+        containedPrimary: {
+          color: "#FFFFFF",
+          background: "linear-gradient(135deg, #6D63F2 0%, #5B45E0 100%)",
+          boxShadow: "0 10px 26px rgba(109, 99, 242, .28)",
           "&:hover": {
-            boxShadow: dark ? "0 8px 18px rgba(18, 199, 192, .20)" : "0 8px 18px rgba(14, 124, 119, .18)",
+            background: "linear-gradient(135deg, #7A70F5 0%, #624CE5 100%)",
+            boxShadow: "0 14px 34px rgba(109, 99, 242, .40)",
             transform: "translateY(-1px)",
           },
+          "&.Mui-disabled": {
+            color: "rgba(255, 255, 255, .70)",
+            background: dark ? "rgba(109, 99, 242, .30)" : "rgba(109, 99, 242, .42)",
+          },
         },
+        outlined: {
+          borderColor: dark ? "rgba(165, 173, 255, .30)" : "rgba(91, 69, 224, .26)",
+          "&:hover": {
+            borderColor: brand,
+            backgroundColor: brandSoft,
+          },
+        },
+        text: {
+          "&:hover": {
+            backgroundColor: brandSoft,
+          },
+        },
+      },
+    },
+    MuiIconButton: {
+      styleOverrides: {
+        root: {
+          padding: 7,
+          borderRadius: 9,
+          transition: "background-color 160ms ease, color 160ms ease, transform 160ms ease",
+          "&:hover": {
+            backgroundColor: brandSoft,
+            color: brand,
+          },
+        },
+        sizeSmall: { padding: 5 },
       },
     },
     MuiChip: {
@@ -131,14 +248,12 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
           borderRadius: 999,
           height: 24,
           fontSize: ".72rem",
+          fontWeight: 650,
           "& .MuiChip-label": { paddingLeft: 9, paddingRight: 9 },
         },
-      },
-    },
-    MuiIconButton: {
-      styleOverrides: {
-        root: { padding: 7 },
-        sizeSmall: { padding: 5 },
+        outlinedPrimary: {
+          borderColor: dark ? "rgba(165, 173, 255, .34)" : "rgba(91, 69, 224, .28)",
+        },
       },
     },
     MuiToolbar: {
@@ -148,12 +263,29 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     },
     MuiListItemButton: {
       styleOverrides: {
-        root: { minHeight: 40, paddingTop: 7, paddingBottom: 7 },
+        root: {
+          minHeight: 40,
+          paddingTop: 7,
+          paddingBottom: 7,
+          borderRadius: 10,
+          transition: "background-color 160ms ease, color 160ms ease, transform 160ms ease",
+          "&:hover": { backgroundColor: brandSoft },
+          "&.active": {
+            color: brand,
+            backgroundColor: brandSoft,
+            boxShadow: dark
+              ? "inset 3px 0 0 #8B87FB, 0 8px 20px rgba(109, 99, 242, .10)"
+              : "inset 3px 0 0 #5B45E0, 0 8px 20px rgba(109, 99, 242, .08)",
+          },
+        },
       },
     },
     MuiListItemIcon: {
       styleOverrides: {
-        root: { minWidth: 34 },
+        root: {
+          minWidth: 34,
+          color: dark ? "#98A2B3" : "#667085",
+        },
       },
     },
     MuiTableCell: {
@@ -170,7 +302,18 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     },
     MuiTab: {
       styleOverrides: {
-        root: { minHeight: 40, padding: "8px 12px", fontSize: ".76rem", textTransform: "none", fontWeight: 650 },
+        root: {
+          minHeight: 40,
+          padding: "8px 12px",
+          fontSize: ".76rem",
+          textTransform: "none",
+          fontWeight: 700,
+          "&.Mui-selected": { color: brand },
+        },
+        indicator: {
+          background: "linear-gradient(90deg, #6D63F2, #22D3EE)",
+          height: 2,
+        },
       },
     },
     MuiTextField: {
@@ -178,7 +321,13 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     },
     MuiInputBase: {
       styleOverrides: {
-        root: { fontSize: ".82rem" },
+        root: {
+          fontSize: ".82rem",
+          "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
+            borderColor: brand,
+            borderWidth: 1,
+          },
+        },
         input: { paddingTop: 10, paddingBottom: 10 },
       },
     },
@@ -204,7 +353,13 @@ const components = (mode: "light" | "dark"): ThemeOptions["components"] => {
     },
     MuiTooltip: {
       styleOverrides: {
-        tooltip: { maxWidth: 360, padding: "8px 10px", fontSize: ".74rem", lineHeight: 1.45 },
+        tooltip: {
+          maxWidth: 360,
+          padding: "8px 10px",
+          fontSize: ".74rem",
+          lineHeight: 1.45,
+          borderRadius: 8,
+        },
       },
     },
   };
@@ -215,14 +370,15 @@ export const lightTheme = createTheme({
   components: components("light"),
   palette: {
     mode: "light",
-    primary: { main: "#0E7C77", contrastText: "#FFFFFF" },
-    secondary: { main: "#E8A03D" },
-    background: { default: "#F5F7F8", paper: "#FFFFFF" },
-    text: { primary: "#12202E", secondary: "#4C5F70" },
-    divider: "#D9E1E5",
-    error: { main: "#C0392B" },
-    warning: { main: "#E8A03D" },
-    success: { main: "#1E8E5A" },
+    primary: { main: "#5B45E0", light: "#8B87FB", dark: "#4632C6", contrastText: "#FFFFFF" },
+    secondary: { main: "#22D3EE", light: "#67E8F9", dark: "#0891B2", contrastText: "#06131A" },
+    background: { default: "#F8F9FF", paper: "#FFFFFF" },
+    text: { primary: "#182033", secondary: "#667085" },
+    divider: "rgba(15, 23, 42, .10)",
+    error: { main: "#E11D48" },
+    warning: { main: "#F59E0B" },
+    info: { main: "#0EA5E9" },
+    success: { main: "#10B981" },
   },
 });
 
@@ -231,15 +387,14 @@ export const darkTheme = createTheme({
   components: components("dark"),
   palette: {
     mode: "dark",
-    primary: { main: "#12C7C0", contrastText: "#06120F" },
-    secondary: { main: "#E8A03D" },
-    background: { default: "#0B141F", paper: "#111E2E" },
-    text: { primary: "#E7EEF2", secondary: "#8FA3B3" },
-    divider: "#1F3040",
-    error: { main: "#E5605A" },
-    warning: { main: "#E8A03D" },
-    success: { main: "#33B37B" },
+    primary: { main: "#8B87FB", light: "#C5C9FF", dark: "#6D63F2", contrastText: "#FFFFFF" },
+    secondary: { main: "#22D3EE", light: "#67E8F9", dark: "#0891B2", contrastText: "#06131A" },
+    background: { default: "#06070F", paper: "#121322" },
+    text: { primary: "#F1F3F8", secondary: "#98A2B3" },
+    divider: "rgba(255, 255, 255, .08)",
+    error: { main: "#FB7185" },
+    warning: { main: "#FBBF24" },
+    info: { main: "#38BDF8" },
+    success: { main: "#34D399" },
   },
 });
-
-
