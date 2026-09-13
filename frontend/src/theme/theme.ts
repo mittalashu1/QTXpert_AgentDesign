@@ -77,6 +77,22 @@ const components = (mode: ThemeMode): ThemeOptions["components"] => {
   return {
     MuiCssBaseline: {
       styleOverrides: {
+        "@font-face": [
+          {
+            fontFamily: "Inter",
+            fontStyle: "normal",
+            fontWeight: "400 700",
+            fontDisplay: "swap",
+            src: 'url("/fonts/inter-latin.woff2") format("woff2")',
+          },
+          {
+            fontFamily: "Sora",
+            fontStyle: "normal",
+            fontWeight: "400 800",
+            fontDisplay: "swap",
+            src: 'url("/fonts/sora-latin.woff2") format("woff2")',
+          },
+        ],
         html: {
           colorScheme: mode,
           scrollBehavior: "smooth",
