@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+  <defs>
+    <linearGradient id="wash" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6d63f2" stop-opacity=".42"/>
+      <stop offset=".48" stop-color="#22d3ee" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#5b45e0" stop-opacity=".34"/>
+    </linearGradient>
+    <radialGradient id="violet" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#8b87fb" stop-opacity=".56"/>
+      <stop offset="1" stop-color="#8b87fb" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cyan" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity=".38"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="blur-strong" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="80"/>
+    </filter>
+    <filter id="blur-soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="28"/>
+    </filter>
+    <style>
+      .qtx-orb { transform-box: fill-box; transform-origin: center; }
+      .qtx-violet { animation: qtx-violet-drift 28s ease-in-out infinite alternate; }
+      .qtx-cyan { animation: qtx-cyan-drift 22s ease-in-out infinite alternate; }
+      .qtx-ripple { animation: qtx-ripple-breathe 12s ease-in-out infinite alternate; }
+      @keyframes qtx-violet-drift {
+        from { transform: translate(-32px, -18px) scale(.96); }
+        to { transform: translate(42px, 28px) scale(1.08); }
+      }
+      @keyframes qtx-cyan-drift {
+        from { transform: translate(28px, 18px) scale(1.04); }
+        to { transform: translate(-36px, -24px) scale(.92); }
+      }
+      @keyframes qtx-ripple-breathe {
+        from { opacity: .18; transform: scale(.98); }
+        to { opacity: .42; transform: scale(1.05); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .qtx-orb, .qtx-ripple { animation: none; }
+      }
+    </style>
+  </defs>
+  <rect width="1600" height="1000" fill="#06070f"/>
+  <rect width="1600" height="1000" fill="url(#wash)" opacity=".22"/>
+  <g class="qtx-orb qtx-violet" filter="url(#blur-strong)">
+    <circle class="qtx-orb" cx="220" cy="80" r="280" fill="url(#violet)"/>
+    <circle class="qtx-orb" cx="1330" cy="860" r="360" fill="url(#violet)" opacity=".7"/>
+  </g>
+  <g class="qtx-orb qtx-cyan" filter="url(#blur-strong)">
+    <circle cx="1360" cy="160" r="220" fill="url(#cyan)"/>
+    <circle cx="520" cy="910" r="290" fill="url(#cyan)" opacity=".72"/>
+  </g>
+  <g class="qtx-ripple" fill="none" stroke="#a5adff" stroke-opacity=".22" filter="url(#blur-soft)">
+    <ellipse cx="1200" cy="410" rx="310" ry="110" stroke-width="2"/>
+    <ellipse cx="1200" cy="410" rx="220" ry="76" stroke-width="1.5"/>
+    <ellipse cx="1200" cy="410" rx="134" ry="44" stroke-width="1"/>
+  </g>
+</svg>
