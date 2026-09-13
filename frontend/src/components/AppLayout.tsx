@@ -132,7 +132,7 @@ export default function AppLayout() {
                 ? "8px 0 30px rgba(0, 0, 0, .28)"
                 : "8px 0 30px rgba(91, 69, 224, .10)"
               : "none",
-            zIndex: (theme) => theme.zIndex.drawer + 2,
+            // Keep the header above the rail so the wordmark is never clipped.\n            zIndex: (theme) => theme.zIndex.drawer,
           },
         }}
       >
