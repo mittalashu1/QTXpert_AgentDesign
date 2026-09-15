@@ -182,6 +182,64 @@ def test_stale_provided_decision_cannot_hide_missing_credential_value():
     assert [item.key for item in _blocking_checkpoint_requests(setup)] == ["credential_reference"]
 
 
+def test_runtime_login_checkpoint_keeps_observed_screen_metadata_on_bundle():
+    """A live login must open the exact screen, not the generic setup form."""
+    analysis = AutopilotAnalysis(
+        job_id="34343434-3434-3434-3434-343434343434",
+        filename="investnation.apk",
+        sha256="e" * 64,
+        tests=[AutopilotTest(
+            id="QT-AUTO-AUTH-OBSERVED",
+            suite="UAT",
+            title="Sign in and reach the dashboard",
+            objective="Validate the observed sign-in entry point.",
+            requires_auth=True,
+            bucket="uat",
+        )],
+    )
+    username = DiscoveredControl(
+        control_id="username",
+        semantic_label="User ID / email",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/user", confidence=0.99)],
+    )
+    password = DiscoveredControl(
+        control_id="password",
+        semantic_label="Password",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/password", confidence=0.99)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="partial",
+        provider="appium",
+        started_at="2026-09-13T00:00:00+00:00",
+        finished_at="2026-09-13T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="test",
+        screens=[DiscoveredScreen(
+            screen_id="login-screen",
+            fingerprint="h" * 64,
+            journey="Account access",
+            page_label="Sign in",
+            controls=[username, password],
+        )],
+    )
+
+    setup = _setup_profile(analysis.job_id, {}, analysis, discovery)
+    bundle = next(item for item in setup.input_requests if item.key == "credential_reference")
+
+    assert bundle.source == "runtime"
+    assert bundle.screen_id == "login-screen"
+    assert bundle.page_label == "Sign in"
+    assert bundle.field_label == "User ID / email + Password"
+    assert "QT-AUTO-AUTH-OBSERVED" in bundle.required_for
+
+
 def test_persisted_runtime_checkpoint_is_reopened_when_value_metadata_is_missing():
     analysis = AutopilotAnalysis(
         job_id="44444444-4444-4444-4444-444444444444",
