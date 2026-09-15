@@ -37,6 +37,7 @@ from app.schemas.autopilot import (
     AutopilotExecutionRecord,
     AutopilotExecutionRequest,
     AutopilotExecutionResult,
+    AutopilotInputRequest,
     AutopilotJobStatus,
     AutopilotProviderStatus,
     AutopilotProfileOption,
@@ -1126,7 +1127,7 @@ def _setup_profile(
         pending_runtime_credentials = [
             item for item in pending_runtime_requests if item.category == "credential"
         ]
-        if pending_runtime_credentials:
+        if pending_runtime_credentials and discovery is not None:
             # Login is the first checkpoint in a live journey. Keep unrelated
             # UAT/SIT/data references out of the dialog until the user has
             # supplied (or explicitly skipped) the concrete sign-in fields.
@@ -1146,6 +1147,75 @@ def _setup_profile(
                     and item.status == "pending"
                 ),
                 None,
+            )
+            # Keep the single user-facing credential bundle, but carry the
+            # location of the *observed* sign-in form onto it.  The compiler
+            # intentionally creates ``credential_reference`` at plan level;
+            # without this merge the UI treats it as a generic reference and
+            # filters it out of the concrete checkpoint list.  The result was
+            # the misleading flow where Runtime Discovery found a login but
+            # “Resolve” opened the advanced setup form instead of User ID /
+            # Password fields.  Only safe metadata is copied here; values are
+            # still write-only and remain in the encrypted input store.
+            primary_runtime_credential = next(
+                (
+                    item
+                    for item in pending_runtime_credentials
+                    if str(item.input_hint or "").strip().lower() == "username"
+                ),
+                pending_runtime_credentials[0],
+            )
+            if credential_bundle_request is None:
+                # A runtime adapter can observe a login before the expanded
+                # coverage plan has been persisted (for example after a
+                # worker restart). Synthesize the same stable bundle so the
+                # user still gets one clear authentication checkpoint.
+                credential_bundle_request = AutopilotInputRequest(
+                    key="credential_reference",
+                    label="UAT sign-in credentials",
+                    category="credential",
+                    reason="A live sign-in form was observed. Enter the non-production User ID/email and password before authenticated journeys continue.",
+                    required_for=sorted({
+                        required
+                        for item in pending_runtime_credentials
+                        for required in item.required_for
+                    }),
+                    sensitive=True,
+                    status="pending",
+                    reference_present=False,
+                    source="runtime",
+                    question="Enter the non-production User ID/email and password for the account Autopilot should use to sign in.",
+                    placeholder="Enter the UAT User ID/email and password in the fields below",
+                    format_hint="Use a test account only. The two values are encrypted together and never sent to the AI model or written to logs.",
+                    credential_bundle=True,
+                    input_hint="username",
+                )
+            runtime_required_for = {
+                required
+                for item in pending_runtime_credentials
+                for required in item.required_for
+            }
+            credential_bundle_request = credential_bundle_request.model_copy(
+                update={
+                    "source": "runtime",
+                    "screen_id": primary_runtime_credential.screen_id,
+                    "control_id": primary_runtime_credential.control_id,
+                    "field_type": "credential",
+                    "input_hint": "username",
+                    "locator": primary_runtime_credential.locator,
+                    "question": "Enter the non-production User ID/email and password for the account Autopilot should use to sign in.",
+                    "placeholder": "Enter the UAT User ID/email and password in the fields below",
+                    "format_hint": "Use a test account only. The two values are encrypted together and never sent to the AI model or written to logs.",
+                    "credential_bundle": True,
+                    "required_for": sorted(set(credential_bundle_request.required_for) | runtime_required_for),
+                    "journey": primary_runtime_credential.journey,
+                    "page_label": primary_runtime_credential.page_label,
+                    "page_url": primary_runtime_credential.page_url,
+                    "field_label": "User ID / email + Password",
+                    "screenshot_asset_id": primary_runtime_credential.screenshot_asset_id,
+                    "page_source_asset_id": primary_runtime_credential.page_source_asset_id,
+                    "probe_guidance": primary_runtime_credential.probe_guidance,
+                }
             )
             credential_bundle_skipped = decisions.get("credential_reference") == "skip"
             normalized_requests = [credential_bundle_request] if credential_bundle_request else []
