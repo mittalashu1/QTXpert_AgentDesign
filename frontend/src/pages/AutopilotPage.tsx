@@ -654,6 +654,7 @@ export default function AutopilotPage() {
   // sign-in). Plan-level UAT/SIT references remain available behind an
   // explicit disclosure once the autonomous first pass has mapped the target.
   const [showAdvancedSetup, setShowAdvancedSetup] = useState(false);
+  const [focusedCheckpointKey, setFocusedCheckpointKey] = useState<string | null>(null);
   const [checkpointStep, setCheckpointStep] = useState(0);
   const [setupBusy, setSetupBusy] = useState(false);
   const [resumeBusy, setResumeBusy] = useState(false);
@@ -1282,7 +1283,7 @@ export default function AutopilotPage() {
     no_reset: false,
     auto_grant_permissions: autoGrantPermissions,
   });
-  const openSetup = () => {
+  const openSetup = (requestKey?: string) => {
     if (!analysis) return;
     const sourceSetup = setup?.job_id === analysis.job_id
       ? setup
@@ -1313,12 +1314,28 @@ export default function AutopilotPage() {
     setSetupDraft(nextSetup);
     setInputDrafts(buildInputDrafts(nextSetup));
     const nextRequests = [...(nextSetup.input_requests || []), ...(nextSetup.runtime_input_requests || [])];
+    const requestedIndex = requestKey
+      ? nextRequests.findIndex((item) => item.key === requestKey)
+      : -1;
+    const requested = requestedIndex >= 0 ? nextRequests[requestedIndex] : null;
     const firstPending = nextRequests.findIndex(isBlockingCheckpoint);
-    // If discovery has finished and only optional references remain, open the
-    // advanced section directly. When a live sign-in gate exists, keep the
-    // dialog focused on that single actionable checkpoint.
-    setShowAdvancedSetup(firstPending < 0);
-    setCheckpointStep(firstPending >= 0 ? firstPending : 0);
+    // A case-level Resolve action must open the exact observed field even
+    // when it is an optional follow-up. Otherwise the dialog hides it behind
+    // the advanced section and appears to ask for unrelated generic setup.
+    const focusedOptional = Boolean(requested && !isBlockingCheckpoint(requested));
+    // A row-level Resolve action should open the exact observed field without
+    // also expanding the separate advanced-reference form. The full optional
+    // list remains available when the user opens the checkpoint generally.
+    const openAdvanced = !focusedOptional && (requested ? false : firstPending < 0);
+    const visibleRequests = focusedOptional
+      ? [...nextRequests.filter(isBlockingCheckpoint), requested!]
+      : openAdvanced ? nextRequests : nextRequests.filter(isBlockingCheckpoint);
+    setFocusedCheckpointKey(focusedOptional ? requestKey! : null);
+    const visibleIndex = requested
+      ? visibleRequests.findIndex((item) => item.key === requestKey)
+      : firstPending >= 0 ? visibleRequests.findIndex((item) => isBlockingCheckpoint(item)) : -1;
+    setShowAdvancedSetup(openAdvanced);
+    setCheckpointStep(visibleIndex >= 0 ? visibleIndex : 0);
     setSetupOpen(true);
   };
   const saveSetup = async () => {
@@ -1717,9 +1734,14 @@ export default function AutopilotPage() {
   const pendingInputRequests = allCheckpointRequests.filter((item) => item.status === "pending");
   const pendingCheckpointRequests = pendingInputRequests.filter(isBlockingCheckpoint);
   const deferredInputRequests = pendingInputRequests.filter((item) => !isBlockingCheckpoint(item));
+  const focusedOptionalRequest = focusedCheckpointKey
+    ? allCheckpointRequests.find((item) => item.key === focusedCheckpointKey)
+    : null;
   const checkpointRequests = showAdvancedSetup
     ? allCheckpointRequests
-    : allCheckpointRequests.filter(isBlockingCheckpoint);
+    : focusedOptionalRequest && !isBlockingCheckpoint(focusedOptionalRequest)
+      ? [...allCheckpointRequests.filter(isBlockingCheckpoint), focusedOptionalRequest]
+      : allCheckpointRequests.filter(isBlockingCheckpoint);
   const runtimeInputRequests = activeSetup.runtime_input_requests || [];
   const runtimePendingCount = runtimeInputRequests.filter((item) => item.status === "pending").length;
   const runtimeSyntheticCount = runtimeInputRequests.filter((item) => item.category === "test_data" && item.status === "random").length;
@@ -1734,6 +1756,18 @@ export default function AutopilotPage() {
     ? (setupDraft.saved_inputs || []).find((item) => item.key === activeCheckpointRequest.key)
     : null;
   const checkpointWaiting = Boolean(analysis && pendingCheckpointRequests.length > 0);
+  const requestForTest = (test: Pick<TestCase, "id" | "journey" | "page_label" | "page_url"> | AutomationTest) => {
+    const testId = "id" in test ? test.id : test.test_id;
+    const requests = allCheckpointRequests;
+    // Prefer a request explicitly linked by the compiler. Runtime field
+    // requests use screen identifiers instead, so fall back to the observed
+    // journey/page and finally to the first pending request. The helper keeps
+    // every Resolve action deterministic without inventing a checkpoint.
+    return requests.find((item) => item.required_for.includes(testId))
+      || requests.find((item) => item.status === "pending" && item.journey && item.journey === test.journey && item.page_label === test.page_label)
+      || requests.find((item) => item.status === "pending" && item.page_label && item.page_label === test.page_label)
+      || null;
+  };
   const analysisButtonLabel = checkpointWaiting
     ? "Review required inputs"
     : busy
@@ -1849,7 +1883,7 @@ export default function AutopilotPage() {
           </CardContent></Card>}
            <Tooltip title="The target and brief guide coverage. Claims stay separate from observed evidence; missing metrics remain pending." placement="bottom-start"><Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, cursor: "help", textDecoration: "underline", textDecorationStyle: "dotted" }}>How this run is scoped</Typography></Tooltip>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
-            <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || resumeBusy || !selectedProjectId} onClick={checkpointWaiting ? openSetup : () => void analyze()} variant="contained" size="large" startIcon={busy || resumeBusy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{analysisButtonLabel}</Button>
+            <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || resumeBusy || !selectedProjectId} onClick={checkpointWaiting ? () => openSetup() : () => void analyze()} variant="contained" size="large" startIcon={busy || resumeBusy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{analysisButtonLabel}</Button>
             {analysis && <Button disabled={busy || resumeBusy || !selectedProjectId} onClick={startRerun} variant="outlined" size="large">Rerun this analysis</Button>}
           </Stack>
         </Grid>
@@ -1897,7 +1931,7 @@ export default function AutopilotPage() {
 
     {analysis && pendingCheckpointRequests.length > 0 && <Alert
       severity="warning"
-      action={<Button color="inherit" size="small" onClick={openSetup} disabled={resumeBusy}>Review inputs</Button>}
+      action={<Button color="inherit" size="small" onClick={() => openSetup()} disabled={resumeBusy}>Review inputs</Button>}
     >
       Analysis is paused for {pendingCheckpointRequests.length} required input{pendingCheckpointRequests.length === 1 ? "" : "s"}.
       Provide, skip, reuse or generate the non-production data before dependent tests continue.
@@ -2088,7 +2122,7 @@ export default function AutopilotPage() {
               Input checkpoint: {pendingCheckpointRequests.length ? `${pendingCheckpointRequests.length} live item${pendingCheckpointRequests.length === 1 ? "" : "s"} pending` : "no blocking items"}.
               {pendingCheckpointRequests.length ? ` ${pendingCheckpointRequests.slice(0, 3).map((item) => item.label).join(" · ")}${pendingCheckpointRequests.length > 3 ? " · …" : ""}` : " Safe deterministic cases can be run now."}
             </Typography>
-            {(pendingCheckpointRequests.length > 0 || deferredInputRequests.length > 0) && <Button size="small" variant="text" onClick={openSetup}>Review field data</Button>}
+            {(pendingCheckpointRequests.length > 0 || deferredInputRequests.length > 0) && <Button size="small" variant="text" onClick={() => openSetup()}>Review field data</Button>}
           </Stack>
           {deferredInputRequests.length > 0 && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>
             {deferredInputRequests.length} observed field/reference item{deferredInputRequests.length === 1 ? " is" : "s are"} optional follow-up. Bounded synthetic probes run first; a value is requested only when a field cannot be validated automatically.
@@ -2117,6 +2151,7 @@ export default function AutopilotPage() {
                   const bucket = normalizedBucket(test);
                   const setupRequired = Boolean(!test.autonomous_candidate && (test.requires_auth || test.requires_test_data || test.dependency));
                   const probes = test.data_probes || [];
+                  const setupRequest = setupRequired ? requestForTest(test) : null;
                   return <TableRow key={test.id} hover>
                     <TableCell sx={{ minWidth: 320 }}>
                       <Stack direction="row" spacing={.5} alignItems="flex-start">
@@ -2141,6 +2176,7 @@ export default function AutopilotPage() {
                     <TableCell sx={{ minWidth: 250 }}>
                       <Chip size="small" label={testModeLabel(test)} color={test.destructive ? "warning" : setupRequired ? "info" : "success"} variant="outlined" />
                       {test.dependency && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>{test.dependency}</Typography>}
+                      {setupRequired && <Button size="small" sx={{ mt: .5 }} onClick={() => openSetup(setupRequest?.key)}>{setupRequest ? "Resolve input" : "Review setup"}</Button>}
                     </TableCell>
                   </TableRow>;
                 })}
@@ -2187,7 +2223,7 @@ export default function AutopilotPage() {
         <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
             <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">One guided input at a time: sign-in fields, test data and references are explained in plain language. Saved values use the encrypted Autopilot checkpoint store and are never shown again.</Typography></Box>
-            <Button size="small" variant="outlined" onClick={openSetup} disabled={resumeBusy}>{pendingCheckpointRequests.length ? "Review required inputs" : activeSetup.provided_fields.length ? "Review inputs" : "Open checkpoint"}</Button>
+            <Button size="small" variant="outlined" onClick={() => openSetup()} disabled={resumeBusy}>{pendingCheckpointRequests.length ? "Review required inputs" : activeSetup.provided_fields.length ? "Review inputs" : "Open checkpoint"}</Button>
           </Stack>
           {activeSetup.checkpoint_message && <Alert severity={pendingCheckpointRequests.length ? "warning" : "info"} sx={{ mt: 1.25 }}>{activeSetup.checkpoint_message}</Alert>}
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1 }}>
@@ -2196,10 +2232,10 @@ export default function AutopilotPage() {
             {(automation?.setup_missing_fields || []).slice(0, 6).map((field) => <Chip key={field} size="small" label={"Pending: " + field} color="warning" variant="outlined" />)}
           </Stack>
           {pendingCheckpointRequests.slice(0, 6).map((request) => <Box key={request.key} sx={{ mt: 1, p: 1, borderRadius: 1.5, bgcolor: "warning.lighter", border: "1px solid", borderColor: "warning.light" }}><Stack direction="row" spacing={.75} alignItems="center"><Chip size="small" label={inputCategoryLabel(request.category)} variant="outlined" /><Typography variant="body2" fontWeight={700}>{request.label}</Typography></Stack><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .35 }}>{request.question || request.reason}</Typography><Typography variant="caption" color="text.secondary">Needed for: {requestDependentTitles(request, analysis.tests).join(" · ") || "this checkpoint"}</Typography></Box>)}
-          {runtimeInputRequests.length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: runtimePendingCount > 0 ? "warning.lighter" : "info.lighter", border: "1px solid", borderColor: runtimePendingCount > 0 ? "warning.light" : "info.light" }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}><Box><Typography variant="body2" fontWeight={700}>Runtime fields mapped</Typography><Typography variant="caption" color="text.secondary">{runtimeInputRequests.length} field{runtimeInputRequests.length === 1 ? "" : "s"} were found on the live screen map. {runtimePendingCount > 0 ? `The ${runtimePendingCount} credential or sensitive field${runtimePendingCount === 1 ? " is" : "s are"} waiting for you in the checkpoint above.` : `${runtimeSyntheticCount || "These"} non-sensitive field${runtimeInputRequests.length === 1 ? " is" : "s are"} ready for bounded synthetic data on the first pass.`}</Typography></Box><Button size="small" variant="outlined" onClick={openSetup}>Review probes</Button></Stack></Box>}
+          {runtimeInputRequests.length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: runtimePendingCount > 0 ? "warning.lighter" : "info.lighter", border: "1px solid", borderColor: runtimePendingCount > 0 ? "warning.light" : "info.light" }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}><Box><Typography variant="body2" fontWeight={700}>Runtime fields mapped</Typography><Typography variant="caption" color="text.secondary">{runtimeInputRequests.length} field{runtimeInputRequests.length === 1 ? "" : "s"} were found on the live screen map. {runtimePendingCount > 0 ? `The ${runtimePendingCount} credential or sensitive field${runtimePendingCount === 1 ? " is" : "s are"} waiting for you in the checkpoint above.` : `${runtimeSyntheticCount || "These"} non-sensitive field${runtimeInputRequests.length === 1 ? " is" : "s are"} ready for bounded synthetic data on the first pass.`}</Typography></Box><Button size="small" variant="outlined" onClick={() => openSetup()}>Review probes</Button></Stack></Box>}
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
-        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · plan capped at 100 cases</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 100).map((test) => { const bucket = normalizedBucket(test); return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={openSetup}>Resolve</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
+        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · plan capped at 100 cases</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.slice(0, 100).map((test) => { const bucket = normalizedBucket(test); const setupRequest = test.readiness !== "executable" ? requestForTest(test) : null; return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={() => openSetup(setupRequest?.key)}>{setupRequest ? "Resolve input" : "Review setup"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
       {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe batch: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The evidence-scoped plan is capped at 100 cases. This run can include up to {suiteMaxTests} eligible deterministic cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
@@ -2373,7 +2409,7 @@ export default function AutopilotPage() {
             <Typography variant="overline" color="text.secondary" fontWeight={800}>Advanced setup (optional)</Typography>
             <Typography variant="caption" color="text.secondary" display="block">Vaults, fixtures, reset hooks and UAT/SIT references are requested only when a discovered journey needs them.</Typography>
           </Box>
-          <Button size="small" variant="outlined" onClick={() => setShowAdvancedSetup((value) => !value)}>{showAdvancedSetup ? "Hide advanced setup" : "Show advanced setup"}</Button>
+          <Button size="small" variant="outlined" onClick={() => { setFocusedCheckpointKey(null); setShowAdvancedSetup((value) => !value); }}>{showAdvancedSetup ? "Hide advanced setup" : "Show advanced setup"}</Button>
         </Stack>
         {showAdvancedSetup && <Grid container spacing={2} sx={{ mt: .25 }}>
           <Grid item xs={12} md={6}><TextField fullWidth label="Saved credential reference (optional)" value={setupDraft.credential_reference} onChange={(event) => updateSetup("credential_reference", event.target.value)} helperText="Use a vault reference, never paste a password here." /></Grid>
