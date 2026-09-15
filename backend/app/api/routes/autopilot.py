@@ -3093,6 +3093,23 @@ async def update_autopilot_setup(
     stored["random_input_keys"] = sorted(key for key, value in prior_decisions.items() if value == "random")
     stored["updated_at"] = datetime.now(timezone.utc).isoformat()
     profile = _setup_profile(job_id, stored, analysis, discovery)
+    # Keep checkpoint diagnostics useful without ever logging submitted
+    # values. This makes a save-versus-resume handoff observable in production
+    # and distinguishes a user-facing approval gate from a persistence error.
+    pending = [
+        item for item in [*(profile.input_requests or []), *(profile.runtime_input_requests or [])]
+        if item.status == "pending"
+    ]
+    logger.info(
+        "Autopilot setup checkpoint saved job_id=%s submitted_count=%s submitted_keys=%s "
+        "pending_count=%s pending_categories=%s auth_approved=%s",
+        job_id,
+        len(payload.input_submissions or []),
+        sorted(decisions.keys()),
+        len(pending),
+        sorted({item.category for item in pending}),
+        profile.safe_authentication_approved,
+    )
     try:
         record.setup_profile = profile.model_dump(mode="json")
         await db.commit()
