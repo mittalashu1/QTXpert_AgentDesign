@@ -14,6 +14,7 @@ from app.schemas.autopilot import (
     AutopilotDiscoveryResult,
     AutopilotExecutionRequest,
     AutopilotInputRequest,
+    AutopilotSavedInput,
     AutopilotSetupProfile,
     AutopilotSuiteResult,
     AutopilotSuiteTestResult,
@@ -38,7 +39,7 @@ from app.services.autopilot import (
     build_surface_key,
     normalize_surface_identity,
 )
-from app.services.autopilot_ir import AutopilotIRCompiler
+from app.services.autopilot_ir import AutopilotIRCompiler, credential_value_available
 from app.services.autopilot_context import (
     DEFAULT_AUTOPILOT_CONTEXT,
     DEFAULT_AUTOPILOT_PROFILE_ID,
@@ -368,6 +369,60 @@ def test_pending_auth_guard_includes_compact_plan_credential_bundle():
     )
 
     assert _pending_runtime_auth_requests(setup) == [bundle]
+
+
+def test_legacy_signin_bundle_label_satisfies_runtime_credentials():
+    setup = AutopilotSetupProfile(
+        job_id="22222222-2222-2222-2222-222222222222",
+        input_decisions={"credential_reference": "provide"},
+        saved_inputs=[AutopilotSavedInput(
+            key="credential_reference",
+            label="Sign-in · User ID / email + Password",
+            category="credential",
+            decision="provide",
+            has_value=True,
+            save_for_reuse=True,
+            source="runtime",
+        )],
+        runtime_input_requests=[AutopilotInputRequest(
+            key="runtime_username",
+            label="Sign-in · Username · User ID / email",
+            category="credential",
+            reason="Observed sign-in field",
+            source="runtime",
+            input_hint="username",
+            status="pending",
+        )],
+    )
+
+    assert credential_value_available(setup) is True
+
+
+def test_generic_credential_reference_label_does_not_satisfy_runtime_credentials():
+    setup = AutopilotSetupProfile(
+        job_id="33333333-3333-3333-3333-333333333333",
+        input_decisions={"credential_reference": "provide"},
+        saved_inputs=[AutopilotSavedInput(
+            key="credential_reference",
+            label="Credential set reference",
+            category="credential",
+            decision="provide",
+            has_value=True,
+            save_for_reuse=True,
+            source="plan",
+        )],
+        runtime_input_requests=[AutopilotInputRequest(
+            key="runtime_username",
+            label="Sign-in · Username · User ID / email",
+            category="credential",
+            reason="Observed sign-in field",
+            source="runtime",
+            input_hint="username",
+            status="pending",
+        )],
+    )
+
+    assert credential_value_available(setup) is False
 
 
 def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
