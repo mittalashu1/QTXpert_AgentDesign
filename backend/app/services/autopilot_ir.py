@@ -171,6 +171,30 @@ _INPUT_REQUEST_GUIDANCE: dict[str, dict[str, str | bool | None]] = {
 }
 
 
+def is_credential_bundle_label(label: object) -> bool:
+    """Recognise current and legacy labels for a real sign-in bundle.
+
+    A few jobs were created before the checkpoint copy was shortened to
+    ``UAT sign-in credentials``.  Those rows still contain the same encrypted
+    User ID/password bundle, but their display label was
+    ``Sign-in · User ID / email + Password``.  Treat only labels that describe
+    both sides of that pair as equivalent; a generic ``credential reference``
+    must remain a pending checkpoint until the user supplies a value.
+    """
+    normalized = " ".join(str(label or "").strip().casefold().replace("·", " ").split())
+    current = " ".join(
+        _INPUT_REQUEST_METADATA["credential reference"][1]
+        .strip()
+        .casefold()
+        .split()
+    )
+    if normalized == current:
+        return True
+    has_sign_in = "sign in" in normalized or "sign-in" in normalized
+    has_identity = any(term in normalized for term in ("user id", "username", "email"))
+    return has_sign_in and has_identity and "password" in normalized
+
+
 def credential_value_available(setup: Optional[AutopilotSetupProfile]) -> bool:
     """Return whether an authenticated journey has usable sign-in setup.
 
@@ -184,7 +208,6 @@ def credential_value_available(setup: Optional[AutopilotSetupProfile]) -> bool:
     """
     if setup is None:
         return False
-    current_label = _INPUT_REQUEST_METADATA["credential reference"][1].strip().casefold()
     decisions = getattr(setup, "input_decisions", {}) or {}
     saved_inputs = list(getattr(setup, "saved_inputs", []) or [])
 
@@ -197,7 +220,7 @@ def credential_value_available(setup: Optional[AutopilotSetupProfile]) -> bool:
             for item in saved_inputs
             if item.key == "credential_reference"
             and item.has_value
-            and str(item.label or "").strip().casefold() == current_label
+            and is_credential_bundle_label(item.label)
         ),
         None,
     )
