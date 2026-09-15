@@ -68,6 +68,7 @@ from app.services.autopilot_ir import (
     AutopilotIRCompiler,
     build_input_requests,
     credential_value_available,
+    is_credential_bundle_label,
     is_blocking_input_request,
 )
 from app.services.autopilot_report import build_test_audit_report
@@ -1338,14 +1339,13 @@ async def _setup_with_input_metadata(
     # them back into the active setup: the current flow must explicitly show
     # the UAT User ID/email + Password fields (or a freshly supplied vault
     # reference) before authenticated cases can continue.
-    current_credential_label = "UAT sign-in credentials"
     active_metadata = [
         item
         for item in metadata
         if not (
             item.key == "credential_reference"
             and not str(profile.credential_reference or "").strip()
-            and str(item.label or "").strip().casefold() != current_credential_label.casefold()
+            and not is_credential_bundle_label(item.label)
         )
     ]
     raw = profile.model_dump(mode="json")
