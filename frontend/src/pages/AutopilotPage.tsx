@@ -1355,6 +1355,23 @@ export default function AutopilotPage() {
       setSetupOpen(true);
       return;
     }
+    // Authentication permission is intentionally separate from the secret
+    // itself. Do not translate an unchecked switch into "Skip" and resume a
+    // journey that will immediately rediscover the same login screen. The
+    // credentials may already be encrypted in the checkpoint store; ask for
+    // the explicit approval in this dialog instead of creating a loop.
+    const approvalCheckpointPending = [...checkpointRequestMap.values()].some(
+      (request) => request.category === "approval"
+        && request.key === "safe_authentication_approved"
+        && request.status === "pending",
+    );
+    if (approvalCheckpointPending && !setupDraft.safe_authentication_approved) {
+      setError("Your sign-in is saved securely. Turn on ‘Approve safe, non-transactional sign-in’ to continue, or close this checkpoint to leave authenticated cases pending.");
+      const step = [...checkpointRequestMap.keys()].indexOf("safe_authentication_approved");
+      if (step >= 0) setCheckpointStep(step);
+      setSetupOpen(true);
+      return;
+    }
     setSetupBusy(true); setError("");
     try {
       const payload = {
@@ -1415,14 +1432,43 @@ export default function AutopilotPage() {
         (item) => item.category === "approval" && item.key === "safe_authentication_approved",
       );
       setSetupDraft(response.data);
-      setInputDrafts(buildInputDrafts(response.data));
+      // The API never returns credential values. Keep any values the user has
+      // just entered in memory while the server is asking for the separate
+      // approval decision, so a partial save cannot look like a failed save
+      // or force the user to type the credentials again. Values are discarded
+      // when the dialog closes or the target changes and are never persisted
+      // in React state beyond this active checkpoint.
+      const nextInputDrafts = buildInputDrafts(response.data);
+      if (responsePendingAuth) {
+        const responseRequests = new Map(
+          [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])]
+            .map((item) => [item.key, item]),
+        );
+        for (const [key, draft] of Object.entries(inputDrafts)) {
+          const request = responseRequests.get(key);
+          if (!request?.credential_bundle || draft.decision !== "provide") continue;
+          if (!draft.username.trim() && !draft.password) continue;
+          nextInputDrafts[key] = {
+            ...(nextInputDrafts[key] || { ...draft, random_spec: { ...draft.random_spec } }),
+            decision: "provide",
+            username: draft.username,
+            password: draft.password,
+            save_for_reuse: draft.save_for_reuse,
+          };
+        }
+      }
+      setInputDrafts(nextInputDrafts);
       if (responsePendingAuth || responsePendingPermission || (Boolean(discovery) && pending.length > 0 && !priorAuthCheckpoint)) {
         // A discovered sign-in (or a later discovered field) is a hard
         // checkpoint. Keep the dialog open when only part of it was supplied.
         const firstPending = [...(response.data.input_requests || []), ...(response.data.runtime_input_requests || [])].findIndex(isBlockingCheckpoint);
         setCheckpointStep(firstPending >= 0 ? firstPending : 0);
         setSetupDraft((current) => ({ ...current, input_requests: response.data.input_requests || [], missing_fields: response.data.missing_fields }));
-        setContextNotice(`${pending.length} setup item${pending.length === 1 ? "" : "s"} still required. Complete the highlighted checkpoint inputs to continue.`);
+        setContextNotice(
+          responsePendingPermission && !responsePendingAuth
+            ? "Sign-in saved securely. Approve safe, non-transactional sign-in below to continue."
+            : `${pending.length} setup item${pending.length === 1 ? "" : "s"} still required. Complete the highlighted checkpoint inputs to continue.`,
+        );
         return;
       }
       if (allPending.length > 0) {
@@ -2365,6 +2411,7 @@ export default function AutopilotPage() {
             {activeCheckpointSaved?.save_for_reuse && <Alert severity="success" sx={{ mt: 1.25 }}>A saved encrypted value exists for this field. Choose “Reuse saved” to use it without revealing it.</Alert>}
             {activeCheckpointRequest.category === "approval" ? <Alert severity="info" sx={{ mt: 1.5 }}>
               <Typography variant="body2" fontWeight={700}>Authentication permission</Typography>
+              {(setupDraft.saved_inputs || []).some((item) => item.key === "credential_reference" && item.has_value) && <Typography variant="body2" sx={{ mt: .25 }}>Your User ID and password are already saved encrypted for this run. You do not need to enter them again.</Typography>}
               <Typography variant="body2" sx={{ mt: .25 }}>Allow Autopilot to sign in to the approved non-production environment. Payments, OTP submission and destructive actions remain blocked.</Typography>
               <FormControlLabel
                 control={<Switch checked={setupDraft.safe_authentication_approved && activeCheckpointDraft.decision !== "skip"} onChange={(event) => {
