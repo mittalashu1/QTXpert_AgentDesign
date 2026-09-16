@@ -1149,6 +1149,12 @@ def _setup_profile(
                 ),
                 None,
             )
+            # A saved bundle is already validated as containing both the
+            # non-production user ID/email and password. Runtime discovery
+            # can still return a field-level credential (especially after an
+            # older job is resumed), so carry that durable decision onto the
+            # compact user-facing bundle instead of recreating it as pending.
+            credential_bundle_available = credential_value_available(normalized_setup)
             # Keep the single user-facing credential bundle, but carry the
             # location of the *observed* sign-in form onto it.  The compiler
             # intentionally creates ``credential_reference`` at plan level;
@@ -1182,8 +1188,8 @@ def _setup_profile(
                         for required in item.required_for
                     }),
                     sensitive=True,
-                    status="pending",
-                    reference_present=False,
+                    status="provided" if credential_bundle_available else "pending",
+                    reference_present=credential_bundle_available,
                     source="runtime",
                     question="Enter the non-production User ID/email and password for the account Autopilot should use to sign in.",
                     placeholder="Enter the UAT User ID/email and password in the fields below",
@@ -1202,6 +1208,8 @@ def _setup_profile(
                     "screen_id": primary_runtime_credential.screen_id,
                     "control_id": primary_runtime_credential.control_id,
                     "field_type": "credential",
+                    "status": "provided" if credential_bundle_available else "pending",
+                    "reference_present": credential_bundle_available,
                     "input_hint": "username",
                     "locator": primary_runtime_credential.locator,
                     "question": "Enter the non-production User ID/email and password for the account Autopilot should use to sign in.",
