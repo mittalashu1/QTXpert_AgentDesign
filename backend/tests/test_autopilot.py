@@ -425,6 +425,73 @@ def test_generic_credential_reference_label_does_not_satisfy_runtime_credentials
     assert credential_value_available(setup) is False
 
 
+def test_saved_bundle_clears_pending_runtime_credential_bundle_with_generic_hint():
+    analysis = AutopilotAnalysis(
+        job_id="44444444-4444-4444-4444-444444444444",
+        filename="investnation.apk",
+        sha256="b" * 64,
+        tests=[AutopilotTest(
+            id="QT-AUTO-FUNC-001",
+            suite="Functional",
+            title="Authenticated journey",
+            objective="Validate the authenticated journey",
+            requires_auth=True,
+            bucket="functional_positive",
+        )],
+    )
+    # Some older Android adapters labelled a credential control simply
+    # "Authentication", which yields a generic text hint. The saved bundle
+    # must still satisfy the username/password pair; only an explicit OTP
+    # request remains a separate gate.
+    credential_control = DiscoveredControl(
+        control_id="authentication",
+        semantic_label="Authentication",
+        class_name="android.widget.EditText",
+        clickable=False,
+        enabled=True,
+        input_capable=True,
+        input_kind="credential",
+        risk="review",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/auth", confidence=0.98)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-15T00:00:00+00:00",
+        finished_at="2026-09-15T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="test",
+        screens=[DiscoveredScreen(screen_id="login", fingerprint="c" * 64, controls=[credential_control])],
+    )
+    setup = _setup_profile(
+        analysis.job_id,
+        {
+            "safe_authentication_approved": True,
+            "input_decisions": {
+                "credential_reference": "provide",
+                "safe_authentication_approved": "provide",
+            },
+            "saved_inputs": [AutopilotSavedInput(
+                key="credential_reference",
+                label="UAT sign-in credentials",
+                category="credential",
+                decision="provide",
+                has_value=True,
+                save_for_reuse=True,
+                source="runtime",
+            ).model_dump(mode="json")],
+        },
+        analysis,
+        discovery,
+    )
+
+    bundle = next(item for item in setup.input_requests if item.key == "credential_reference")
+    assert bundle.status == "provided"
+    assert bundle.reference_present is True
+    assert _pending_runtime_auth_requests(setup) == []
+
+
 def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
     service = _service(tmp_path)
     baseline = service._build_deterministic_tests({"permissions": []})
