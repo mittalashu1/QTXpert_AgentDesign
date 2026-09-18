@@ -586,34 +586,62 @@ class AutopilotSuiteService:
         if not package:
             return
         # A hosted device can preserve the app's navigation state even when a
-        # new session is created with ``noReset=false``.  Replayable runtime
+        # new session is created with noReset=false. Replayable runtime
         # cases must start from the same launch state that Discovery observed,
         # otherwise a locator from the first screen is searched on a later
         # screen and is reported as a misleading NoSuchElementException.
         resetter = getattr(driver, "reset", None)
+        provider_reset_succeeded = False
         if callable(resetter):
             try:
                 resetter()
+                provider_reset_succeeded = True
                 time.sleep(1.8)
-                # A successful reset is itself the provider's contract. Some
-                # drivers do not expose package identity immediately (or at
-                # all), so an ``unknown`` state must not send us into a
-                # second, unsupported lifecycle call.
-                if expected_package_state(driver, package) is not False:
-                    return
             except Exception:
                 # BrowserStack and some local providers do not expose the
                 # optional reset endpoint. Fall back to the portable lifecycle
                 # sequence below.
                 pass
+
+        # A number of hosted Android drivers implement reset as a session
+        # reset but keep the last activity/view in the foreground. That makes
+        # a locator observed on the discovery root disappear on the next case
+        # and is reported as a misleading NoSuchElementException. Always use
+        # the portable terminate/activate pair when it is available, even
+        # after a provider reset, so every replay starts at a cold app entry
+        # point. If a provider restricts either lifecycle call, retain the
+        # successful reset and continue rather than turning capability limits
+        # into a suite failure.
+        terminator = getattr(driver, "terminate_app", None)
+        activator = getattr(driver, "activate_app", None)
+        if callable(terminator) and callable(activator):
+            try:
+                terminator(package)
+                time.sleep(0.5)
+                activator(package)
+                time.sleep(2.0)
+                if expected_package_state(driver, package) is not False:
+                    return
+            except Exception:
+                if provider_reset_succeeded and expected_package_state(driver, package) is not False:
+                    return
+
+        # A provider reset is still preferable to an unsupported lifecycle
+        # sequence. Some drivers do not expose package identity immediately;
+        # an unknown state must not trigger a second unsupported call.
+        if provider_reset_succeeded and expected_package_state(driver, package) is not False:
+            return
         try:
-            driver.terminate_app(package)
+            if not callable(terminator):
+                driver.terminate_app(package)
             time.sleep(0.5)
-            driver.activate_app(package)
+            if not callable(activator):
+                driver.activate_app(package)
             time.sleep(2.0)
         except Exception:
-            # Some remote providers restrict lifecycle APIs; if the target app is
-            # already foreground, continuing is safer than failing the whole suite.
+            # Some remote providers restrict lifecycle APIs; if the target app
+            # is already foreground, continuing is safer than failing the whole
+            # suite.
             if expected_package_state(driver, package) is not True:
                 raise
 
