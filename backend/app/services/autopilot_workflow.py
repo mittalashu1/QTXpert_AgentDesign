@@ -66,7 +66,10 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "execution_ready": frozenset({"running", "exploring", "failed"}),
     "running": frozenset({"completed", "partial", "blocked", "failed", "execution_ready"}),
     "completed": frozenset({"plan_pending_review", "exploring", "execution_ready"}),
-    "partial": frozenset({"exploring", "execution_ready", "running", "plan_pending_review"}),
+    # A partially completed legacy run can be reopened from the report's
+    # explicit "Approve & discover" action. Treat that as a valid resumable
+    # gate instead of surfacing an invalid partial -> plan_approved error.
+    "partial": frozenset({"exploring", "execution_ready", "running", "plan_pending_review", "plan_approved"}),
     "blocked": frozenset({"exploring", "execution_ready", "plan_pending_review"}),
     "failed": frozenset({"preflight", "context_ready", "plan_pending_review", "exploring"}),
 }
