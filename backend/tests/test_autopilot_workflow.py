@@ -75,6 +75,8 @@ def _analysis() -> AutopilotAnalysis:
 
 def test_phase_transitions_are_explicit_and_idempotent():
     assert transition_phase("draft", "preflight") == "preflight"
+    assert transition_phase("draft", "cases_pending_review") == "cases_pending_review"
+    assert transition_phase("draft", "blocked") == "blocked"
     assert transition_phase("cases_pending_review", "cases_approved") == "cases_approved"
     assert transition_phase("cases_approved", "cases_approved") == "cases_approved"
 
