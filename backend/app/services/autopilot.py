@@ -18,6 +18,8 @@ import plistlib
 import re
 import shutil
 import socket
+import struct
+import subprocess
 import threading
 import time
 import uuid
@@ -33,6 +35,9 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.database.models.autopilot_job import AutopilotJob
+from app.database.models.autopilot_plan import AutopilotPlan
+from app.database.models.autopilot_application_map import AutopilotApplicationMap as AutopilotApplicationMapRecord
+from app.database.models.autopilot_context_source import AutopilotContextSource
 from app.database.session import AsyncSessionLocal
 from app.llm.base import LLMMessage
 from app.llm.factory import get_llm_provider
@@ -46,15 +51,29 @@ from app.schemas.autopilot import (
     AutopilotTest,
     AutopilotScopeSource,
     AutopilotDiscoveryResult,
+    AutopilotApplicationMap,
+    AutopilotGenerationPlan,
     DiscoveredControl,
     DiscoveredScreen,
 )
-from app.services.appium_compat import safe_app_identity, safe_page_source, safe_quit
+from app.services.appium_compat import (
+    ProviderLifecycleUnavailable,
+    safe_app_identity,
+    safe_page_source,
+    safe_quit,
+    validate_target_surface,
+)
 from app.services.autopilot_context import default_context, get_profile, sanitize_target_url
 from app.services.autopilot_labels import input_probe_guidance, observed_journey_label, observed_page_label
 from app.services.autopilot_ir import is_blocking_input_request
 from app.services.autopilot_research import AutopilotResearchService
-from app.services.autopilot_scope import add_test_provenance, compile_scope, update_scope_with_discovery
+from app.services.autopilot_scope import add_test_provenance, annotate_scope_usage, compile_scope, update_scope_with_discovery
+from app.services.autopilot_workflow import (
+    build_application_map,
+    build_generation_plan,
+    phase_for_job,
+    transition_phase,
+)
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -124,7 +143,10 @@ def build_report_tab_key(surface_key: str | None, surface_version: int | None, j
 _ANALYSIS_SLOT = threading.BoundedSemaphore(1)
 _MAX_ARCHIVE_ENTRIES = 200_000
 _MAX_ARCHIVE_UNCOMPRESSED_BYTES = 4 * 1024 * 1024 * 1024
-_MAX_GENERATED_AUTOPILOT_TESTS = 100
+# AndroidManifest.xml is normally a small binary-XML entry even when the APK
+# itself is hundreds of megabytes.  Read only this bounded entry on the large
+# artifact path; never inflate the complete resource table in the web worker.
+_MAX_BINARY_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
 class _WebSurfaceParser(html.parser.HTMLParser):
@@ -556,12 +578,137 @@ class AutopilotPrototypeService:
                 record.apk_path = job.get("apk_path")
                 record.status = str(job.get("status", "uploaded"))
                 record.stage = str(job.get("stage", "queued"))
+                record.phase = str(job.get("phase") or phase_for_job(job))
                 record.progress = int(job.get("progress", 0))
                 record.error = job.get("error")
                 if "setup_profile" in job:
                     record.setup_profile = job.get("setup_profile")
+                if "plan" in job:
+                    record.plan = job.get("plan")
+                if "application_map" in job:
+                    record.application_map = job.get("application_map")
+                if "case_reviews" in job:
+                    record.case_reviews = job.get("case_reviews")
+                if "shared_generation_run_id" in job:
+                    shared_run_id = job.get("shared_generation_run_id")
+                    record.shared_generation_run_id = (
+                        uuid.UUID(str(shared_run_id)) if shared_run_id and _is_uuid(shared_run_id) else None
+                    )
                 if analysis is not _MISSING:
                     record.analysis = analysis
+                # Persist the bounded context-source index separately from the
+                # analysis JSON. It is safe to query by project and lets the
+                # UI distinguish used/unused evidence after a restart.
+                scope_payload = None
+                if isinstance(analysis, dict):
+                    scope_payload = analysis.get("scope")
+                elif analysis is not _MISSING and hasattr(analysis, "get"):
+                    scope_payload = analysis.get("scope")
+                if scope_payload is None and isinstance(job.get("analysis"), dict):
+                    scope_payload = job["analysis"].get("scope")
+                if isinstance(scope_payload, dict) and job.get("job_id"):
+                    sources = scope_payload.get("sources") or []
+                    await session.flush()
+                    seen_source_ids: set[str] = set()
+                    for raw_source in sources[:30]:
+                        if not isinstance(raw_source, dict):
+                            continue
+                        source_id = str(raw_source.get("source_id") or raw_source.get("reference") or raw_source.get("label") or "")[:80]
+                        if not source_id or source_id in seen_source_ids:
+                            continue
+                        seen_source_ids.add(source_id)
+                        source_record = await session.scalar(
+                            select(AutopilotContextSource).where(
+                                AutopilotContextSource.autopilot_job_id == record.id,
+                                AutopilotContextSource.source_id == source_id,
+                            )
+                        )
+                        retrieved_at = raw_source.get("retrieved_at")
+                        parsed_retrieved_at = None
+                        if retrieved_at:
+                            try:
+                                parsed_retrieved_at = datetime.fromisoformat(str(retrieved_at).replace("Z", "+00:00"))
+                            except (TypeError, ValueError):
+                                parsed_retrieved_at = None
+                        values = {
+                            "job_id": str(job["job_id"]),
+                            "owner_id": owner_id,
+                            "project_id": record.project_id,
+                            "kind": str(raw_source.get("kind") or "system")[:30],
+                            "label": str(raw_source.get("label") or "Context source")[:180],
+                            "reference": str(raw_source.get("reference") or "")[:500] or None,
+                            "summary": str(raw_source.get("summary") or "")[:2000],
+                            "confidence": float(raw_source.get("confidence", 0.5) or 0.5),
+                            "trust_level": str(raw_source.get("trust_level") or "medium")[:12],
+                            "observed": bool(raw_source.get("observed", False)),
+                            "used": bool(raw_source.get("used", False)),
+                            "influenced_plan_items": list(raw_source.get("influenced_plan_items") or [])[:50],
+                            "influenced_test_ids": list(raw_source.get("influenced_test_ids") or [])[:100],
+                            "retrieved_at": parsed_retrieved_at,
+                        }
+                        if source_record is None:
+                            session.add(AutopilotContextSource(
+                                autopilot_job_id=record.id,
+                                source_id=source_id,
+                                **values,
+                            ))
+                        else:
+                            for key, value in values.items():
+                                setattr(source_record, key, value)
+                # Keep individually queryable plan/map revisions in addition
+                # to the compact job snapshot used by legacy clients.
+                if job.get("plan"):
+                    await session.flush()
+                    plan_payload = dict(job["plan"])
+                    plan_version = int(plan_payload.get("version") or 1)
+                    plan_record = await session.scalar(
+                        select(AutopilotPlan).where(
+                            AutopilotPlan.autopilot_job_id == record.id,
+                            AutopilotPlan.version == plan_version,
+                        )
+                    )
+                    if plan_record is None:
+                        plan_record = AutopilotPlan(
+                            autopilot_job_id=record.id,
+                            job_id=str(job["job_id"]),
+                            owner_id=owner_id,
+                            project_id=record.project_id,
+                            version=plan_version,
+                            status=str(plan_payload.get("status") or "pending_review"),
+                            plan=plan_payload,
+                            generated_at=datetime.fromisoformat(
+                                str(plan_payload.get("generated_at") or datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00")
+                            ),
+                        )
+                        session.add(plan_record)
+                    else:
+                        plan_record.status = str(plan_payload.get("status") or plan_record.status)
+                        plan_record.plan = plan_payload
+                if job.get("application_map"):
+                    await session.flush()
+                    map_payload = dict(job["application_map"])
+                    map_version = int(map_payload.get("version") or 1)
+                    map_record = await session.scalar(
+                        select(AutopilotApplicationMapRecord).where(
+                            AutopilotApplicationMapRecord.autopilot_job_id == record.id,
+                            AutopilotApplicationMapRecord.version == map_version,
+                        )
+                    )
+                    if map_record is None:
+                        map_record = AutopilotApplicationMapRecord(
+                            autopilot_job_id=record.id,
+                            job_id=str(job["job_id"]),
+                            owner_id=owner_id,
+                            project_id=record.project_id,
+                            version=map_version,
+                            map=map_payload,
+                            generated_at=datetime.fromisoformat(
+                                str(map_payload.get("generated_at") or datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00")
+                            ),
+                        )
+                        session.add(map_record)
+                    else:
+                        map_record.map = map_payload
                 await session.commit()
 
         attempts = max(1, min(3, int(getattr(self.settings, "AUTOPILOT_DB_RETRY_ATTEMPTS", 2))))
@@ -609,6 +756,15 @@ class AutopilotPrototypeService:
                     "apk_path": record.apk_path,
                     "status": record.status,
                     "stage": record.stage,
+                    "phase": getattr(record, "phase", None) or phase_for_job({
+                        "status": record.status,
+                        "stage": record.stage,
+                    }),
+                    "shared_generation_run_id": (
+                        str(record.shared_generation_run_id)
+                        if getattr(record, "shared_generation_run_id", None)
+                        else None
+                    ),
                     "progress": record.progress,
                     "error": record.error,
                     "created_at": record.created_at.isoformat(),
@@ -616,6 +772,12 @@ class AutopilotPrototypeService:
                 }
                 if getattr(record, "setup_profile", None) is not None:
                     result["setup_profile"] = record.setup_profile
+                if getattr(record, "plan", None) is not None:
+                    result["plan"] = record.plan
+                if getattr(record, "application_map", None) is not None:
+                    result["application_map"] = record.application_map
+                if getattr(record, "case_reviews", None) is not None:
+                    result["case_reviews"] = record.case_reviews
                 if record.analysis is not None:
                     result["analysis"] = record.analysis
                 return result
@@ -784,6 +946,7 @@ class AutopilotPrototypeService:
             "apk_path": str(artifact_path),
             "status": "uploaded",
             "stage": "queued",
+            "phase": "draft",
             "progress": 5,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -852,6 +1015,7 @@ class AutopilotPrototypeService:
                 "apk_path": str(artifact_path),
                 "status": "uploaded",
                 "stage": "queued",
+                "phase": "draft",
                 "progress": 5,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -919,6 +1083,7 @@ class AutopilotPrototypeService:
             "apk_path": str(artifact_path),
             "status": "uploaded",
             "stage": "queued",
+            "phase": "draft",
             "progress": 5,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -964,6 +1129,7 @@ class AutopilotPrototypeService:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "uploaded",
             "stage": "queued",
+            "phase": "draft",
             "progress": 5,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -974,6 +1140,10 @@ class AutopilotPrototypeService:
     async def update_job(self, job_id: str, **changes: Any) -> Dict[str, Any]:
         path = self._job_dir(job_id) / "job.json"
         job = await self.load_job(job_id)
+        if "phase" in changes:
+            current_phase = str(job.get("phase") or phase_for_job(job))
+            changes["phase"] = transition_phase(current_phase, str(changes["phase"]))
+            changes["phase_updated_at"] = datetime.now(timezone.utc).isoformat()
         job.update(changes)
         job["updated_at"] = datetime.now(timezone.utc).isoformat()
         if path.parent.exists():
@@ -1099,6 +1269,23 @@ class AutopilotPrototypeService:
             checkpoint_stage=str(job.get("checkpoint_stage") or (analysis.checkpoint_stage if analysis else "queued")),
             checkpoint_message=job.get("checkpoint_message"),
             input_requests=input_requests,
+            phase=str(job.get("phase") or phase_for_job(job)),
+            phase_updated_at=job.get("phase_updated_at") or job.get("updated_at"),
+            generation_plan=(
+                AutopilotGenerationPlan.model_validate(job["plan"])
+                if isinstance(job.get("plan"), dict)
+                else (analysis.generation_plan if analysis else None)
+            ),
+            application_map=(
+                AutopilotApplicationMap.model_validate(job["application_map"])
+                if isinstance(job.get("application_map"), dict)
+                else (analysis.application_map if analysis else None)
+            ),
+            case_reviews={
+                str(key): str(value)
+                for key, value in (job.get("case_reviews") or {}).items()
+                if key and value
+            },
         )
 
     async def get_latest_job_status(self, owner_id: str) -> AutopilotJobStatus | None:
@@ -1180,6 +1367,7 @@ class AutopilotPrototypeService:
                 status="analyzing",
                 stage="fetching_website" if target_kind == "web" else "reading_mobile_artifact",
                 progress=15,
+                phase="preflight",
                 error=None,
             )
             await asyncio.wait_for(self.analyze(job_id), timeout=self.settings.AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS)
@@ -1554,7 +1742,7 @@ class AutopilotPrototypeService:
         ]
 
         coverage_counts: dict[str, int] = {}
-        for test in deduped[:_MAX_GENERATED_AUTOPILOT_TESTS]:
+        for test in deduped:
             coverage_counts[test.bucket] = coverage_counts.get(test.bucket, 0) + 1
         input_summary: list[str] = []
         auth_cases = sum(test.requires_auth for test in deduped)
@@ -1642,16 +1830,16 @@ class AutopilotPrototypeService:
                 )
                 or self._fallback_questions(metadata)
             ),
-            # Keep one bounded, auditable plan.  The runtime expansion pass
-            # below can add observed screen/control cases after discovery,
-            # but Autopilot never creates an unbounded case explosion.
-            tests=deduped[:_MAX_GENERATED_AUTOPILOT_TESTS],
+            # Keep every distinct, evidence-scoped case. Runtime expansion is
+            # finite because it is derived from the discovered screen/control
+            # graph; execution remains separately batchable.
+            tests=deduped,
             release_risks=enrichment.get("release_risks") or self._fallback_risks(metadata),
             warnings=metadata.get("warnings", []),
             capabilities=self._capabilities(metadata),
             coverage_counts=coverage_counts,
             generation_policy=[
-                f"Generate a bounded plan of at most {_MAX_GENERATED_AUTOPILOT_TESTS} cases",
+                "Generate every distinct evidence-scoped case supported by the target, runtime graph and selected scope",
                 "Cover functional positive/negative, UAT/SIT, UI/accessibility, platform and security guardrails when target evidence supports them",
                 "Keep setup-gated, destructive and unobserved behavior pending until the checkpoint and runtime evidence are supplied",
             ],
@@ -1663,8 +1851,33 @@ class AutopilotPrototypeService:
             document_analysis_run_id=document_analysis_run_id,
             scope=scope,
         )
+        # Make the plan a first-class, reviewable artifact.  The legacy stage
+        # remains compatible with existing clients, while the explicit phase
+        # tells newer clients that runtime exploration must be grounded in the
+        # generated scope rather than guessed from profile words.
+        plan = build_generation_plan(analysis)
+        compiled_scope = annotate_scope_usage(analysis.scope, plan)
+        analysis = analysis.model_copy(
+            update={
+                "phase": "plan_pending_review",
+                "generation_plan": plan,
+                "scope": compiled_scope,
+            }
+        )
+        try:
+            await self.update_job(job_id, phase="context_ready")
+            await self.update_job(
+                job_id,
+                phase="plan_pending_review",
+                plan=plan.model_dump(mode="json"),
+            )
+        except ValueError:
+            logger.info("Autopilot plan phase update skipped for legacy job_id=%s", job_id)
         await asyncio.to_thread(self._metadata_path(job_id).write_text, analysis.model_dump_json(indent=2), "utf-8")
-        await self._persist_job(job, analysis=analysis.model_dump(mode="json"))
+        persisted_job = await self.load_job(job_id)
+        persisted_job["phase"] = "plan_pending_review"
+        persisted_job["plan"] = plan.model_dump(mode="json")
+        await self._persist_job(persisted_job, analysis=analysis.model_dump(mode="json"))
         return analysis
 
     async def _analyze_web(self, target_url: str) -> Dict[str, Any]:
@@ -1832,6 +2045,395 @@ class AutopilotPrototypeService:
         except Exception as exc:  # pragma: no cover - corrupt archives/provider files
             return 0, f"{artifact_label} ZIP inventory was unavailable: {type(exc).__name__}"
 
+    @staticmethod
+    def _parse_binary_axml_manifest(payload: bytes) -> Dict[str, Any]:
+        """Extract launch identity and safe manifest facts from binary AXML.
+
+        Android packages store ``AndroidManifest.xml`` as a compact binary XML
+        document.  Parsing this one entry is cheap and bounded, while
+        Androguard's full resource-table parse can consume hundreds of MiB on
+        a release APK.  The parser intentionally returns only metadata needed
+        to launch and scope the target; it never evaluates resources or code.
+        """
+        if len(payload) < 8:
+            return {}
+
+        def u16(offset: int) -> int:
+            return struct.unpack_from("<H", payload, offset)[0]
+
+        def u32(offset: int) -> int:
+            return struct.unpack_from("<I", payload, offset)[0]
+
+        def chunk_header(offset: int) -> tuple[int, int, int] | None:
+            if offset < 0 or offset + 8 > len(payload):
+                return None
+            chunk_type, header_size, chunk_size = struct.unpack_from("<HHI", payload, offset)
+            if header_size < 8 or chunk_size < header_size or offset + chunk_size > len(payload):
+                return None
+            return chunk_type, header_size, chunk_size
+
+        def decode_length8(offset: int) -> tuple[int, int] | None:
+            if offset >= len(payload):
+                return None
+            first = payload[offset]
+            if first & 0x80:
+                if offset + 1 >= len(payload):
+                    return None
+                return ((first & 0x7F) << 7) | (payload[offset + 1] & 0x7F), 2
+            return first, 1
+
+        def decode_length16(offset: int) -> tuple[int, int] | None:
+            if offset + 2 > len(payload):
+                return None
+            first = u16(offset)
+            if first & 0x8000:
+                if offset + 4 > len(payload):
+                    return None
+                return ((first & 0x7FFF) << 15) | (u16(offset + 2) & 0x7FFF), 4
+            return first, 2
+
+        def parse_string_pool(offset: int, header_size: int, chunk_size: int) -> list[str]:
+            # ResStringPool_header: stringCount, styleCount, flags,
+            # stringsStart, stylesStart.
+            if header_size < 28 or offset + 28 > len(payload):
+                return []
+            string_count, _style_count, flags, strings_start, _styles_start = struct.unpack_from(
+                "<5I", payload, offset + 8
+            )
+            # A corrupt manifest must not turn a bounded parser into an
+            # allocation primitive.
+            if string_count > 200_000 or offset + 28 + string_count * 4 > len(payload):
+                return []
+            offsets = [u32(offset + 28 + index * 4) for index in range(string_count)]
+            string_base = offset + strings_start
+            chunk_end = min(len(payload), offset + chunk_size)
+            utf8 = bool(flags & 0x100)
+            values: list[str] = []
+            for relative in offsets:
+                start = string_base + relative
+                if start < string_base or start >= chunk_end:
+                    values.append("")
+                    continue
+                try:
+                    if utf8:
+                        decoded_length = decode_length8(start)
+                        if decoded_length is None:
+                            values.append("")
+                            continue
+                        _utf16_length, first_size = decoded_length
+                        byte_length = decode_length8(start + first_size)
+                        if byte_length is None:
+                            values.append("")
+                            continue
+                        length, second_size = byte_length
+                        data_start = start + first_size + second_size
+                        raw = payload[data_start : data_start + length]
+                        values.append(raw.decode("utf-8", errors="replace"))
+                    else:
+                        decoded_length = decode_length16(start)
+                        if decoded_length is None:
+                            values.append("")
+                            continue
+                        length, length_size = decoded_length
+                        data_start = start + length_size
+                        raw = payload[data_start : data_start + length * 2]
+                        values.append(raw.decode("utf-16le", errors="replace"))
+                except (IndexError, UnicodeError, struct.error):
+                    values.append("")
+            return values
+
+        root = chunk_header(0)
+        if root is None or root[0] != 0x0003:
+            return {}
+
+        strings: list[str] = []
+        namespace_uris: dict[int, str] = {}
+        stack: list[dict[str, Any]] = []
+        activity_records: list[dict[str, Any]] = []
+        package_name: str | None = None
+        app_name: str | None = None
+        version_name: str | None = None
+        version_code: str | None = None
+        min_sdk: str | None = None
+        target_sdk: str | None = None
+        debuggable: bool | None = None
+        permissions: set[str] = set()
+        services: set[str] = set()
+        receivers: set[str] = set()
+        activities: set[str] = set()
+
+        def string_at(index: int) -> str:
+            return strings[index] if 0 <= index < len(strings) else ""
+
+        def attr_value(index: int, raw_index: int, value_type: int, value_data: int) -> str | None:
+            raw = string_at(raw_index)
+            if raw:
+                return raw
+            if value_type == 0x03:  # TYPE_STRING
+                return string_at(value_data) or None
+            if value_type == 0x12:  # TYPE_INT_BOOLEAN
+                return "true" if value_data else "false"
+            if value_type in {0x10, 0x11, 0x1D, 0x1E, 0x1F}:
+                return str(value_data)
+            return None
+
+        def parse_attributes(offset: int, attribute_start: int, attribute_size: int, count: int) -> dict[str, str]:
+            if attribute_size < 20 or count < 0 or count > 512:
+                return {}
+            attrs: dict[str, str] = {}
+            # ``attributeStart`` is relative to ResXMLTree_attrExt (which
+            # begins after the 16-byte ResXMLTree_node), not to the chunk
+            # header itself.  In normal manifests this is 20, yielding the
+            # first attribute at offset + 36.
+            base = offset + 16 + attribute_start
+            for index in range(count):
+                position = base + index * attribute_size
+                if position + 20 > len(payload) or position + 20 > offset + (chunk_header(offset) or (0, 0, 0))[2]:
+                    break
+                try:
+                    _namespace, name_index, raw_index = struct.unpack_from("<III", payload, position)
+                    value_size = u16(position + 12)
+                    value_type = payload[position + 15]
+                    value_data = u32(position + 16)
+                    # ``value_size`` is normally 8; reject malformed entries
+                    # rather than reading beyond the attribute record.
+                    if value_size < 8:
+                        continue
+                    name = string_at(name_index)
+                    value = attr_value(name_index, raw_index, value_type, value_data)
+                    if name and value is not None:
+                        attrs[name] = value
+                except (IndexError, struct.error):
+                    break
+            return attrs
+
+        def qualify_component(value: str | None) -> str | None:
+            if not value:
+                return None
+            value = value.strip()
+            if value.startswith(".") and package_name:
+                return f"{package_name}{value}"
+            if "." not in value and package_name:
+                return f"{package_name}.{value}"
+            return value
+
+        offset = root[1]
+        # A binary XML document is a sequence of chunks.  Limit the walk to
+        # the declared root size even when the file has trailing bytes.
+        root_end = min(len(payload), root[2])
+        while offset + 8 <= root_end:
+            header = chunk_header(offset)
+            if header is None:
+                break
+            chunk_type, header_size, chunk_size = header
+            if chunk_type == 0x0001:  # RES_STRING_POOL_TYPE
+                strings = parse_string_pool(offset, header_size, chunk_size)
+            elif chunk_type == 0x0100 and offset + 24 <= root_end:  # START_NAMESPACE
+                try:
+                    prefix_index = u32(offset + 16)
+                    uri_index = u32(offset + 20)
+                    namespace_uris[prefix_index] = string_at(uri_index)
+                except struct.error:
+                    pass
+            elif chunk_type == 0x0102 and offset + 28 <= root_end:  # START_ELEMENT
+                try:
+                    _line, _comment, _namespace, name_index = struct.unpack_from("<4I", payload, offset + 8)
+                    attribute_start, attribute_size, attribute_count, _id, _class, _style = struct.unpack_from(
+                        "<6H", payload, offset + 24
+                    )
+                    name = string_at(name_index)
+                    attrs = parse_attributes(offset, attribute_start, attribute_size, attribute_count)
+                    record: dict[str, Any] = {"name": name, "attrs": attrs, "main": False, "launcher": False}
+
+                    if name == "manifest":
+                        package_name = attrs.get("package") or package_name
+                        version_name = attrs.get("versionName") or version_name
+                        version_code = attrs.get("versionCode") or version_code
+                    elif name == "application":
+                        app_name = attrs.get("label") or app_name
+                        if "debuggable" in attrs:
+                            debuggable = attrs["debuggable"].casefold() == "true"
+                    elif name == "uses-sdk":
+                        min_sdk = attrs.get("minSdkVersion") or min_sdk
+                        target_sdk = attrs.get("targetSdkVersion") or target_sdk
+                    elif name == "uses-permission":
+                        permission = attrs.get("name")
+                        if permission:
+                            permissions.add(permission)
+                    elif name in {"activity", "activity-alias"}:
+                        component = qualify_component(attrs.get("name"))
+                        if component:
+                            activities.add(component)
+                            record["component"] = component
+                            activity_records.append(record)
+                    elif name == "service":
+                        component = qualify_component(attrs.get("name"))
+                        if component:
+                            services.add(component)
+                    elif name == "receiver":
+                        component = qualify_component(attrs.get("name"))
+                        if component:
+                            receivers.add(component)
+
+                    # ``action`` and ``category`` belong to the nearest
+                    # activity's intent-filter; mark the launch activity while
+                    # walking the nested element stack.
+                    if name == "action" and attrs.get("name") == "android.intent.action.MAIN":
+                        for parent in reversed(stack):
+                            if parent.get("name") in {"activity", "activity-alias"}:
+                                parent["main"] = True
+                                break
+                    elif name == "category" and attrs.get("name") == "android.intent.category.LAUNCHER":
+                        for parent in reversed(stack):
+                            if parent.get("name") in {"activity", "activity-alias"}:
+                                parent["launcher"] = True
+                                break
+                    stack.append(record)
+                except (IndexError, struct.error):
+                    break
+            elif chunk_type == 0x0103:  # END_ELEMENT
+                if stack:
+                    stack.pop()
+            offset += chunk_size
+
+        main_activity = next(
+            (record.get("component") for record in activity_records if record.get("main") and record.get("launcher")),
+            next(iter(activities), None),
+        )
+        result: Dict[str, Any] = {
+            "app_name": app_name,
+            "package_name": package_name,
+            "version_name": version_name,
+            "version_code": version_code,
+            "min_sdk": min_sdk,
+            "target_sdk": target_sdk,
+            "main_activity": main_activity,
+            "activities": sorted(activities),
+            "services": sorted(services),
+            "receivers": sorted(receivers),
+            "permissions": sorted(permissions),
+            "debuggable": debuggable,
+        }
+        return {key: value for key, value in result.items() if value not in (None, [], "")}
+
+    @classmethod
+    def _bounded_apk_manifest_metadata(cls, apk_path: Path) -> Dict[str, Any]:
+        """Read only ``AndroidManifest.xml`` and parse it without full APK IO."""
+        try:
+            with zipfile.ZipFile(apk_path) as archive:
+                info = archive.getinfo("AndroidManifest.xml")
+                if info.file_size <= 0 or info.file_size > _MAX_BINARY_MANIFEST_BYTES:
+                    return {}
+                payload = archive.read(info)
+            return cls._parse_binary_axml_manifest(payload)
+        except (KeyError, OSError, ValueError, zipfile.BadZipFile, RuntimeError):
+            return {}
+
+    @staticmethod
+    def _lightweight_apk_metadata(apk_path: Path) -> Dict[str, Any]:
+        """Extract only launch metadata without parsing the resource table.
+
+        Large release APKs can exceed the memory budget of Androguard's full
+        resource parser.  ``aapt2``/``aapt``/``apkanalyzer`` are much cheaper
+        manifest readers when an Android SDK tool is present in the worker.
+        The helper is optional and bounded: a missing tool or a malformed
+        output simply returns an empty mapping, leaving the existing safe ZIP
+        inventory fallback in place.
+        """
+        commands: list[list[str]] = []
+        for binary, args in (
+            ("apkanalyzer", ["manifest", "print"]),
+            ("aapt2", ["dump", "badging"]),
+            ("aapt", ["dump", "badging"]),
+        ):
+            resolved = shutil.which(binary)
+            if resolved:
+                commands.append([resolved, *args, str(apk_path)])
+        if not commands:
+            return {}
+        output = ""
+        for command in commands:
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            output = (completed.stdout or "")[:2_000_000]
+            if output.strip():
+                break
+        if not output.strip():
+            return {}
+
+        def first(patterns: Iterable[str]) -> str | None:
+            for pattern in patterns:
+                match = re.search(pattern, output, flags=re.IGNORECASE)
+                if match and match.group(1).strip():
+                    return match.group(1).strip()
+            return None
+
+        metadata: Dict[str, Any] = {
+            "activities": [],
+            "services": [],
+            "receivers": [],
+            "permissions": [],
+        }
+        metadata["package_name"] = first(
+            [
+                r"package:\s+name=['\"]([^'\"]+)['\"]",
+                r"<manifest[^>]+\b(?:android:)?package=['\"]([^'\"]+)['\"]",
+            ]
+        )
+        metadata["version_name"] = first(
+            [r"versionName=['\"]([^'\"]+)['\"]", r"android:versionName=['\"]([^'\"]+)['\"]"]
+        )
+        metadata["version_code"] = first(
+            [r"versionCode=['\"]([^'\"]+)['\"]", r"android:versionCode=['\"]([^'\"]+)['\"]"]
+        )
+        metadata["main_activity"] = first(
+            [
+                r"launchable-activity:\s+name=['\"]([^'\"]+)['\"]",
+                r"<activity[^>]+android:name=['\"]([^'\"]+)['\"][^>]*>[^<]*(?:MAIN|LAUNCHER)",
+            ]
+        )
+        metadata["app_name"] = first(
+            [r"application-label(?:-[^:]+)?:['\"]([^'\"]+)['\"]", r"<application[^>]+android:label=['\"]([^'\"]+)['\"]"]
+        )
+        permissions = re.findall(
+            r"(?:uses-permission[^>]+(?:android:)?name=|uses-permission:\s+name=)['\"]?([^'\"\s>]+)",
+            output,
+            flags=re.IGNORECASE,
+        )
+        metadata["permissions"] = sorted({item.strip() for item in permissions if item.strip()})
+        metadata["activities"] = sorted(
+            {
+                item.strip()
+                for item in re.findall(r"<activity(?:-alias)?[^>]+(?:android:)?name=['\"]([^'\"]+)", output, flags=re.IGNORECASE)
+                if item.strip()
+            }
+        )
+        metadata["services"] = sorted(
+            {
+                item.strip()
+                for item in re.findall(r"<service[^>]+(?:android:)?name=['\"]([^'\"]+)", output, flags=re.IGNORECASE)
+                if item.strip()
+            }
+        )
+        metadata["receivers"] = sorted(
+            {
+                item.strip()
+                for item in re.findall(r"<receiver[^>]+(?:android:)?name=['\"]([^'\"]+)", output, flags=re.IGNORECASE)
+                if item.strip()
+            }
+        )
+        debug = first([r"application-debuggable", r"(?:android:)?debuggable=['\"](true|false)['\"]"])
+        metadata["debuggable"] = debug.casefold() == "true" if debug else None
+        return {key: value for key, value in metadata.items() if value not in (None, [], "")}
+
     def _analyze_apk_sync(self, apk_path: Path) -> Dict[str, Any]:
         digest = hashlib.sha256()
         with apk_path.open("rb") as handle:
@@ -1860,6 +2462,14 @@ class AutopilotPrototypeService:
             result["file_count"] = file_count
             if warning:
                 result["warnings"].append(warning)
+            lightweight = self._lightweight_apk_metadata(apk_path)
+            bounded_manifest = self._bounded_apk_manifest_metadata(apk_path)
+            manifest_metadata = {**lightweight, **bounded_manifest}
+            if manifest_metadata:
+                result.update(manifest_metadata)
+                result["warnings"].append(
+                    "Manifest identity was recovered with a bounded binary/XML metadata reader; deep resource parsing remains skipped."
+                )
             return result
         # Inspect the central directory before invoking Androguard. This is
         # cheap compared with resource-table parsing and prevents a crafted
@@ -1906,6 +2516,14 @@ class AutopilotPrototypeService:
             result["warnings"].append(f"Deep APK parsing was partial: {type(exc).__name__}: {exc}")
             file_count, _ = self._safe_zip_inventory(apk_path, "APK")
             result["file_count"] = file_count
+            lightweight = self._lightweight_apk_metadata(apk_path)
+            bounded_manifest = self._bounded_apk_manifest_metadata(apk_path)
+            manifest_metadata = {**lightweight, **bounded_manifest}
+            if manifest_metadata:
+                result.update(manifest_metadata)
+                result["warnings"].append(
+                    "Manifest identity was recovered with a bounded binary/XML metadata reader after deep parsing was unavailable."
+                )
         return result
 
     def _build_deterministic_tests(self, meta: Dict[str, Any]) -> List[AutopilotTest]:
@@ -2152,7 +2770,11 @@ class AutopilotPrototypeService:
         if discovery is None or not discovery.screens:
             return analysis
 
-        screens = list(discovery.screens[:40])
+        # Runtime Discovery already bounds the screen/action graph at the
+        # provider boundary. Do not apply a second arbitrary case cap here;
+        # every observed screen and safe control must be represented in the
+        # report, even when that produces hundreds of cases.
+        screens = list(discovery.screens)
         screen_map = {screen.screen_id: screen for screen in screens}
         # Replay observed navigation from the launch screen for every case.
         # A label on a later screen is not reachable merely by launching again.
@@ -2161,7 +2783,11 @@ class AutopilotPrototypeService:
         while pending:
             source_id = pending.pop(0)
             for transition in discovery.transitions:
-                if transition.from_screen_id != source_id or transition.action != "tap" or transition.to_screen_id not in screen_map or transition.to_screen_id in paths:
+                if transition.from_screen_id != source_id or transition.action not in {"tap", "scroll"} or transition.to_screen_id not in screen_map or transition.to_screen_id in paths:
+                    continue
+                if transition.action == "scroll":
+                    paths[transition.to_screen_id] = [*paths[source_id], "Scroll down to reveal more content"]
+                    pending.append(transition.to_screen_id)
                     continue
                 control = next((item for item in screen_map[source_id].controls if item.control_id == transition.control_id and item.risk == "safe" and not item.input_capable), None)
                 if control and control.semantic_label:
@@ -2356,11 +2982,14 @@ class AutopilotPrototypeService:
                     )
                 )
 
+            # Keep every observed safe control in the compiled plan.  The old
+            # six-control slice silently hid functional journeys on dense
+            # screens and made the plan look complete when it was not.
             safe_controls = [
                 control
                 for control in controls
                 if control.clickable and not control.input_capable and control.risk == "safe"
-            ][:6]
+            ]
             for control in safe_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "safe control"
                 transition = next(
@@ -2413,7 +3042,10 @@ class AutopilotPrototypeService:
                     )
                 )
 
-            input_controls = [control for control in controls if control.input_capable][:4]
+            # Input coverage is evidence-scoped too; do not discard fields on
+            # forms with more than four controls.  Sensitive values remain
+            # checkpoint-gated and are never inferred from the UI.
+            input_controls = [control for control in controls if control.input_capable]
             for control in input_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "input field"
                 input_is_sensitive = control.input_kind == "credential"
@@ -2511,9 +3143,9 @@ class AutopilotPrototypeService:
                         )
                     )
 
-        # Round-robin category queues keep the first bounded page balanced;
-        # otherwise a large number of observed controls could crowd UAT/SIT
-        # cases out of the 100-case plan.
+        # Round-robin category queues keep the report readable while retaining
+        # every observed case. No category is truncated simply because the
+        # target has more than 100 cases.
         merged: list[AutopilotTest] = []
         seen_titles: set[str] = set()
         for test in [*analysis.tests]:
@@ -2522,9 +3154,9 @@ class AutopilotPrototypeService:
                 merged.append(test)
                 seen_titles.add(key)
         queue_order = list(queues.values())
-        while any(queue_order) and len(merged) < _MAX_GENERATED_AUTOPILOT_TESTS:
+        while any(queue_order):
             for queue in queue_order:
-                if not queue or len(merged) >= _MAX_GENERATED_AUTOPILOT_TESTS:
+                if not queue:
                     continue
                 test = queue.pop(0)
                 key = re.sub(r"\W+", " ", test.title.lower()).strip()
@@ -2544,8 +3176,7 @@ class AutopilotPrototypeService:
         ]
         expansion_note = (
             f"Runtime Discovery added {max(0, len(merged) - before)} observed-surface case(s); the plan now has "
-            f"{len(merged)} evidence-scoped case(s) across {len(screens)} observed screen(s) and is capped at "
-            f"{_MAX_GENERATED_AUTOPILOT_TESTS} cases."
+            f"{len(merged)} evidence-scoped case(s) across {len(screens)} observed screen(s); no artificial case-count cap is applied."
         )
         basis.append(expansion_note)
         observed_journeys: list[str] = []
@@ -2739,7 +3370,8 @@ class AutopilotPrototypeService:
                         "release_risks (array), tests (array). Generate a broad but evidence-scoped plan: "
                         "cover positive and negative functional paths, UAT acceptance, SIT/integration contracts, "
                         "UI visual/error states, accessibility, page-level navigation, resilience and security. "
-                        "Generate up to 50 distinct high-value cases when the artifact/context supports them; "
+                        "Return every distinct high-value case the supplied artifact/context can support; do not "
+                        "truncate a journey merely to fit a fixed case-count quota. "
                         "do not invent screens, workflows or business rules. During the initial static pass, emit only "
                         "safe public/platform baselines; do not create login, UAT, SIT, payment or business cases from "
                         "profile wording alone. Those cases are added after Runtime Discovery observes the corresponding "
@@ -2755,7 +3387,7 @@ class AutopilotPrototypeService:
             response = await provider.complete(messages, temperature=0.1, max_tokens=4200, response_format_json=True)
             data = json.loads(response.content)
             parsed_tests: list[AutopilotTest] = []
-            for index, raw in enumerate(data.get("tests", [])[:50], start=1):
+            for index, raw in enumerate(data.get("tests", []), start=1):
                 if not isinstance(raw, dict) or not raw.get("title"):
                     continue
                 priority = str(raw.get("priority", "medium")).lower()
@@ -3391,6 +4023,17 @@ class AutopilotPrototypeService:
             )
             current_package = identity.get("package")
             current_activity = identity.get("activity")
+            target_ready, target_reason, _ = validate_target_surface(
+                driver,
+                expected_package=expected_package,
+                page_source=page_source,
+            )
+            if not target_ready:
+                # A connected provider showing system UI or a different
+                # package is a lifecycle/attachment problem, not a product
+                # assertion failure. Keep the smoke result blocked with an
+                # actionable diagnostic and never report a false pass.
+                raise ProviderLifecycleUnavailable(target_reason)
             AutopilotPrototypeService._validate_runtime_state(
                 page_source,
                 current_package,

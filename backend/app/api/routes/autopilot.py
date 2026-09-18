@@ -20,14 +20,21 @@ from app.config import Settings, get_settings
 from app.database.models.autopilot_execution import AutopilotExecution
 from app.database.models.autopilot_input import AutopilotInputRecord
 from app.database.models.autopilot_job import AutopilotJob
+from app.database.models.autopilot_plan import AutopilotPlan
+from app.database.models.autopilot_application_map import AutopilotApplicationMap
+from app.database.models.autopilot_context_source import AutopilotContextSource
 from app.database.models.document_intelligence import DocumentAnalysisRun
 from app.database.models.execution import Defect, DefectStatus
+from app.database.models.test_case import TestCase
+from app.database.models.generation_run import GenerationRun, RunStatus
+from app.database.models.test_case import Priority, RiskLevel, Severity, TestCaseType
 from app.database.models.uploaded_asset import UploadedAsset
 from app.database.models.user import User
 from app.database.repositories.requirement_repository import ProjectRepository
 from app.database.session import AsyncSessionLocal, get_db_session
 from app.schemas.autopilot import (
     AutopilotAnalysis,
+    AutopilotApplicationMap as AutopilotApplicationMapSchema,
     AutopilotAnalysisRerunRequest,
     AutopilotAutomationBundle,
     AutopilotContextRequest,
@@ -41,11 +48,17 @@ from app.schemas.autopilot import (
     AutopilotJobStatus,
     AutopilotProviderStatus,
     AutopilotProfileOption,
+    AutopilotGenerationPlan,
+    AutopilotPlanUpdateRequest,
+    AutopilotCaseReviewUpdateRequest,
+    AutopilotCaseApprovalRequest,
+    AutopilotCaseLibraryResult,
     AutopilotReportDeletionResult,
     AutopilotResumeRequest,
     AutopilotSurface,
     AutopilotSetupProfile,
     AutopilotSetupUpdateRequest,
+    AutopilotScopeSource,
     AutopilotTestAuditReport,
     AutopilotSuiteRequest,
     AutopilotSuiteResult,
@@ -73,6 +86,14 @@ from app.services.autopilot_ir import (
 )
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
+from app.services.autopilot_workflow import (
+    build_application_map,
+    build_execution_control_payload,
+    build_generation_plan,
+    find_duplicate_cases,
+    phase_for_job,
+    transition_phase,
+)
 from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata, resolve_value
 from app.services.defect_logging import safe_target_reference, secret_safe_text
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
@@ -205,10 +226,10 @@ async def _prepare_resume_target(
         user = await db.scalar(select(User).where(User.id == owner_id))
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot owner was not found")
-        job = await _require_owned_job(service, job_id, user)
+        job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
         target_kind = str(job.get("target_kind") or "android")
         if target_kind != "web":
-            await _ensure_local_artifact(db, service, job_id, user)
+            await _ensure_local_artifact(db, service, job_id, user, owner_id=owner_id)
         return target_kind
 
 
@@ -689,12 +710,24 @@ async def _active_project(
     return project_id
 
 
-async def _require_owned_job(service: AutopilotPrototypeService, job_id: str, user: User):
+async def _require_owned_job(
+    service: AutopilotPrototypeService,
+    job_id: str,
+    user: User,
+    *,
+    owner_id: Optional[UUID] = None,
+):
+    """Load a job and verify ownership without refreshing an expired User row."""
     try:
         job = await service.load_job(job_id)
     except (FileNotFoundError, ValueError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot job not found")
-    if job.get("owner_id") != str(user.id):
+    # A previous rollback can expire the ORM instance supplied by the auth
+    # dependency.  Callers that cross a repository/DB boundary pass the
+    # immutable UUID captured at request entry; ordinary callers retain the
+    # existing behaviour.
+    expected_owner = owner_id if owner_id is not None else user.id
+    if job.get("owner_id") != str(expected_owner):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot job not found")
     return job
 
@@ -746,19 +779,21 @@ async def _ensure_local_artifact(
     service: AutopilotPrototypeService,
     job_id: str,
     user: User,
+    *,
+    owner_id: Optional[UUID] = None,
 ) -> Path:
     # R2 materialization releases the database session with a rollback before
     # copying a large object. Rollback expires ORM instances, so keep the
     # immutable owner id and never read ``user.id`` after that await.
-    owner_id = user.id
-    job = await _require_owned_job(service, job_id, user)
+    immutable_owner_id = owner_id or user.id
+    job = await _require_owned_job(service, job_id, user, owner_id=immutable_owner_id)
     if str(job.get("target_kind") or "android") == "web":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Website jobs do not have a mobile artifact.")
     path_value = job.get("apk_path")
     if path_value and Path(path_value).is_file():
         return Path(path_value)
 
-    record = await _safe_job_record(db, job_id, owner_id)
+    record = await _safe_job_record(db, job_id, immutable_owner_id)
     # The local manifest is deliberately the first durable fallback after a
     # Render restart.  Older rows can have the repository link in that
     # manifest even when the ORM row is briefly unavailable or was written by
@@ -780,11 +815,112 @@ async def _ensure_local_artifact(
 
     target = service.root / job_id / Path(job.get("filename") or "application.apk").name
     try:
-        await UploadRepositoryService.materialize(db, asset_id, owner_id, target, settings=service.settings)
+        await UploadRepositoryService.materialize(db, asset_id, immutable_owner_id, target, settings=service.settings)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored APK was not found")
     await service.update_job(job_id, apk_path=str(target))
     return target
+
+
+async def _refresh_mobile_analysis_identity(
+    service: AutopilotPrototypeService,
+    job_id: str,
+    analysis: Optional[AutopilotAnalysis],
+    artifact_path: Path,
+) -> Optional[AutopilotAnalysis]:
+    """Recover launch identity for legacy jobs before Runtime Discovery.
+
+    A job created by an older worker may have completed the 64 MB-safe APK
+    analysis without a package/activity because it only inventoried the ZIP.
+    Runtime Discovery cannot launch such a job deterministically and falls
+    back to the Android system navigation surface.  Re-read only the bounded
+    manifest (or the normal lightweight parser for small builds), fill missing
+    identity fields, and persist the refreshed analysis before Appium is
+    contacted.  Existing tests, context, documents and provenance are kept
+    intact; this helper never reads or writes checkpoint values.
+    """
+    if analysis is None or not artifact_path.is_file():
+        return analysis
+    if analysis.target_kind == "web" or (analysis.package_name and analysis.main_activity):
+        return analysis
+
+    try:
+        analyzer = (
+            service._analyze_ipa_sync
+            if artifact_path.suffix.lower() == ".ipa"
+            else service._analyze_apk_sync
+        )
+        metadata = await asyncio.to_thread(analyzer, artifact_path)
+    except Exception as exc:  # pragma: no cover - corrupt/removed repository asset
+        logger.warning(
+            "Autopilot legacy identity refresh skipped job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+        return analysis
+    if not metadata:
+        return analysis
+
+    # Never overwrite a value already established by a newer analysis.  Only
+    # fill gaps that are necessary for the provider launch contract, plus
+    # harmless static metadata that helps the report explain the target.
+    updates: dict[str, object] = {}
+    for field in (
+        "app_name",
+        "package_name",
+        "version_name",
+        "version_code",
+        "min_sdk",
+        "target_sdk",
+        "main_activity",
+        "activities",
+        "services",
+        "receivers",
+        "permissions",
+        "debuggable",
+        "file_count",
+        "size_bytes",
+    ):
+        value = metadata.get(field)
+        current = getattr(analysis, field, None)
+        if value in (None, "", []):
+            continue
+        if current in (None, "", []):
+            updates[field] = value
+    metadata_warnings = [str(item) for item in (metadata.get("warnings") or []) if str(item).strip()]
+    if metadata_warnings:
+        merged_warnings = list(dict.fromkeys([*(analysis.warnings or []), *metadata_warnings]))
+        if merged_warnings != list(analysis.warnings or []):
+            updates["warnings"] = merged_warnings[-40:]
+    if not updates:
+        return analysis
+
+    refreshed = analysis.model_copy(update=updates)
+    try:
+        metadata_path = service._metadata_path(job_id)
+        await asyncio.to_thread(
+            metadata_path.write_text,
+            refreshed.model_dump_json(indent=2),
+            "utf-8",
+        )
+    except Exception as exc:  # pragma: no cover - filesystem/storage degraded
+        logger.warning(
+            "Autopilot legacy identity manifest write skipped job_id=%s: %s",
+            job_id,
+            type(exc).__name__,
+        )
+        return analysis
+
+    # Keep the durable row in sync when it is available. The manifest write
+    # above is sufficient for a same-instance discovery; this best-effort
+    # mirror makes the repair survive a Render restart without making a
+    # database outage block a valid device run.
+    try:
+        job = await service.load_job(job_id)
+        await service._persist_job(job, analysis=refreshed.model_dump(mode="json"))
+    except Exception:
+        logger.info("Autopilot legacy identity durable mirror skipped job_id=%s", job_id, exc_info=True)
+    return refreshed
 
 
 async def _mark_repository_available(
@@ -808,6 +944,43 @@ def _record_discovery(record: Optional[AutopilotJob]):
         return AutopilotDiscoveryResult.model_validate(record.discovery)
     except Exception:
         return None
+
+
+def _merge_discovery_snapshot(
+    previous: Optional[AutopilotDiscoveryResult],
+    latest: AutopilotDiscoveryResult,
+) -> AutopilotDiscoveryResult:
+    """Keep a usable map when a later provider attempt cannot attach.
+
+    Appium/BrowserStack can accept a session and then expose only the launcher
+    or system navigation surface.  Persisting that empty/blocked response over
+    a real map would make a transient provider outage look like lost coverage
+    and would force the user through the login checkpoint again.  Return the
+    latest map when it contains evidence; otherwise retain the previous map and
+    attach a small, non-secret diagnostic about the failed attempt.
+    """
+    if not previous or previous is latest or previous.screen_count <= 0:
+        return latest
+    if latest.screens and latest.target_ready is not False:
+        return latest
+    reason = (
+        latest.target_identity_reason
+        or latest.error
+        or latest.stop_reason
+        or "The latest Runtime Discovery attempt did not expose a usable target."
+    )
+    diagnostic = f"Latest discovery attempt {latest.status}: {str(reason)[:500]}"
+    warnings = list(previous.warnings or [])
+    if diagnostic not in warnings:
+        warnings.append(diagnostic)
+    return previous.model_copy(
+        update={
+            "warnings": warnings[-20:],
+            "last_attempt_status": latest.status,
+            "last_attempt_reason": str(reason)[:1200],
+            "last_attempt_at": latest.finished_at,
+        }
+    )
 
 
 async def _available_evidence_asset_ids(
@@ -1604,6 +1777,7 @@ async def _resume_and_discover_background(
             stage="runtime_discovery",
             checkpoint_stage="runtime_discovery",
             checkpoint_message="Setup references validated. Runtime Discovery is mapping safe screens and controls.",
+            phase="exploring",
             error=None,
         )
         async with AsyncSessionLocal() as db:
@@ -1611,15 +1785,26 @@ async def _resume_and_discover_background(
             if user is None:
                 logger.warning("Autopilot chained discovery owner was not found job_id=%s", job_id)
                 return
-            job = await _require_owned_job(service, job_id, user)
+            job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
             target_kind = str(job.get("target_kind") or "android")
             # Rehydrate the current setup and decrypt approved values only for
             # this live discovery call. They are never copied to the job JSON.
-            record = await _safe_job_record(db, job_id, user.id)
+            # ``UploadRepositoryService.materialize`` may roll back this
+            # session while copying a large APK.  Rollback expires ORM
+            # attributes, so use the immutable owner id passed to this
+            # background task for every subsequent query and evidence write.
+            record = await _safe_job_record(db, job_id, owner_id)
             if target_kind != "web":
-                await _ensure_local_artifact(db, service, job_id, user)
-                record = await _safe_job_record(db, job_id, user.id)
+                artifact_path = await _ensure_local_artifact(db, service, job_id, user, owner_id=owner_id)
+                record = await _safe_job_record(db, job_id, owner_id)
             analysis_for_discovery = await service.load_analysis(job_id)
+            if target_kind != "web":
+                analysis_for_discovery = await _refresh_mobile_analysis_identity(
+                    service,
+                    job_id,
+                    analysis_for_discovery,
+                    artifact_path,
+                )
             existing_discovery = _record_discovery(record)
             setup_for_discovery = await _setup_with_input_metadata(
                 db,
@@ -1649,8 +1834,8 @@ async def _resume_and_discover_background(
                 platform_version=resume_payload.discovery_platform_version or "14.0",
                 observe_only=False,
                 # Explore a meaningful app surface while keeping navigation
-                # bounded to safe/reversible controls only. The compiler
-                # still caps the resulting plan at 100 cases.
+                # bounded to safe/reversible controls only. The compiler keeps
+                # every distinct case derived from the resulting evidence.
                 max_screens=40,
                 max_actions=50,
             )
@@ -1681,7 +1866,29 @@ async def _resume_and_discover_background(
                     job_id,
                     exc_info=True,
                 )
-            record = await _safe_job_record(db, job_id, user.id)
+            record = await _safe_job_record(db, job_id, owner_id)
+            # Do not replace a real screen graph with an empty provider/system
+            # UI response.  The latest attempt is still returned to the
+            # caller through its job diagnostic, while the durable report
+            # keeps the last usable evidence and records the attempt metadata.
+            persisted_discovery = _merge_discovery_snapshot(
+                _record_discovery(record),
+                result,
+            )
+            previous_map = job.get("application_map")
+            map_version = int(previous_map.get("version") or 0) + 1 if isinstance(previous_map, dict) else 1
+            application_map = build_application_map(
+                job_id=job_id,
+                target_kind=target_kind,
+                target_identity=result.target_identity or job.get("surface_identity"),
+                screens=persisted_discovery.screens,
+                transitions=persisted_discovery.transitions,
+                login_observed=bool(
+                    any(item.category == "credential" for item in persisted_discovery.input_requests)
+                    or _pending_runtime_auth_requests(setup_for_discovery)
+                ),
+                version=map_version,
+            )
             if record is not None:
                 repository_asset_id = record.repository_asset_id
                 for screen in result.screens:
@@ -1694,6 +1901,7 @@ async def _resume_and_discover_background(
                         filename=f"discovery-{job_id[:8]}-{screen.screen_id}.png",
                         content_type="image/png",
                         repository_asset_id=repository_asset_id,
+                        owner_id=owner_id,
                     )
                     screen.page_source_asset_id = await _persist_evidence_asset(
                         db,
@@ -1704,10 +1912,27 @@ async def _resume_and_discover_background(
                         filename=f"discovery-{job_id[:8]}-{screen.screen_id}.{'html' if result.target_kind == 'web' else 'xml'}",
                         content_type="text/html" if result.target_kind == "web" else "application/xml",
                         repository_asset_id=repository_asset_id,
+                        owner_id=owner_id,
                     )
-                record = await _safe_job_record(db, job_id, user.id)
+                # Evidence asset ids are assigned while the snapshot is being
+                # persisted. Re-project the map afterwards so its durable
+                # screen records link to the same redacted screenshot/source
+                # artifacts shown in Test Reports.
+                application_map = build_application_map(
+                    job_id=job_id,
+                    target_kind=target_kind,
+                    target_identity=result.target_identity or job.get("surface_identity"),
+                    screens=persisted_discovery.screens,
+                    transitions=persisted_discovery.transitions,
+                    login_observed=bool(
+                        any(item.category == "credential" for item in persisted_discovery.input_requests)
+                        or _pending_runtime_auth_requests(setup_for_discovery)
+                    ),
+                    version=map_version,
+                )
+                record = await _safe_job_record(db, job_id, owner_id)
                 if record is not None:
-                    record.discovery = result.model_dump(mode="json")
+                    record.discovery = persisted_discovery.model_dump(mode="json")
                     try:
                         analysis = expanded_analysis or await service.load_analysis(job_id)
                         if expanded_analysis is not None:
@@ -1716,12 +1941,15 @@ async def _resume_and_discover_background(
                             job_id,
                             record.setup_profile,
                             analysis,
-                            result,
+                            persisted_discovery,
                         ).model_dump(mode="json")
                     except FileNotFoundError:
                         pass
                     await db.commit()
-            job_changes: dict[str, object] = {"discovery": result.model_dump(mode="json")}
+            job_changes: dict[str, object] = {
+                "discovery": persisted_discovery.model_dump(mode="json"),
+                "application_map": application_map.model_dump(mode="json"),
+            }
             persisted_analysis = expanded_analysis
             persisted_setup = None
             pending_checkpoints: list = []
@@ -1733,7 +1961,7 @@ async def _resume_and_discover_background(
                         record,
                         job_id,
                         persisted_analysis,
-                        result,
+                        persisted_discovery,
                     )
                     pending_checkpoints = _blocking_checkpoint_requests(persisted_setup)
                     if pending_checkpoints:
@@ -1741,11 +1969,18 @@ async def _resume_and_discover_background(
                             update={
                                 "checkpoint_stage": "input_collection",
                                 "input_requests": pending_checkpoints,
+                                "application_map": application_map,
+                                "phase": "cases_pending_review",
                             }
                         )
                     else:
                         persisted_analysis = persisted_analysis.model_copy(
-                            update={"checkpoint_stage": "ready_for_execution", "input_requests": []}
+                            update={
+                                "checkpoint_stage": "ready_for_execution",
+                                "input_requests": [],
+                                "application_map": application_map,
+                                "phase": "cases_pending_review",
+                            }
                         )
                     record.setup_profile = persisted_setup.model_dump(mode="json")
                     record.analysis = persisted_analysis.model_dump(mode="json")
@@ -1756,21 +1991,28 @@ async def _resume_and_discover_background(
             if persisted_analysis is not None and "analysis" not in job_changes:
                 job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
             pending_auth = _pending_runtime_auth_requests(persisted_setup)
+            latest_target_blocked = result.target_ready is False
             await service.update_job(
                 job_id,
                 **job_changes,
                 status="waiting_for_input" if pending_checkpoints else "analyzed",
-                stage="input_collection" if pending_checkpoints else "ready_for_execution" if result.screens else "runtime_discovery",
+                stage="input_collection" if pending_checkpoints else "ready_for_execution" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
                 progress=85 if pending_checkpoints else 100,
-                checkpoint_stage="input_collection" if pending_checkpoints else "ready" if result.screens else "runtime_discovery",
+                phase="cases_pending_review" if persisted_discovery.screens and not latest_target_blocked else "blocked",
+                checkpoint_stage="input_collection" if pending_checkpoints else "ready" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
                 checkpoint_message=(
                     "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
                     if pending_auth
                     else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
                     if pending_checkpoints
                     else "Runtime Discovery completed. Review the discovered map and run safe execution."
-                    if result.screens
-                    else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+                    if persisted_discovery.screens and not latest_target_blocked
+                    else (
+                        "The latest Runtime Discovery attempt did not attach to the uploaded application. "
+                        f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
+                        if latest_target_blocked
+                        else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+                    )
                 ),
                 input_requests=(
                     [item.model_dump(mode="json") for item in pending_checkpoints]
@@ -2018,6 +2260,7 @@ async def _persist_execution(
         filename=f"launch-{execution_id}.png",
         content_type="image/png",
         repository_asset_id=repository_asset_id,
+        owner_id=owner_id,
     )
     page_source_asset_id = await _persist_evidence_asset(
         db,
@@ -2028,6 +2271,7 @@ async def _persist_execution(
         filename=f"page-source-{execution_id}.{'html' if result.target_kind == 'web' else 'xml'}",
         content_type="text/html" if result.target_kind == "web" else "application/xml",
         repository_asset_id=repository_asset_id,
+        owner_id=owner_id,
     )
     evidence = dict(result.evidence or {})
     if screenshot_asset_id:
@@ -2147,7 +2391,12 @@ async def _execute_and_persist(
     job_id: str,
     request: AutopilotExecutionRequest,
 ) -> AutopilotExecutionResult:
-    job = await _require_owned_job(service, job_id, user)
+    # Repository materialization and evidence persistence can roll back the
+    # request session, expiring the auth ORM instance. Capture the scalar
+    # owner id before crossing either boundary and use it for every later
+    # ownership check/read in this request.
+    owner_id = user.id
+    job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
     target_kind = str(job.get("target_kind") or "android")
     if target_kind == "web":
         request = request.model_copy(update={
@@ -2158,9 +2407,19 @@ async def _execute_and_persist(
     else:
         if request.target_kind != target_kind:
             request = request.model_copy(update={"target_kind": target_kind})
-        await _ensure_local_artifact(db, service, job_id, user)
+        artifact_path = await _ensure_local_artifact(db, service, job_id, user, owner_id=owner_id)
+        try:
+            analysis_for_smoke = await service.load_analysis(job_id)
+        except FileNotFoundError:
+            analysis_for_smoke = None
+        await _refresh_mobile_analysis_identity(
+            service,
+            job_id,
+            analysis_for_smoke,
+            artifact_path,
+        )
     result = await service.execute_smoke(job_id, request)
-    record = await _safe_job_record(db, job_id, user.id)
+    record = await _safe_job_record(db, job_id, owner_id)
     if record is not None:
         result = await _persist_execution(service, db, user, record, request, result)
     return result
@@ -2347,6 +2606,474 @@ async def get_autopilot_report_tabs(
         )
     result.sort(key=lambda item: item.latest_updated_at, reverse=True)
     return result
+
+
+async def _load_or_build_autopilot_plan(
+    service: AutopilotPrototypeService,
+    job_id: str,
+) -> tuple[dict, AutopilotAnalysis]:
+    job = await service.load_job(job_id)
+    analysis = await service.load_analysis(job_id)
+    raw_plan = job.get("plan")
+    if isinstance(raw_plan, dict):
+        try:
+            # Validate persisted JSON before returning it. A partial write or
+            # an older manifest should fall back to the versioned analysis
+            # plan instead of surfacing a generic response-validation error.
+            validated = AutopilotGenerationPlan.model_validate(raw_plan)
+            return validated.model_dump(mode="json"), analysis
+        except (TypeError, ValueError):
+            pass
+    if analysis.generation_plan is not None:
+        return analysis.generation_plan.model_dump(mode="json"), analysis
+    plan = build_generation_plan(analysis)
+    return plan.model_dump(mode="json"), analysis
+
+
+@router.get("/{job_id}/plan", response_model=AutopilotGenerationPlan)
+async def get_autopilot_generation_plan(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Return the editable, source-backed plan for one Autopilot surface."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    raw_plan, analysis = await _load_or_build_autopilot_plan(service, job_id)
+    plan = AutopilotGenerationPlan.model_validate(raw_plan)
+    if not isinstance((await service.load_job(job_id)).get("plan"), dict):
+        await service.update_job(job_id, plan=plan.model_dump(mode="json"))
+    return plan
+
+
+@router.put("/{job_id}/plan", response_model=AutopilotGenerationPlan)
+async def update_autopilot_generation_plan(
+    job_id: str,
+    payload: AutopilotPlanUpdateRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Save a new plan revision without accepting credentials or raw data."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    raw_plan, _analysis = await _load_or_build_autopilot_plan(service, job_id)
+    current = AutopilotGenerationPlan.model_validate(raw_plan)
+    next_version = current.version + 1
+    updates = payload.model_dump(exclude_none=True)
+    plan = current.model_copy(
+        update={
+            **updates,
+            "version": next_version,
+            "status": "pending_review",
+            "plan_id": f"plan-{job_id}-v{next_version}",
+            "editable": True,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    await service.update_job(job_id, plan=plan.model_dump(mode="json"), phase="plan_pending_review")
+    return plan
+
+
+@router.post("/{job_id}/plan/approve", response_model=AutopilotGenerationPlan)
+async def approve_autopilot_generation_plan(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Approve the generated scope before Runtime Discovery may proceed."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    raw_plan, _analysis = await _load_or_build_autopilot_plan(service, job_id)
+    plan = AutopilotGenerationPlan.model_validate(raw_plan).model_copy(
+        update={"status": "approved", "approval_required": False}
+    )
+    try:
+        await service.update_job(
+            job_id,
+            plan=plan.model_dump(mode="json"),
+            phase="plan_approved",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return plan
+
+
+@router.get("/{job_id}/context-sources", response_model=list[AutopilotScopeSource])
+async def get_autopilot_context_sources(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Return the provenance-aware context pack used by one Autopilot run."""
+
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    job = await service.load_job(job_id)
+    try:
+        rows = list(
+            (
+                await db.scalars(
+                    select(AutopilotContextSource)
+                    .where(
+                        AutopilotContextSource.job_id == job_id,
+                        AutopilotContextSource.owner_id == user.id,
+                    )
+                    .order_by(AutopilotContextSource.created_at.asc())
+                )
+            ).all()
+        )
+    except Exception:
+        await db.rollback()
+        rows = []
+    if rows:
+        return [
+            AutopilotScopeSource(
+                source_id=row.source_id,
+                kind=row.kind,  # type: ignore[arg-type]
+                label=row.label,
+                reference=row.reference,
+                summary=row.summary,
+                observed=row.observed,
+                confidence=row.confidence,
+                trust_level=row.trust_level,  # type: ignore[arg-type]
+                used=row.used,
+                influenced_plan_items=list(row.influenced_plan_items or []),
+                influenced_test_ids=list(row.influenced_test_ids or []),
+                retrieved_at=row.retrieved_at.isoformat() if row.retrieved_at else None,
+            )
+            for row in rows
+        ]
+    try:
+        analysis = await service.load_analysis(job_id)
+    except FileNotFoundError:
+        return []
+    return list(analysis.scope.sources)
+
+
+@router.get("/{job_id}/application-map", response_model=AutopilotApplicationMapSchema)
+async def get_autopilot_application_map(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Return the latest observed screen/control graph for the surface."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    job = await service.load_job(job_id)
+    raw_map = job.get("application_map")
+    if isinstance(raw_map, dict):
+        return AutopilotApplicationMapSchema.model_validate(raw_map)
+    record = await _safe_job_record(db, job_id, user.id)
+    discovery = _record_discovery(record)
+    if discovery is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runtime Discovery has not produced an application map yet.")
+    result = build_application_map(
+        job_id=job_id,
+        target_kind=str(job.get("target_kind") or "android"),
+        target_identity=discovery.target_identity or job.get("surface_identity"),
+        screens=discovery.screens,
+        transitions=discovery.transitions,
+        login_observed=bool(any(item.category == "credential" for item in discovery.input_requests)),
+    )
+    await service.update_job(job_id, application_map=result.model_dump(mode="json"))
+    return result
+
+
+@router.get("/{job_id}/execution-control")
+async def get_autopilot_execution_control(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Expose the framework-neutral handoff consumed by Test Execution."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    job = await service.load_job(job_id)
+    analysis = await service.load_analysis(job_id)
+    record = await _safe_job_record(db, job_id, user.id)
+    return build_execution_control_payload(
+        analysis.tests,
+        run_id=job_id,
+    ) | {
+        "application_map_id": (
+            job.get("application_map", {}).get("map_id")
+            if isinstance(job.get("application_map"), dict)
+            else None
+        ),
+        "discovery_used": bool(record and record.discovery),
+    }
+
+
+@router.get("/{job_id}/duplicates")
+async def get_autopilot_duplicates(
+    job_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Compare generated coverage with the shared Test Design library."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    job = await service.load_job(job_id)
+    analysis = await service.load_analysis(job_id)
+    existing: list[TestCase] = []
+    project_id = job.get("project_id")
+    if project_id and _is_uuid(project_id):
+        try:
+            query = (
+                select(TestCase)
+                .join(GenerationRun, TestCase.generation_run_id == GenerationRun.id)
+                .where(GenerationRun.project_id == UUID(str(project_id)))
+                .order_by(TestCase.created_at.desc())
+                .limit(5000)
+            )
+            existing = list((await db.scalars(query)).all())
+        except Exception:
+            await db.rollback()
+            logger.info("Autopilot duplicate lookup fell back to generated cases only", exc_info=True)
+    duplicates = find_duplicate_cases(analysis.tests, existing)
+    return {
+        "job_id": job_id,
+        "candidate_count": len(analysis.tests),
+        "existing_count": len(existing),
+        "duplicates": duplicates,
+        "counts": {
+            "unique": sum(item.get("status") == "unique" for item in duplicates.values()),
+            "similar": sum(item.get("status") == "similar" for item in duplicates.values()),
+            "duplicate": sum(item.get("status") == "duplicate" for item in duplicates.values()),
+        },
+    }
+
+
+@router.patch("/{job_id}/cases/{case_id}/review")
+async def review_autopilot_case(
+    job_id: str,
+    case_id: str,
+    payload: AutopilotCaseReviewUpdateRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    """Store an explicit case-review decision before suite execution."""
+    service = _service(settings)
+    await _require_owned_job(service, job_id, user)
+    analysis = await service.load_analysis(job_id)
+    if not any(test.id == case_id for test in analysis.tests):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot case was not found in this plan.")
+    job = await service.load_job(job_id)
+    reviews = dict(job.get("case_reviews") or {})
+    reviews[case_id] = payload.decision
+    await service.update_job(job_id, case_reviews=reviews)
+    return {"job_id": job_id, "case_id": case_id, "decision": payload.decision, "note": payload.note}
+
+
+def _autopilot_test_case_type(bucket: str) -> TestCaseType:
+    """Map the user-facing Autopilot coverage bucket to Test Design's enum."""
+
+    mapping = {
+        "installation": TestCaseType.MOBILE,
+        "page_level": TestCaseType.FUNCTIONAL,
+        "functional": TestCaseType.FUNCTIONAL,
+        "functional_positive": TestCaseType.FUNCTIONAL,
+        "functional_negative": TestCaseType.NEGATIVE,
+        "uat": TestCaseType.WORKFLOW,
+        "ui": TestCaseType.USABILITY,
+        "ui_positive": TestCaseType.USABILITY,
+        "ui_negative": TestCaseType.USABILITY,
+        "accessibility": TestCaseType.ACCESSIBILITY,
+        "integration": TestCaseType.INTEGRATION,
+        "sit": TestCaseType.INTEGRATION,
+        "performance": TestCaseType.PERFORMANCE,
+        "security": TestCaseType.SECURITY,
+        "compatibility": TestCaseType.CROSS_PLATFORM,
+        "resilience": TestCaseType.ERROR_HANDLING,
+        "permissions": TestCaseType.PERMISSION,
+        "regression": TestCaseType.REGRESSION,
+    }
+    return mapping.get(str(bucket or "functional").strip().lower(), TestCaseType.FUNCTIONAL)
+
+
+def _autopilot_safe_case_metadata(test, job_id: str) -> dict:
+    """Build bounded, non-secret provenance for a shared TestCase row."""
+
+    metadata = {
+        "autopilot_job_id": job_id,
+        "autopilot_test_id": test.id,
+        "journey": test.journey,
+        "page_label": test.page_label,
+        "page_url": test.page_url,
+        "source_refs": list(dict.fromkeys([*test.source_refs, *[
+            item.reference for item in test.provenance if item.reference
+        ]]))[:50],
+        "observation_refs": list(dict.fromkeys(test.observation_refs))[:100],
+        "test_data_refs": list(dict.fromkeys(test.test_data_refs))[:50],
+        "data_probes": [probe.model_dump(mode="json") for probe in test.data_probes[:20]],
+        "safety_classification": test.safety_classification,
+        "confidence": test.confidence,
+        "duplicate_status": test.duplicate_status,
+        "duplicate_of": test.duplicate_of,
+    }
+    # Redact before JSON is written so a future generator cannot accidentally
+    # turn an input-like provenance string into a persisted secret.
+    safe_text = AutopilotPrototypeService._redact_context(json.dumps(metadata, ensure_ascii=False))
+    try:
+        return json.loads(safe_text)
+    except json.JSONDecodeError:
+        return {"autopilot_job_id": job_id, "autopilot_test_id": test.id}
+
+
+@router.post("/{job_id}/cases/approve", response_model=AutopilotCaseLibraryResult)
+async def approve_autopilot_cases(
+    job_id: str,
+    payload: AutopilotCaseApprovalRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Persist reviewed Autopilot cases into the shared Test Design library.
+
+    The hand-off is deliberately idempotent: retrying this request reuses the
+    same GenerationRun and the unique ``generation_run_id + test_case_key``
+    constraint prevents duplicate TestCase rows.  Only references and bounded
+    observations are copied; credentials and raw runtime values never cross
+    this boundary.
+    """
+
+    service = _service(settings)
+    job = await _require_owned_job(service, job_id, user)
+    try:
+        project_id = UUID(str(job.get("project_id"))) if job.get("project_id") else None
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A project is required before cases can be approved.") from exc
+    if project_id is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="A project is required before cases can be approved.")
+    try:
+        if await ProjectRepository(db).get_for_owner(project_id, user.id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Project storage is temporarily unavailable; retry after storage recovers.") from exc
+
+    analysis = await service.load_analysis(job_id)
+    candidates = {test.id: test for test in analysis.tests}
+    selected_ids = set(candidates) if payload.approve_all else {str(item).strip() for item in payload.case_ids if str(item).strip()}
+    if not selected_ids:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Select at least one generated case or approve the complete suite.")
+    unknown_ids = sorted(selected_ids - set(candidates))
+    if unknown_ids:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Autopilot case was not found: {unknown_ids[0]}")
+
+    current_phase = phase_for_job(job)
+    if current_phase not in {"cases_pending_review", "cases_approved", "execution_ready", "running", "completed", "partial"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Cases can be approved after exploration. Current phase is {current_phase}.")
+
+    shared_run: GenerationRun | None = None
+    shared_run_id = job.get("shared_generation_run_id")
+    if shared_run_id and _is_uuid(shared_run_id):
+        shared_run = await db.scalar(
+            select(GenerationRun).where(
+                GenerationRun.id == UUID(str(shared_run_id)),
+                GenerationRun.project_id == project_id,
+                GenerationRun.requested_by_id == user.id,
+            )
+        )
+    if shared_run is None:
+        source_document_analysis_id = None
+        if job.get("document_analysis_run_id") and _is_uuid(job.get("document_analysis_run_id")):
+            source_document_analysis_id = UUID(str(job["document_analysis_run_id"]))
+        shared_run = GenerationRun(
+            project_id=project_id,
+            requested_by_id=user.id,
+            source_document_analysis_id=source_document_analysis_id,
+            status=RunStatus.COMPLETED,
+            llm_provider="autopilot",
+            llm_model="evidence-first",
+            generation_profile="autopilot",
+            title=f"Autopilot · {str(job.get('filename') or job.get('target_url') or 'target')}"[:500],
+            requirement_summary=(analysis.scope.summary or analysis.app_summary or "Autopilot evidence-backed coverage")[:1000],
+        )
+        db.add(shared_run)
+        await db.flush()
+
+    existing_rows = list(
+        (
+            await db.scalars(
+                select(TestCase).where(TestCase.generation_run_id == shared_run.id)
+            )
+        ).all()
+    )
+    existing_by_key = {row.test_case_key: row for row in existing_rows}
+    persisted_ids = []
+    skipped_ids: list[str] = []
+    reviews = dict(job.get("case_reviews") or {})
+    for test_id in selected_ids:
+        test = candidates[test_id]
+        reviews[test_id] = "approve"
+        key = str(test.id)[:50]
+        row = existing_by_key.get(key)
+        if row is None:
+            preconditions = "\n".join(test.preconditions)[:10000] or None
+            post_conditions = "\n".join([*test.postconditions, *test.cleanup_requirements])[:10000] or None
+            steps = [AutopilotPrototypeService._redact_context(str(step))[:4000] for step in test.steps]
+            expected = "\n".join(AutopilotPrototypeService._redact_context(str(item)) for item in test.expected).strip()
+            row = TestCase(
+                generation_run_id=shared_run.id,
+                test_case_key=key,
+                requirement_traceability=", ".join(test.requirement_refs)[:255] or None,
+                test_type=_autopilot_test_case_type(test.bucket),
+                scenario=AutopilotPrototypeService._redact_context(test.title)[:500],
+                objective=AutopilotPrototypeService._redact_context(test.objective)[:10000],
+                priority=Priority(test.priority),
+                severity=Severity(test.severity),
+                preconditions=preconditions,
+                test_data=_autopilot_safe_case_metadata(test, job_id),
+                steps=steps or ["Use the observed journey and controls recorded for this case."],
+                expected_result=expected or "The observed expected outcome is satisfied.",
+                post_conditions=post_conditions,
+                is_automation_candidate=bool(test.autonomous_candidate or test.autonomous),
+                automation_type="qtx-ir" if test.autonomous_candidate or test.autonomous else None,
+                risk_level=RiskLevel(test.risk_level),
+            )
+            db.add(row)
+            await db.flush()
+            existing_by_key[key] = row
+        else:
+            skipped_ids.append(test_id)
+        persisted_ids.append(row.id)
+
+    await db.commit()
+    analysis_with_reviews = analysis.model_copy(update={"case_reviews": reviews})
+    try:
+        await service.update_job(
+            job_id,
+            shared_generation_run_id=str(shared_run.id),
+            case_reviews=reviews,
+            analysis=analysis_with_reviews.model_dump(mode="json"),
+            phase="cases_approved",
+            checkpoint_message="Approved cases are now available in the shared Test Design library.",
+        )
+    except ValueError as exc:
+        # The database hand-off is already committed and safe to retry. A
+        # concurrent worker may have advanced the phase; surface that clearly
+        # without losing the generated rows.
+        logger.info("Autopilot case approval phase update deferred job_id=%s: %s", job_id, exc)
+
+    return AutopilotCaseLibraryResult(
+        job_id=job_id,
+        generation_run_id=shared_run.id,
+        persisted_case_ids=persisted_ids,
+        persisted_count=len(persisted_ids),
+        skipped_case_ids=skipped_ids,
+        message=(
+            f"{len(persisted_ids)} approved case(s) are available in the shared Test Design library."
+            if persisted_ids
+            else "No new rows were required; the approved cases were already in the shared Test Design library."
+        ),
+    )
 
 
 @router.post("/analyze", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
@@ -3150,8 +3877,12 @@ async def resume_autopilot_checkpoint(
     """Continue a run only after its checkpoint references are confirmed."""
 
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
-    record = await _safe_job_record(db, job_id, user.id)
+    # Snapshot this before any database operation.  A rollback while
+    # rehydrating a repository-backed APK expires the request-scoped User ORM
+    # instance; reading ``user.id`` afterwards raises MissingGreenlet.
+    owner_id = user.id
+    await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    record = await _safe_job_record(db, job_id, owner_id)
     try:
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError as exc:
@@ -3166,7 +3897,7 @@ async def resume_autopilot_checkpoint(
             if raw_asset_id and _is_uuid(raw_asset_id):
                 recovered_asset_id = UUID(str(raw_asset_id))
         if recovered_asset_id is not None and str(recovered_job.get("target_kind") or "android") != "web":
-            await _ensure_local_artifact(db, service, job_id, user)
+            await _ensure_local_artifact(db, service, job_id, user, owner_id=owner_id)
             await service.update_job(
                 job_id,
                 status="uploaded",
@@ -3220,7 +3951,7 @@ async def resume_autopilot_checkpoint(
         background_tasks.add_task(
             _resume_and_discover_background,
             job_id,
-            user.id,
+            owner_id,
             settings,
             payload,
         )
@@ -3229,7 +3960,7 @@ async def resume_autopilot_checkpoint(
             _resume_analysis_background,
             settings,
             job_id,
-            user.id,
+            owner_id,
         )
     return await service.get_job_status(job_id)
 
@@ -3244,9 +3975,23 @@ async def run_autopilot_discovery(
 ):
     """Perform bounded safe navigation and persist the discovered app map."""
     service = _service(settings)
-    job = await _require_owned_job(service, job_id, user)
+    # Materialising a large repository asset can roll back the request
+    # session.  Keep the scalar owner id outside the ORM object so all later
+    # reads remain safe in async SQLAlchemy.
+    owner_id = user.id
+    job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    # Clicking Run discovery is an explicit approval of the generated plan.
+    # Keep the transition visible while preserving the legacy stage strings.
+    try:
+        current_phase = phase_for_job(job)
+        if current_phase == "plan_pending_review":
+            await service.update_job(job_id, phase="plan_approved")
+        await service.update_job(job_id, phase="exploring")
+        job = await service.load_job(job_id)
+    except ValueError:
+        logger.info("Autopilot discovery phase transition skipped for legacy job_id=%s", job_id)
     target_kind = str(job.get("target_kind") or "android")
-    record = await _safe_job_record(db, job_id, user.id)
+    record = await _safe_job_record(db, job_id, owner_id)
     try:
         analysis_for_discovery = await service.load_analysis(job_id)
     except FileNotFoundError:
@@ -3277,14 +4022,20 @@ async def run_autopilot_discovery(
             input_values=discovery_input_values,
         )
     else:
-        await _ensure_local_artifact(db, service, job_id, user)
+        artifact_path = await _ensure_local_artifact(db, service, job_id, user, owner_id=owner_id)
         # Repository materialization can expire the SQLAlchemy row; reload the
         # scalar job record before resolving encrypted checkpoint values.
-        record = await _safe_job_record(db, job_id, user.id)
+        record = await _safe_job_record(db, job_id, owner_id)
         try:
             analysis_for_discovery = await service.load_analysis(job_id)
         except FileNotFoundError:
             analysis_for_discovery = None
+        analysis_for_discovery = await _refresh_mobile_analysis_identity(
+            service,
+            job_id,
+            analysis_for_discovery,
+            artifact_path,
+        )
         existing_discovery = _record_discovery(record)
         setup_for_discovery = await _setup_with_input_metadata(
             db,
@@ -3303,7 +4054,7 @@ async def run_autopilot_discovery(
             # A hosted Appium endpoint cannot see a Render-local IPA path. The
             # BrowserStack adapter materializes the repository asset itself;
             # custom remote labs must provide their own reachable app reference.
-            record = await _safe_job_record(db, job_id, user.id)
+            record = await _safe_job_record(db, job_id, owner_id)
             if settings.APP_ENV != "local" and record is not None and record.repository_asset_id and not payload.appium_app:
                 raise HTTPException(status_code=400, detail="Hosted custom Appium requires a remote IPA reference for iOS discovery.")
         result = await AutopilotDiscoveryService(settings, service).run(
@@ -3317,7 +4068,26 @@ async def run_autopilot_discovery(
         expanded_analysis = service.expand_discovered_coverage(discovered_analysis, result)
     except Exception:
         logger.warning("Autopilot runtime coverage expansion skipped job_id=%s", job_id, exc_info=True)
-    record = await _safe_job_record(db, job_id, user.id)
+    record = await _safe_job_record(db, job_id, owner_id)
+    # A transient provider failure (or a session stuck on Android system UI)
+    # must not erase a previously successful screen graph. Keep the prior map
+    # for reports/execution and expose the failed attempt through the durable
+    # discovery diagnostic fields.
+    persisted_discovery = _merge_discovery_snapshot(
+        _record_discovery(record),
+        result,
+    )
+    previous_map = job.get("application_map")
+    map_version = int(previous_map.get("version") or 0) + 1 if isinstance(previous_map, dict) else 1
+    application_map = build_application_map(
+        job_id=job_id,
+        target_kind=target_kind,
+        target_identity=result.target_identity or job.get("surface_identity"),
+        screens=persisted_discovery.screens,
+        transitions=persisted_discovery.transitions,
+        login_observed=bool(any(item.category == "credential" for item in persisted_discovery.input_requests)),
+        version=map_version,
+    )
     if record is not None and result.screens:
         repository_asset_id = record.repository_asset_id
         for screen in result.screens:
@@ -3330,6 +4100,7 @@ async def run_autopilot_discovery(
                 filename=f"discovery-{job_id[:8]}-{screen.screen_id}.png",
                 content_type="image/png",
                 repository_asset_id=repository_asset_id,
+                owner_id=owner_id,
             )
             screen.page_source_asset_id = await _persist_evidence_asset(
                 db,
@@ -3340,11 +4111,24 @@ async def run_autopilot_discovery(
                 filename=f"discovery-{job_id[:8]}-{screen.screen_id}.{'html' if result.target_kind == 'web' else 'xml'}",
                 content_type="text/html" if result.target_kind == "web" else "application/xml",
                 repository_asset_id=repository_asset_id,
+                owner_id=owner_id,
             )
-        record = await _safe_job_record(db, job_id, user.id)
+        # The evidence links are attached during persistence. Re-project the
+        # map after that step so callers can navigate from an observed screen
+        # directly to its redacted screenshot and UI/source artifact.
+        application_map = build_application_map(
+            job_id=job_id,
+            target_kind=target_kind,
+            target_identity=result.target_identity or job.get("surface_identity"),
+            screens=persisted_discovery.screens,
+            transitions=persisted_discovery.transitions,
+            login_observed=bool(any(item.category == "credential" for item in persisted_discovery.input_requests)),
+            version=map_version,
+        )
+        record = await _safe_job_record(db, job_id, owner_id)
     if record is not None:
         try:
-            record.discovery = result.model_dump(mode="json")
+            record.discovery = persisted_discovery.model_dump(mode="json")
             # Runtime discovery is also the source for field-level setup
             # prompts. Refresh the durable checkpoint immediately so a page
             # refresh (or another worker) sees the same entry points.
@@ -3352,7 +4136,7 @@ async def run_autopilot_discovery(
                 analysis = expanded_analysis or await service.load_analysis(job_id)
                 if expanded_analysis is not None:
                     record.analysis = expanded_analysis.model_dump(mode="json")
-                profile = await _setup_with_input_metadata(db, record, job_id, analysis, result)
+                profile = await _setup_with_input_metadata(db, record, job_id, analysis, persisted_discovery)
                 record.setup_profile = profile.model_dump(mode="json")
             except FileNotFoundError:
                 pass
@@ -3361,7 +4145,10 @@ async def run_autopilot_discovery(
             await db.rollback()
             logger.warning("Autopilot discovery durable write skipped", exc_info=True)
     try:
-        job_changes: dict[str, object] = {"discovery": result.model_dump(mode="json")}
+        job_changes: dict[str, object] = {
+            "discovery": persisted_discovery.model_dump(mode="json"),
+            "application_map": application_map.model_dump(mode="json"),
+        }
         persisted_analysis = expanded_analysis
         persisted_setup = None
         pending_checkpoints: list = []
@@ -3373,16 +4160,26 @@ async def run_autopilot_discovery(
                     record,
                     job_id,
                     persisted_analysis,
-                    result,
+                    persisted_discovery,
                 )
                 pending_checkpoints = _blocking_checkpoint_requests(persisted_setup)
                 if pending_checkpoints:
                     persisted_analysis = persisted_analysis.model_copy(
-                        update={"checkpoint_stage": "input_collection", "input_requests": pending_checkpoints}
+                        update={
+                            "checkpoint_stage": "input_collection",
+                            "input_requests": pending_checkpoints,
+                            "application_map": application_map,
+                            "phase": "cases_pending_review",
+                        }
                     )
                 else:
                     persisted_analysis = persisted_analysis.model_copy(
-                        update={"checkpoint_stage": "ready_for_execution", "input_requests": []}
+                        update={
+                            "checkpoint_stage": "ready_for_execution",
+                            "input_requests": [],
+                            "application_map": application_map,
+                            "phase": "cases_pending_review",
+                        }
                     )
                 record.setup_profile = persisted_setup.model_dump(mode="json")
                 record.analysis = persisted_analysis.model_dump(mode="json")
@@ -3393,27 +4190,37 @@ async def run_autopilot_discovery(
         if persisted_analysis is not None and "analysis" not in job_changes:
             job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
         pending_auth = _pending_runtime_auth_requests(persisted_setup)
+        latest_target_blocked = result.target_ready is False
         await service.update_job(
             job_id,
             **job_changes,
             status="waiting_for_input" if pending_checkpoints else "analyzed",
-            stage="input_collection" if pending_checkpoints else "ready_for_execution" if result.screens else "runtime_discovery",
+            stage="input_collection" if pending_checkpoints else "ready_for_execution" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
             progress=85 if pending_checkpoints else 100,
-            checkpoint_stage="input_collection" if pending_checkpoints else "ready" if result.screens else "runtime_discovery",
+            phase="cases_pending_review" if persisted_discovery.screens and not latest_target_blocked else "blocked",
+            checkpoint_stage="input_collection" if pending_checkpoints else "ready" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
             checkpoint_message=(
                 "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
                 if pending_auth
                 else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
                 if pending_checkpoints
                 else "Runtime Discovery completed. Generated an evidence-scoped coverage plan; review it and run safe execution."
-                if result.screens
-                else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+                if persisted_discovery.screens and not latest_target_blocked
+                else (
+                    "The latest Runtime Discovery attempt did not attach to the uploaded application. "
+                    f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
+                    if latest_target_blocked
+                    else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+                )
             ),
             input_requests=[item.model_dump(mode="json") for item in pending_checkpoints] if pending_checkpoints else [],
         )
     except Exception:
         logger.warning("Autopilot discovery manifest update skipped job_id=%s", job_id, exc_info=True)
-    return result
+    # Return the same durable snapshot used by reports and the execution
+    # compiler.  When a retry only sees provider/system UI, this preserves the
+    # last usable map while exposing the latest attempt diagnostic fields.
+    return persisted_discovery
 
 
 def _strip_suite_evidence_paths(result: AutopilotSuiteResult) -> AutopilotSuiteResult:
@@ -3584,10 +4391,24 @@ async def execute_autopilot_suite(
 ):
     """Execute only QTX IR cases proven safe and deterministic."""
     service = _service(settings)
-    job = await _require_owned_job(service, job_id, user)
     # Capture the immutable owner id before any repository operation can roll
     # back the request session and expire the User ORM instance.
     owner_id = user.id
+    job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    # Case execution is the second user approval boundary.  A plan/map can be
+    # generated automatically, but entering the suite endpoint records that
+    # the selected cases are approved for the shared execution control plane.
+    try:
+        current_phase = phase_for_job(job)
+        if current_phase == "plan_pending_review":
+            await service.update_job(job_id, phase="plan_approved")
+            current_phase = "plan_approved"
+        if current_phase == "cases_pending_review":
+            await service.update_job(job_id, phase="cases_approved")
+        await service.update_job(job_id, phase="execution_ready")
+        await service.update_job(job_id, phase="running")
+    except ValueError:
+        logger.info("Autopilot suite phase transition skipped for legacy job_id=%s", job_id)
     record = await _safe_job_record(db, job_id, owner_id)
     if str(job.get("target_kind") or "android") == "web":
         analysis = await service.load_analysis(job_id)
@@ -3651,7 +4472,7 @@ async def execute_autopilot_suite(
                 "tests": result.tests + deferred_results,
             })
     else:
-        await _ensure_local_artifact(db, service, job_id, user)
+        artifact_path = await _ensure_local_artifact(db, service, job_id, user, owner_id=owner_id)
         # Materializing a repository-backed APK may commit/rollback on the
         # shared session.  That expires ORM attributes on the row fetched
         # above; reload it before reading discovery/setup so async SQLAlchemy
@@ -3662,6 +4483,12 @@ async def execute_autopilot_suite(
             analysis_for_setup = await service.load_analysis(job_id)
         except FileNotFoundError:
             analysis_for_setup = None
+        analysis_for_setup = await _refresh_mobile_analysis_identity(
+            service,
+            job_id,
+            analysis_for_setup,
+            artifact_path,
+        )
         discovery = _record_discovery(record)
         setup = await _setup_with_input_metadata(db, record, job_id, analysis_for_setup, discovery)
         input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
@@ -3704,6 +4531,23 @@ async def execute_autopilot_suite(
         except Exception:
             await db.rollback()
             logger.warning("Autopilot suite durable write skipped", exc_info=True)
+    try:
+        result_phase = (
+            "completed"
+            if result.status == "passed"
+            else "partial"
+            if result.status == "partial"
+            else "blocked"
+            if result.status == "blocked"
+            else "failed"
+        )
+        await service.update_job(
+            job_id,
+            phase=result_phase,
+            suite_execution=result.model_dump(mode="json"),
+        )
+    except ValueError:
+        logger.info("Autopilot suite terminal phase update skipped for legacy job_id=%s", job_id)
     return result
 
 

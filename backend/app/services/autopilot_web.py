@@ -422,6 +422,20 @@ class AutopilotWebService:
                 ).hexdigest()
                 existing = next((item for item in screens if item.fingerprint == fingerprint), None)
                 if existing is not None:
+                    # The immediate post-auth capture is intentionally
+                    # non-persistent so typed credentials never enter the
+                    # repository.  Once the page is stable, persist the
+                    # already-observed screen with the same redaction policy
+                    # so its journey cases retain screenshot/DOM evidence.
+                    if persist_evidence and not existing.screenshot_path and not existing.page_source_path:
+                        screenshot_path = evidence_root / f"{existing.screen_id}.png"
+                        source_path = evidence_root / f"{existing.screen_id}.html"
+                        captured_screenshot, screenshot_warning = await _capture_screenshot(page, screenshot_path)
+                        if screenshot_warning:
+                            warnings.append(f"{existing.screen_id}: {screenshot_warning}")
+                        source_path.write_text(_redact_html(html), encoding="utf-8")
+                        existing.screenshot_path = captured_screenshot
+                        existing.page_source_path = str(source_path)
                     return existing, True
                 screen_id = f"screen-{len(screens) + 1:03d}"
                 screenshot_path = evidence_root / f"{screen_id}.png"
@@ -548,6 +562,18 @@ class AutopilotWebService:
                                 # after typing credentials. The next stable page
                                 # is captured after this checkpoint succeeds.
                                 post_auth, duplicate = await append_screen(persist_evidence=False)
+                                post_auth_has_sensitive_inputs = any(
+                                    control.input_capable and control.input_kind == "credential"
+                                    for control in post_auth.controls
+                                )
+                                if not duplicate and not post_auth_has_sensitive_inputs:
+                                    # Keep the first post-submit observation
+                                    # memory-only, then persist a second stable
+                                    # capture with redacted HTML so authenticated
+                                    # journey cases always have reviewable proof.
+                                    # If the login form remains, do not persist
+                                    # a screenshot that could show typed values.
+                                    post_auth, _ = await append_screen(persist_evidence=True)
                                 transitions.append(
                                     {
                                         "from_screen_id": current.screen_id,
@@ -586,7 +612,7 @@ class AutopilotWebService:
                             break
 
                         links = await page.locator("a[href]").evaluate_all(
-                            "els => els.slice(0, 100).map(a => ({href: a.href, text: (a.innerText || a.getAttribute('aria-label') || '').trim()}))"
+                            "els => els.map(a => ({href: a.href, text: (a.innerText || a.getAttribute('aria-label') || '').trim()}))"
                         )
                         link_items: list[tuple[str, str]] = []
                         for link in links:
@@ -607,9 +633,10 @@ class AutopilotWebService:
                             queue.append(urldefrag(href)[0])
                             actions += 1
 
-                        # Links do not represent the whole UI. Probe a bounded
-                        # set of reversible menus, tabs, filters and accordions
-                        # and return to the original URL after each probe.
+                        # Links do not represent the whole UI. Probe every
+                        # observed reversible menu, tab, filter and accordion
+                        # until the request's safe action/page budget is met,
+                        # then return to the original URL after each probe.
                         for control in current.controls:
                             if actions >= request.max_actions or len(screens) >= request.max_screens:
                                 break
@@ -682,6 +709,15 @@ class AutopilotWebService:
                 await context.close()
         finished_at = datetime.now(timezone.utc)
         status_value = "completed" if screens and not warnings else "partial" if screens else "failed"
+        bounded = stop_reason.lower()
+        can_continue = any(token in bounded for token in ("max_screens", "max_actions"))
+        cursor = (
+            hashlib.sha256(
+                f"{job_id}|{request.continuation_token or ''}|{len(screens)}|{actions}".encode()
+            ).hexdigest()[:32]
+            if can_continue
+            else None
+        )
         return AutopilotDiscoveryResult(
             job_id=job_id,
             target_kind="web",
@@ -699,11 +735,18 @@ class AutopilotWebService:
             blocked_control_count=sum(sum(control.risk == "blocked" for control in screen.controls) for screen in screens),
             actions_attempted=actions,
             stop_reason=stop_reason,
+            target_ready=bool(screens),
+            target_identity=urlparse(target_url).netloc if screens else None,
+            target_identity_reason=None if screens else "The browser provider did not expose a readable page for the selected website.",
             screens=screens,
             transitions=transitions,
             input_requests=self._runtime_input_requests(screens),
             warnings=warnings,
             error=None if screens else "No website page could be inspected.",
+            exploration_cursor=cursor,
+            can_continue=can_continue,
+            visited_screen_count=len(screens),
+            unvisited_edge_count=max(0, len(queue)),
         )
 
     async def safe_suite(
@@ -796,7 +839,23 @@ class AutopilotWebService:
                     for step in test.steps:
                         if step.action in {"launch_app", "inspect_ui", "capture_evidence"}:
                             continue
-                        if step.action not in {"tap", "assert_visible", "fill", "assert_validation_feedback"}:
+                        if step.action == "wait_for_state":
+                            await page.wait_for_load_state(
+                                "domcontentloaded",
+                                timeout=min(120000, int(step.timeout_ms or 1000)),
+                            )
+                            continue
+                        if step.action not in {
+                            "tap",
+                            "click",
+                            "assert_visible",
+                            "assert_text",
+                            "assert_url",
+                            "fill",
+                            "clear",
+                            "select",
+                            "assert_validation_feedback",
+                        }:
                             raise AssertionError(f"Website runner cannot validate action: {step.action}")
                         if step.action == "assert_validation_feedback":
                             # Look for an explicit validation affordance rather
@@ -822,7 +881,7 @@ class AutopilotWebService:
                             raise AssertionError(f"Journey control is missing or ambiguous: {step.target}")
                         if not await element.is_visible():
                             raise AssertionError(f"Journey control is not visible: {step.target}")
-                        if step.action == "tap":
+                        if step.action in {"tap", "click"}:
                             await element.click(timeout=10000)
                             if not _same_origin(target_url, page.url):
                                 raise AssertionError("Journey navigated outside the selected website")
@@ -836,6 +895,22 @@ class AutopilotWebService:
                             # Trigger client-side blur/validation without
                             # submitting the form or changing server state.
                             await element.evaluate("el => el.blur()")
+                        elif step.action == "clear":
+                            await element.fill("")
+                        elif step.action == "select":
+                            option = str(step.value or "").strip()
+                            if not option:
+                                raise AssertionError(f"No safe option was supplied for {step.target or 'the select'}")
+                            await element.select_option(option)
+                        elif step.action == "assert_text":
+                            expected_text = str(step.assertion or step.value or step.description or "").strip()
+                            actual_text = await element.inner_text()
+                            if expected_text and expected_text.casefold() not in actual_text.casefold():
+                                raise AssertionError(f"Expected text was not visible for {step.target or 'the control'}")
+                        elif step.action == "assert_url":
+                            expected_url = str(step.assertion or step.value or "").strip()
+                            if expected_url and expected_url not in page.url:
+                                raise AssertionError("The observed URL did not match the grounded expectation")
                     # Every executed web case gets its own screenshot and HTML
                     # snapshot.  The API replaces these temporary paths with
                     # repository asset IDs before returning the result.
@@ -956,7 +1031,10 @@ class AutopilotWebService:
         elements = await page.locator('a,button,input,select,textarea,[role=button],[contenteditable="true"]').all()
         controls: list[DiscoveredControl] = []
         seen: set[str] = set()
-        for index, element in enumerate(elements[:120]):
+        # Preserve the complete observed control inventory.  Execution remains
+        # safe because only allow-listed, non-destructive controls are replayed;
+        # truncating the inventory here would hide real journeys from the plan.
+        for index, element in enumerate(elements):
             try:
                 tag = await element.evaluate("el => el.tagName.toLowerCase()")
                 element_id = await element.get_attribute("id") or ""
@@ -1129,4 +1207,5 @@ class AutopilotWebService:
                 await self.browser.close()
             if self.manager is not None:
                 await self.manager.stop()
+
 

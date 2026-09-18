@@ -1,5 +1,6 @@
 import json
 import os
+import struct
 import time
 import zipfile
 from pathlib import Path
@@ -26,7 +27,9 @@ from app.schemas.autopilot import (
 from app.api.routes.autopilot import (
     _blocking_checkpoint_requests,
     _effective_context,
+    _merge_discovery_snapshot,
     _pending_runtime_auth_requests,
+    _refresh_mobile_analysis_identity,
     _remove_local_report_data,
     _sanitize_discovery_assets,
     _setup_profile,
@@ -547,13 +550,64 @@ def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
     buckets = {test.bucket for test in expanded.tests}
 
     assert len(expanded.tests) > len(baseline)
-    assert len(expanded.tests) <= 100
     # A credential field is a concrete runtime checkpoint, so the deeper UAT
     # and SIT queues become eligible only in this observed branch.
     assert {"functional_positive", "functional_negative", "uat", "sit"}.issubset(buckets)
     assert any("Sign in" in test.title for test in expanded.tests)
     assert any(test.requires_test_data for test in expanded.tests)
     assert any("Runtime Discovery added" in item for item in expanded.analysis_basis)
+
+
+def test_runtime_discovery_keeps_all_observed_cases_without_fixed_cap(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="44444444-4444-4444-4444-444444444444",
+        filename="wide-surface.apk",
+        sha256="4" * 64,
+        tests=service._build_deterministic_tests({"permissions": []}),
+    )
+    screens = []
+    for screen_index in range(12):
+        controls = []
+        for control_index in range(8):
+            controls.append(DiscoveredControl(
+                control_id=f"safe-{screen_index}-{control_index}",
+                semantic_label=f"Open module {screen_index} {control_index}",
+                class_name="android.widget.Button",
+                clickable=True,
+                enabled=True,
+                risk="safe",
+                locators=[DiscoveryLocator(
+                    strategy="id",
+                    value=f"com.example:id/{screen_index}_{control_index}",
+                    confidence=0.98,
+                )],
+            ))
+        screens.append(DiscoveredScreen(
+            screen_id=f"screen-{screen_index}",
+            fingerprint=f"{screen_index:064d}",
+            activity_name=".MainActivity",
+            controls=controls,
+        ))
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-05T00:00:00+00:00",
+        finished_at="2026-09-05T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screen_count=len(screens),
+        control_count=96,
+        safe_control_count=96,
+        screens=screens,
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+
+    assert len(expanded.tests) > 100
+    assert any("Open module 11 7" in test.title for test in expanded.tests)
+    assert any("no artificial case-count cap" in item for item in expanded.analysis_basis)
 
 
 def test_runtime_discovery_does_not_guess_uat_or_sit_for_public_surface(tmp_path):
@@ -1362,6 +1416,78 @@ async def test_stale_discovery_evidence_ids_are_removed_at_read_boundary():
     assert sanitized.screens[0].page_source_asset_id is None
 
 
+def test_failed_retry_keeps_last_usable_discovery_snapshot():
+    """A provider/system-UI retry must not erase the authenticated map."""
+    previous = AutopilotDiscoveryResult(
+        job_id="33333333-3333-4333-8333-333333333333",
+        status="completed",
+        provider="appium",
+        started_at="2026-09-04T00:00:00+00:00",
+        finished_at="2026-09-04T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Android emulator",
+        target_ready=True,
+        target_identity="com.example.investnation",
+        screen_count=1,
+        screens=[DiscoveredScreen(
+            screen_id="screen-001",
+            fingerprint="a" * 64,
+            package_name="com.example.investnation",
+            page_label="Home",
+        )],
+    )
+    latest = AutopilotDiscoveryResult(
+        job_id=previous.job_id,
+        status="blocked",
+        provider="appium",
+        started_at="2026-09-04T00:01:00+00:00",
+        finished_at="2026-09-04T00:01:02+00:00",
+        duration_seconds=2,
+        device_name="Android emulator",
+        target_ready=False,
+        target_identity="android",
+        target_identity_reason="Runtime session reached only Android system UI; the uploaded application was not launched.",
+        stop_reason="Target was not attached",
+        screen_count=0,
+        screens=[],
+    )
+
+    merged = _merge_discovery_snapshot(previous, latest)
+
+    assert [screen.screen_id for screen in merged.screens] == ["screen-001"]
+    assert merged.target_ready is True
+    assert merged.last_attempt_status == "blocked"
+    assert "system UI" in (merged.last_attempt_reason or "")
+    assert any("Latest discovery attempt blocked" in warning for warning in merged.warnings)
+
+
+def test_successful_retry_replaces_old_discovery_snapshot():
+    previous = AutopilotDiscoveryResult(
+        job_id="44444444-4444-4444-8444-444444444444",
+        status="completed",
+        provider="appium",
+        started_at="2026-09-04T00:00:00+00:00",
+        finished_at="2026-09-04T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Android emulator",
+        target_ready=True,
+        screen_count=1,
+        screens=[DiscoveredScreen(screen_id="old", fingerprint="b" * 64)],
+    )
+    latest = previous.model_copy(update={
+        "finished_at": "2026-09-04T00:02:00+00:00",
+        "screen_count": 1,
+        "screens": [DiscoveredScreen(screen_id="new", fingerprint="c" * 64)],
+        "last_attempt_status": None,
+        "target_ready": True,
+    })
+
+    merged = _merge_discovery_snapshot(previous, latest)
+
+    assert [screen.screen_id for screen in merged.screens] == ["new"]
+    assert merged.last_attempt_status is None
+
+
 @pytest.mark.asyncio
 async def test_background_analysis_records_failure_instead_of_hanging(tmp_path, monkeypatch):
     service = _service(tmp_path)
@@ -1523,6 +1649,196 @@ def test_large_apk_uses_safe_zip_inventory_without_shadowing_zipfile(tmp_path):
     assert result["file_count"] == 1
     assert any("bounded archive metadata" in warning for warning in result["warnings"])
     assert not any("UnboundLocalError" in warning for warning in result["warnings"])
+
+
+def _fixture_binary_manifest() -> bytes:
+    """Build a small binary-XML manifest for bounded large-APK coverage."""
+    values = [
+        "android",
+        "http://schemas.android.com/apk/res/android",
+        "manifest",
+        "application",
+        "activity",
+        "intent-filter",
+        "action",
+        "category",
+        "uses-sdk",
+        "uses-permission",
+        "package",
+        "versionName",
+        "versionCode",
+        "minSdkVersion",
+        "targetSdkVersion",
+        "name",
+        "label",
+        "debuggable",
+        "com.example.investnation",
+        "Investnation",
+        "27",
+        "23",
+        "34",
+        "com.example.investnation.MainActivity",
+        "android.intent.action.MAIN",
+        "android.intent.category.LAUNCHER",
+        "android.permission.INTERNET",
+        "1.2.3",
+        "true",
+    ]
+    index = {value: number for number, value in enumerate(values)}
+
+    def length8(number: int) -> bytes:
+        return bytes([number]) if number < 0x80 else bytes([((number >> 7) & 0x7F) | 0x80, number & 0x7F])
+
+    strings = b"".join(length8(len(value.encode("utf-8"))) + length8(len(value)) + value.encode("utf-8") + b"\0" for value in values)
+    offsets: list[int] = []
+    cursor = 0
+    for value in values:
+        offsets.append(cursor)
+        cursor += len(length8(len(value.encode("utf-8"))) + length8(len(value)) + value.encode("utf-8") + b"\0")
+    pool_header_size = 28
+    pool_size = pool_header_size + len(offsets) * 4 + len(strings)
+    pool = struct.pack(
+        "<HHI5I",
+        0x0001,
+        pool_header_size,
+        pool_size,
+        len(values),
+        0,
+        0x100,
+        pool_header_size + len(offsets) * 4,
+        0,
+    ) + struct.pack(f"<{len(offsets)}I", *offsets) + strings
+
+    def start_namespace() -> bytes:
+        return struct.pack(
+            "<HHI4I",
+            0x0100,
+            16,
+            24,
+            1,
+            0,
+            index["android"],
+            index["http://schemas.android.com/apk/res/android"],
+        )
+
+    def start_element(name: str, attrs: list[tuple[str, str, str | None]]) -> bytes:
+        attr_bytes = b""
+        for attr_name, attr_value, raw_value in attrs:
+            raw_index = 0xFFFFFFFF if raw_value is None else index[raw_value]
+            value_index = index[attr_value] if attr_value in index else 0
+            attr_bytes += struct.pack(
+                "<IIIHBBI",
+                0xFFFFFFFF if attr_name == "package" else index["http://schemas.android.com/apk/res/android"],
+                index[attr_name],
+                raw_index,
+                8,
+                0,
+                0x03,
+                value_index,
+            )
+        return (
+            struct.pack(
+                "<HHI4I6H",
+                0x0102,
+                16,
+                36 + len(attr_bytes),
+                1,
+                0,
+                0,
+                index[name],
+                20,
+                20,
+                len(attrs),
+                0,
+                0,
+                0,
+            )
+            + attr_bytes
+        )
+
+    def end_element(name: str) -> bytes:
+        return struct.pack("<HHI4I", 0x0103, 16, 24, 1, 0, 0, index[name])
+
+    chunks = [
+        pool,
+        start_namespace(),
+        start_element(
+            "manifest",
+            [("package", "com.example.investnation", None), ("versionName", "1.2.3", None), ("versionCode", "27", None)],
+        ),
+        start_element("uses-sdk", [("minSdkVersion", "23", None), ("targetSdkVersion", "34", None)]),
+        end_element("uses-sdk"),
+        start_element("uses-permission", [("name", "android.permission.INTERNET", None)]),
+        end_element("uses-permission"),
+        start_element("application", [("label", "Investnation", None), ("debuggable", "true", None)]),
+        start_element("activity", [("name", "com.example.investnation.MainActivity", None)]),
+        start_element("intent-filter", []),
+        start_element("action", [("name", "android.intent.action.MAIN", None)]),
+        end_element("action"),
+        start_element("category", [("name", "android.intent.category.LAUNCHER", None)]),
+        end_element("category"),
+        end_element("intent-filter"),
+        end_element("activity"),
+        end_element("application"),
+        end_element("manifest"),
+    ]
+    body = b"".join(chunks)
+    return struct.pack("<HHI", 0x0003, 8, 8 + len(body)) + body
+
+
+def test_large_apk_recovers_binary_manifest_identity_for_runtime_launch(tmp_path):
+    apk_path = tmp_path / "large-release.apk"
+    with zipfile.ZipFile(apk_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("AndroidManifest.xml", _fixture_binary_manifest())
+        archive.writestr("assets/payload.bin", b"x" * (2 * 1024 * 1024))
+
+    service = _service(tmp_path, AUTOPILOT_DEEP_PARSE_MAX_MB=1)
+    result = service._analyze_apk_sync(apk_path)
+
+    assert result["package_name"] == "com.example.investnation"
+    assert result["main_activity"] == "com.example.investnation.MainActivity"
+    assert result["activities"] == ["com.example.investnation.MainActivity"]
+    assert "android.permission.INTERNET" in result["permissions"]
+    assert result["min_sdk"] == "23"
+    assert result["target_sdk"] == "34"
+    assert result["debuggable"] is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_discovery_refreshes_missing_apk_identity_before_launch(tmp_path):
+    """A pre-manifest job is repaired from its stored APK on discovery retry."""
+    apk_path = tmp_path / "legacy-release.apk"
+    with zipfile.ZipFile(apk_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("AndroidManifest.xml", _fixture_binary_manifest())
+        archive.writestr("assets/payload.bin", b"x" * (2 * 1024 * 1024))
+
+    service = _service(tmp_path, AUTOPILOT_DEEP_PARSE_MAX_MB=1)
+    job_id, _ = await service.save_upload("legacy-release.apk", apk_path.read_bytes(), "owner")
+    stale = AutopilotAnalysis(
+        job_id=job_id,
+        filename="legacy-release.apk",
+        sha256="f" * 64,
+        target_kind="android",
+        platform="android",
+        package_name=None,
+        main_activity=None,
+    )
+    (tmp_path / job_id / "analysis.json").write_text(stale.model_dump_json(indent=2), encoding="utf-8")
+
+    refreshed = await _refresh_mobile_analysis_identity(
+        service,
+        job_id,
+        stale,
+        artifact_path=tmp_path / job_id / "legacy-release.apk",
+    )
+
+    assert refreshed is not None
+    assert refreshed.package_name == "com.example.investnation"
+    assert refreshed.main_activity == "com.example.investnation.MainActivity"
+    saved = AutopilotAnalysis.model_validate_json(
+        (tmp_path / job_id / "analysis.json").read_text(encoding="utf-8")
+    )
+    assert saved.package_name == refreshed.package_name
 
 
 def test_large_apk_upload_limit_is_separate_from_deep_parse_limit(tmp_path):

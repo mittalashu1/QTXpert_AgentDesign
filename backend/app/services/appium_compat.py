@@ -13,10 +13,168 @@ from typing import Any, Mapping, Optional
 
 
 _PACKAGE_RE = re.compile(r'\bpackage="([^"]+)"')
+_PACKAGE_SINGLE_RE = re.compile(r"\bpackage='([^']+)'")
+
+# Appium hierarchies often include the Android system navigation/status bars
+# alongside the application.  They are harmless when the target package is
+# also present, but a hierarchy containing only these surfaces is a false
+# positive: the provider created a session without launching the uploaded
+# build.  Keep the list deliberately narrow so a product package is never
+# rejected merely because it starts with a common vendor prefix.
+_SYSTEM_PACKAGE_NAMES = {
+    "android",
+    "com.android.systemui",
+    "com.android.permissioncontroller",
+    "com.google.android.permissioncontroller",
+    "com.android.packageinstaller",
+    "io.appium.settings",
+    "io.appium.uiautomator2.server",
+    "io.appium.uiautomator2.server.test",
+}
+_SYSTEM_SURFACE_MARKERS = (
+    "navigationbarbackground",
+    "statusbar",
+    "com.android.systemui",
+    "permissioncontroller",
+    "packageinstaller",
+    "android:id/navigationbar",
+    "android:id/statusbar",
+)
 
 
 class ProviderLifecycleUnavailable(RuntimeError):
     """The connected device cloud cannot perform a lifecycle-only check safely."""
+
+
+def _is_system_package(value: Optional[str]) -> bool:
+    normalized = str(value or "").strip().casefold()
+    return not normalized or normalized in _SYSTEM_PACKAGE_NAMES
+
+
+def _hierarchy_packages(page_source: str) -> list[str]:
+    """Return package attributes visible in a native UI hierarchy."""
+    if not page_source:
+        return []
+    values = [*(_PACKAGE_RE.findall(page_source)), *(_PACKAGE_SINGLE_RE.findall(page_source))]
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        package = str(value or "").strip()
+        if package and package not in seen:
+            seen.add(package)
+            result.append(package)
+    return result
+
+
+def observed_app_identity(driver: Any, *, page_source: Optional[str] = None) -> dict[str, Any]:
+    """Resolve identity without falling back to an analysis hint.
+
+    ``safe_app_identity`` intentionally uses ``package_hint`` as a last
+    resort so legacy smoke checks can still produce useful evidence.  Target
+    validation must distinguish that hint from what the provider actually
+    exposed; otherwise an Android system hierarchy can be reported as the
+    uploaded app.  This helper returns the hierarchy package list so callers
+    can fail fast on a wrong or unlaunched target.
+    """
+    capabilities = safe_capabilities(driver)
+    hierarchy = page_source if page_source is not None else safe_page_source(driver)
+    hierarchy_packages = _hierarchy_packages(hierarchy)
+    package = next((item for item in hierarchy_packages if not _is_system_package(item)), None)
+    activity = _first(
+        capabilities,
+        "appium:appActivity",
+        "appActivity",
+        "currentActivity",
+    )
+    if not package:
+        package = _first(
+            capabilities,
+            "appium:appPackage",
+            "appPackage",
+            "packageName",
+            "appium:bundleId",
+            "bundleId",
+        )
+    source = "hierarchy" if hierarchy_packages and package in hierarchy_packages else "capabilities" if package else None
+    return {
+        "package": package,
+        "activity": activity,
+        "identity_source": source,
+        "hierarchy_packages": hierarchy_packages,
+    }
+
+
+def validate_target_surface(
+    driver: Any,
+    *,
+    expected_package: Optional[str] = None,
+    expected_activity: Optional[str] = None,
+    page_source: Optional[str] = None,
+    control_labels: Optional[list[str]] = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Verify that a live session is attached to the uploaded application.
+
+    A successful Appium handshake is not enough for Autopilot: BrowserStack
+    and custom providers can leave the Android system UI foreground when an
+    app upload, package or launch capability is wrong.  Return a structured,
+    actionable diagnostic instead of allowing that state to generate a
+    misleading "completed" discovery or passing smoke case.
+    """
+    hierarchy = page_source if page_source is not None else safe_page_source(driver)
+    identity = observed_app_identity(driver, page_source=hierarchy)
+    expected = str(expected_package or "").strip()
+    packages = list(identity.get("hierarchy_packages") or [])
+    non_system = [item for item in packages if not _is_system_package(item)]
+    labels = [str(item or "").strip().casefold() for item in (control_labels or []) if str(item or "").strip()]
+    system_only_labels = bool(labels) and all(
+        any(marker in label for marker in _SYSTEM_SURFACE_MARKERS)
+        for label in labels
+    )
+    if not labels and any(marker in hierarchy.casefold() for marker in _SYSTEM_SURFACE_MARKERS):
+        system_only_labels = True
+
+    if expected:
+        if expected in packages:
+            return True, "Target package observed in the live hierarchy.", identity
+        actual = next((item for item in non_system), identity.get("package"))
+        if actual and str(actual).strip() != expected:
+            return (
+                False,
+                f"Runtime session foreground package {actual!r} does not match uploaded package {expected!r}.",
+                identity,
+            )
+        # A few providers omit package attributes from the hierarchy while
+        # advertising the requested appPackage in capabilities.  Accept that
+        # state only when the hierarchy is not recognisably system-only.
+        if identity.get("package") == expected and not system_only_labels:
+            return True, "Target package supplied by the provider capabilities.", identity
+        if system_only_labels:
+            return (
+                False,
+                "Runtime session reached only Android system UI; the uploaded application was not launched.",
+                identity,
+            )
+        return (
+            False,
+            f"Runtime provider did not expose uploaded package {expected!r} in the live application surface.",
+            identity,
+        )
+
+    if non_system:
+        return True, "A non-system application package was observed in the live hierarchy.", identity
+    if identity.get("package") and not _is_system_package(str(identity.get("package"))):
+        return True, "A non-system application package was supplied by the provider.", identity
+    if system_only_labels or packages:
+        return (
+            False,
+            "Runtime session reached only Android system UI; configure the uploaded app package/activity or retry the device session.",
+            identity,
+        )
+    return (
+        False,
+        "Runtime provider did not expose a verifiable application package; configure appPackage/appActivity or a supported device session.",
+        identity,
+    )
 
 
 def safe_page_source(driver: Any) -> str:
@@ -144,4 +302,5 @@ def _first(values: Mapping[str, Any], *keys: str) -> Optional[str]:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
 

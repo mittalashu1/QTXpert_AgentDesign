@@ -29,6 +29,27 @@ AutopilotTestBucket = Literal[
 AutopilotTargetKind = Literal["android", "ios", "web"]
 AutopilotProvider = Literal["browserstack", "appium", "playwright"]
 
+# The phase is intentionally separate from the legacy ``status`` field.  The
+# latter is a transport/storage status used by older clients, while this
+# contract describes the user-visible autonomous workflow and can be resumed
+# safely after a worker restart.
+AutopilotPhase = Literal[
+    "draft",
+    "preflight",
+    "context_ready",
+    "plan_pending_review",
+    "plan_approved",
+    "exploring",
+    "cases_pending_review",
+    "cases_approved",
+    "execution_ready",
+    "running",
+    "completed",
+    "partial",
+    "blocked",
+    "failed",
+]
+
 
 AutopilotInputCategory = Literal[
     "credential",
@@ -61,11 +82,22 @@ class AutopilotScopeSource(BaseModel):
     not carry document bodies, credentials or runtime secrets.
     """
 
+    # ``source_id`` is stable within a run and is safe to expose in reports.
+    # It lets plan items and generated cases point back to the exact source
+    # without copying document bodies or secret values.
+    source_id: str = ""
     kind: AutopilotScopeSourceKind
     label: str
     reference: Optional[str] = None
     summary: str = ""
     observed: bool = False
+    # Confidence describes the source signal, not the truth of an unobserved
+    # claim. ``used`` and ``influenced_*`` make the context panel auditable.
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    trust_level: Literal["high", "medium", "low"] = "medium"
+    used: bool = False
+    influenced_plan_items: List[str] = Field(default_factory=list)
+    influenced_test_ids: List[str] = Field(default_factory=list)
     retrieved_at: Optional[str] = None
 
 
@@ -214,6 +246,107 @@ class AutopilotTestProvenance(BaseModel):
     label: str
     reference: Optional[str] = None
     observed: bool = False
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    source_id: Optional[str] = None
+
+
+class AutopilotPlanItem(BaseModel):
+    """One editable, source-backed item in the generated coverage plan."""
+
+    id: str
+    title: str
+    description: str
+    test_type: str = "functional"
+    status: Literal["planned", "running", "completed", "blocked", "skipped"] = "planned"
+    source_refs: List[str] = Field(default_factory=list)
+    requirement_refs: List[str] = Field(default_factory=list)
+    risk: Literal["critical", "high", "medium", "low"] = "medium"
+    estimated_case_count: int = Field(default=0, ge=0)
+    expected_output: str = ""
+    actual_output: Optional[str] = None
+    agent: str = "Autopilot planner"
+    depends_on: List[str] = Field(default_factory=list)
+    approval_required: bool = False
+    editable: bool = True
+
+
+class AutopilotGenerationPlan(BaseModel):
+    """Versioned plan shown to the user before exploration and execution."""
+
+    schema_version: str = "qtx-autopilot-plan/1.0"
+    plan_id: str
+    job_id: str
+    version: int = Field(default=1, ge=1)
+    status: Literal["draft", "pending_review", "approved", "superseded"] = "pending_review"
+    target_kind: AutopilotTargetKind = "android"
+    summary: str = ""
+    items: List[AutopilotPlanItem] = Field(default_factory=list)
+    requested_test_types: List[str] = Field(default_factory=list)
+    context_source_count: int = Field(default=0, ge=0)
+    document_section_count: int = Field(default=0, ge=0)
+    runtime_gate: str = (
+        "Explore the supplied target first; authenticated execution starts only after an observed sign-in is approved."
+    )
+    approval_required: bool = True
+    editable: bool = True
+    generated_at: str = ""
+
+
+class AutopilotApplicationMap(BaseModel):
+    """Durable projection of the observed application/page graph."""
+
+    schema_version: str = "qtx-application-map/1.0"
+    map_id: str
+    job_id: str
+    target_kind: AutopilotTargetKind = "android"
+    target_identity: Optional[str] = None
+    version: int = Field(default=1, ge=1)
+    generated_at: str = ""
+    login_observed: bool = False
+    screens: List["DiscoveredScreen"] = Field(default_factory=list)
+    transitions: List["DiscoveredTransition"] = Field(default_factory=list)
+    controls_count: int = Field(default=0, ge=0)
+    # These are references/observations only. Values such as passwords and
+    # session tokens are never part of the map.
+    authentication_boundaries: List[str] = Field(default_factory=list)
+    validation_behaviors: List[str] = Field(default_factory=list)
+    observation_refs: List[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    coverage_notes: List[str] = Field(default_factory=list)
+
+
+class AutopilotPlanUpdateRequest(BaseModel):
+    """User-editable plan fields; secrets and runtime values are excluded."""
+
+    summary: Optional[str] = Field(default=None, max_length=4000)
+    items: Optional[List[AutopilotPlanItem]] = Field(default=None, max_length=500)
+    requested_test_types: Optional[List[str]] = Field(default=None, max_length=40)
+
+
+class AutopilotCaseReviewUpdateRequest(BaseModel):
+    """Review decision for one grounded case before execution."""
+
+    decision: Literal["approve", "defer", "skip"]
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class AutopilotCaseApprovalRequest(BaseModel):
+    """Approve grounded cases for hand-off to the shared Test Case library."""
+
+    case_ids: List[str] = Field(default_factory=list, max_length=5000)
+    approve_all: bool = False
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class AutopilotCaseLibraryResult(BaseModel):
+    """Result of an idempotent Autopilot-to-Test-Design library hand-off."""
+
+    job_id: str
+    generation_run_id: UUID
+    persisted_case_ids: List[UUID] = Field(default_factory=list)
+    persisted_count: int = 0
+    skipped_case_ids: List[str] = Field(default_factory=list)
+    message: str = "Approved cases are available in the shared Test Case library."
 
 
 class AutopilotTest(BaseModel):
@@ -221,9 +354,14 @@ class AutopilotTest(BaseModel):
     suite: str
     title: str
     priority: Literal["critical", "high", "medium", "low"] = "medium"
+    severity: Literal["blocker", "critical", "major", "minor", "trivial"] = "major"
+    risk_level: Literal["high", "medium", "low"] = "medium"
     objective: str
     steps: List[str] = Field(default_factory=list)
     expected: List[str] = Field(default_factory=list)
+    preconditions: List[str] = Field(default_factory=list)
+    postconditions: List[str] = Field(default_factory=list)
+    cleanup_requirements: List[str] = Field(default_factory=list)
     autonomous: bool = True
     destructive: bool = False
     source: Literal["deterministic", "ai"] = "deterministic"
@@ -249,6 +387,14 @@ class AutopilotTest(BaseModel):
     page_url: Optional[str] = None
     data_probes: List[AutopilotDataProbe] = Field(default_factory=list)
     provenance: List[AutopilotTestProvenance] = Field(default_factory=list)
+    requirement_refs: List[str] = Field(default_factory=list)
+    source_refs: List[str] = Field(default_factory=list)
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    safety_classification: Literal["safe", "review", "blocked"] = "safe"
+    observation_refs: List[str] = Field(default_factory=list)
+    test_data_refs: List[str] = Field(default_factory=list)
+    duplicate_of: Optional[str] = None
+    duplicate_status: Literal["unique", "similar", "duplicate", "unknown"] = "unknown"
 
 
 class AutopilotAnalysis(BaseModel):
@@ -302,6 +448,11 @@ class AutopilotAnalysis(BaseModel):
     # The compiled scope is deliberately stored inside the versioned analysis
     # JSON so older database rows remain readable without a migration.
     scope: AutopilotScope = Field(default_factory=AutopilotScope)
+    phase: AutopilotPhase = "context_ready"
+    generation_plan: Optional[AutopilotGenerationPlan] = None
+    application_map: Optional[AutopilotApplicationMap] = None
+    context_pack_version: str = "qtx-context/1.0"
+    case_reviews: Dict[str, str] = Field(default_factory=dict)
 
 
 ReportCheckStatus = Literal["pass", "fail", "warning", "pending", "not_assessed"]
@@ -511,6 +662,10 @@ class AutopilotJobStatus(BaseModel):
     checkpoint_stage: str = "queued"
     checkpoint_message: Optional[str] = None
     input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
+    phase: AutopilotPhase = "draft"
+    phase_updated_at: Optional[str] = None
+    generation_plan: Optional[AutopilotGenerationPlan] = None
+    application_map: Optional[AutopilotApplicationMap] = None
 
 
 class AutopilotProviderStatus(BaseModel):
@@ -535,7 +690,9 @@ class AutopilotSetupUpdateRequest(BaseModel):
     api_oracle_reference: str = Field(default="", max_length=500)
     navigation_notes: str = Field(default="", max_length=4000)
     safe_authentication_approved: bool = False
-    approved_test_ids: List[str] = Field(default_factory=list, max_length=100)
+    # Approval applies to any number of observed cases; the plan itself is
+    # finite because it is derived from the target graph, not a fixed quota.
+    approved_test_ids: List[str] = Field(default_factory=list)
     # Optional per-control references let a user map a discovered username,
     # password, search or test-data field to a vault/fixture without sending
     # the actual value to QTXpert.
@@ -585,18 +742,38 @@ class AutopilotResumeRequest(BaseModel):
 class QTXIRStep(BaseModel):
     action: Literal[
         "launch_app",
+        "launch",
         "background_app",
         "restore_app",
+        "scroll",
+        "swipe",
         "capture_evidence",
         "inspect_ui",
         "static_assertion",
         "permission_flow",
+        "permission_grant",
+        "permission_deny",
         "network_condition",
         "intent",
+        "wait_for_state",
         "tap",
+        "click",
         "fill",
+        "clear",
+        "select",
+        "press",
+        "navigate",
         "assert_visible",
+        "assert_text",
+        "assert_url",
+        "request_json",
+        "request",
+        "assert_json",
+        "reset",
+        "reset_state",
         "assert_validation_feedback",
+        "assert_value",
+        "assert_attribute",
     ]
     description: str
     target: Optional[str] = None
@@ -609,6 +786,13 @@ class QTXIRStep(BaseModel):
     locator_strategy: Optional[Literal["accessibility_id", "id", "xpath", "css"]] = None
     locator_value: Optional[str] = None
     locator_confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    timeout_ms: Optional[int] = Field(default=None, ge=0, le=120_000)
+    retry_count: int = Field(default=0, ge=0, le=5)
+    safety_classification: Literal["safe", "review", "blocked"] = "safe"
+    observation_ref: Optional[str] = None
+    value_source: Optional[Literal["literal_non_secret", "encrypted_input", "generated_fixture", "environment", "observed"]] = None
+    assertion: Optional[str] = None
+    on_error: Optional[Literal["stop", "continue", "capture_and_stop", "request_input"]] = "capture_and_stop"
 
 
 class QTXTestIR(BaseModel):
@@ -718,9 +902,13 @@ class AutopilotAnalysisRerunRequest(BaseModel):
 class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
     """Bounded safe runtime exploration configuration."""
 
+    # These are safety budgets per pass, not a product-level test-count cap.
+    # Continuation is supported by the cursor fields on the result so a large
+    # app can be explored over multiple resumable passes.
     max_screens: int = Field(default=12, ge=1, le=40)
     max_actions: int = Field(default=10, ge=0, le=50)
     observe_only: bool = False
+    continuation_token: Optional[str] = Field(default=None, max_length=512)
 
 
 class DiscoveryLocator(BaseModel):
@@ -739,8 +927,12 @@ class DiscoveredControl(BaseModel):
     bounds: str = ""
     clickable: bool = False
     enabled: bool = True
+    scrollable: bool = False
     input_capable: bool = False
     input_kind: Optional[str] = None
+    input_type: Optional[str] = None
+    validation_behavior: Optional[str] = None
+    observation_ref: Optional[str] = None
     risk: Literal["safe", "review", "blocked"] = "review"
     risk_reason: Optional[str] = None
     locators: List[DiscoveryLocator] = Field(default_factory=list)
@@ -761,6 +953,9 @@ class DiscoveredScreen(BaseModel):
     page_source_path: Optional[str] = None
     screenshot_asset_id: Optional[UUID] = None
     page_source_asset_id: Optional[UUID] = None
+    state_key: Optional[str] = None
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    observation_ref: Optional[str] = None
     controls: List[DiscoveredControl] = Field(default_factory=list)
 
 
@@ -769,8 +964,9 @@ class DiscoveredTransition(BaseModel):
     to_screen_id: str
     control_id: str
     control_label: str
-    action: Literal["tap", "back"] = "tap"
+    action: Literal["tap", "back", "scroll"] = "tap"
     duplicate_state: bool = False
+    observation_ref: Optional[str] = None
 
 
 class AutopilotDiscoveryResult(BaseModel):
@@ -790,6 +986,21 @@ class AutopilotDiscoveryResult(BaseModel):
     blocked_control_count: int = 0
     actions_attempted: int = 0
     stop_reason: str = ""
+    # Target validation is separate from Appium session creation.  A provider
+    # can accept a session while leaving the Android system UI foreground;
+    # these fields make that degraded state explicit and prevent it from being
+    # reported as app coverage.
+    target_ready: Optional[bool] = None
+    target_identity: Optional[str] = None
+    target_activity: Optional[str] = None
+    target_identity_reason: Optional[str] = None
+    # A provider failure must not erase a previously valid map.  When the
+    # latest attempt cannot attach to the target, routes keep the last usable
+    # screens/transitions and record the failed attempt here for the UI and
+    # audit trail.
+    last_attempt_status: Optional[Literal["completed", "partial", "blocked", "failed"]] = None
+    last_attempt_reason: Optional[str] = None
+    last_attempt_at: Optional[str] = None
     screens: List[DiscoveredScreen] = Field(default_factory=list)
     transitions: List[DiscoveredTransition] = Field(default_factory=list)
     # Field-specific, non-secret setup references inferred from the live UI.
@@ -798,17 +1009,23 @@ class AutopilotDiscoveryResult(BaseModel):
     input_requests: List[AutopilotInputRequest] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[str] = None
+    # A discovery pass is resumable.  The token is opaque to clients and does
+    # not contain credentials or page contents.
+    exploration_cursor: Optional[str] = None
+    can_continue: bool = False
+    visited_screen_count: int = Field(default=0, ge=0)
+    unvisited_edge_count: int = Field(default=0, ge=0)
 
 
 class AutopilotSuiteRequest(AutopilotExecutionRequest):
     """Execute safe IR cases and report deferred cases with their dependencies."""
 
-    test_ids: List[str] = Field(default_factory=list, max_length=100)
+    test_ids: List[str] = Field(default_factory=list)
     buckets: List[AutopilotTestBucket] = Field(default_factory=list, max_length=20)
-    # The generated plan is capped at 100.  A safe batch defaults to 20 so a
-    # real-device run remains bounded, while API callers can deliberately
-    # request additional eligible cases in later batches up to that cap.
-    max_tests: int = Field(default=20, ge=1, le=100)
+    # The plan has no arbitrary case-count cap. A safe batch still defaults to
+    # 20 so callers can choose an execution size appropriate for their device
+    # provider and timeout budget.
+    max_tests: int = Field(default=20, ge=1)
     include_deferred: bool = True
     # This is informational for explicitly triggered runs and is also used by
     # the checkpoint-resume worker when it chains discovery into execution.
@@ -850,5 +1067,13 @@ class AutopilotSuiteResult(BaseModel):
     bucket_counts: Dict[str, int] = Field(default_factory=dict)
     error: Optional[str] = None
     tests: List[AutopilotSuiteTestResult] = Field(default_factory=list)
+    continuation_token: Optional[str] = None
+    remaining_count: int = Field(default=0, ge=0)
+
+
+# ``AutopilotApplicationMap`` is declared before the discovery models so it
+# can be referenced by the analysis/job contracts above.  Resolve the forward
+# references once all of the concrete discovery models are available.
+AutopilotApplicationMap.model_rebuild()
 
 

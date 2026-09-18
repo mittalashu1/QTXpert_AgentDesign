@@ -19,7 +19,11 @@ class ExecutionCreate(BaseModel):
     # FastAPI's opaque 422 response before that useful validation can run.
     base_url: str | None = Field(default=None, max_length=2048)
     browser: str = Field(default="chromium", pattern="^chromium$")
-    test_case_ids: list[UUID] = Field(min_length=1, max_length=100)
+    # A generated plan can legitimately contain hundreds (or thousands) of
+    # evidence-backed cases.  Execution providers still process work in safe
+    # batches, so the request boundary must not truncate a complete selection
+    # at the former 100-case product limit.
+    test_case_ids: list[UUID] = Field(min_length=1)
     target_kind: ExecutionTargetKind = "web"
     provider: ExecutionProvider = "playwright"
     app_asset_id: UUID | None = None
@@ -57,7 +61,10 @@ class ExecutionPlanCaseSelection(BaseModel):
 class ExecutionPlanCasesUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    cases: list[ExecutionPlanCaseSelection] = Field(min_length=1, max_length=500)
+    # Keep the complete generated plan addressable.  The execution service
+    # batches provider work independently, so importing or editing a large
+    # evidence-backed plan must not fail at an arbitrary list length.
+    cases: list[ExecutionPlanCaseSelection] = Field(min_length=1)
 
 
 class ExecutionInputRequirementOut(BaseModel):
@@ -302,4 +309,5 @@ class DashboardSummary(BaseModel):
     skipped_tests: int = 0
     pending_tests: int = 0
     autopilot: AutopilotDashboardSummary = Field(default_factory=AutopilotDashboardSummary)
+
 

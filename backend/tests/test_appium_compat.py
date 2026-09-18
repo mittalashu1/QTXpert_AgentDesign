@@ -1,10 +1,12 @@
 from app.services.appium_compat import (
     ProviderLifecycleUnavailable,
     expected_package_state,
+    observed_app_identity,
     safe_app_identity,
     safe_background_application,
     safe_page_source,
     safe_quit,
+    validate_target_surface,
 )
 
 
@@ -57,6 +59,72 @@ def test_expected_package_state_is_tristate():
         page_source = ""
 
     assert expected_package_state(UnknownDriver(), "com.qtx.demo") is None
+
+
+def test_target_validation_rejects_system_only_surface():
+    class Driver:
+        capabilities = {"appium:appPackage": "com.qtx.demo"}
+        page_source = (
+            '<hierarchy><node package="com.android.systemui" '
+            'resource-id="android:id/navigationBarBackground" class="android.view.View" />'
+            '</hierarchy>'
+        )
+
+    ready, reason, identity = validate_target_surface(
+        Driver(),
+        expected_package="com.qtx.demo",
+        page_source=Driver.page_source,
+        control_labels=["navigationBarBackground"],
+    )
+
+    assert ready is False
+    assert "system UI" in reason
+    assert identity["hierarchy_packages"] == ["com.android.systemui"]
+
+
+def test_target_validation_accepts_expected_package_in_live_hierarchy():
+    class Driver:
+        capabilities = {"appium:appPackage": "com.qtx.demo"}
+        page_source = (
+            '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">'
+            '<node text="Welcome" class="android.widget.TextView" />'
+            '</node></hierarchy>'
+        )
+
+    ready, reason, identity = validate_target_surface(
+        Driver(), expected_package="com.qtx.demo", page_source=Driver.page_source
+    )
+
+    assert ready is True
+    assert "observed" in reason.lower()
+    assert identity["package"] == "com.qtx.demo"
+
+
+def test_target_validation_rejects_wrong_foreground_package():
+    class Driver:
+        capabilities = {"appium:appPackage": "com.qtx.demo"}
+        page_source = '<hierarchy package="com.example.other"><node text="Other app" /></hierarchy>'
+
+    ready, reason, _ = validate_target_surface(
+        Driver(), expected_package="com.qtx.demo", page_source=Driver.page_source
+    )
+
+    assert ready is False
+    assert "does not match" in reason
+
+
+def test_target_validation_allows_capability_identity_when_hierarchy_omits_package():
+    class Driver:
+        capabilities = {"appium:appPackage": "com.qtx.demo"}
+        page_source = '<hierarchy><node text="Welcome" class="android.widget.TextView" /></hierarchy>'
+
+    ready, reason, identity = validate_target_surface(
+        Driver(), expected_package="com.qtx.demo", page_source=Driver.page_source
+    )
+
+    assert ready is True
+    assert "capabilities" in reason.lower()
+    assert observed_app_identity(Driver(), page_source=Driver.page_source)["package"] == "com.qtx.demo"
 
 
 def test_evidence_and_cleanup_are_best_effort():
@@ -128,4 +196,5 @@ def test_background_preserves_native_local_appium_path(monkeypatch):
 
     assert safe_background_application(driver, 2, package="com.qtx.demo") == "background_app"
     assert driver.seconds == 2
+
 

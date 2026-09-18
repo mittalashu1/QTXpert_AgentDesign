@@ -64,14 +64,27 @@ class AutopilotJob(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     apk_path: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="uploaded")
     stage: Mapped[str] = mapped_column(String(80), nullable=False, default="queued")
+    # Explicit workflow phase; status and stage remain for backwards
+    # compatibility with existing clients and dashboards.
+    phase: Mapped[str] = mapped_column(String(40), nullable=False, default="draft", server_default="draft")
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     analysis: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     discovery: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     suite_execution: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     setup_profile: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    plan: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    application_map: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    case_reviews: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # When a user approves cases, the shared Test Design library generation
+    # run is linked here. This keeps Autopilot orchestration separate from the
+    # canonical TestCase rows while making the hand-off queryable and repeatable.
+    shared_generation_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("generation_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
     )
+
 
