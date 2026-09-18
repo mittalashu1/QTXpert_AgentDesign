@@ -90,6 +90,20 @@ class _ResettableDriver(_Driver):
         self.reset_calls += 1
 
 
+class _ColdRelaunchDriver(_ResettableDriver):
+    def __init__(self):
+        super().__init__()
+        self.terminate_calls = []
+        self.activate_calls = []
+
+    def terminate_app(self, package):
+        self.terminate_calls.append(package)
+
+    def activate_app(self, package):
+        self.activate_calls.append(package)
+        super().activate_app(package)
+
+
 def _test_ir(actions):
     return QTXTestIR(
         test_id="QT-AI-100",
@@ -153,6 +167,16 @@ def test_suite_reset_to_application_prefers_provider_reset():
     AutopilotSuiteService._reset_to_application(driver, "com.qtx.demo")
 
     assert driver.reset_calls == 1
+
+
+def test_suite_reset_to_application_cold_relaunches_after_provider_reset():
+    driver = _ColdRelaunchDriver()
+
+    AutopilotSuiteService._reset_to_application(driver, "com.qtx.demo")
+
+    assert driver.reset_calls == 1
+    assert driver.terminate_calls == ["com.qtx.demo"]
+    assert driver.activate_calls == ["com.qtx.demo"]
 
 
 def test_suite_interpreter_rejects_non_allowlisted_ir_action(tmp_path):
