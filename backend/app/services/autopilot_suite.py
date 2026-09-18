@@ -31,6 +31,7 @@ from app.services.appium_compat import (
     safe_background_application,
     safe_page_source,
     safe_quit,
+    validate_target_surface,
 )
 from app.services.autopilot_ir import AutopilotIRCompiler
 
@@ -42,11 +43,19 @@ class AutopilotSuiteService:
         "launch_app",
         "background_app",
         "restore_app",
+        "scroll",
         "capture_evidence",
         "inspect_ui",
+        "wait_for_state",
         "tap",
+        "click",
         "fill",
+        "clear",
+        "select",
+        "press",
+        "reset",
         "assert_visible",
+        "assert_text",
         "assert_validation_feedback",
     }
     # Record only user-journey coverage.  Installation, discovery, security
@@ -182,7 +191,11 @@ class AutopilotSuiteService:
             )
         except Exception as exc:
             finished = datetime.now(timezone.utc)
-            blocked = self.prototype._looks_like_connector_problem(exc)
+            # A session that is connected to the provider but showing system
+            # UI is a lifecycle/target failure, not a test assertion failure.
+            # Keep it blocked and expose the actionable provider diagnostic to
+            # the report instead of counting any platform check as a pass.
+            blocked = isinstance(exc, ProviderLifecycleUnavailable) or self.prototype._looks_like_connector_problem(exc)
             connector_error = f"{type(exc).__name__}: {exc}"[:1200]
             failure_results = [
                 AutopilotSuiteTestResult(
@@ -419,6 +432,8 @@ class AutopilotSuiteService:
             "appium:noReset": request.no_reset,
             "appium:newCommandTimeout": 240,
         }
+        if package_hint:
+            capabilities["appium:appPackage"] = package_hint
         if is_ios:
             capabilities.update(
                 {
@@ -458,11 +473,19 @@ class AutopilotSuiteService:
         try:
             time.sleep(2)
             initial_source = safe_page_source(driver)
-            package = safe_app_identity(
+            identity = safe_app_identity(
                 driver,
                 page_source=initial_source,
                 package_hint=package_hint,
-            )["package"]
+            )
+            package = identity["package"]
+            target_ready, target_reason, _ = validate_target_surface(
+                driver,
+                expected_package=package_hint,
+                page_source=initial_source,
+            )
+            if not target_ready:
+                raise ProviderLifecycleUnavailable(target_reason)
             for test in tests:
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -645,15 +668,114 @@ class AutopilotSuiteService:
                 time.sleep(1)
                 if expected_package_state(driver, package) is not True:
                     raise AssertionError("Application did not recover to foreground")
-            elif step.action in {"tap", "assert_visible"}:
+            elif step.action == "scroll":
+                # Keep replay aligned with Runtime Discovery's provider-safe
+                # gesture order. A missing/unsupported gesture blocks this
+                # case with an actionable capability message; it must not
+                # masquerade as a locator or assertion failure.
+                width, height = 1080, 1920
+                try:
+                    size = driver.get_window_size()
+                    width = max(320, int(size.get("width") or width))
+                    height = max(480, int(size.get("height") or height))
+                except Exception:
+                    pass
+                scrolled = False
+                execute_script = getattr(driver, "execute_script", None)
+                if callable(execute_script):
+                    for command, arguments in (
+                        (
+                            "mobile: scrollGesture",
+                            {
+                                "left": 0,
+                                "top": max(0, int(height * 0.12)),
+                                "width": width,
+                                "height": max(200, int(height * 0.78)),
+                                "direction": "down",
+                                "percent": 0.75,
+                            },
+                        ),
+                        ("mobile: swipe", {"direction": "up", "percent": 0.75}),
+                    ):
+                        try:
+                            result = execute_script(command, arguments)
+                            scrolled = result is not False
+                            if scrolled:
+                                break
+                        except Exception:
+                            continue
+                if not scrolled:
+                    swipe = getattr(driver, "swipe", None)
+                    if callable(swipe):
+                        try:
+                            swipe(
+                                int(width * 0.5),
+                                int(height * 0.82),
+                                int(width * 0.5),
+                                int(height * 0.22),
+                                duration=700,
+                            )
+                            scrolled = True
+                        except TypeError:
+                            try:
+                                swipe(
+                                    int(width * 0.5),
+                                    int(height * 0.82),
+                                    int(width * 0.5),
+                                    int(height * 0.22),
+                                    700,
+                                )
+                                scrolled = True
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                if not scrolled:
+                    raise ProviderLifecycleUnavailable(
+                        "The mobile provider does not expose a safe scroll gesture for this journey."
+                    )
+                time.sleep(0.8)
+            elif step.action == "wait_for_state":
+                # The bounded wait is an explicit IR action so a slow screen
+                # is distinguishable from an unsupported provider command.
+                time.sleep(min(120.0, max(0.0, float(step.timeout_ms or 1000) / 1000)))
+            elif step.action in {"tap", "click", "assert_visible", "assert_text", "clear", "select"}:
                 element = self._find_semantic_element(driver, step, locator_map)
-                if step.action == "tap":
+                if step.action in {"tap", "click"}:
                     if not element.is_enabled():
                         raise AssertionError(f"Resolved control is disabled: {step.target}")
                     element.click()
                     time.sleep(0.9)
                 elif not element.is_displayed():
                     raise AssertionError(f"Resolved control is not visible: {step.target}")
+                elif step.action == "assert_text":
+                    expected = str(step.assertion or step.value or step.description or "").strip()
+                    actual = str(getattr(element, "text", "") or "")
+                    if expected and expected.casefold() not in actual.casefold():
+                        raise AssertionError(f"Expected text was not visible for {step.target or 'the control'}")
+                elif step.action == "clear":
+                    clearer = getattr(element, "clear", None)
+                    if callable(clearer):
+                        clearer()
+                    else:
+                        raise ProviderLifecycleUnavailable("The provider does not expose a safe clear action for this field.")
+                elif step.action == "select":
+                    # Native select controls vary by platform; opening the
+                    # observed control is safe, while the option selection is
+                    # represented by a following tap in the grounded IR.
+                    element.click()
+                    time.sleep(0.4)
+            elif step.action == "press":
+                key = step.value or step.target
+                if not key:
+                    raise AssertionError("Press action has no key target")
+                presser = getattr(driver, "press_keycode", None)
+                if callable(presser) and str(key).isdigit():
+                    presser(int(key))
+                else:
+                    raise ProviderLifecycleUnavailable("The provider does not expose a safe press action for this key.")
+            elif step.action == "reset":
+                self._reset_to_application(driver, package)
             elif step.action == "fill":
                 input_key = step.input_key
                 # Synthetic values are embedded only for non-sensitive
@@ -774,3 +896,4 @@ class AutopilotSuiteService:
     @staticmethod
     def _safe_name(value: str) -> str:
         return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")[:100]
+

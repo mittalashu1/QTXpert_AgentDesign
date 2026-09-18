@@ -25,6 +25,9 @@ from app.database.models.uploaded_asset import UploadedAsset, UploadedAssetChunk
 from app.database.models.autopilot_job import AutopilotJob  # noqa: F401
 from app.database.models.autopilot_execution import AutopilotExecution  # noqa: F401
 from app.database.models.autopilot_input import AutopilotInputRecord  # noqa: F401
+from app.database.models.autopilot_plan import AutopilotPlan  # noqa: F401
+from app.database.models.autopilot_application_map import AutopilotApplicationMap  # noqa: F401
+from app.database.models.autopilot_context_source import AutopilotContextSource  # noqa: F401
 from app.database.models.document_intelligence import (  # noqa: F401
     DocumentAnalysisRun,
     DocumentFinding,
@@ -39,9 +42,10 @@ __all__ = [
     "GenerationRun", "RunStatus", "TestCase", "TestCaseType", "Priority", "Severity", "RiskLevel",
     "ApiConfiguration", "AuditLog", "ExecutionRun", "ExecutionResult", "ExecutionStatus", "ResultStatus",
     "ExecutionPlan", "ExecutionPlanCase",
-    "Defect", "DefectStatus", "LLMUsageEvent", "CostCenterSnapshot", "UploadedAsset", "UploadedAssetChunk", "AutopilotJob", "AutopilotExecution", "AutopilotInputRecord",
+    "Defect", "DefectStatus", "LLMUsageEvent", "CostCenterSnapshot", "UploadedAsset", "UploadedAssetChunk", "AutopilotJob", "AutopilotExecution", "AutopilotInputRecord", "AutopilotPlan", "AutopilotApplicationMap", "AutopilotContextSource",
     "DocumentAnalysisRun", "DocumentFinding",
     "IntegrationConnection", "IntegrationUserPreference",
 ]
+
 
 

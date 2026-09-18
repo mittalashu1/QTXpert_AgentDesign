@@ -51,6 +51,13 @@ GENERIC_SUBMIT_LOGIN_XML = '''
 </hierarchy>
 '''
 
+SCROLLABLE_XML = '''
+<hierarchy rotation="0">
+  <node index="0" class="android.widget.ScrollView" scrollable="true" enabled="true"
+        resource-id="com.qtx:id/content" bounds="[0,0][1080,1920]" />
+</hierarchy>
+'''
+
 
 def test_parse_controls_builds_semantics_and_locator_candidates():
     controls = AutopilotDiscoveryService.parse_controls(SAMPLE_XML)
@@ -63,6 +70,19 @@ def test_parse_controls_builds_semantics_and_locator_candidates():
     assert by_label["Username"].input_capable is True
     assert by_label["Username"].input_kind == "credential"
     assert by_label["Username"].text == ""
+
+
+def test_parse_controls_marks_scrollable_surfaces_for_bounded_traversal():
+    controls = AutopilotDiscoveryService.parse_controls(SCROLLABLE_XML)
+
+    assert len(controls) == 1
+    assert controls[0].scrollable is True
+    assert controls[0].semantic_label == "Scrollable content"
+    # The container is observed as a reviewable surface; traversal invokes the
+    # bounded gesture directly rather than clicking the container as a safe
+    # business control.
+    assert controls[0].risk == "review"
+    assert controls[0].locators
 
 
 def test_runtime_input_requests_are_reference_only():

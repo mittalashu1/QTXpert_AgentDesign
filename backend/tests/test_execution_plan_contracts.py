@@ -4,7 +4,7 @@ from uuid import uuid4
 from app.api.routes.execution_plans import _compact_plan_name, _input_requirements, _plan_payload, _preflight_plan
 from app.api.routes.executions import _compile_mobile_steps
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
-from app.schemas.execution import ExecutionPlanExecute, ExecutionPlanPreflight
+from app.schemas.execution import ExecutionCreate, ExecutionPlanExecute, ExecutionPlanPreflight
 
 
 def _case(*, selected=True, mode="automated", steps=None, candidate=True):
@@ -48,6 +48,16 @@ def test_web_target_url_is_deferred_to_execution_target_validation():
         for value in ("https://investnation.com", "investnation.com"):
             payload = model(target_kind="web", provider="playwright", base_url=value)
             assert payload.base_url == value
+
+
+def test_execution_request_accepts_complete_selection_over_100_cases():
+    payload = ExecutionCreate(
+        project_id=uuid4(),
+        name="Complete evidence plan",
+        test_case_ids=[uuid4() for _ in range(101)],
+    )
+
+    assert len(payload.test_case_ids) == 101
 
 
 @pytest.mark.asyncio
@@ -169,4 +179,5 @@ async def test_mobile_preflight_blocks_prose_and_offers_conversion_requirement()
     assert plan.cases[0].readiness == "blocked"
     assert "Unsupported mobile automation step" in (plan.cases[0].blocker_reason or "")
     assert any(item["category"] == "automation" for item in _input_requirements(plan))
+
 

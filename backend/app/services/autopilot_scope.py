@@ -10,6 +10,7 @@ missing LLM never changes the safety boundary.
 from __future__ import annotations
 
 import re
+import hashlib
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 from urllib.parse import urlparse
@@ -66,6 +67,32 @@ def _clean(value: object, limit: int = 320) -> str:
     return text[:limit]
 
 
+def _source_id(kind: str, reference: str | None, label: str) -> str:
+    """Create a stable, non-secret source identifier for one run."""
+
+    seed = f"{kind}:{reference or label}".casefold().encode("utf-8", errors="ignore")
+    return f"src-{hashlib.sha1(seed).hexdigest()[:14]}"
+
+
+def _source_defaults(kind: str, *, observed: bool = False) -> tuple[float, str]:
+    """Return conservative trust metadata for a context source."""
+
+    if kind == "runtime":
+        return 0.95, "high"
+    if kind == "target":
+        return (0.9, "high") if observed else (0.55, "medium")
+    if kind == "document":
+        return 0.8, "high"
+    if kind == "profile":
+        return 0.65, "medium"
+    if kind == "user_context":
+        return 0.6, "medium"
+    if kind == "system":
+        return 0.75, "medium"
+    # Public search is useful for hypotheses, never product evidence.
+    return 0.3, "low"
+
+
 def _unique(values: Iterable[str], limit: int = 20) -> list[str]:
     result: list[str] = []
     for value in values:
@@ -95,12 +122,30 @@ def _source_from_dict(raw: object) -> AutopilotScopeSource | None:
     kind = str(raw.get("kind") or "internet").strip().lower()
     if kind not in {"profile", "user_context", "document", "internet", "target", "runtime", "system"}:
         kind = "internet"
+    reference = _clean(raw.get("reference") or raw.get("url") or "", 500) or None
+    label = _clean(raw.get("label") or raw.get("title") or "Public reference", 180)
+    observed = bool(raw.get("observed", False))
+    default_confidence, default_trust = _source_defaults(kind, observed=observed)
+    try:
+        confidence = float(raw.get("confidence", default_confidence))
+    except (TypeError, ValueError):
+        confidence = default_confidence
+    confidence = min(1.0, max(0.0, confidence))
+    trust_level = str(raw.get("trust_level") or default_trust).strip().lower()
+    if trust_level not in {"high", "medium", "low"}:
+        trust_level = default_trust
     return AutopilotScopeSource(
+        source_id=_clean(raw.get("source_id") or _source_id(kind, reference, label), 80),
         kind=kind,  # type: ignore[arg-type]
-        label=_clean(raw.get("label") or raw.get("title") or "Public reference", 180),
-        reference=_clean(raw.get("reference") or raw.get("url") or "", 500) or None,
+        label=label,
+        reference=reference,
         summary=_clean(raw.get("summary") or raw.get("snippet") or "", 420),
-        observed=bool(raw.get("observed", False)),
+        observed=observed,
+        confidence=confidence,
+        trust_level=trust_level,  # type: ignore[arg-type]
+        used=bool(raw.get("used", False)),
+        influenced_plan_items=[str(item) for item in (raw.get("influenced_plan_items") or [])[:50]],
+        influenced_test_ids=[str(item) for item in (raw.get("influenced_test_ids") or [])[:100]],
         retrieved_at=_clean(raw.get("retrieved_at") or "", 80) or None,
     )
 
@@ -416,6 +461,24 @@ def compile_scope(
                 observed=True,
             )
         )
+    # Normalise every source once after composing the pack. This gives source
+    # rows stable IDs and conservative trust metadata even when a caller used
+    # the legacy constructor fields.
+    normalised_sources: list[AutopilotScopeSource] = []
+    for source in sources:
+        normalised = _source_from_dict(source.model_dump())
+        if normalised is None:
+            continue
+        normalised = normalised.model_copy(
+            update={
+                # A source present in the compiled scope was considered by the
+                # planner. Runtime remains explicitly observed; internet
+                # sources remain low-trust hypotheses despite being used.
+                "used": True,
+            }
+        )
+        if not any(item.source_id == normalised.source_id for item in normalised_sources):
+            normalised_sources.append(normalised)
     scope_sections = [
         AutopilotScopeSection(
             key="profile-scope",
@@ -480,7 +543,7 @@ def compile_scope(
         ),
         document_sections=document_sections[:30],
         scope_sections=scope_sections[:50],
-        sources=sources[:20],
+        sources=normalised_sources[:20],
         authentication_gate=authentication_gate,
         runtime_observed=bool(runtime),
         login_observed=login_observed,
@@ -585,11 +648,15 @@ def update_scope_with_discovery(scope: AutopilotScope, discovery: AutopilotDisco
     if not any(item.reference == runtime_ref for item in sources):
         sources.append(
             AutopilotScopeSource(
+                source_id=_source_id("runtime", runtime_ref, "Runtime Discovery"),
                 kind="runtime",
                 label="Runtime Discovery",
                 reference=runtime_ref,
                 summary=f"Observed {discovery.screen_count} screen(s) and {discovery.control_count} control(s).",
                 observed=True,
+                confidence=0.95,
+                trust_level="high",
+                used=True,
                 retrieved_at=datetime.now(timezone.utc).isoformat(),
             )
         )
@@ -612,4 +679,39 @@ def update_scope_with_discovery(scope: AutopilotScope, discovery: AutopilotDisco
             ),
         }
     )
+
+
+def annotate_scope_usage(scope: AutopilotScope, plan: object) -> AutopilotScope:
+    """Attach plan-item influence to the source rows in a compiled scope.
+
+    This is intentionally a pure projection: it does not infer new coverage
+    and it never copies source content. ``plan`` is duck-typed so the helper
+    works with both the Pydantic contract and a JSON snapshot during retries.
+    """
+
+    raw_items = getattr(plan, "items", None)
+    if raw_items is None and isinstance(plan, dict):
+        raw_items = plan.get("items")
+    items = list(raw_items or [])
+    plan_by_source: dict[str, list[str]] = {}
+    for item in items:
+        item_id = str(getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else ""))
+        refs = getattr(item, "source_refs", None)
+        if refs is None and isinstance(item, dict):
+            refs = item.get("source_refs")
+        for ref in refs or []:
+            plan_by_source.setdefault(str(ref), []).append(item_id)
+    updated_sources: list[AutopilotScopeSource] = []
+    for source in scope.sources:
+        refs = {str(source.reference or ""), str(source.source_id or "")}
+        influenced = sorted({item_id for ref, item_ids in plan_by_source.items() if ref in refs for item_id in item_ids})
+        updated_sources.append(
+            source.model_copy(
+                update={
+                    "used": bool(influenced) or source.used,
+                    "influenced_plan_items": influenced[:50],
+                }
+            )
+        )
+    return scope.model_copy(update={"sources": updated_sources[:20]})
 

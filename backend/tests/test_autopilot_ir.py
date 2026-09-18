@@ -205,6 +205,30 @@ def test_runtime_discovery_promotes_resolved_safe_journey():
     compile(generated.appium_python, "<qtx-generated>", "exec")
 
 
+def test_generated_evidence_scripts_redact_runtime_values():
+    mobile_analysis = _analysis([
+        AutopilotTest(
+            id="QT-AUTO-SMOKE-001",
+            suite="Smoke",
+            title="Install and cold-launch application",
+            priority="critical",
+            objective="Launch safely",
+        )
+    ])
+    mobile_script = AutopilotIRCompiler().compile_bundle(mobile_analysis).tests[0].appium_python
+    assert "_redact_page_source" in mobile_script
+    compile(mobile_script, "<qtx-generated-mobile>", "exec")
+
+    web_analysis = mobile_analysis.model_copy(update={
+        "platform": "web",
+        "target_kind": "web",
+        "target_url": "https://example.test",
+    })
+    web_script = AutopilotIRCompiler().compile_bundle(web_analysis).tests[0].appium_python
+    assert "_redact_html" in web_script
+    compile(web_script, "<qtx-generated-web>", "exec")
+
+
 def test_authentication_steps_are_injected_before_observed_sign_in():
     username = DiscoveredControl(
         control_id="user",

@@ -329,6 +329,7 @@ class AutopilotIRCompiler:
         "QT-WEB-SEC-001",
     }
     _TAP_RE = re.compile(r"^(?:tap|click|open|navigate\s+to|go\s+to|select|choose|press)\s+(.+)$", re.I)
+    _SCROLL_RE = re.compile(r"^(?:scroll|swipe)\b", re.I)
     _ASSERT_RE = re.compile(r"^(?:verify|check|ensure|assert|observe|validate)\s+(.+)$", re.I)
     _INPUT_RE = re.compile(r"^(?:enter|type|input|fill|provide)\b", re.I)
     _STOP_WORDS = {
@@ -637,6 +638,32 @@ class AutopilotIRCompiler:
                 continue
             if re.search(r"\b(?:launch|start)\s+(?:the\s+)?(?:application|app)\b", step, re.I):
                 resolved.append(QTXIRStep(action="launch_app", description=raw_step, screen_id=current.screen_id))
+                continue
+
+            if self._SCROLL_RE.match(step):
+                resolved.append(
+                    QTXIRStep(
+                        action="scroll",
+                        description=raw_step,
+                        target="scrollable content",
+                        screen_id=current.screen_id,
+                    )
+                )
+                # Discovery-generated routes record the destination of each
+                # bounded scroll. Follow that edge so the next assertion is
+                # resolved against the newly observed viewport.
+                scroll_transition = next(
+                    (
+                        item
+                        for item in discovery.transitions
+                        if item.from_screen_id == current.screen_id
+                        and item.action == "scroll"
+                        and item.to_screen_id in screens
+                    ),
+                    None,
+                )
+                if scroll_transition is not None:
+                    current = screens[scroll_transition.to_screen_id]
                 continue
 
             tap_match = self._TAP_RE.match(step)
@@ -1002,6 +1029,7 @@ class AutopilotIRCompiler:
                 def {function_name}(browser, evidence_dir):
                     """QTX {test.id}: {test.title}."""
                     from pathlib import Path
+                    from app.services.autopilot_web import _redact_html
 
                     evidence_dir = Path(evidence_dir)
                     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -1009,7 +1037,9 @@ class AutopilotIRCompiler:
                     response = page.goto({target_url!r}, wait_until="domcontentloaded", timeout=45000)
                     assert response is None or response.status < 400, f"Website returned HTTP {{response.status if response else 'unknown'}}"
                     page.screenshot(path=str(evidence_dir / "{test.id.lower()}.png"), full_page=True)
-                    (evidence_dir / "{test.id.lower()}.html").write_text(page.content(), encoding="utf-8")
+                    # DOM snapshots are evidence, not a secret store. Redact
+                    # value-like attributes before writing an HTML capture.
+                    (evidence_dir / "{test.id.lower()}.html").write_text(_redact_html(page.content()), encoding="utf-8")
                     return {{"url": page.url, "title": page.title(), "status_code": response.status if response else None}}
                 '''
             ).strip()
@@ -1022,6 +1052,7 @@ class AutopilotIRCompiler:
                     from pathlib import Path
                     import time
                     from app.services.appium_compat import safe_app_identity, safe_page_source
+                    from app.services.autopilot_discovery import AutopilotDiscoveryService
 
                     evidence_dir = Path(evidence_dir)
                     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -1032,7 +1063,9 @@ class AutopilotIRCompiler:
                     activity = identity["activity"]
                     assert package, "Application did not reach a foreground package"
                     driver.get_screenshot_as_file(str(evidence_dir / "{test.id.lower()}.png"))
-                    (evidence_dir / "{test.id.lower()}.xml").write_text(page_source, encoding="utf-8")
+                    (evidence_dir / "{test.id.lower()}.xml").write_text(
+                        AutopilotDiscoveryService._redact_page_source(page_source), encoding="utf-8"
+                    )
                     assert page_source.strip(), "No readable Android UI hierarchy was returned"
                     return {{"package": package, "activity": activity, "page_source_chars": len(page_source)}}
                 '''
@@ -1070,6 +1103,7 @@ class AutopilotIRCompiler:
                     """QTX {test.id}: semantic UI baseline."""
                     from pathlib import Path
                     import re
+                    from app.services.autopilot_discovery import AutopilotDiscoveryService
 
                     evidence_dir = Path(evidence_dir)
                     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -1077,7 +1111,9 @@ class AutopilotIRCompiler:
                     assert xml.strip(), "No UI hierarchy available for semantic inspection"
                     clickable = len(re.findall(r'clickable="true"', xml, flags=re.IGNORECASE))
                     labelled = len(re.findall(r'(?:text|content-desc)="[^"]+"', xml, flags=re.IGNORECASE))
-                    (evidence_dir / "{test.id.lower()}.xml").write_text(xml, encoding="utf-8")
+                    (evidence_dir / "{test.id.lower()}.xml").write_text(
+                        AutopilotDiscoveryService._redact_page_source(xml), encoding="utf-8"
+                    )
                     return {{"clickable_controls": clickable, "labelled_nodes": labelled}}
                 '''
             ).strip()
@@ -1090,6 +1126,7 @@ class AutopilotIRCompiler:
                 "    import time",
                 "    from appium.webdriver.common.appiumby import AppiumBy",
                 "    from app.services.appium_compat import safe_app_identity, safe_page_source",
+                "    from app.services.autopilot_discovery import AutopilotDiscoveryService",
                 "",
                 "    evidence_dir = Path(evidence_dir)",
                 "    evidence_dir.mkdir(parents=True, exist_ok=True)",
@@ -1099,6 +1136,24 @@ class AutopilotIRCompiler:
             for index, step in enumerate(generated.steps, start=1):
                 if step.action == "launch_app":
                     lines.extend([f"    # {index}. {step.description}", "    time.sleep(1)"])
+                elif step.action == "scroll":
+                    lines.extend([
+                        f"    # {index}. {step.description}",
+                        "    try:",
+                        "        driver.execute_script('mobile: scrollGesture', {'direction': 'down', 'percent': 0.75})",
+                        "    except Exception:",
+                        "        try:",
+                        "            driver.execute_script('mobile: swipe', {'direction': 'up', 'percent': 0.75})",
+                        "        except Exception:",
+                        "            width, height = 1080, 1920",
+                        "            try: size = driver.get_window_size(); width, height = int(size.get('width') or width), int(size.get('height') or height)",
+                        "            except Exception: pass",
+                        "            swipe = getattr(driver, 'swipe', None)",
+                        "            if not callable(swipe): raise RuntimeError('Provider does not expose a safe scroll gesture')",
+                        "            try: swipe(int(width * .5), int(height * .82), int(width * .5), int(height * .22), duration=700)",
+                        "            except TypeError: swipe(int(width * .5), int(height * .82), int(width * .5), int(height * .22), 700)",
+                        "    time.sleep(0.8)",
+                    ])
                 elif step.action in {"tap", "assert_visible"}:
                     lines.extend([
                         f"    # {index}. {step.description}",
@@ -1123,7 +1178,7 @@ class AutopilotIRCompiler:
                         f"    # {index}. {step.description}",
                         f"    driver.get_screenshot_as_file(str(evidence_dir / '{test.id.lower()}.png'))",
                         "    xml = driver.page_source or ''",
-                        f"    (evidence_dir / '{test.id.lower()}.xml').write_text(xml, encoding='utf-8')",
+                        f"    (evidence_dir / '{test.id.lower()}.xml').write_text(AutopilotDiscoveryService._redact_page_source(xml), encoding='utf-8')",
                     ])
             lines.extend([
                 "    identity = safe_app_identity(driver, page_source=safe_page_source(driver))",
