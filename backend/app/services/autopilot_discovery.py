@@ -618,12 +618,31 @@ class AutopilotDiscoveryService:
             control for control in controls
             if control.enabled and control.clickable and not control.input_capable and control.risk == "safe"
             and control.locators and control.control_id not in visited
-            and max(locator.confidence for locator in control.locators) >= 0.90
+            and AutopilotDiscoveryService._safe_locator_confidence(control)
         ]
         if not candidates:
             return None
         candidates.sort(key=lambda item: (-max(locator.confidence for locator in item.locators), item.semantic_label.lower()))
         return candidates[0]
+
+    @classmethod
+    def _safe_locator_confidence(cls, control: DiscoveredControl) -> bool:
+        """Allow explicit login navigation to be reached with a text locator.
+
+        A native login CTA often exposes only visible text, which produces a
+        deliberately lower-confidence XPath locator than an accessibility ID
+        or resource ID. It is safe to relax the threshold only for an explicit
+        authentication entry point so discovery can observe the actual
+        username/password fields. Generic Continue buttons and ordinary
+        product links keep the stronger locator requirement.
+        """
+        confidence = max(locator.confidence for locator in control.locators)
+        if confidence >= 0.90:
+            return True
+        if confidence < 0.80:
+            return False
+        label = cls._normalize(control.semantic_label).replace("-", " ")
+        return bool(re.fullmatch(r"(?:login|log\\s+in|sign\\s+in|unlock|authenticate|continue\\s+to\\s+account)", label))
 
     @staticmethod
     def _scroll_forward(driver: Any) -> bool:
