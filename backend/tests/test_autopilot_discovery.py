@@ -247,6 +247,21 @@ def test_transactional_control_is_blocked_before_navigation():
     assert safe.semantic_label in {"Sign in", "Settings"}
 
 
+def test_text_only_login_cta_is_reachable_for_auth_checkpoint():
+    controls = AutopilotDiscoveryService.parse_controls(
+        """
+        <hierarchy>
+          <node class="android.widget.TextView" text="Login" clickable="true" enabled="true" />
+        </hierarchy>
+        """
+    )
+    login = AutopilotDiscoveryService._select_safe_control(controls, set())
+
+    assert login is not None
+    assert login.semantic_label == "Login"
+    assert max(locator.confidence for locator in login.locators) == pytest.approx(0.82)
+
+
 def test_persisted_mobile_hierarchy_redacts_input_values():
     source = (
         '<hierarchy><node class="android.widget.EditText" text="qa@example.test" '
