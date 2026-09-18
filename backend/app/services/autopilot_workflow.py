@@ -50,7 +50,12 @@ TERMINAL_PHASES = frozenset({"completed", "partial", "blocked", "failed"})
 # timeout, so the table deliberately allows the normal resumable paths while
 # rejecting accidental jumps that would skip a user approval or runtime gate.
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    "draft": frozenset({"preflight", "context_ready", "failed"}),
+    # Jobs created before the explicit workflow contract may still be stored
+    # as draft when Runtime Discovery is the first durable operation. A
+    # discovered map must be allowed to move those legacy jobs to the review
+    # gate (or to blocked when the provider cannot attach) instead of silently
+    # skipping the manifest update.
+    "draft": frozenset({"preflight", "context_ready", "cases_pending_review", "blocked", "failed"}),
     "preflight": frozenset({"context_ready", "plan_pending_review", "failed"}),
     "context_ready": frozenset({"plan_pending_review", "plan_approved", "failed"}),
     "plan_pending_review": frozenset({"plan_approved", "context_ready", "exploring", "failed"}),
