@@ -741,3 +741,18 @@ def test_safe_authentication_input_decision_counts_as_approval():
     assert "safe authentication approval" not in bundle.setup_missing_fields
 
 
+def test_short_assertion_does_not_match_a_longer_unrelated_control():
+    compiler = AutopilotIRCompiler()
+    email = _control("email", "Email address")
+    screen = DiscoveredScreen(
+        screen_id="screen-email",
+        fingerprint="email-fingerprint",
+        controls=[email],
+    )
+
+    assert compiler._semantic_score("EM", email) == 0
+    assert compiler._best_control(screen, "EM", interaction=False) is None
+    assert compiler._best_control(screen, "Email address", interaction=False) is email
+
+
+
