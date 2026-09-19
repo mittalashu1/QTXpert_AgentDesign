@@ -735,7 +735,7 @@ class AutopilotSuiteService:
 
     @staticmethod
     def _normalize_screen_text(value: str | None) -> str:
-        return re.sub(r"\\s+", " ", str(value or "").casefold().replace("_", " ").replace("-", " ")).strip()
+        return re.sub(r"\s+", " ", str(value or "").casefold().replace("_", " ").replace("-", " ")).strip()
 
     @classmethod
     def _screen_tokens(cls, screen) -> set[str]:
