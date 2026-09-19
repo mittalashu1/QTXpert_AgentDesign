@@ -30,6 +30,7 @@ from app.services.appium_compat import (
     expected_package_state,
     safe_app_identity,
     safe_background_application,
+    safe_navigate_back,
     safe_page_source,
     safe_quit,
     validate_target_surface,
@@ -524,6 +525,7 @@ class AutopilotSuiteService:
                         test,
                         discovery,
                         package,
+                        request.target_kind,
                     )
                     evidence = self._execute_test(
                         driver,
@@ -906,6 +908,7 @@ class AutopilotSuiteService:
         test: QTXTestIR,
         discovery: AutopilotDiscoveryResult | None,
         package: str | None,
+        target_kind: str = "android",
     ) -> list[dict[str, str]]:
         if not discovery or not discovery.screens:
             return []
@@ -962,9 +965,66 @@ class AutopilotSuiteService:
 
         path = self._safe_discovery_path(discovery, current.screen_id, target.screen_id)
         if path is None:
+            # If the provider relaunches directly onto a credential form, an
+            # earlier observed public entry screen may still be safely
+            # reachable by one native Back action. Permit that one reverse
+            # only when it exactly undoes an observed, safe tap from a public
+            # screen to an empty credential form. Never backtrack through an
+            # authenticated screen or a form containing user-entered values.
+            back_edge = next(
+                (
+                    transition
+                    for transition in discovery.transitions
+                    if transition.from_screen_id == target.screen_id
+                    and transition.to_screen_id == current.screen_id
+                    and transition.action == "tap"
+                    and not transition.duplicate_state
+                ),
+                None,
+            )
+            screen_by_id = {screen.screen_id: screen for screen in discovery.screens}
+            public_parent = screen_by_id.get(target.screen_id)
+            if (
+                back_edge is not None
+                and public_parent is not None
+                and self._screen_has_credential_fields(current)
+                and not self._screen_has_credential_fields(public_parent)
+                and self._observed_route_control_is_safe(public_parent, back_edge.control_id)
+                and self._credential_fields_are_empty(driver, current, locator_map)
+            ):
+                back_method = safe_navigate_back(driver, target_kind=target_kind)
+                time.sleep(0.6)
+                if package:
+                    target_ready, target_reason, _ = validate_target_surface(
+                        driver,
+                        expected_package=package,
+                        page_source=safe_page_source(driver),
+                    )
+                    if not target_ready:
+                        raise ProviderLifecycleUnavailable(
+                            f"Stopped while returning to the observed public screen: {target_reason}"
+                        )
+                reached = self._identify_discovered_screen(driver, discovery, package)
+                if reached is not None and reached.screen_id == target.screen_id:
+                    if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
+                        raise ProviderLifecycleUnavailable(
+                            f"Back navigation returned to {self._screen_reference(target)}, but the case's "
+                            "saved control locator is not visible. No test action was taken."
+                        )
+                    return [
+                        {
+                            "from_screen": current.screen_id,
+                            "to_screen": target.screen_id,
+                            "control": f"Back to observed public screen ({back_method})",
+                        }
+                    ]
+                raise ProviderLifecycleUnavailable(
+                    f"Back navigation did not return from {self._screen_reference(current)} to the observed "
+                    f"public screen {self._screen_reference(target)}. The case was not attempted."
+                )
             raise ProviderLifecycleUnavailable(
-                f"No safe, observed navigation path leads from {current.page_label or current.screen_id} "
-                f"to {target.page_label or target.screen_id}. The case was not attempted."
+                f"No safe, observed navigation path leads from {self._screen_reference(current)} "
+                f"to {self._screen_reference(target)}. The case was not attempted."
             )
 
         navigation: list[dict[str, str]] = []
@@ -1015,6 +1075,63 @@ class AutopilotSuiteService:
                 "entry control is not visible. No test action was taken."
             )
         return navigation
+
+    @staticmethod
+    def _screen_reference(screen) -> str:
+        label = str(screen.page_label or screen.journey or "Observed screen").strip()
+        return f"{label} [{screen.screen_id}]"
+
+    @staticmethod
+    def _screen_has_credential_fields(screen) -> bool:
+        return any(
+            control.enabled
+            and control.input_capable
+            and control.input_kind == "credential"
+            for control in screen.controls
+        )
+
+    @staticmethod
+    def _observed_route_control_is_safe(screen, control_id: str) -> bool:
+        control = next((item for item in screen.controls if item.control_id == control_id), None)
+        return bool(
+            control
+            and control.enabled
+            and control.clickable
+            and not control.input_capable
+            and control.risk == "safe"
+        )
+
+    @staticmethod
+    def _credential_fields_are_empty(driver, screen, locator_map: Dict[str, str]) -> bool:
+        credential_fields = [
+            control
+            for control in screen.controls
+            if control.enabled and control.input_capable and control.input_kind == "credential"
+        ]
+        if not credential_fields:
+            return False
+        for control in credential_fields:
+            value_locator = next(
+                (
+                    locator
+                    for locator in control.locators
+                    if locator.strategy in locator_map and locator.confidence >= 0.90
+                ),
+                None,
+            )
+            if value_locator is None:
+                return False
+            try:
+                element = driver.find_element(
+                    locator_map[value_locator.strategy],
+                    value_locator.value,
+                )
+                value = element.get_attribute("text")
+            except Exception:
+                return False
+            if str(value or "").strip():
+                return False
+        return True
 
     def _execute_test(
         self,
@@ -1315,4 +1432,5 @@ class AutopilotSuiteService:
     @staticmethod
     def _safe_name(value: str) -> str:
         return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")[:100]
+
 
