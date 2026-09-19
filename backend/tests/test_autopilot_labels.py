@@ -44,3 +44,15 @@ def test_unknown_screen_gets_an_honest_observed_fallback():
 
     assert observed_journey_label(screen, 3) == "Observed journey 3"
     assert observed_page_label(screen, 3) == "Observed journey 3"
+
+
+def test_short_fragment_is_not_promoted_to_a_journey_name():
+    screen = _screen(
+        title="InvestNation",
+        activity="MainActivity",
+        controls=[DiscoveredControl(control_id="fragment", semantic_label="EM")],
+    )
+
+    assert observed_journey_label(screen) == "InvestNation"
+    assert observed_page_label(screen) == "InvestNation"
+
