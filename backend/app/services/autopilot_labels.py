@@ -55,7 +55,14 @@ def _meaningful(value: str | None) -> bool:
     if not candidate or candidate.startswith(("http://", "https://")):
         return False
     compact = re.sub(r"[^a-z0-9]+", "", candidate.casefold())
-    return bool(re.search(r"[a-zA-Z]", candidate)) and compact not in _GENERIC_SCREEN_TOKENS
+    # Ignore clipped two-letter fragments (for example, "EM" from an icon or
+    # truncated UI label) as journey names. They are not useful evidence for a
+    # user-facing screen title.
+    return (
+        len(compact) >= 3
+        and bool(re.search(r"[a-zA-Z]", candidate))
+        and compact not in _GENERIC_SCREEN_TOKENS
+    )
 
 
 def observed_journey_label(screen: DiscoveredScreen, index: int = 1) -> str:
@@ -173,3 +180,4 @@ def journey_for_title(title: str) -> str | None:
 
     prefix = _clean((title or "").split(" — ", 1)[0], limit=100)
     return prefix or None
+
