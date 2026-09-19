@@ -468,4 +468,47 @@ def test_runtime_discovery_stops_at_login_reached_after_safe_navigation(tmp_path
     assert len(result["transitions"]) == 1
     assert driver.quit_called is True
 
+def test_auth_entry_login_is_prioritized_over_higher_confidence_guest_route():
+    controls = [
+        DiscoveredControl(
+            control_id="guest",
+            semantic_label="Explore as a Guest",
+            class_name="android.widget.Button",
+            clickable=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="text", value="Explore as a Guest", confidence=0.99)],
+        ),
+        DiscoveredControl(
+            control_id="login",
+            semantic_label="Login",
+            class_name="android.widget.TextView",
+            clickable=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="text", value="Login", confidence=0.82)],
+        ),
+    ]
 
+    selected = AutopilotDiscoveryService._select_safe_control(controls, set())
+
+    assert selected is not None
+    assert selected.semantic_label == "Login"
+
+
+@pytest.mark.parametrize("label", [
+    "Home Tab 1 of 4",
+    "Investments Tab 2 of 4",
+    "Cards Tab 3 of 4",
+    "Bullion Tab 4 of 4",
+])
+def test_native_safe_tab_position_suffix_is_not_treated_as_a_risky_action(label):
+    risk, reason = AutopilotDiscoveryService._risk(label, {})
+
+    assert risk == "safe"
+    assert reason is None
+
+
+def test_send_money_bottom_tab_remains_blocked_after_suffix_normalization():
+    risk, reason = AutopilotDiscoveryService._risk("Send Money Tab 4 of 4", {})
+
+    assert risk == "blocked"
+    assert "send money" in reason.lower()

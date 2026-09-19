@@ -30,6 +30,7 @@ from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
     safe_app_identity,
     safe_page_source,
+    safe_navigate_back,
     safe_quit,
     validate_target_surface,
 )
@@ -54,7 +55,7 @@ _SAFE_NAVIGATION_TERMS = {
     # before a control is traversed; these labels only make navigation pages
     # discoverable when the product exposes them as standalone menu items.
     "accounts", "account overview", "cards", "portfolio", "investments",
-    "transactions", "activity", "rewards", "offers", "benefits", "support",
+    "transactions", "activity", "rewards", "offers", "benefits", "support", "bullion",
     "notifications", "documents", "services", "products", "overview",
     "insights", "security", "faq", "contact", "locations", "branches",
 }
@@ -423,6 +424,7 @@ class AutopilotDiscoveryService:
             if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", haystack):
                 return "blocked", f"Blocked business/destructive action matched: {term}"
         normalized = cls._normalize(label)
+        normalized = re.sub(r"\s+tab\s+\d+\s+of\s+\d+$", "", normalized, flags=re.I).strip()
         if normalized in _SAFE_NAVIGATION_TERMS or any(pattern.search(normalized) for pattern in _SAFE_NAVIGATION_PATTERNS):
             return "safe", None
         return "review", "Control requires semantic review before autonomous interaction"
@@ -637,16 +639,27 @@ class AutopilotDiscoveryService:
         return hashlib.sha256(material.encode("utf-8", errors="ignore")).hexdigest()
 
     @staticmethod
-    def _select_safe_control(controls: list[DiscoveredControl], visited: set[str]) -> Optional[DiscoveredControl]:
+    def _is_auth_entry_control(label: str) -> bool:
+        normalized = re.sub(r"[\s_-]+", " ", str(label or "").lower()).strip()
+        return bool(re.search(r"\b(?:log in|login|sign in|authenticate)\b", normalized))
+
+    @classmethod
+    def _select_safe_control(cls, controls: list[DiscoveredControl], visited: set[str]) -> Optional[DiscoveredControl]:
         candidates = [
             control for control in controls
             if control.enabled and control.clickable and not control.input_capable and control.risk == "safe"
             and control.locators and control.control_id not in visited
-            and AutopilotDiscoveryService._safe_locator_confidence(control)
+            and cls._safe_locator_confidence(control)
         ]
         if not candidates:
             return None
-        candidates.sort(key=lambda item: (-max(locator.confidence for locator in item.locators), item.semantic_label.lower()))
+        # At the app entry screen, observe a real sign-in gate before any
+        # guest/demo route; confidence remains the tie-breaker within each group.
+        candidates.sort(key=lambda item: (
+            0 if cls._is_auth_entry_control(item.semantic_label) else 1,
+            -max(locator.confidence for locator in item.locators),
+            item.semantic_label.lower(),
+        ))
         return candidates[0]
 
     @classmethod
@@ -1454,7 +1467,7 @@ class AutopilotDiscoveryService:
                             break
                         parent = stack.pop()
                         try:
-                            driver.back()
+                            safe_navigate_back(driver, target_kind=request.target_kind)
                             time.sleep(0.8)
                             recovered, recovered_duplicate = capture(
                                 persist_evidence=False,
@@ -1494,7 +1507,7 @@ class AutopilotDiscoveryService:
                         )
                         if duplicate:
                             try:
-                                driver.back()
+                                safe_navigate_back(driver, target_kind=request.target_kind)
                                 time.sleep(0.8)
                             except Exception:
                                 pass
@@ -1544,7 +1557,7 @@ class AutopilotDiscoveryService:
                             if package_hint:
                                 driver.activate_app(package_hint)
                             else:
-                                driver.back()
+                                safe_navigate_back(driver, target_kind=request.target_kind)
                             time.sleep(1.2)
                             recovered, duplicate = capture(
                                 persist_evidence=False,
