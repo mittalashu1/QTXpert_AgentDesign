@@ -116,7 +116,19 @@ _SYSTEM_SURFACE_MARKERS = (
     "springboard",
     "xctest",
     "appium settings",
+    "com.google.android.apps.nexuslauncher",
+    "com.android.launcher3",
+    "com.sec.android.app.launcher",
+    "com.miui.home",
+    "search apps, web and more",
+    "search on play store",
+    "pixel launcher",
+    "app suggestions",
 )
+
+
+class _UnexpectedTargetSurface(RuntimeError):
+    """A safe navigation action left the uploaded application's surface."""
 
 
 class AutopilotDiscoveryService:
@@ -480,9 +492,6 @@ class AutopilotDiscoveryService:
         # generic Continue CTA from being turned into a credential checkpoint.
         if not explicit_auth_submit and not labelled_auth_input and len(inputs) < 2:
             return controls
-        known_credential = [control for control in inputs if control.input_kind == "credential"]
-        if known_credential and len(known_credential) == len(inputs):
-            return controls
         input_positions = {control.control_id: index for index, control in enumerate(inputs)}
         updated: list[DiscoveredControl] = []
         for control in controls:
@@ -490,7 +499,14 @@ class AutopilotDiscoveryService:
                 updated.append(control)
                 continue
             if control.input_kind == "credential":
-                updated.append(control)
+                position = input_positions[control.control_id]
+                label = control.semantic_label or ""
+                normalized = cls._normalize(label).replace(" ", "")
+                if position == 0 and normalized in {"user", "userid", "uid", "username"}:
+                    label = "User ID / email"
+                elif position == 1 and normalized in {"password", "passcode", "pwd"}:
+                    label = "Password"
+                updated.append(control.model_copy(update={"semantic_label": label}))
                 continue
             position = input_positions[control.control_id]
             label = control.semantic_label or ""
@@ -498,6 +514,14 @@ class AutopilotDiscoveryService:
             # names such as EditText/TextField so the checkpoint is readable.
             if cls._is_generic_input_label(label, control.class_name):
                 label = "User ID / email" if position == 0 else "Password" if position == 1 else label
+            elif position == 0 and cls._normalize(label).replace(" ", "") in {"user", "userid", "uid"}:
+                # Resource IDs such as ``user``/``uid`` are implementation
+                # names, not a useful end-user prompt label.
+                label = "User ID / email"
+            elif position == 1 and cls._normalize(label).replace(" ", "") in {"password", "passcode", "pwd"}:
+                # Native resource IDs are commonly lower-case even though the
+                # checkpoint is presented as a customer-facing question.
+                label = "Password"
             updated.append(control.model_copy(update={"semantic_label": label, "input_kind": "credential"}))
         return updated
 
@@ -631,10 +655,11 @@ class AutopilotDiscoveryService:
 
         A native login CTA often exposes only visible text, which produces a
         deliberately lower-confidence XPath locator than an accessibility ID
-        or resource ID. It is safe to relax the threshold only for an explicit
-        authentication entry point so discovery can observe the actual
-        username/password fields. Generic Continue buttons and ordinary
-        product links keep the stronger locator requirement.
+        or resource ID.  Requiring the normal ``0.90`` threshold in that case
+        leaves discovery parked on the landing screen and never lets it
+        observe the actual username/password fields.  Lower the threshold only
+        for an explicit authentication entry point; generic ``Continue`` and
+        ordinary product links still require the stronger locator.
         """
         confidence = max(locator.confidence for locator in control.locators)
         if confidence >= 0.90:
@@ -642,7 +667,7 @@ class AutopilotDiscoveryService:
         if confidence < 0.80:
             return False
         label = cls._normalize(control.semantic_label).replace("-", " ")
-        return bool(re.fullmatch(r"(?:login|log\\s+in|sign\\s+in|unlock|authenticate|continue\\s+to\\s+account)", label))
+        return bool(re.fullmatch(r"(?:login|log\s+in|sign\s+in|unlock|authenticate|continue\s+to\s+account)", label))
 
     @staticmethod
     def _scroll_forward(driver: Any) -> bool:
@@ -725,6 +750,39 @@ class AutopilotDiscoveryService:
         return "username"
 
     @classmethod
+    def _credential_controls(cls, screen: DiscoveredScreen) -> list[DiscoveredControl]:
+        return [
+            control
+            for control in screen.controls
+            if control.enabled and control.input_capable and control.input_kind == "credential"
+        ]
+
+    @classmethod
+    def _authentication_checkpoint_reason(
+        cls,
+        screen: DiscoveredScreen,
+        input_values: Mapping[str, str],
+    ) -> Optional[str]:
+        """Return the user-facing gate reason when an observed form needs input."""
+        credential_controls = cls._credential_controls(screen)
+        if not credential_controls:
+            return None
+        approved = str(input_values.get("__auth_approved") or "") == "1"
+        missing_controls = [
+            control
+            for control in credential_controls
+            if cls._credential_hint(control) != "otp"
+            and cls._credential_value(screen.screen_id, control, input_values) is None
+        ]
+        otp_controls = [control for control in credential_controls if cls._credential_hint(control) == "otp"]
+        if approved and not missing_controls and not otp_controls:
+            return None
+        return (
+            "Authentication checkpoint detected. Enter the non-production User ID and Password "
+            "(and provide an approved OTP only when the flow permits it) before Autopilot continues."
+        )
+
+    @classmethod
     def _credential_value(
         cls,
         screen_id: str,
@@ -795,6 +853,28 @@ class AutopilotDiscoveryService:
                 candidates.append(control)
         candidates.sort(key=lambda item: (-max(locator.confidence for locator in item.locators), item.semantic_label.lower()))
         return candidates[0] if candidates else None
+
+    @staticmethod
+    def _find_discovered_element(driver: Any, control: DiscoveredControl, appium_by: Any) -> Any:
+        """Resolve one control using only locators observed on that control."""
+        locator_map = {
+            "accessibility_id": appium_by.ACCESSIBILITY_ID,
+            "id": appium_by.ID,
+            "xpath": appium_by.XPATH,
+        }
+        candidates = sorted(control.locators, key=lambda locator: -locator.confidence)
+        last_error: Optional[Exception] = None
+        for locator in candidates[:3]:
+            strategy = locator_map.get(locator.strategy)
+            if strategy is None:
+                continue
+            try:
+                return driver.find_element(strategy, locator.value)
+            except Exception as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise LookupError(f"No supported observed locator exists for {control.semantic_label}")
 
     @staticmethod
     def _redact_page_source(page_source: str) -> str:
@@ -1021,10 +1101,24 @@ class AutopilotDiscoveryService:
         target_activity: Optional[str] = None
         target_identity_reason: Optional[str] = None
 
-        def capture(*, persist_evidence: bool = True) -> tuple[DiscoveredScreen, bool]:
+        def capture(
+            *,
+            persist_evidence: bool = True,
+            require_target: bool = False,
+        ) -> tuple[DiscoveredScreen, bool]:
             index = len(screens) + 1
             page_source = safe_page_source(driver)
             controls = self._ensure_auth_input_semantics(self.parse_controls(page_source))
+            if require_target:
+                target_ok, reason, _ = validate_target_surface(
+                    driver,
+                    expected_package=package_hint,
+                    expected_activity=activity_hint,
+                    page_source=page_source,
+                    control_labels=[control.semantic_label for control in controls],
+                )
+                if not target_ok:
+                    raise _UnexpectedTargetSurface(reason)
             identity = safe_app_identity(
                 driver,
                 page_source=page_source,
@@ -1103,12 +1197,15 @@ class AutopilotDiscoveryService:
             retry_wait = max(1, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_SECONDS", 4)))
             retry_limit = max(0, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_RETRIES", 3)))
             time.sleep(initial_wait)
-            current, _ = capture()
+            # Keep launch/splash surfaces in memory until target identity has
+            # been checked. If the provider left Android Home foreground, it
+            # must never be persisted as an InvestNation product screen.
+            current, _ = capture(persist_evidence=False)
             retries = 0
             while self._looks_like_loading_screen(current) and retries < retry_limit:
                 retries += 1
                 time.sleep(retry_wait)
-                candidate, duplicate = capture()
+                candidate, duplicate = capture(persist_evidence=False)
                 current_score = sum(1 for item in current.controls if item.enabled and (item.clickable or item.input_capable))
                 candidate_score = sum(1 for item in candidate.controls if item.enabled and (item.clickable or item.input_capable))
                 if not duplicate or candidate_score >= current_score:
@@ -1144,6 +1241,10 @@ class AutopilotDiscoveryService:
                 # activated. Retry that deterministic operation once before
                 # declaring the provider unusable.
                 try:
+                    # Discard the unverified launch surface before retrying;
+                    # it is not part of the app's screen graph.
+                    screens.clear()
+                    seen_fingerprints.clear()
                     driver.activate_app(package_hint)
                     time.sleep(2)
                     candidate, _ = capture(persist_evidence=False)
@@ -1160,7 +1261,12 @@ class AutopilotDiscoveryService:
                         target_identity_reason = retry_reason
                         target_identity = retry_identity.get("package")
                         target_activity = retry_identity.get("activity")
+                    else:
+                        screens.clear()
+                        seen_fingerprints.clear()
                 except Exception as exc:
+                    screens.clear()
+                    seen_fingerprints.clear()
                     warnings.append(
                         f"Explicit target activation retry was unavailable: {type(exc).__name__}"
                     )
@@ -1177,6 +1283,9 @@ class AutopilotDiscoveryService:
                     "target_activity": target_activity,
                     "target_identity_reason": target_identity_reason,
                 }
+            # Persist only the now-verified target root. This also upgrades an
+            # identical in-memory candidate if the session needed activation.
+            current, _ = capture(persist_evidence=True, require_target=True)
             if request.observe_only:
                 stop_reason = "Observe-only discovery captured the current screen"
                 return {
@@ -1196,133 +1305,104 @@ class AutopilotDiscoveryService:
             # already supplied approved, decrypted values we fill them only in
             # the live session and suppress the immediate evidence snapshot.
             input_values = input_values or {}
-            credential_controls = [
-                control
-                for control in current.controls
-                if control.input_capable and control.input_kind == "credential"
-            ]
             authentication_blocked = False
             auth_rounds = 0
-            while current is not None:
-                credential_controls = [
-                    control
-                    for control in current.controls
-                    if control.input_capable and control.input_kind == "credential"
-                ]
-                if not credential_controls:
-                    break
-                auth_rounds += 1
-                if auth_rounds > 3:
-                    authentication_blocked = True
-                    stop_reason = "Authentication has more than three sequential checkpoints; continue under supervision."
-                    break
-                auth_approved = str(input_values.get("__auth_approved") or "") == "1"
-                missing_controls = [
-                    control
-                    for control in credential_controls
-                    if self._credential_hint(control) != "otp"
-                    and self._credential_value(current.screen_id, control, input_values) is None
-                ]
-                otp_controls = [control for control in credential_controls if self._credential_hint(control) == "otp"]
-                if not auth_approved or missing_controls or otp_controls:
-                    authentication_blocked = True
-                    stop_reason = (
-                        "Authentication checkpoint detected. Enter the non-production User ID and Password "
-                        "(and provide an approved OTP only when the flow permits it) before Autopilot continues."
-                    )
-                    break
-                if actions_attempted >= request.max_actions:
-                    authentication_blocked = True
-                    stop_reason = f"Authentication values are ready, but max_actions={request.max_actions} was reached"
-                    break
-                try:
-                    for control in credential_controls:
-                        value = self._credential_value(current.screen_id, control, input_values)
-                        if value is None:
-                            continue
-                        locator = control.locators[0]
-                        by = {
-                            "accessibility_id": AppiumBy.ACCESSIBILITY_ID,
-                            "id": AppiumBy.ID,
-                            "xpath": AppiumBy.XPATH,
-                        }[locator.strategy]
-                        element = driver.find_element(by, locator.value)
-                        try:
-                            element.clear()
-                        except Exception:
-                            pass
-                        element.send_keys(value)
-                    submit = self._auth_submit_control(current.controls)
-                    if submit is None:
-                        authentication_blocked = True
-                        stop_reason = "Credentials were supplied, but no safe sign-in control was found"
-                        break
+
+            def process_authentication(
+                screen: DiscoveredScreen,
+            ) -> tuple[DiscoveredScreen, bool, Optional[str]]:
+                nonlocal actions_attempted, auth_rounds
+                while screen is not None:
+                    credential_controls = self._credential_controls(screen)
+                    if not credential_controls:
+                        return screen, False, None
+                    auth_rounds += 1
+                    if auth_rounds > 3:
+                        return (
+                            screen,
+                            True,
+                            "Authentication has more than three sequential checkpoints; continue under supervision.",
+                        )
+                    checkpoint_reason = self._authentication_checkpoint_reason(screen, input_values)
+                    if checkpoint_reason:
+                        return screen, True, checkpoint_reason
                     if actions_attempted >= request.max_actions:
-                        authentication_blocked = True
-                        stop_reason = f"Authentication values are ready, but max_actions={request.max_actions} was reached"
-                        break
-                    locator = submit.locators[0]
-                    by = {
-                        "accessibility_id": AppiumBy.ACCESSIBILITY_ID,
-                        "id": AppiumBy.ID,
-                        "xpath": AppiumBy.XPATH,
-                    }[locator.strategy]
-                    driver.find_element(by, locator.value).click()
-                    actions_attempted += 1
-                    time.sleep(1.5)
-                    # Do not persist a screenshot/XML immediately after typing
-                    # credentials. The next stable screen is captured normally
-                    # once authentication succeeds.
-                    next_screen, duplicate = capture(persist_evidence=False)
-                    next_has_sensitive_inputs = any(
-                        control.input_capable and control.input_kind == "credential"
-                        for control in next_screen.controls
-                    )
-                    if not duplicate and not next_has_sensitive_inputs:
-                        # The first post-submit observation is deliberately
-                        # memory-only.  Persist a second, stable observation
-                        # before traversing so every authenticated journey has
-                        # reviewable screenshot/XML evidence. If the sign-in
-                        # form remains (for example after a rejected login),
-                        # keep that state memory-only so a screenshot cannot
-                        # expose the value the user typed.
-                        next_screen, _ = capture(persist_evidence=True)
-                    transitions.append(
-                        DiscoveredTransition(
-                            from_screen_id=current.screen_id,
-                            to_screen_id=next_screen.screen_id,
-                            control_id=submit.control_id,
-                            control_label=submit.semantic_label,
-                            duplicate_state=duplicate,
+                        return (
+                            screen,
+                            True,
+                            f"Authentication values are ready, but max_actions={request.max_actions} was reached",
                         )
-                    )
-                    next_credentials = [
-                        control
-                        for control in next_screen.controls
-                        if control.input_capable and control.input_kind == "credential"
-                    ]
-                    if duplicate:
-                        authentication_blocked = True
-                        stop_reason = (
-                            "Sign-in returned to the same screen; credentials may be invalid or the flow needs supervision."
+                    try:
+                        for control in credential_controls:
+                            value = self._credential_value(screen.screen_id, control, input_values)
+                            if value is None:
+                                continue
+                            element = self._find_discovered_element(driver, control, AppiumBy)
+                            try:
+                                element.clear()
+                            except Exception:
+                                pass
+                            element.send_keys(value)
+                        submit = self._auth_submit_control(screen.controls)
+                        if submit is None:
+                            return screen, True, "Credentials were supplied, but no safe sign-in control was found"
+                        if actions_attempted >= request.max_actions:
+                            return (
+                                screen,
+                                True,
+                                f"Authentication values are ready, but max_actions={request.max_actions} was reached",
+                            )
+                        self._find_discovered_element(driver, submit, AppiumBy).click()
+                        actions_attempted += 1
+                        time.sleep(1.5)
+                        # Never persist the post-fill frame until it has been
+                        # checked for remaining sensitive fields.
+                        next_screen, duplicate = capture(
+                            persist_evidence=False,
+                            require_target=True,
                         )
-                        break
-                    if next_credentials:
-                        # Multi-step sign-in (for example user ID → password)
-                        # is still part of the login checkpoint. Loop once more
-                        # with the same approved in-memory values; OTP remains
-                        # a hard supervised stop in the next iteration.
-                        current = next_screen
-                        continue
-                    current = next_screen
-                    break
-                except Exception as exc:
-                    authentication_blocked = True
-                    warnings.append(
-                        f"Could not safely submit the approved sign-in form: {type(exc).__name__}: {str(exc)[:180]}"
-                    )
-                    stop_reason = "Authentication could not be completed safely; review the sign-in checkpoint"
-                    break
+                        next_has_sensitive_inputs = bool(self._credential_controls(next_screen))
+                        if not duplicate and not next_has_sensitive_inputs:
+                            next_screen, _ = capture(
+                                persist_evidence=True,
+                                require_target=True,
+                            )
+                        transitions.append(
+                            DiscoveredTransition(
+                                from_screen_id=screen.screen_id,
+                                to_screen_id=next_screen.screen_id,
+                                control_id=submit.control_id,
+                                control_label=submit.semantic_label,
+                                duplicate_state=duplicate,
+                            )
+                        )
+                        if duplicate:
+                            return (
+                                screen,
+                                True,
+                                "Sign-in returned to the same screen; credentials may be invalid or the flow needs supervision.",
+                            )
+                        screen = next_screen
+                    except _UnexpectedTargetSurface as exc:
+                        return (
+                            screen,
+                            True,
+                            f"Sign-in left the uploaded app surface and was stopped safely: {exc}",
+                        )
+                    except Exception as exc:
+                        warnings.append(
+                            f"Could not safely submit the approved sign-in form: {type(exc).__name__}: {str(exc)[:180]}"
+                        )
+                        return (
+                            screen,
+                            True,
+                            "Authentication could not be completed safely; review the sign-in checkpoint",
+                        )
+                return screen, False, None
+
+            current, authentication_blocked, authentication_reason = process_authentication(current)
+            if authentication_reason:
+                stop_reason = authentication_reason
 
             # A bounded depth-first traversal explores sibling navigation controls
             # instead of following one path and stopping at the first leaf. Every
@@ -1347,7 +1427,14 @@ class AutopilotDiscoveryService:
                             scroll_rounds[current.screen_id] = rounds + 1
                             if self._scroll_forward(driver):
                                 actions_attempted += 1
-                                next_screen, duplicate = capture()
+                                try:
+                                    next_screen, duplicate = capture(require_target=True)
+                                except _UnexpectedTargetSurface as exc:
+                                    warnings.append(
+                                        f"Stopped before counting a screen outside the uploaded app after scrolling: {exc}"
+                                    )
+                                    stop_reason = "Discovery stopped at the uploaded-app boundary."
+                                    break
                                 transitions.append(
                                     DiscoveredTransition(
                                         from_screen_id=current.screen_id,
@@ -1369,7 +1456,10 @@ class AutopilotDiscoveryService:
                         try:
                             driver.back()
                             time.sleep(0.8)
-                            recovered, recovered_duplicate = capture(persist_evidence=False)
+                            recovered, recovered_duplicate = capture(
+                                persist_evidence=False,
+                                require_target=True,
+                            )
                             transitions.append(
                                 DiscoveredTransition(
                                     from_screen_id=current.screen_id,
@@ -1387,18 +1477,12 @@ class AutopilotDiscoveryService:
                             break
                         continue
                     visited_edges.add((current.screen_id, control.control_id))
-                    locator = control.locators[0]
-                    by = {
-                        "accessibility_id": AppiumBy.ACCESSIBILITY_ID,
-                        "id": AppiumBy.ID,
-                        "xpath": AppiumBy.XPATH,
-                    }[locator.strategy]
                     try:
-                        element = driver.find_element(by, locator.value)
+                        element = self._find_discovered_element(driver, control, AppiumBy)
                         element.click()
                         actions_attempted += 1
                         time.sleep(1.2)
-                        next_screen, duplicate = capture()
+                        next_screen, duplicate = capture(require_target=True)
                         transitions.append(
                             DiscoveredTransition(
                                 from_screen_id=current.screen_id,
@@ -1414,10 +1498,74 @@ class AutopilotDiscoveryService:
                                 time.sleep(0.8)
                             except Exception:
                                 pass
-                            current, _ = capture(persist_evidence=False)
+                            current, _ = capture(persist_evidence=False, require_target=True)
                             continue
                         stack.append(current)
                         current = next_screen
+                        # Login may be behind a public landing screen. Treat
+                        # that newly observed form as the checkpoint before
+                        # the walker attempts any other screen action.
+                        if self._credential_controls(current):
+                            auth_screen_id = current.screen_id
+                            current, authentication_blocked, authentication_reason = process_authentication(current)
+                            if authentication_reason:
+                                stop_reason = authentication_reason
+                            if authentication_blocked:
+                                break
+                            # After a successful sign-in, do not backtrack into
+                            # the unauthenticated landing/login stack and risk
+                            # replaying the same credential form.
+                            if current.screen_id != auth_screen_id:
+                                stack.clear()
+                                visited_edges.clear()
+                                scroll_rounds.clear()
+                                continue
+                    except _UnexpectedTargetSurface as exc:
+                        warnings.append(
+                            f"Navigation control {control.semantic_label!r} left the uploaded app; its destination was not recorded: {exc}"
+                        )
+                        reviewed_controls = [
+                            item.model_copy(
+                                update={
+                                    "risk": "review",
+                                    "risk_reason": "This action left the uploaded application; the external surface was excluded.",
+                                }
+                            )
+                            if item.control_id == control.control_id
+                            else item
+                            for item in current.controls
+                        ]
+                        current = current.model_copy(update={"controls": reviewed_controls})
+                        for screen_index, item in enumerate(screens):
+                            if item.screen_id == current.screen_id:
+                                screens[screen_index] = current
+                                break
+                        try:
+                            if package_hint:
+                                driver.activate_app(package_hint)
+                            else:
+                                driver.back()
+                            time.sleep(1.2)
+                            recovered, duplicate = capture(
+                                persist_evidence=False,
+                                require_target=True,
+                            )
+                            if not duplicate and recovered.fingerprint != current.fingerprint:
+                                # The reactivated app did not return to the
+                                # prior observed state. Discard the disconnected
+                                # snapshot and stop rather than fabricate a path.
+                                screens[:] = [item for item in screens if item.screen_id != recovered.screen_id]
+                                seen_fingerprints.pop(recovered.fingerprint, None)
+                                stop_reason = "Discovery stopped because the app could not return to the previous observed screen."
+                                break
+                            current = recovered
+                            continue
+                        except Exception as recovery_exc:
+                            warnings.append(
+                                f"Could not restore the uploaded app after leaving its boundary: {type(recovery_exc).__name__}"
+                            )
+                            stop_reason = "Discovery stopped because the uploaded app could not be safely restored."
+                            break
                     except Exception as exc:
                         warnings.append(
                             f"Could not safely interact with {control.semantic_label}: {type(exc).__name__}: {str(exc)[:180]}"

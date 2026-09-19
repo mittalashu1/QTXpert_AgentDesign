@@ -205,6 +205,48 @@ def test_runtime_discovery_promotes_resolved_safe_journey():
     compile(generated.appium_python, "<qtx-generated>", "exec")
 
 
+def test_qtx_ir_carries_only_observed_alternate_locators_for_runtime_retry():
+    help_control = _control("help", "Help")
+    help_control = help_control.model_copy(
+        update={
+            "locators": [
+                DiscoveryLocator(strategy="id", value="com.qtxpert.demo:id/help", confidence=0.97),
+                DiscoveryLocator(strategy="accessibility_id", value="Help", confidence=0.96),
+            ]
+        }
+    )
+    discovery = _discovery().model_copy(
+        update={
+            "screens": [
+                _discovery().screens[0].model_copy(
+                    update={"controls": [help_control, _control("transfer", "Transfer money", risk="blocked")]}
+                ),
+                _discovery().screens[1],
+            ]
+        }
+    )
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AI-LOCATOR-FALLBACK",
+            suite="Functional",
+            title="Open Help",
+            priority="medium",
+            objective="Verify an observed safe help destination.",
+            steps=["Tap Help", "Verify Support"],
+            expected=["Support is visible"],
+            source="ai",
+        )
+    ])
+
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+    tap = next(step for step in generated.steps if step.action == "tap")
+
+    assert tap.locator_strategy == "id"
+    assert [(locator.strategy, locator.value) for locator in tap.locator_fallbacks] == [
+        ("accessibility_id", "Help")
+    ]
+
+
 def test_generated_evidence_scripts_redact_runtime_values():
     mobile_analysis = _analysis([
         AutopilotTest(

@@ -249,12 +249,15 @@ def test_transactional_control_is_blocked_before_navigation():
 
 def test_text_only_login_cta_is_reachable_for_auth_checkpoint():
     controls = AutopilotDiscoveryService.parse_controls(
-        """
-        <hierarchy>
-          <node class="android.widget.TextView" text="Login" clickable="true" enabled="true" />
+        '''
+        <hierarchy rotation="0">
+          <node index="0" class="android.widget.FrameLayout" clickable="false" enabled="true">
+            <node index="0" text="Login" class="android.widget.TextView" clickable="true" enabled="true" bounds="[10,10][200,80]" />
+          </node>
         </hierarchy>
-        """
+        '''
     )
+
     login = AutopilotDiscoveryService._select_safe_control(controls, set())
 
     assert login is not None
@@ -343,5 +346,126 @@ async def test_browserstack_discovery_does_not_resolve_custom_appium(tmp_path, m
     assert captured["url"] == settings.BROWSERSTACK_HUB_URL
     assert captured["app"] == "bs://demo"
     assert captured["options"]["userName"] == "user"
+
+
+def test_runtime_discovery_stops_at_login_reached_after_safe_navigation(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    class AppiumBy:
+        ACCESSIBILITY_ID = "accessibility id"
+        ID = "id"
+        XPATH = "xpath"
+
+    class Options:
+        def load_capabilities(self, _capabilities):
+            return self
+
+    class Element:
+        def __init__(self, driver):
+            self.driver = driver
+
+        def click(self):
+            self.driver.state = "login"
+
+    class Driver:
+        capabilities = {"appium:appPackage": "com.qtx.demo", "appium:appActivity": ".MainActivity"}
+
+        def __init__(self):
+            self.state = "landing"
+            self.quit_called = False
+
+        @property
+        def page_source(self):
+            if self.state == "landing":
+                return (
+                    '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">'
+                    '<node package="com.qtx.demo" text="Welcome" class="android.widget.TextView" />'
+                    '<node package="com.qtx.demo" text="Login" resource-id="com.qtx.demo:id/login" '
+                    'class="android.widget.Button" clickable="true" enabled="true" />'
+                    '</node></hierarchy>'
+                )
+            return (
+                '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">'
+                '<node package="com.qtx.demo" text="User ID" class="android.widget.TextView" />'
+                '<node package="com.qtx.demo" resource-id="com.qtx.demo:id/user" '
+                'class="android.widget.EditText" clickable="true" enabled="true" />'
+                '<node package="com.qtx.demo" text="Password" class="android.widget.TextView" />'
+                '<node package="com.qtx.demo" resource-id="com.qtx.demo:id/password" '
+                'class="android.widget.EditText" clickable="true" enabled="true" />'
+                '<node package="com.qtx.demo" text="Sign in" resource-id="com.qtx.demo:id/signin" '
+                'class="android.widget.Button" clickable="true" enabled="true" />'
+                '</node></hierarchy>'
+            )
+
+        def find_element(self, by, value):
+            assert by == AppiumBy.ID
+            assert value == "com.qtx.demo:id/login"
+            return Element(self)
+
+        def get_screenshot_as_file(self, path):
+            Path(path).write_bytes(b"png")
+            return True
+
+        def quit(self):
+            self.quit_called = True
+
+    driver = Driver()
+    appium = types.ModuleType("appium")
+    webdriver = types.ModuleType("appium.webdriver")
+    webdriver.Remote = lambda *_args, **_kwargs: driver
+    appium.webdriver = webdriver
+    appium_by_module = types.ModuleType("appium.webdriver.common.appiumby")
+    appium_by_module.AppiumBy = AppiumBy
+    android_options = types.ModuleType("appium.options.android")
+    android_options.UiAutomator2Options = Options
+    ios_options = types.ModuleType("appium.options.ios")
+    ios_options.XCUITestOptions = Options
+    for name, module in {
+        "appium": appium,
+        "appium.webdriver": webdriver,
+        "appium.webdriver.common": types.ModuleType("appium.webdriver.common"),
+        "appium.webdriver.common.appiumby": appium_by_module,
+        "appium.options": types.ModuleType("appium.options"),
+        "appium.options.android": android_options,
+        "appium.options.ios": ios_options,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr("app.services.autopilot_discovery.time.sleep", lambda _seconds: None)
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotDiscoveryService(
+        SimpleNamespace(AUTOPILOT_DISCOVERY_SETTLE_SECONDS=1, AUTOPILOT_DISCOVERY_SETTLE_RETRIES=0),
+        Prototype(),
+    )
+    request = AutopilotDiscoveryRequest(provider="browserstack", max_screens=8, max_actions=12)
+
+    result = service._run_sync(
+        "job-login-after-navigation",
+        "https://hub.example.test/wd/hub",
+        "bs://app",
+        request,
+        "com.qtx.demo",
+        ".MainActivity",
+        None,
+        30_000,
+        30_000,
+        30_000,
+    )
+
+    assert result["stop_reason"].startswith("Authentication checkpoint detected.")
+    assert result["actions_attempted"] == 1
+    assert len(result["screens"]) == 2
+    assert result["screens"][1].screen_id == "screen-002"
+    assert {control.semantic_label for control in result["screens"][1].controls if control.input_capable} == {
+        "User ID / email",
+        "Password",
+    }
+    assert len(result["transitions"]) == 1
+    assert driver.quit_called is True
 
 
