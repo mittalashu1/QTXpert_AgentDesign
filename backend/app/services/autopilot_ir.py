@@ -1003,7 +1003,15 @@ class AutopilotIRCompiler:
             if target == candidate:
                 best = max(best, 1.0)
                 continue
-            if target in candidate or candidate in target:
+            # Substring matching is useful for longer, descriptive phrases,
+            # but it makes short labels such as "EM" match unrelated controls
+            # such as "Email". Require enough evidence on both sides before
+            # allowing a partial phrase match; exact matches remain valid.
+            if (
+                len(target.replace(" ", "")) >= 3
+                and len(candidate.replace(" ", "")) >= 3
+                and (target in candidate or candidate in target)
+            ):
                 best = max(best, 0.92)
             tokens = set(candidate.split())
             if target_tokens and tokens:
@@ -1239,6 +1247,7 @@ class AutopilotIRCompiler:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in test_id)
         safe = "_".join(part for part in safe.split("_") if part)
         return f"test_{safe}"
+
 
 
 
