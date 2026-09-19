@@ -198,9 +198,7 @@ def test_suite_interpreter_tries_only_observed_locator_fallbacks(tmp_path, monke
     service._execute_test(driver, test, tmp_path, "com.qtx.demo")
 
     assert driver.element.clicked is True
-    assert [value for _, value in driver.locators] == [
-        "missing-resource-id", "missing-resource-id", "missing-resource-id", "missing-resource-id", "Login"
-    ]
+    assert [value for _, value in driver.locators] == ["missing-resource-id"] * 8 + ["Login"]
 
 
 def test_suite_interpreter_blocks_when_tap_leaves_uploaded_app(tmp_path, monkeypatch):
