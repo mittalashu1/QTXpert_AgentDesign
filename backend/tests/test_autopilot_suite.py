@@ -4,7 +4,15 @@ import base64
 import pytest
 
 from app.config import Settings
-from app.schemas.autopilot import DiscoveryLocator, QTXIRStep, QTXTestIR
+from app.schemas.autopilot import (
+    AutopilotDiscoveryResult,
+    DiscoveredControl,
+    DiscoveredScreen,
+    DiscoveredTransition,
+    DiscoveryLocator,
+    QTXIRStep,
+    QTXTestIR,
+)
 from app.services.autopilot_suite import AutopilotSuiteService
 
 
@@ -333,4 +341,219 @@ def test_sensitive_functional_video_is_discarded(tmp_path):
     assert path is None
     assert status == "suppressed_sensitive_input"
     assert not (tmp_path / "journey.mp4").exists()
+
+
+
+def _observed_screen(screen_id, controls):
+    return DiscoveredScreen(
+        screen_id=screen_id,
+        fingerprint=f"fingerprint-{screen_id}",
+        package_name="com.qtx.demo",
+        activity_name=".MainActivity",
+        page_label=screen_id,
+        controls=controls,
+    )
+
+
+def _navigation_discovery():
+    entry = DiscoveredControl(
+        control_id="start-entry",
+        semantic_label="Get started",
+        class_name="android.widget.Button",
+        text="Get started",
+        resource_id="com.qtx.demo:id/get_started",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/get_started", confidence=0.98)],
+    )
+    user_id = DiscoveredControl(
+        control_id="user-id",
+        semantic_label="User ID",
+        class_name="android.widget.EditText",
+        text="",
+        resource_id="com.qtx.demo:id/user_id",
+        input_capable=True,
+        input_kind="credential",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/user_id", confidence=0.98)],
+    )
+    password = DiscoveredControl(
+        control_id="password",
+        semantic_label="Password",
+        class_name="android.widget.EditText",
+        resource_id="com.qtx.demo:id/password",
+        input_capable=True,
+        input_kind="credential",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/password", confidence=0.98)],
+    )
+    submit = DiscoveredControl(
+        control_id="login-submit",
+        semantic_label="Login",
+        class_name="android.widget.Button",
+        text="Login",
+        resource_id="com.qtx.demo:id/login",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/login", confidence=0.98)],
+    )
+    root = _observed_screen("screen-root", [entry])
+    auth = _observed_screen("screen-auth", [user_id, password, submit])
+    return AutopilotDiscoveryResult(
+        job_id="test-job",
+        status="partial",
+        provider="browserstack",
+        started_at="2026-09-19T00:00:00Z",
+        finished_at="2026-09-19T00:00:01Z",
+        duration_seconds=1,
+        device_name="test device",
+        stop_reason="Authentication screen observed.",
+        screens=[root, auth],
+        transitions=[
+            DiscoveredTransition(
+                from_screen_id=root.screen_id,
+                to_screen_id=auth.screen_id,
+                control_id=entry.control_id,
+                control_label=entry.semantic_label,
+                action="tap",
+            )
+        ],
+    )
+
+
+class _RouteDriver(_Driver):
+    def __init__(self):
+        super().__init__()
+        self.root_source = (
+            '<hierarchy><node package="com.qtx.demo" class="android.widget.Button" '
+            'resource-id="com.qtx.demo:id/get_started" text="Get started" clickable="true" /></hierarchy>'
+        )
+        self.auth_source = (
+            '<hierarchy><node package="com.qtx.demo" class="android.widget.EditText" '
+            'resource-id="com.qtx.demo:id/user_id" hint="User ID" />'
+            '<node package="com.qtx.demo" class="android.widget.EditText" '
+            'resource-id="com.qtx.demo:id/password" hint="Password" />'
+            '<node package="com.qtx.demo" class="android.widget.Button" '
+            'resource-id="com.qtx.demo:id/login" text="Login" clickable="true" /></hierarchy>'
+        )
+        self.page_source = self.root_source
+        self.navigation_clicks = 0
+        self.auth_submit_clicks = 0
+
+    def find_element(self, by, value):
+        self.locators.append((by, value))
+        if value == "com.qtx.demo:id/get_started" and self.page_source == self.root_source:
+            driver = self
+
+            class EntryElement(_Element):
+                def click(inner_self):
+                    super(EntryElement, inner_self).click()
+                    driver.navigation_clicks += 1
+                    driver.page_source = driver.auth_source
+
+            return EntryElement()
+        if value == "com.qtx.demo:id/user_id" and self.page_source == self.auth_source:
+            return _Element()
+        if value == "com.qtx.demo:id/password" and self.page_source == self.auth_source:
+            return _Element()
+        if value == "com.qtx.demo:id/login" and self.page_source == self.auth_source:
+            driver = self
+
+            class SubmitElement(_Element):
+                def click(inner_self):
+                    super(SubmitElement, inner_self).click()
+                    driver.auth_submit_clicks += 1
+
+            return SubmitElement()
+        raise RuntimeError("NoSuchElementException")
+
+
+def test_suite_replays_only_observed_safe_route_to_case_screen(tmp_path):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    driver = _RouteDriver()
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify the User ID field on the observed sign-in screen",
+            target="User ID",
+            screen_id="screen-auth",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/user_id",
+            locator_confidence=0.98,
+        )
+    ])
+
+    navigation = service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert navigation == [{
+        "from_screen": "screen-root",
+        "to_screen": "screen-auth",
+        "control": "Get started",
+    }]
+    assert driver.navigation_clicks == 1
+    assert driver.auth_submit_clicks == 0
+    assert driver.page_source == driver.auth_source
+
+
+def test_suite_does_not_repeat_sign_in_after_discovery_returns_to_same_screen():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery().model_copy(
+        update={"stop_reason": "Sign-in returned to the same screen; credentials may be invalid."}
+    )
+    test = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Tap Login",
+            target="Login",
+            screen_id="screen-auth",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/login",
+            locator_confidence=0.98,
+        )
+    ])
+
+    assert service._would_repeat_failed_auth_submission(test, discovery) is True
+
+
+def test_suite_safe_route_will_not_submit_authentication_controls():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    auth = discovery.screens[1]
+    landing = _observed_screen("screen-home", [
+        DiscoveredControl(
+            control_id="home",
+            semantic_label="Home",
+            class_name="android.widget.Button",
+            text="Home",
+            resource_id="com.qtx.demo:id/home",
+            clickable=True,
+            enabled=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/home", confidence=0.98)],
+        )
+    ])
+    discovery = discovery.model_copy(
+        update={
+            "screens": [*discovery.screens, landing],
+            "transitions": [
+                *discovery.transitions,
+                DiscoveredTransition(
+                    from_screen_id=auth.screen_id,
+                    to_screen_id=landing.screen_id,
+                    control_id="login-submit",
+                    control_label="Login",
+                    action="tap",
+                ),
+            ],
+        }
+    )
+
+    assert service._safe_discovery_path(discovery, auth.screen_id, landing.screen_id) is None
 
