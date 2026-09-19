@@ -406,13 +406,26 @@ class AutopilotDiscoveryService:
         ).lower()
         if any(term in marker_text for term in ("splash", "loading", "progressbar", "launchscreen", "please wait")):
             return True
+        generic_labels = {
+            "view", "imageview", "textview", "unknown", "layout", "framelayout",
+            "linearlayout", "relativelayout", "constraintlayout", "scrollview",
+        }
         interactive = [
             control for control in screen.controls
-            if control.enabled and (control.clickable or control.input_capable)
+            if control.enabled
+            and control.locators
+            and (
+                control.input_capable
+                or (
+                    control.clickable
+                    and re.sub(r"[\s_-]+", " ", str(control.semantic_label or "").lower()).strip() not in generic_labels
+                )
+            )
         ]
-        # A small non-interactive hierarchy is characteristic of an Android
-        # splash/launch view. This is deliberately conservative and is only
-        # retried a few times before the state is retained as evidence.
+        # Some providers expose an Android splash as a clickable generic View.
+        # It is not a ready product page without a deterministic locator and
+        # a meaningful user-facing label; keep waiting rather than reporting
+        # a false one-screen discovery.
         return len(interactive) == 0 and len(screen.controls) <= 4
 
     @classmethod
@@ -971,11 +984,12 @@ class AutopilotDiscoveryService:
             checkpoint_stop = str(payload.get("stop_reason") or "").lower().startswith(
                 ("authentication", "sign-in", "credentials")
             )
+            launch_wait_exhausted = "non-interactive launch screen" in str(payload.get("stop_reason") or "").lower()
             target_ready = payload.get("target_ready")
             status = (
                 "blocked"
                 if target_ready is False
-                else "partial" if checkpoint_stop
+                else "partial" if checkpoint_stop or launch_wait_exhausted
                 else "completed" if payload["screens"]
                 else "partial"
             )
@@ -1109,6 +1123,7 @@ class AutopilotDiscoveryService:
         warnings: list[str] = []
         actions_attempted = 0
         stop_reason = "Discovery bounds reached"
+        launch_surface_incomplete = False
         target_ready: Optional[bool] = None
         target_identity: Optional[str] = None
         target_activity: Optional[str] = None
@@ -1224,15 +1239,19 @@ class AutopilotDiscoveryService:
                 if not duplicate or candidate_score >= current_score:
                     current = candidate
             if self._looks_like_loading_screen(current):
+                launch_surface_incomplete = True
                 warnings.append(
                     f"Initial app screen remained non-interactive after {retries} bounded settle attempt(s); "
                     "the launch state was retained as evidence and no controls were auto-clicked."
+                )
+                stop_reason = (
+                    "App remained on a non-interactive launch screen after bounded settling; "
+                    "login and workflows were not inferred."
                 )
             elif current is not screens[0]:
                 # The replay root must be the settled app, not its splash.
                 screens.remove(current)
                 screens.insert(0, current)
-
             # A successful WebDriver handshake does not prove that the
             # uploaded application is foreground.  Validate the observed
             # package/surface before interpreting any controls as product UI.
@@ -1300,7 +1319,11 @@ class AutopilotDiscoveryService:
             # identical in-memory candidate if the session needed activation.
             current, _ = capture(persist_evidence=True, require_target=True)
             if request.observe_only:
-                stop_reason = "Observe-only discovery captured the current screen"
+                stop_reason = (
+                    "Observe-only discovery captured an incomplete launch screen; no login or workflows were inferred"
+                    if launch_surface_incomplete
+                    else "Observe-only discovery captured the current screen"
+                )
                 return {
                     "screens": screens,
                     "transitions": transitions,
@@ -1421,7 +1444,7 @@ class AutopilotDiscoveryService:
             # instead of following one path and stopping at the first leaf. Every
             # edge is attempted at most once per observed screen; all backtracking
             # is reversible and destructive controls remain excluded by risk.
-            if not authentication_blocked and current is not None:
+            if not authentication_blocked and current is not None and not launch_surface_incomplete:
                 stack: list[DiscoveredScreen] = []
                 while len(screens) < request.max_screens and actions_attempted < request.max_actions:
                     visited_for_screen = {

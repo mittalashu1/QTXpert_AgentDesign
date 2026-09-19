@@ -236,6 +236,27 @@ def test_loading_screen_detection_is_conservative():
     assert AutopilotDiscoveryService._looks_like_loading_screen(ready) is False
 
 
+def test_generic_unlocated_launch_view_is_not_treated_as_a_ready_screen():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    splash = DiscoveredScreen(
+        screen_id="screen-splash",
+        fingerprint="splash",
+        activity_name="com.example.investnation.MainActivity",
+        controls=[
+            DiscoveredControl(
+                control_id="root-view",
+                semantic_label="View",
+                class_name="android.view.View",
+                clickable=True,
+                locators=[],
+            )
+        ],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(splash) is True
+
+
 def test_transactional_control_is_blocked_before_navigation():
     controls = AutopilotDiscoveryService.parse_controls(SAMPLE_XML)
     transfer = next(control for control in controls if control.semantic_label == "Transfer money")
