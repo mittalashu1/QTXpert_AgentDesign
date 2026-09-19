@@ -180,7 +180,10 @@ def _metrics(
         blocked = sum(item.status == "blocked" for item in executions)
         environments.extend(f"{item.provider} · {item.device_name}" for item in executions)
 
-    pass_rate = round((passed / executed) * 100, 1) if executed else None
+    # Keep the denominator tied to the complete designed scope. Dividing by
+    # only the cases that happened to execute makes a partially blocked run
+    # look healthier than it is (for example, 10/11 executed vs. 10/42 planned).
+    pass_rate = round((passed / designed) * 100, 1) if designed else None
     evidence_state = (
         "Runtime suite evidence is available."
         if suite is not None and executed
@@ -624,5 +627,6 @@ def build_test_audit_report(
             else None
         ),
     )
+
 
 

@@ -1327,6 +1327,49 @@ def test_report_never_claims_runtime_pass_rate_without_execution():
     assert all(check.dependency for check in report.compliance_verification)
 
 
+def test_report_pass_rate_uses_all_designed_cases_as_denominator():
+    analysis = AutopilotAnalysis(
+        job_id="11111111-1111-4111-8111-111111111111",
+        filename="investnation.apk",
+        sha256="a" * 64,
+        app_name="Investnation",
+        package_name="com.example.investnation",
+        tests=[
+            AutopilotTest(
+                id=f"QT-FUNC-{index:03d}",
+                suite="Functional",
+                title=f"Functional case {index}",
+                objective="Validate an observed application flow.",
+            )
+            for index in range(1, 6)
+        ],
+    )
+    suite = AutopilotSuiteResult(
+        job_id=analysis.job_id,
+        status="partial",
+        provider="appium",
+        started_at="2026-09-19T00:00:00+00:00",
+        finished_at="2026-09-19T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Test device",
+        selected_count=3,
+        executed_count=3,
+        passed_count=2,
+        tests=[
+            AutopilotSuiteTestResult(test_id=f"QT-FUNC-{index:03d}", title=f"Case {index}", status="passed")
+            for index in range(1, 3)
+        ]
+        + [AutopilotSuiteTestResult(test_id="QT-FUNC-003", title="Case 3", status="blocked")],
+    )
+
+    report = build_test_audit_report(analysis, DEFAULT_AUTOPILOT_CONTEXT, suite=suite)
+
+    assert report.metrics.designed_test_cases == 5
+    assert report.metrics.executed_test_cases == 3
+    assert report.metrics.passed_count == 2
+    assert report.metrics.pass_rate == 40.0
+
+
 def test_report_exposes_durable_functional_video_assets():
     analysis = AutopilotAnalysis(
         job_id="11111111-1111-4111-8111-111111111111",
@@ -1944,6 +1987,7 @@ async def test_execution_history_files_are_per_run_and_reusable(tmp_path):
     restored = _execution_record_from_file(records[0], job_id)
     assert restored is not None
     assert restored.execution_id == result.execution_id
+
 
 
 
