@@ -5,6 +5,7 @@ from app.services.appium_compat import (
     safe_app_identity,
     safe_background_application,
     safe_page_source,
+    safe_navigate_back,
     safe_quit,
     validate_target_surface,
 )
@@ -231,4 +232,58 @@ def test_background_preserves_native_local_appium_path(monkeypatch):
     assert safe_background_application(driver, 2, package="com.qtx.demo") == "background_app"
     assert driver.seconds == 2
 
+def test_back_uses_provider_fallback_when_webdriver_back_is_unavailable():
+    class Driver:
+        def back(self):
+            raise RuntimeError("Unknown command: back")
 
+        def press_keycode(self, keycode):
+            self.keycode = keycode
+
+    driver = Driver()
+
+    assert safe_navigate_back(driver, target_kind="android") == "android_back_keycode"
+    assert driver.keycode == 4
+
+
+def test_back_reports_provider_limitation_without_leaking_provider_error():
+    class Driver:
+        def back(self):
+            raise RuntimeError("internal provider detail")
+
+        def press_keycode(self, _keycode):
+            raise RuntimeError("keycode unsupported")
+
+        def execute_script(self, command, _arguments):
+            if command == "mobile: pressKey":
+                raise RuntimeError("pressKey unsupported")
+            raise RuntimeError("shell unsupported")
+
+    try:
+        safe_navigate_back(Driver(), target_kind="android")
+    except ProviderLifecycleUnavailable as exc:
+        assert str(exc) == "Android back navigation is unavailable through this device provider."
+        assert "internal provider detail" not in str(exc)
+    else:  # pragma: no cover - assertion documents the required contract
+        raise AssertionError("provider limitation was not reported")
+
+
+def test_ios_back_does_not_try_android_keycode_fallback():
+    class Driver:
+        called = False
+
+        def back(self):
+            raise RuntimeError("generic back unsupported")
+
+        def press_keycode(self, _keycode):
+            self.called = True
+
+    driver = Driver()
+
+    try:
+        safe_navigate_back(driver, target_kind="ios")
+    except ProviderLifecycleUnavailable as exc:
+        assert str(exc) == "Back navigation is unavailable through this device provider."
+    else:  # pragma: no cover
+        raise AssertionError("unsupported iOS back should be reported")
+    assert driver.called is False

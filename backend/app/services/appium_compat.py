@@ -289,6 +289,46 @@ def expected_package_state(driver: Any, expected: Optional[str], *, page_source:
     return None
 
 
+def safe_navigate_back(driver: Any, *, target_kind: str = "android") -> str:
+    """Navigate back using only a platform-appropriate provider operation."""
+    platform = str(target_kind or "").strip().lower()
+    try:
+        driver.back()
+        return "webdriver_back"
+    except Exception as webdriver_error:
+        if platform != "android":
+            raise ProviderLifecycleUnavailable(
+                "Back navigation is unavailable through this device provider."
+            ) from webdriver_error
+
+    try:
+        driver.press_keycode(4)
+        return "android_back_keycode"
+    except Exception:
+        pass
+
+    try:
+        driver.execute_script("mobile: pressKey", {"keycode": 4})
+        return "android_mobile_press_key"
+    except Exception:
+        pass
+
+    try:
+        driver.execute_script(
+            "mobile: shell",
+            {
+                "command": "input",
+                "args": ["keyevent", "4"],
+                "includeStderr": True,
+                "timeout": 5000,
+            },
+        )
+        return "android_mobile_shell_back"
+    except Exception as exc:
+        raise ProviderLifecycleUnavailable(
+            "Android back navigation is unavailable through this device provider."
+        ) from exc
+
 def safe_quit(driver: Any) -> None:
     """Best-effort session cleanup that cannot mask the recorded result."""
     try:
