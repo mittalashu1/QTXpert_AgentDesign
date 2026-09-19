@@ -632,6 +632,7 @@ class AutopilotIRCompiler:
                         locator_strategy=locator.strategy,
                         locator_value=locator.value,
                         locator_confidence=locator.confidence,
+                        locator_fallbacks=self._locator_fallbacks(control, locator, interaction=False),
                     )
                 )
                 filled_input_keys.add(input_key)
@@ -724,6 +725,11 @@ class AutopilotIRCompiler:
                                 locator_strategy=credential_locator.strategy,
                                 locator_value=credential_locator.value,
                                 locator_confidence=credential_locator.confidence,
+                                locator_fallbacks=self._locator_fallbacks(
+                                    credential,
+                                    credential_locator,
+                                    interaction=False,
+                                ),
                             )
                         )
                         filled_input_keys.add(input_key)
@@ -736,6 +742,7 @@ class AutopilotIRCompiler:
                         locator_strategy=locator.strategy,
                         locator_value=locator.value,
                         locator_confidence=locator.confidence,
+                        locator_fallbacks=self._locator_fallbacks(control, locator, interaction=True),
                     )
                 )
                 if transition and transition.to_screen_id in screens:
@@ -771,6 +778,7 @@ class AutopilotIRCompiler:
                         locator_strategy=locator.strategy,
                         locator_value=locator.value,
                         locator_confidence=locator.confidence,
+                        locator_fallbacks=self._locator_fallbacks(control, locator, interaction=False),
                     )
                 )
                 assertion_count += 1
@@ -1011,12 +1019,35 @@ class AutopilotIRCompiler:
 
     @staticmethod
     def _best_locator(control: DiscoveredControl, interaction: bool):
-        minimum = 0.90 if interaction else 0.82
-        candidates = [locator for locator in control.locators if locator.confidence >= minimum]
+        candidates = AutopilotIRCompiler._eligible_locators(control, interaction)
         if not candidates:
             return None
-        candidates.sort(key=lambda locator: -locator.confidence)
         return candidates[0]
+
+    @staticmethod
+    def _eligible_locators(control: DiscoveredControl, interaction: bool):
+        minimum = 0.90 if interaction else 0.82
+        candidates = [locator for locator in control.locators if locator.confidence >= minimum]
+        candidates.sort(key=lambda locator: -locator.confidence)
+        # Keep only unique observed selectors. The runtime runner may retry
+        # them, but it must not synthesize new CSS/XPath guesses.
+        unique = []
+        seen: set[tuple[str, str]] = set()
+        for locator in candidates:
+            key = (locator.strategy, locator.value)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(locator)
+        return unique
+
+    @staticmethod
+    def _locator_fallbacks(control: DiscoveredControl, primary, interaction: bool):
+        return [
+            locator
+            for locator in AutopilotIRCompiler._eligible_locators(control, interaction)
+            if locator.strategy != primary.strategy or locator.value != primary.value
+        ]
 
     def _appium_script(self, test: AutopilotTest, analysis: AutopilotAnalysis, generated: QTXTestIR) -> str:
         function_name = self._function_name(test.id)

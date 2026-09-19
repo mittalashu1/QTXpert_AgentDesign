@@ -51,7 +51,7 @@ TERMINAL_PHASES = frozenset({"completed", "partial", "blocked", "failed"})
 # rejecting accidental jumps that would skip a user approval or runtime gate.
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # Jobs created before the explicit workflow contract may still be stored
-    # as draft when Runtime Discovery is the first durable operation. A
+    # as ``draft`` when Runtime Discovery is the first durable operation.  A
     # discovered map must be allowed to move those legacy jobs to the review
     # gate (or to blocked when the provider cannot attach) instead of silently
     # skipping the manifest update.
@@ -67,8 +67,8 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "running": frozenset({"completed", "partial", "blocked", "failed", "execution_ready"}),
     "completed": frozenset({"plan_pending_review", "exploring", "execution_ready"}),
     # A partially completed legacy run can be reopened from the report's
-    # explicit plan-approval and case-approval actions. Treat both as valid
-    # resumable gates instead of surfacing an invalid phase-transition error.
+    # explicit "Approve & discover" action.  Treat that as a valid resumable
+    # gate instead of surfacing an invalid partial -> plan_approved error.
     "partial": frozenset({"exploring", "execution_ready", "running", "plan_pending_review", "plan_approved", "cases_approved"}),
     "blocked": frozenset({"exploring", "execution_ready", "plan_pending_review"}),
     "failed": frozenset({"preflight", "context_ready", "plan_pending_review", "exploring"}),

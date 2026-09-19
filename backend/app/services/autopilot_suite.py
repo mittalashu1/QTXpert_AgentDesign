@@ -503,6 +503,13 @@ class AutopilotSuiteService:
                     if video_requested:
                         video_started, video_status = self._start_video_recording(driver)
                     self._reset_to_application(driver, package)
+                    case_target_ready, case_target_reason, _ = validate_target_surface(
+                        driver,
+                        expected_package=package,
+                        page_source=safe_page_source(driver),
+                    )
+                    if not case_target_ready:
+                        raise ProviderLifecycleUnavailable(case_target_reason)
                     evidence = self._execute_test(
                         driver,
                         test,
@@ -586,7 +593,7 @@ class AutopilotSuiteService:
         if not package:
             return
         # A hosted device can preserve the app's navigation state even when a
-        # new session is created with noReset=false. Replayable runtime
+        # new session is created with ``noReset=false``.  Replayable runtime
         # cases must start from the same launch state that Discovery observed,
         # otherwise a locator from the first screen is searched on a later
         # screen and is reported as a misleading NoSuchElementException.
@@ -603,13 +610,13 @@ class AutopilotSuiteService:
                 # sequence below.
                 pass
 
-        # A number of hosted Android drivers implement reset as a session
-        # reset but keep the last activity/view in the foreground. That makes
+        # A number of hosted Android drivers implement ``reset`` as a session
+        # reset but keep the last activity/view in the foreground.  That makes
         # a locator observed on the discovery root disappear on the next case
-        # and is reported as a misleading NoSuchElementException. Always use
+        # and is reported as a misleading NoSuchElementException.  Always use
         # the portable terminate/activate pair when it is available, even
         # after a provider reset, so every replay starts at a cold app entry
-        # point. If a provider restricts either lifecycle call, retain the
+        # point.  If a provider restricts either lifecycle call, retain the
         # successful reset and continue rather than turning capability limits
         # into a suite failure.
         terminator = getattr(driver, "terminate_app", None)
@@ -627,7 +634,7 @@ class AutopilotSuiteService:
                     return
 
         # A provider reset is still preferable to an unsupported lifecycle
-        # sequence. Some drivers do not expose package identity immediately;
+        # sequence.  Some drivers do not expose package identity immediately;
         # an unknown state must not trigger a second unsupported call.
         if provider_reset_succeeded and expected_package_state(driver, package) is not False:
             return
@@ -639,9 +646,8 @@ class AutopilotSuiteService:
                 driver.activate_app(package)
             time.sleep(2.0)
         except Exception:
-            # Some remote providers restrict lifecycle APIs; if the target app
-            # is already foreground, continuing is safer than failing the whole
-            # suite.
+            # Some remote providers restrict lifecycle APIs; if the target app is
+            # already foreground, continuing is safer than failing the whole suite.
             if expected_package_state(driver, package) is not True:
                 raise
 
@@ -774,6 +780,16 @@ class AutopilotSuiteService:
                         raise AssertionError(f"Resolved control is disabled: {step.target}")
                     element.click()
                     time.sleep(0.9)
+                    if package:
+                        target_ready, target_reason, _ = validate_target_surface(
+                            driver,
+                            expected_package=package,
+                            page_source=safe_page_source(driver),
+                        )
+                        if not target_ready:
+                            raise ProviderLifecycleUnavailable(
+                                f"Stopped after navigation left the uploaded app: {target_reason}"
+                            )
                 elif not element.is_displayed():
                     raise AssertionError(f"Resolved control is not visible: {step.target}")
                 elif step.action == "assert_text":
@@ -905,18 +921,26 @@ class AutopilotSuiteService:
             raise AssertionError(f"Missing deterministic locator for semantic target: {step.target}")
         if step.locator_strategy not in locator_map:
             raise AssertionError(f"Unsupported locator strategy: {step.locator_strategy}")
-        # Appium can return the previous hierarchy for a short window after a
-        # reset/activation. Retry only the deterministic lookup; no alternate
-        # locator is guessed and provider error text is not surfaced until the
-        # bounded wait is exhausted.
+        candidates = [(step.locator_strategy, step.locator_value)]
+        candidates.extend(
+            (locator.strategy, locator.value)
+            for locator in step.locator_fallbacks
+            if locator.strategy in locator_map
+            and (locator.strategy, locator.value) not in candidates
+        )
         last_error: Exception | None = None
-        for attempt in range(4):
-            try:
-                return driver.find_element(locator_map[step.locator_strategy], step.locator_value)
-            except Exception as exc:
-                last_error = exc
-                if attempt < 3:
-                    time.sleep(0.6)
+        for candidate_index, (strategy, value) in enumerate(candidates):
+            # Keep the existing settling retry for the preferred selector;
+            # then try only the other selectors explicitly observed during
+            # discovery. No new locator is guessed at execution time.
+            attempts = 4 if candidate_index == 0 else 1
+            for attempt in range(attempts):
+                try:
+                    return driver.find_element(locator_map[strategy], value)
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < attempts - 1:
+                        time.sleep(0.6)
         if last_error is not None:
             raise last_error
         raise AssertionError(f"Unable to resolve deterministic locator for {step.target}")

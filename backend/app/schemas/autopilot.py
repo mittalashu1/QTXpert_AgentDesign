@@ -739,6 +739,12 @@ class AutopilotResumeRequest(BaseModel):
     discovery_appium_app: Optional[str] = Field(default=None, max_length=2048)
 
 
+class DiscoveryLocator(BaseModel):
+    strategy: Literal["accessibility_id", "id", "xpath", "css"]
+    value: str
+    confidence: float = Field(ge=0, le=1)
+
+
 class QTXIRStep(BaseModel):
     action: Literal[
         "launch_app",
@@ -786,6 +792,10 @@ class QTXIRStep(BaseModel):
     locator_strategy: Optional[Literal["accessibility_id", "id", "xpath", "css"]] = None
     locator_value: Optional[str] = None
     locator_confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    # Additional deterministic locators observed for the same control. The
+    # runner may try these only after the preferred locator misses; no new
+    # selector is generated or guessed at execution time.
+    locator_fallbacks: List[DiscoveryLocator] = Field(default_factory=list)
     timeout_ms: Optional[int] = Field(default=None, ge=0, le=120_000)
     retry_count: int = Field(default=0, ge=0, le=5)
     safety_classification: Literal["safe", "review", "blocked"] = "safe"
@@ -909,12 +919,6 @@ class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
     max_actions: int = Field(default=10, ge=0, le=50)
     observe_only: bool = False
     continuation_token: Optional[str] = Field(default=None, max_length=512)
-
-
-class DiscoveryLocator(BaseModel):
-    strategy: Literal["accessibility_id", "id", "xpath", "css"]
-    value: str
-    confidence: float = Field(ge=0, le=1)
 
 
 class DiscoveredControl(BaseModel):

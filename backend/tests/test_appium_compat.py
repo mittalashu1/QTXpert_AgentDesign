@@ -113,6 +113,40 @@ def test_target_validation_rejects_wrong_foreground_package():
     assert "does not match" in reason
 
 
+def test_target_validation_rejects_launcher_even_when_target_is_still_in_hierarchy():
+    class Driver:
+        capabilities = {"appium:appPackage": "com.qtx.demo"}
+        page_source = (
+            '<hierarchy><node package="com.qtx.demo" text="Welcome" />'
+            '<node package="com.google.android.apps.nexuslauncher" '
+            'text="Search apps, web and more" /></hierarchy>'
+        )
+
+    ready, reason, identity = validate_target_surface(
+        Driver(), expected_package="com.qtx.demo", page_source=Driver.page_source
+    )
+
+    assert ready is False
+    assert "com.google.android.apps.nexuslauncher" in reason
+    assert identity["package"] == "com.qtx.demo"
+
+
+def test_target_validation_rejects_launcher_when_target_package_is_unavailable():
+    class Driver:
+        capabilities = {"appium:appPackage": "com.qtx.demo"}
+        page_source = (
+            '<hierarchy package="com.google.android.apps.nexuslauncher">'
+            '<node text="Search apps, web and more" /></hierarchy>'
+        )
+
+    ready, reason, _ = validate_target_surface(
+        Driver(), page_source=Driver.page_source, control_labels=["Search apps, web and more"]
+    )
+
+    assert ready is False
+    assert "Android launcher package" in reason
+
+
 def test_target_validation_allows_capability_identity_when_hierarchy_omits_package():
     class Driver:
         capabilities = {"appium:appPackage": "com.qtx.demo"}

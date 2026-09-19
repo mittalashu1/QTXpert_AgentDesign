@@ -4,7 +4,7 @@ import base64
 import pytest
 
 from app.config import Settings
-from app.schemas.autopilot import QTXIRStep, QTXTestIR
+from app.schemas.autopilot import DiscoveryLocator, QTXIRStep, QTXTestIR
 from app.services.autopilot_suite import AutopilotSuiteService
 
 
@@ -35,7 +35,7 @@ class _Driver:
     def __init__(self):
         self.current_package = "com.qtx.demo"
         self.current_activity = ".MainActivity"
-        self.page_source = '<hierarchy><node text="Help" /></hierarchy>'
+        self.page_source = '<hierarchy><node package="com.qtx.demo" text="Help" /></hierarchy>'
         self.element = _Element()
         self.locators = []
 
@@ -161,6 +161,77 @@ def test_suite_interpreter_retries_a_settling_hierarchy(tmp_path):
     assert driver.element.clicked is True
 
 
+def test_suite_interpreter_tries_only_observed_locator_fallbacks(tmp_path, monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+
+    class FallbackDriver(_Driver):
+        def find_element(self, by, value):
+            self.locators.append((by, value))
+            if value == "missing-resource-id":
+                raise RuntimeError("NoSuchElementException")
+            return self.element
+
+    driver = FallbackDriver()
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    test = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Open Login",
+            target="Login",
+            locator_strategy="id",
+            locator_value="missing-resource-id",
+            locator_confidence=0.97,
+            locator_fallbacks=[
+                DiscoveryLocator(strategy="accessibility_id", value="Login", confidence=0.96),
+            ],
+        ),
+    ])
+
+    service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    assert driver.element.clicked is True
+    assert [value for _, value in driver.locators] == [
+        "missing-resource-id", "missing-resource-id", "missing-resource-id", "missing-resource-id", "Login"
+    ]
+
+
+def test_suite_interpreter_blocks_when_tap_leaves_uploaded_app(tmp_path, monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+
+    class LeavingElement(_Element):
+        def __init__(self, driver):
+            super().__init__()
+            self.driver = driver
+
+        def click(self):
+            super().click()
+            self.driver.page_source = (
+                '<hierarchy><node package="com.google.android.apps.nexuslauncher" '
+                'text="Search apps, web and more" /></hierarchy>'
+            )
+
+    class LeavingDriver(_Driver):
+        def __init__(self):
+            super().__init__()
+            self.element = LeavingElement(self)
+
+    driver = LeavingDriver()
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    test = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Open Login",
+            target="Login",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/login",
+            locator_confidence=0.97,
+        ),
+    ])
+
+    with pytest.raises(RuntimeError, match="left the uploaded app"):
+        service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+
 def test_suite_reset_to_application_prefers_provider_reset():
     driver = _ResettableDriver()
 
@@ -262,3 +333,4 @@ def test_sensitive_functional_video_is_discarded(tmp_path):
     assert path is None
     assert status == "suppressed_sensitive_input"
     assert not (tmp_path / "journey.mp4").exists()
+

@@ -31,6 +31,12 @@ _SYSTEM_PACKAGE_NAMES = {
     "io.appium.uiautomator2.server",
     "io.appium.uiautomator2.server.test",
 }
+_ANDROID_LAUNCHER_PACKAGES = {
+    "com.google.android.apps.nexuslauncher",
+    "com.android.launcher3",
+    "com.sec.android.app.launcher",
+    "com.miui.home",
+}
 _SYSTEM_SURFACE_MARKERS = (
     "navigationbarbackground",
     "statusbar",
@@ -39,6 +45,18 @@ _SYSTEM_SURFACE_MARKERS = (
     "packageinstaller",
     "android:id/navigationbar",
     "android:id/statusbar",
+    # Android launchers are not in the framework package allow-list above:
+    # they are ordinary apps, but they are still outside the uploaded target.
+    # These markers are used only to reject unmistakable launcher surfaces.
+    "com.google.android.apps.nexuslauncher",
+    "com.android.launcher3",
+    "com.sec.android.app.launcher",
+    "com.miui.home",
+    "search apps, web and more",
+    "search on play store",
+    "pixel launcher",
+    "app suggestions",
+    "all apps",
 )
 
 
@@ -126,16 +144,29 @@ def validate_target_surface(
     packages = list(identity.get("hierarchy_packages") or [])
     non_system = [item for item in packages if not _is_system_package(item)]
     labels = [str(item or "").strip().casefold() for item in (control_labels or []) if str(item or "").strip()]
+    launcher_package = next(
+        (item for item in packages if item.strip().casefold() in _ANDROID_LAUNCHER_PACKAGES),
+        None,
+    )
     system_only_labels = bool(labels) and all(
         any(marker in label for marker in _SYSTEM_SURFACE_MARKERS)
         for label in labels
     )
-    if not labels and any(marker in hierarchy.casefold() for marker in _SYSTEM_SURFACE_MARKERS):
+    system_surface = any(marker in hierarchy.casefold() for marker in _SYSTEM_SURFACE_MARKERS)
+    if not labels and system_surface:
         system_only_labels = True
 
+    # Reject a hierarchy containing a launcher package even when stale target
+    # nodes remain elsewhere in the XML. Package presence alone is not proof
+    # that the uploaded application is the foreground surface.
+    if launcher_package:
+        return (
+            False,
+            f"Runtime session reached Android launcher package {launcher_package!r}, outside the uploaded application.",
+            identity,
+        )
+
     if expected:
-        if expected in packages:
-            return True, "Target package observed in the live hierarchy.", identity
         actual = next((item for item in non_system), identity.get("package"))
         if actual and str(actual).strip() != expected:
             return (
@@ -143,6 +174,12 @@ def validate_target_surface(
                 f"Runtime session foreground package {actual!r} does not match uploaded package {expected!r}.",
                 identity,
             )
+        # A hierarchy may contain a stale/underlying target package while the
+        # visible foreground has already moved to another app (commonly the
+        # Android launcher).  The foreground package must match before the
+        # target's mere presence anywhere in the XML can count as proof.
+        if expected in packages:
+            return True, "Target package observed in the live hierarchy.", identity
         # A few providers omit package attributes from the hierarchy while
         # advertising the requested appPackage in capabilities.  Accept that
         # state only when the hierarchy is not recognisably system-only.
@@ -160,6 +197,12 @@ def validate_target_surface(
             identity,
         )
 
+    if system_surface or system_only_labels:
+        return (
+            False,
+            "Runtime session reached Android system or launcher UI rather than a verifiable product surface.",
+            identity,
+        )
     if non_system:
         return True, "A non-system application package was observed in the live hierarchy.", identity
     if identity.get("package") and not _is_system_package(str(identity.get("package"))):
