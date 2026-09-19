@@ -476,7 +476,7 @@ def test_auth_entry_login_is_prioritized_over_higher_confidence_guest_route():
             class_name="android.widget.Button",
             clickable=True,
             risk="safe",
-            locators=[DiscoveryLocator(strategy="text", value="Explore as a Guest", confidence=0.99)],
+            locators=[DiscoveryLocator(strategy="id", value="Explore as a Guest", confidence=0.99)],
         ),
         DiscoveredControl(
             control_id="login",
@@ -484,7 +484,7 @@ def test_auth_entry_login_is_prioritized_over_higher_confidence_guest_route():
             class_name="android.widget.TextView",
             clickable=True,
             risk="safe",
-            locators=[DiscoveryLocator(strategy="text", value="Login", confidence=0.82)],
+            locators=[DiscoveryLocator(strategy="id", value="Login", confidence=0.82)],
         ),
     ]
 
