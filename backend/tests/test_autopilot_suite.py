@@ -4,6 +4,7 @@ import base64
 import pytest
 
 from app.config import Settings
+from app.services.appium_compat import ProviderLifecycleUnavailable
 from app.schemas.autopilot import (
     AutopilotDiscoveryResult,
     DiscoveredControl,
@@ -21,6 +22,7 @@ class _Element:
         self.clicked = False
         self.cleared = False
         self.values = []
+        self.text_value = ""
 
     def is_enabled(self):
         return True
@@ -37,6 +39,9 @@ class _Element:
 
     def send_keys(self, value):
         self.values.append(value)
+
+    def get_attribute(self, name):
+        return self.text_value if name in {"text", "value"} else None
 
 
 class _Driver:
@@ -443,6 +448,8 @@ class _RouteDriver(_Driver):
         self.page_source = self.root_source
         self.navigation_clicks = 0
         self.auth_submit_clicks = 0
+        self.back_calls = 0
+        self.credential_values = {}
 
     def find_element(self, by, value):
         self.locators.append((by, value))
@@ -457,9 +464,13 @@ class _RouteDriver(_Driver):
 
             return EntryElement()
         if value == "com.qtx.demo:id/user_id" and self.page_source == self.auth_source:
-            return _Element()
+            element = _Element()
+            element.text_value = self.credential_values.get(value, "")
+            return element
         if value == "com.qtx.demo:id/password" and self.page_source == self.auth_source:
-            return _Element()
+            element = _Element()
+            element.text_value = self.credential_values.get(value, "")
+            return element
         if value == "com.qtx.demo:id/login" and self.page_source == self.auth_source:
             driver = self
 
@@ -470,6 +481,12 @@ class _RouteDriver(_Driver):
 
             return SubmitElement()
         raise RuntimeError("NoSuchElementException")
+
+    def back(self):
+        self.back_calls += 1
+        if self.page_source != self.auth_source:
+            raise RuntimeError("No safe back route")
+        self.page_source = self.root_source
 
 
 def test_suite_replays_only_observed_safe_route_to_case_screen(tmp_path):
@@ -498,6 +515,87 @@ def test_suite_replays_only_observed_safe_route_to_case_screen(tmp_path):
     assert driver.navigation_clicks == 1
     assert driver.auth_submit_clicks == 0
     assert driver.page_source == driver.auth_source
+
+
+def test_suite_retraces_one_observed_safe_edge_from_empty_sign_in_form():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    discovery.screens[0].page_label = "Authentication"
+    discovery.screens[1].page_label = "Authentication"
+    driver = _RouteDriver()
+    driver.page_source = driver.auth_source
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify Get started on the observed public entry screen",
+            target="Get started",
+            screen_id="screen-root",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/get_started",
+            locator_confidence=0.98,
+        )
+    ])
+
+    navigation = service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert navigation == [{
+        "from_screen": "screen-auth",
+        "to_screen": "screen-root",
+        "control": "Back to observed public screen (webdriver_back)",
+    }]
+    assert driver.back_calls == 1
+    assert driver.auth_submit_clicks == 0
+    assert driver.page_source == driver.root_source
+
+
+def test_suite_will_not_backtrack_from_a_populated_credential_form():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    driver = _RouteDriver()
+    driver.page_source = driver.auth_source
+    driver.credential_values["com.qtx.demo:id/user_id"] = "qa@example.test"
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify Get started on the observed public entry screen",
+            target="Get started",
+            screen_id="screen-root",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/get_started",
+            locator_confidence=0.98,
+        )
+    ])
+
+    with pytest.raises(ProviderLifecycleUnavailable, match="No safe, observed navigation path"):
+        service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert driver.back_calls == 0
+    assert driver.auth_submit_clicks == 0
+
+
+def test_missing_route_diagnostic_distinguishes_screens_with_same_label():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery().model_copy(update={"transitions": []})
+    discovery.screens[0].page_label = "Authentication"
+    discovery.screens[1].page_label = "Authentication"
+    driver = _RouteDriver()
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify User ID",
+            target="User ID",
+            screen_id="screen-auth",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/user_id",
+            locator_confidence=0.98,
+        )
+    ])
+
+    with pytest.raises(ProviderLifecycleUnavailable) as exc_info:
+        service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert "Authentication [screen-root]" in str(exc_info.value)
+    assert "Authentication [screen-auth]" in str(exc_info.value)
 
 
 def test_suite_does_not_repeat_sign_in_after_discovery_returns_to_same_screen():
