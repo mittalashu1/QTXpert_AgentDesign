@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -186,6 +187,7 @@ class AutopilotSuiteService:
                     self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
                     input_values=input_values or {},
                     sensitive_input_keys=sensitive_input_keys or set(),
+                    discovery=discovery,
                 ),
                 timeout=self.settings.AUTOPILOT_SUITE_TIMEOUT_SECONDS,
             )
@@ -417,6 +419,7 @@ class AutopilotSuiteService:
         adb_exec_timeout_ms: int,
         input_values: Dict[str, str] | None = None,
         sensitive_input_keys: set[str] | None = None,
+        discovery: AutopilotDiscoveryResult | None = None,
     ) -> list[AutopilotSuiteTestResult]:
         from appium import webdriver
 
@@ -510,6 +513,18 @@ class AutopilotSuiteService:
                     )
                     if not case_target_ready:
                         raise ProviderLifecycleUnavailable(case_target_reason)
+                    if self._would_repeat_failed_auth_submission(test, discovery):
+                        raise ProviderLifecycleUnavailable(
+                            "Runtime Discovery already tried the approved sign-in once but remained on the "
+                            "sign-in screen. Saved credentials were not submitted again during this safe batch; "
+                            "verify the UAT account or any additional sign-in verification before retrying."
+                        )
+                    setup_navigation = self._prepare_test_screen(
+                        driver,
+                        test,
+                        discovery,
+                        package,
+                    )
                     evidence = self._execute_test(
                         driver,
                         test,
@@ -519,6 +534,8 @@ class AutopilotSuiteService:
                         input_values=input_values,
                         sensitive_input_keys=sensitive_input_keys,
                     )
+                    if setup_navigation:
+                        evidence["setup_navigation"] = setup_navigation
                     status = "passed"
                     error = None
                     dependency = test.dependency
@@ -650,6 +667,354 @@ class AutopilotSuiteService:
             # already foreground, continuing is safer than failing the whole suite.
             if expected_package_state(driver, package) is not True:
                 raise
+
+
+    @staticmethod
+    def _auth_submit_label(value: str | None) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+        return normalized in {
+            "login",
+            "log in",
+            "sign in",
+            "sign in to account",
+            "continue to account",
+            "continue",
+            "next",
+            "unlock",
+            "authenticate",
+            "submit",
+        }
+
+    @classmethod
+    def _would_repeat_failed_auth_submission(
+        cls,
+        test: QTXTestIR,
+        discovery: AutopilotDiscoveryResult | None,
+    ) -> bool:
+        if not discovery or "sign-in returned to the same screen" not in (discovery.stop_reason or "").casefold():
+            return False
+        screens = {screen.screen_id: screen for screen in discovery.screens}
+        for step in test.steps:
+            if step.action not in {"tap", "click"} or not step.screen_id:
+                continue
+            screen = screens.get(step.screen_id)
+            if screen is None:
+                continue
+            credentials_present = any(
+                control.input_capable
+                and control.input_kind == "credential"
+                and control.enabled
+                for control in screen.controls
+            )
+            if not credentials_present:
+                continue
+            control = next(
+                (
+                    item
+                    for item in screen.controls
+                    if (
+                        step.locator_strategy
+                        and step.locator_value
+                        and any(
+                            locator.strategy == step.locator_strategy
+                            and locator.value == step.locator_value
+                            for locator in item.locators
+                        )
+                    )
+                    or (
+                        step.target
+                        and cls._normalize_screen_text(item.semantic_label)
+                        == cls._normalize_screen_text(step.target)
+                    )
+                ),
+                None,
+            )
+            if control and cls._auth_submit_label(control.semantic_label):
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_screen_text(value: str | None) -> str:
+        return re.sub(r"\\s+", " ", str(value or "").casefold().replace("_", " ").replace("-", " ")).strip()
+
+    @classmethod
+    def _screen_tokens(cls, screen) -> set[str]:
+        generic = {
+            "button", "view", "control", "image", "imageview", "textview", "edittext",
+            "field", "input", "container", "scrollview", "linearlayout", "framelayout",
+        }
+        tokens: set[str] = set()
+        for control in screen.controls:
+            for value in (
+                control.semantic_label,
+                control.text,
+                control.content_description,
+                control.resource_id,
+            ):
+                token = cls._normalize_screen_text(value)
+                if len(token) < 3 or token in generic:
+                    continue
+                tokens.add(token)
+                if "/" in token:
+                    suffix = token.rsplit("/", 1)[-1]
+                    if len(suffix) >= 3 and suffix not in generic:
+                        tokens.add(suffix)
+        return tokens
+
+    @classmethod
+    def _identify_discovered_screen(
+        cls,
+        driver,
+        discovery: AutopilotDiscoveryResult,
+        package: str | None,
+    ):
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        source = safe_page_source(driver)
+        identity = safe_app_identity(driver, page_source=source, package_hint=package)
+        try:
+            controls = AutopilotDiscoveryService.parse_controls(source or "")
+            fingerprint = AutopilotDiscoveryService.fingerprint(
+                identity.get("package"),
+                identity.get("activity"),
+                controls,
+            )
+            exact = next(
+                (screen for screen in discovery.screens if screen.fingerprint == fingerprint),
+                None,
+            )
+            if exact is not None:
+                return exact
+        except Exception:
+            pass
+
+        haystack = cls._normalize_screen_text(source)
+        ranked: list[tuple[float, int, object]] = []
+        for screen in discovery.screens:
+            tokens = cls._screen_tokens(screen)
+            if not tokens:
+                continue
+            matches = sum(token in haystack for token in tokens)
+            ranked.append((matches / len(tokens), matches, screen))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        if not ranked:
+            return None
+        score, matches, best = ranked[0]
+        runner_up = ranked[1][0] if len(ranked) > 1 else 0.0
+        if matches >= 2 and score >= 0.40 and score - runner_up >= 0.10:
+            return best
+        return None
+
+    @classmethod
+    def _safe_discovery_path(
+        cls,
+        discovery: AutopilotDiscoveryResult,
+        start_screen_id: str,
+        target_screen_id: str,
+    ):
+        if start_screen_id == target_screen_id:
+            return []
+        screens = {screen.screen_id: screen for screen in discovery.screens}
+        if start_screen_id not in screens or target_screen_id not in screens:
+            return None
+        queue: list[tuple[str, list[tuple[object, object]]]] = [(start_screen_id, [])]
+        visited = {start_screen_id}
+        while queue:
+            source_id, path = queue.pop(0)
+            source = screens[source_id]
+            credential_screen = any(
+                control.input_capable
+                and control.input_kind == "credential"
+                and control.enabled
+                for control in source.controls
+            )
+            for transition in discovery.transitions:
+                if (
+                    transition.from_screen_id != source_id
+                    or transition.to_screen_id not in screens
+                    or transition.duplicate_state
+                    or transition.action != "tap"
+                    or transition.to_screen_id in visited
+                ):
+                    continue
+                control = next(
+                    (item for item in source.controls if item.control_id == transition.control_id),
+                    None,
+                )
+                if (
+                    control is None
+                    or not control.clickable
+                    or not control.enabled
+                    or control.input_capable
+                    or control.risk != "safe"
+                ):
+                    continue
+                if credential_screen and cls._auth_submit_label(transition.control_label):
+                    continue
+                next_path = path + [(transition, control)]
+                if transition.to_screen_id == target_screen_id:
+                    return next_path
+                visited.add(transition.to_screen_id)
+                queue.append((transition.to_screen_id, next_path))
+        return None
+
+    @staticmethod
+    def _step_locator_available(driver, step: QTXIRStep, locator_map: Dict[str, str]) -> bool:
+        candidates = []
+        if step.locator_strategy and step.locator_value and step.locator_strategy in locator_map:
+            candidates.append((step.locator_strategy, step.locator_value))
+        candidates.extend(
+            (item.strategy, item.value)
+            for item in step.locator_fallbacks
+            if item.strategy in locator_map
+            and (item.strategy, item.value) not in candidates
+        )
+        for strategy, value in candidates:
+            try:
+                element = driver.find_element(locator_map[strategy], value)
+                if not hasattr(element, "is_displayed") or element.is_displayed():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _route_control_element(driver, control, locator_map: Dict[str, str]):
+        priority = {"id": 0, "accessibility_id": 1, "xpath": 2, "css": 3}
+        candidates = sorted(
+            (
+                item for item in control.locators
+                if item.strategy in locator_map and item.confidence >= 0.70
+            ),
+            key=lambda item: (-item.confidence, priority.get(item.strategy, 10), item.value),
+        )
+        for locator in candidates:
+            try:
+                element = driver.find_element(locator_map[locator.strategy], locator.value)
+                if hasattr(element, "is_enabled") and not element.is_enabled():
+                    continue
+                if hasattr(element, "is_displayed") and not element.is_displayed():
+                    continue
+                return element
+            except Exception:
+                continue
+        return None
+
+    def _prepare_test_screen(
+        self,
+        driver,
+        test: QTXTestIR,
+        discovery: AutopilotDiscoveryResult | None,
+        package: str | None,
+    ) -> list[dict[str, str]]:
+        if not discovery or not discovery.screens:
+            return []
+        entry_step = next(
+            (
+                step for step in test.steps
+                if step.screen_id and step.locator_strategy and step.locator_value
+            ),
+            next((step for step in test.steps if step.screen_id), None),
+        )
+        if entry_step is None:
+            return []
+        target = next(
+            (screen for screen in discovery.screens if screen.screen_id == entry_step.screen_id),
+            None,
+        )
+        if target is None:
+            raise ProviderLifecycleUnavailable(
+                "This case refers to a screen that is not present in the saved discovery map. Run discovery again."
+            )
+
+        from appium.webdriver.common.appiumby import AppiumBy
+
+        locator_map = {
+            "accessibility_id": AppiumBy.ACCESSIBILITY_ID,
+            "id": AppiumBy.ID,
+            "xpath": AppiumBy.XPATH,
+        }
+        has_locator = bool(entry_step.locator_strategy and entry_step.locator_value)
+        deadline = time.monotonic() + 10.0
+        current = None
+        while time.monotonic() < deadline:
+            if has_locator and self._step_locator_available(driver, entry_step, locator_map):
+                current = self._identify_discovered_screen(driver, discovery, package)
+                if current is None or current.screen_id == target.screen_id:
+                    return []
+            current = self._identify_discovered_screen(driver, discovery, package)
+            if current is not None:
+                break
+            time.sleep(0.5)
+
+        if current is None:
+            raise ProviderLifecycleUnavailable(
+                "The app opened, but Autopilot could not match the current screen to the saved discovery map. "
+                "No test action was taken."
+            )
+        if current.screen_id == target.screen_id:
+            if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
+                raise ProviderLifecycleUnavailable(
+                    f"The observed screen {target.page_label or target.screen_id} was restored, but its "
+                    "saved control locator is no longer present. No test action was taken."
+                )
+            return []
+
+        path = self._safe_discovery_path(discovery, current.screen_id, target.screen_id)
+        if path is None:
+            raise ProviderLifecycleUnavailable(
+                f"No safe, observed navigation path leads from {current.page_label or current.screen_id} "
+                f"to {target.page_label or target.screen_id}. The case was not attempted."
+            )
+
+        navigation: list[dict[str, str]] = []
+        for transition, control in path:
+            element = self._route_control_element(driver, control, locator_map)
+            if element is None:
+                raise ProviderLifecycleUnavailable(
+                    f"The observed navigation control {control.semantic_label} is no longer available. "
+                    "The case was not attempted."
+                )
+            element.click()
+            time.sleep(0.6)
+            target_screen = next(
+                screen for screen in discovery.screens if screen.screen_id == transition.to_screen_id
+            )
+            reached = None
+            step_deadline = time.monotonic() + 8.0
+            while time.monotonic() < step_deadline:
+                if package:
+                    target_ready, target_reason, _ = validate_target_surface(
+                        driver,
+                        expected_package=package,
+                        page_source=safe_page_source(driver),
+                    )
+                    if not target_ready:
+                        raise ProviderLifecycleUnavailable(
+                            f"Stopped while replaying observed navigation: {target_reason}"
+                        )
+                reached = self._identify_discovered_screen(driver, discovery, package)
+                if reached is not None and reached.screen_id == target_screen.screen_id:
+                    break
+                time.sleep(0.5)
+            if reached is None or reached.screen_id != target_screen.screen_id:
+                raise ProviderLifecycleUnavailable(
+                    f"Observed navigation via {control.semantic_label} did not reach "
+                    f"{target_screen.page_label or target_screen.screen_id}. The case was stopped safely."
+                )
+            navigation.append(
+                {
+                    "from_screen": transition.from_screen_id,
+                    "to_screen": transition.to_screen_id,
+                    "control": control.semantic_label,
+                }
+            )
+        if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
+            raise ProviderLifecycleUnavailable(
+                f"Autopilot reached {target.page_label or target.screen_id}, but the case's observed "
+                "entry control is not visible. No test action was taken."
+            )
+        return navigation
 
     def _execute_test(
         self,
@@ -933,7 +1298,9 @@ class AutopilotSuiteService:
             # Keep the existing settling retry for the preferred selector;
             # then try only the other selectors explicitly observed during
             # discovery. No new locator is guessed at execution time.
-            attempts = 4 if candidate_index == 0 else 1
+            default_timeout_ms = 4800
+            bounded_timeout_ms = min(9600, max(2400, int(step.timeout_ms or default_timeout_ms)))
+            attempts = max(4, min(16, (bounded_timeout_ms + 599) // 600)) if candidate_index == 0 else 1
             for attempt in range(attempts):
                 try:
                     return driver.find_element(locator_map[strategy], value)
