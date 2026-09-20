@@ -61,6 +61,68 @@ _PLAIN_NON_FUNCTIONAL = (
     "Recovery from errors and interruptions",
 )
 
+FUNCTIONAL_CASE_BUCKETS = frozenset({
+    "functional",
+    "functional_positive",
+    "functional_negative",
+    # Page/navigation checks verify application behavior, not a visual or
+    # non-functional quality attribute.
+    "page_level",
+})
+
+_REQUESTED_JOURNEY_HEADER = re.compile(
+    r"\b(?P<label>modules?|journeys?|features?|flows?|functional\s+areas?)\s*[:\-]\s*(?P<value>.*)$",
+    re.IGNORECASE,
+)
+_REQUESTED_JOURNEY_STOP = re.compile(
+    r"^\s*(?:user\s*(?:id|name)|username|email|password|passcode|otp|token|secret|"
+    r"application|profile(?:\s+category)?|target(?:\s+type)?|environment|"
+    r"url|api(?:\s+route)?|test\s+type|acceptance\s+criteria)\s*[:=]",
+    re.IGNORECASE,
+)
+_FUNCTIONAL_ONLY = re.compile(
+    r"\b(?:functional(?:\s+(?:testing|tests?))?\s+only|"
+    r"only\s+(?:the\s+)?functional(?:\s+(?:testing|tests?))?)\b",
+    re.IGNORECASE,
+)
+_COMPLETE_FUNCTIONAL_CASES_REQUEST = re.compile(
+    r"\b(?:create|generate|produce|list|show|design)\s+"
+    r"(?:all|complete|comprehensive)\s+(?:of\s+)?(?:the\s+)?"
+    r"functional\s+test\s+cases?\b",
+    re.IGNORECASE,
+)
+_TEST_SCOPE_HEADER = re.compile(
+    r"\b(?:test|testing)\s+(?:scope|types?|focus)\s*[:=]\s*([^\r\n]+)",
+    re.IGNORECASE,
+)
+_OTHER_TEST_TYPES = (
+    "non-functional", "nonfunctional", "ui", "visual", "accessibility", "a11y", "wcag",
+    "performance", "latency", "load", "throughput", "security", "privacy", "compatibility",
+    "integration", "sit", "uat", "regression", "audit", "resilience", "device", "browser",
+)
+_OTHER_TEST_REQUEST = re.compile(
+    r"\b(?:also|plus|alongside|including|in\s+addition\s+to|and)\s+"
+    r"(?:the\s+)?(?:non[- ]functional\s+)?(?:ui|visual|accessibility|a11y|wcag|performance|"
+    r"latency|load|throughput|security|privacy|compatibility|integration|sit|uat|regression|"
+    r"audit|resilience|device|browser)(?:\s+(?:quality\s+)?(?:testing|tests?|checks?|coverage))?\b"
+    r"|\b(?:ui|visual|accessibility|a11y|wcag|performance|latency|load|throughput|security|"
+    r"privacy|compatibility|integration|sit|uat|regression|audit|resilience|device|browser)\s+"
+    r"(?:quality\s+)?(?:testing|tests?|checks?|coverage)\b",
+    re.IGNORECASE,
+)
+_JOURNEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "login": ("login", "log in", "sign in", "authentication"),
+    "registration": ("registration", "register", "sign up", "onboarding"),
+    "dashboard": ("dashboard", "home", "overview"),
+    "cards": ("cards", "card"),
+    "loans": ("loans", "loan", "credit"),
+    "rewards": ("rewards", "reward", "loyalty", "points"),
+    "send money": ("send money", "transfer", "payment"),
+    "utilities": ("utilities", "utility", "bill payment", "bills"),
+    "applications": ("applications", "application status", "application"),
+    "aani": ("aani", "instant payment", "instant transfer"),
+}
+
 
 def _clean(value: object, limit: int = 320) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -299,6 +361,8 @@ def _context_sources(context: str) -> list[AutopilotScopeSource]:
 
 
 def _requested_types(context: str) -> list[str]:
+    if is_functional_only_request(context):
+        return ["Functional only"]
     lowered = str(context or "").casefold()
     found: list[str] = []
     for label, terms in _TEST_TYPE_RULES:
@@ -307,6 +371,112 @@ def _requested_types(context: str) -> list[str]:
     if "Core journeys" not in found:
         found.insert(0, "Core journeys")
     return _unique(found, 12)
+
+
+def is_functional_only_request(value: str | Sequence[str] | None) -> bool:
+    """Recognize an explicit functional-only request as a hard scope filter."""
+
+    values = [str(item).strip() for item in value] if not isinstance(value, str) else []
+    text = value if isinstance(value, str) else " ".join(values)
+    explicit = bool(_FUNCTIONAL_ONLY.search(text)) or any(
+        item.casefold() == "functional only" for item in values
+    )
+    if not explicit and not _COMPLETE_FUNCTIONAL_CASES_REQUEST.search(text):
+        return False
+
+    if values and any(
+        item.casefold() not in {"functional only", "core journeys"}
+        for item in values
+    ):
+        return False
+    if _OTHER_TEST_REQUEST.search(text):
+        return False
+    return not any(
+        any(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", match.group(1), re.IGNORECASE)
+            for term in _OTHER_TEST_TYPES)
+        for match in _TEST_SCOPE_HEADER.finditer(text)
+    )
+
+
+def requested_journey_names(context: str) -> list[str]:
+    """Extract explicit module/journey names without treating them as evidence."""
+
+    lines = str(context or "").splitlines()
+    collected: list[str] = []
+    for index, line in enumerate(lines):
+        header = _REQUESTED_JOURNEY_HEADER.search(line)
+        if not header:
+            continue
+        if header.group("value").strip():
+            collected.append(header.group("value"))
+        cursor = index + 1
+        continuation_lines = 0
+        while cursor < len(lines) and continuation_lines < 8:
+            candidate = lines[cursor].strip()
+            if not candidate or _REQUESTED_JOURNEY_STOP.match(candidate):
+                break
+            if _REQUESTED_JOURNEY_HEADER.search(candidate):
+                break
+            is_list_line = any(mark in candidate for mark in (",", ";", "|", "•"))
+            is_short_item = len(candidate.split()) <= 4 and not re.search(r"[.!?]$", candidate)
+            if not (is_list_line or is_short_item):
+                break
+            collected.append(candidate)
+            continuation_lines += 1
+            cursor += 1
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_line in collected:
+        for raw_name in re.split(r"\s*(?:,|;|\||•|\s+and\s+)\s*", raw_line, flags=re.IGNORECASE):
+            name = re.sub(r"^[\s\-*•]+|[\s\-*•]+$", "", raw_name).strip(" :.-")
+            name = re.sub(r"\s+", " ", name)
+            if not name or len(name) > 64 or len(name.split()) > 7 or "@" in name or ":" in name:
+                continue
+            if re.search(r"https?://", name, re.IGNORECASE):
+                continue
+            key = name.casefold()
+            if key not in seen:
+                seen.add(key)
+                names.append(name)
+            if len(names) >= 40:
+                return names
+    return names
+
+
+def _requested_journey_sections(context: str) -> list[AutopilotScopeSection]:
+    sections: list[AutopilotScopeSection] = []
+    for name in requested_journey_names(context):
+        slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or "journey"
+        sections.append(
+            AutopilotScopeSection(
+                key=f"requested-journey:{slug}",
+                title=name,
+                summary="Requested in the testing brief; not confirmed by Runtime Discovery yet.",
+                source="user_context",
+                source_refs=["context:editable-brief"],
+                status="planned",
+                requested=True,
+            )
+        )
+    return sections
+
+
+def _journey_matches_discovery(
+    requested: AutopilotScopeSection,
+    discovery: AutopilotDiscoveryResult,
+) -> bool:
+    normalized = requested.title.casefold().strip()
+    terms = _JOURNEY_ALIASES.get(normalized, (normalized,))
+    for screen in discovery.screens:
+        observed = " ".join(
+            [screen.journey or "", screen.page_label or "", screen.title or "", screen.activity_name or ""]
+            + [control.semantic_label or "" for control in screen.controls]
+            + [control.content_description or "" for control in screen.controls]
+        ).casefold()
+        if any(term and term in observed for term in terms):
+            return True
+    return False
 
 
 def _change_impact(context: str, document_sections: Sequence[AutopilotScopeSection]) -> list[str]:
@@ -411,6 +581,7 @@ def compile_scope(
         [str(value) for value in (document_asset_ids or [])],
         str(document_analysis_run_id) if document_analysis_run_id else None,
     )
+    requested_journeys = _requested_journey_sections(context)
     sources = [
         AutopilotScopeSource(
             kind="profile",
@@ -498,6 +669,7 @@ def compile_scope(
             requested=True,
         ),
         *document_sections,
+        *requested_journeys,
         *runtime,
     ]
     functional = ["Core journeys", "Navigation and safe interactions", "Positive and negative outcomes"]
@@ -506,11 +678,13 @@ def compile_scope(
     else:
         functional.append("Install, launch and app lifecycle")
     functional.extend(item for item in _requested_types(context) if item not in functional and item in {"Business acceptance", "Service connections", "Release comparison"})
-    non_functional = list(_PLAIN_NON_FUNCTIONAL)
-    if target_kind == "web":
-        non_functional.append("Browser and device fit")
-    else:
-        non_functional.append("Device and OS fit")
+    functional_only = is_functional_only_request(context)
+    non_functional = [] if functional_only else list(_PLAIN_NON_FUNCTIONAL)
+    if not functional_only:
+        if target_kind == "web":
+            non_functional.append("Browser and device fit")
+        else:
+            non_functional.append("Device and OS fit")
     # Keep the user-facing scope short even when the model or documents are
     # verbose. Detailed provenance remains available in the source arrays.
     summary = (
@@ -534,6 +708,7 @@ def compile_scope(
         functional_scope=_unique(functional, 8),
         non_functional_scope=_unique(non_functional, 8),
         requested_test_types=_requested_types(context),
+        requested_journeys=requested_journeys[:40],
         # Document Intelligence can carry release/change signals in its
         # bounded hand-off; include that hand-off in the change compiler while
         # keeping the original document bytes out of the scope object.
@@ -633,7 +808,24 @@ def update_scope_with_discovery(scope: AutopilotScope, discovery: AutopilotDisco
     """Merge observed screens into a prior scope without losing its sources."""
 
     additions = _runtime_sections(discovery)
-    existing_scope_sections = list(scope.scope_sections or scope.document_sections)
+    requested_journeys = [
+        item.model_copy(
+            update={
+                "status": "observed",
+                "summary": "Runtime Discovery observed a matching screen or control; concrete cases use that evidence.",
+            }
+        )
+        if _journey_matches_discovery(item, discovery)
+        else item
+        for item in scope.requested_journeys
+    ]
+    requested_by_key = {item.key: item for item in requested_journeys}
+    existing_scope_sections = [
+        requested_by_key.get(item.key, item)
+        for item in (scope.scope_sections or scope.document_sections)
+    ]
+    existing_keys = {item.key for item in existing_scope_sections}
+    existing_scope_sections.extend(item for item in requested_journeys if item.key not in existing_keys)
     existing_keys = {item.key for item in existing_scope_sections}
     merged_scope_sections = [
         *existing_scope_sections,
@@ -668,6 +860,7 @@ def update_scope_with_discovery(scope: AutopilotScope, discovery: AutopilotDisco
         update={
             "document_sections": document_sections[:30],
             "scope_sections": merged_scope_sections[:50],
+            "requested_journeys": requested_journeys[:40],
             "sources": sources[:20],
             "functional_scope": _unique(functional, 8),
             "runtime_observed": True,

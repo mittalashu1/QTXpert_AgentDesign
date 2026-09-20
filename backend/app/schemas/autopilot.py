@@ -128,6 +128,9 @@ class AutopilotScope(BaseModel):
     functional_scope: List[str] = Field(default_factory=list)
     non_functional_scope: List[str] = Field(default_factory=list)
     requested_test_types: List[str] = Field(default_factory=list)
+    # Journeys explicitly named in the editable brief remain visible even
+    # before Runtime Discovery can confirm that the target contains them.
+    requested_journeys: List[AutopilotScopeSection] = Field(default_factory=list)
     change_impact: List[str] = Field(default_factory=list)
     # Document-only sections stay separate from the complete scope index so
     # the UI can show both the source documents and the runtime-observed map

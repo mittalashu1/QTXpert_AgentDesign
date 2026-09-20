@@ -67,7 +67,15 @@ from app.services.autopilot_context import default_context, get_profile, sanitiz
 from app.services.autopilot_labels import input_probe_guidance, observed_journey_label, observed_page_label
 from app.services.autopilot_ir import is_blocking_input_request
 from app.services.autopilot_research import AutopilotResearchService
-from app.services.autopilot_scope import add_test_provenance, annotate_scope_usage, compile_scope, update_scope_with_discovery
+from app.services.autopilot_scope import (
+    FUNCTIONAL_CASE_BUCKETS,
+    add_test_provenance,
+    annotate_scope_usage,
+    compile_scope,
+    is_functional_only_request,
+    requested_journey_names,
+    update_scope_with_discovery,
+)
 from app.services.autopilot_workflow import (
     build_application_map,
     build_generation_plan,
@@ -243,7 +251,7 @@ class AutopilotPrototypeService:
     def _redact_context(value: str) -> str:
         """Remove obvious secret assignments before a context reaches an LLM/UI."""
         sensitive = re.compile(
-            r"(?im)(?P<key>[\"']?\b(password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key)\b[\"']?)\s*(?P<sep>[:=])\s*(?P<value>[\"'][^\"']*[\"']|[^,;\s}\]]+)"
+            r"(?im)(?P<key>[\"']?\b(password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key|user[_ -]?id|username|email)\b[\"']?)\s*(?P<sep>[:=])\s*(?P<value>[\"'][^\"']*[\"']|[^,;\s}\]]+)"
         )
         redacted = sensitive.sub(lambda match: f"{match.group('key')}{match.group('sep')}[REDACTED]", value)
         # People often paste a natural-language checkpoint ("password is …"
@@ -251,14 +259,14 @@ class AutopilotPrototypeService:
         # forms as secrets too, while retaining the field name so the context
         # still explains which input is needed.
         natural_language_secret = re.compile(
-            r"(?im)(?P<key>\b(?:password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key)\b)\s+(?:is|as)\s+(?P<value>[\"'][^\"']*[\"']|[^,;\s}\]]+)"
+            r"(?im)(?P<key>\b(?:password|passcode|token|secret|otp|api[_ -]?key|access[_ -]?key|user[_ -]?id|username|email)\b)\s+(?:is|as)\s+(?P<value>[\"'][^\"']*[\"']|[^,;\s}\]]+)"
         )
         redacted = natural_language_secret.sub(
             lambda match: f"{match.group('key')} [REDACTED]",
             redacted,
         )
         query_secret = re.compile(
-            r"(?i)([?&](?:password|passcode|token|secret|otp|api[_-]?key|access[_-]?key)=)[^&#\s]+"
+            r"(?i)([?&](?:password|passcode|token|secret|otp|api[_-]?key|access[_-]?key|user[_-]?id|username|email)=)[^&#\s]+"
         )
         return query_secret.sub(r"\1[REDACTED]", redacted)
 
@@ -1676,6 +1684,7 @@ class AutopilotPrototypeService:
             metadata = await asyncio.to_thread(self._analyze_apk_sync, Path(job["apk_path"]))
         await self.update_job(job_id, status="analyzing", stage="designing_tests", progress=65)
         deterministic_tests = self._build_deterministic_tests(metadata)
+        deterministic_tests = self._filter_tests_for_requested_scope(deterministic_tests, context_text)
         enrichment = await self._enrich_with_ai(metadata, context_text)
         ai_enrichment_used = bool(enrichment.pop("_ai_used", False))
         await self.update_job(job_id, status="analyzing", stage="finalizing", progress=90)
@@ -1740,6 +1749,7 @@ class AutopilotPrototypeService:
             )
             for test in deduped
         ]
+        deduped = self._filter_tests_for_requested_scope(deduped, scope.requested_test_types)
 
         coverage_counts: dict[str, int] = {}
         for test in deduped:
@@ -1755,7 +1765,9 @@ class AutopilotPrototypeService:
         if approval_cases:
             input_summary.append(f"{approval_cases} case(s) remain approval-gated because they may be destructive or financial")
         if not input_summary:
-            input_summary.append("No additional checkpoint input was inferred from the static target evidence")
+            input_summary.append(
+                "Static analysis has not observed a sign-in screen; Runtime Discovery will request credentials only if it finds one."
+            )
 
         document_asset_ids = [
             uuid.UUID(str(value))
@@ -1785,6 +1797,10 @@ class AutopilotPrototypeService:
         if research_sources:
             analysis_basis.append(
                 f"{len(research_sources)} public reference signal(s) informed context hypotheses; they are not runtime evidence"
+            )
+        if scope.requested_journeys:
+            analysis_basis.append(
+                f"Preserved {len(scope.requested_journeys)} user-requested journey(s) as unverified scope; detailed cases wait for matching Runtime Discovery evidence"
             )
         if held_back_ai_cases:
             analysis_basis.append(
@@ -1823,7 +1839,10 @@ class AutopilotPrototypeService:
             debuggable=metadata.get("debuggable"),
             inferred_domain=enrichment.get("inferred_domain") or self._infer_domain(metadata, context_text),
             app_summary=enrichment.get("app_summary") or self._fallback_summary(metadata),
-            critical_journeys=enrichment.get("critical_journeys") or self._fallback_journeys(metadata),
+            critical_journeys=list(dict.fromkeys([
+                *requested_journey_names(context_text),
+                *(enrichment.get("critical_journeys") or self._fallback_journeys(metadata)),
+            ]))[:20],
             clarification_questions=(
                 self._filter_initial_clarification_questions(
                     enrichment.get("clarification_questions"), metadata
@@ -1838,11 +1857,19 @@ class AutopilotPrototypeService:
             warnings=metadata.get("warnings", []),
             capabilities=self._capabilities(metadata),
             coverage_counts=coverage_counts,
-            generation_policy=[
-                "Generate every distinct evidence-scoped case supported by the target, runtime graph and selected scope",
-                "Cover functional positive/negative, UAT/SIT, UI/accessibility, platform and security guardrails when target evidence supports them",
-                "Keep setup-gated, destructive and unobserved behavior pending until the checkpoint and runtime evidence are supplied",
-            ],
+            generation_policy=(
+                [
+                    "The requested scope is functional only; non-functional cases are excluded from this plan",
+                    "Keep each named journey visible as requested but unverified until Runtime Discovery observes its screens and controls",
+                    "Generate positive/negative cases only from observed controls; keep authentication and risky actions behind the secure checkpoint",
+                ]
+                if is_functional_only_request(scope.requested_test_types)
+                else [
+                    "Generate every distinct evidence-scoped case supported by the target, runtime graph and selected scope",
+                    "Cover functional positive/negative, UAT/SIT, UI/accessibility, platform and security guardrails when target evidence supports them",
+                    "Keep setup-gated, destructive and unobserved behavior pending until the checkpoint and runtime evidence are supplied",
+                ]
+            ),
             input_summary=input_summary,
             context_considered=bool(context_text),
             ai_enrichment_used=ai_enrichment_used,
@@ -3163,6 +3190,7 @@ class AutopilotPrototypeService:
                 if key and key not in seen_titles:
                     merged.append(test)
                     seen_titles.add(key)
+        merged = cls._filter_tests_for_requested_scope(merged, analysis.scope.requested_test_types)
         before = len(analysis.tests)
         # Re-discovery is idempotent. Replace the previous expansion note
         # instead of accumulating a new "N to N" line on every refresh.
@@ -3188,6 +3216,21 @@ class AutopilotPrototypeService:
         basis = [item for item in basis if not str(item).startswith("Observed journeys:")]
         basis.append(journey_note)
         scope = update_scope_with_discovery(analysis.scope, discovery)
+        input_summary = list(analysis.input_summary)
+        input_summary = [
+            item for item in input_summary
+            if not item.startswith("Static analysis has not observed a sign-in screen")
+            and not item.startswith("Runtime Discovery found no sign-in form")
+            and not item.startswith("Runtime Discovery observed a sign-in form")
+        ]
+        if scope.login_observed:
+            input_summary.append(
+                "Runtime Discovery observed a sign-in form; provide an approved non-production User ID/email and Password to continue authenticated journeys."
+            )
+        else:
+            input_summary.append(
+                "Runtime Discovery found no sign-in form; public/read-only journeys can continue without credentials."
+            )
         merged = [
             add_test_provenance(
                 test,
@@ -3204,6 +3247,7 @@ class AutopilotPrototypeService:
                 "analysis_basis": basis,
                 "critical_journeys": observed_journeys[:20] or analysis.critical_journeys,
                 "scope": scope,
+                "input_summary": input_summary,
             }
         )
 
@@ -3532,6 +3576,18 @@ class AutopilotPrototypeService:
                 continue
             kept.append(test)
         return kept, held_back
+
+    @staticmethod
+    def _filter_tests_for_requested_scope(
+        tests: Iterable[AutopilotTest],
+        requested_scope: str | list[str] | None,
+    ) -> list[AutopilotTest]:
+        """Enforce an explicit functional-only request across every plan phase."""
+
+        cases = list(tests or [])
+        if not is_functional_only_request(requested_scope):
+            return cases
+        return [test for test in cases if test.bucket in FUNCTIONAL_CASE_BUCKETS]
 
     @staticmethod
     def _filter_initial_clarification_questions(

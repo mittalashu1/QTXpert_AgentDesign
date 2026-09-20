@@ -278,9 +278,31 @@ def test_persisted_runtime_checkpoint_is_reopened_when_value_metadata_is_missing
 
 
 def test_context_boundary_redacts_natural_language_secrets():
-    safe = _effective_context("Use username qa@example.test and password as SuperSecret!", "general_mobile")
+    safe = _effective_context(
+        "Use username as qa@example.test and password as SuperSecret!",
+        "general_mobile",
+    )
     assert "SuperSecret!" not in safe
     assert "password [REDACTED]" in safe
+    assert "qa@example.test" not in safe
+    assert "username [REDACTED]" in safe
+
+
+def test_functional_only_request_filters_nonfunctional_and_installation_cases():
+    tests = [
+        AutopilotTest(id="FUNC", suite="Functional", bucket="functional_positive", title="Open profile", objective="Observed safe journey."),
+        AutopilotTest(id="PAGE", suite="Page-level", bucket="page_level", title="Inspect profile", objective="Observed screen."),
+        AutopilotTest(id="UI", suite="UI", bucket="ui", title="Visual profile layout", objective="Visual baseline."),
+        AutopilotTest(id="SEC", suite="Security", bucket="security", title="Package posture", objective="Static check."),
+        AutopilotTest(id="INSTALL", suite="Smoke", bucket="installation", title="Install app", objective="Launch check."),
+    ]
+
+    selected = AutopilotPrototypeService._filter_tests_for_requested_scope(
+        tests,
+        "Create all functional test cases for the modules listed below.",
+    )
+
+    assert {item.bucket for item in selected} == {"functional_positive", "page_level"}
 
 
 def test_autopilot_generates_core_and_permission_tests(tmp_path):
@@ -1368,6 +1390,27 @@ def test_report_pass_rate_uses_all_designed_cases_as_denominator():
     assert report.metrics.executed_test_cases == 3
     assert report.metrics.passed_count == 2
     assert report.metrics.pass_rate == 40.0
+
+
+def test_report_preserves_user_stated_modules_as_unverified_scope():
+    analysis = AutopilotAnalysis(
+        job_id="11111111-1111-4111-8111-111111111199",
+        filename="FH_Money.apk",
+        sha256="c" * 64,
+        app_name="FH Money",
+        package_name="com.fh.payday",
+        tests=[],
+    )
+
+    report = build_test_audit_report(
+        analysis,
+        "Testing scope: Functional only\nModules: Login, Profile, Cards, Send Money",
+    )
+
+    assert report.application_overview.core_features[0].startswith(
+        "User-stated modules (runtime confirmation pending):"
+    )
+    assert "Send Money" in report.application_overview.core_features[0]
 
 
 def test_report_exposes_durable_functional_video_assets():

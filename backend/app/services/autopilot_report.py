@@ -23,6 +23,7 @@ from app.schemas.autopilot import (
     AutopilotSuiteResult,
     AutopilotTestAuditReport,
 )
+from app.services.autopilot_scope import requested_journey_names
 
 
 def _contains(context: str, *terms: str) -> bool:
@@ -236,6 +237,12 @@ def _application_overview(analysis: AutopilotAnalysis, context: str) -> Autopilo
     for label, terms in feature_terms:
         if _contains(context, *terms):
             features.append(label)
+    requested_modules = requested_journey_names(context)
+    if requested_modules:
+        features.insert(
+            0,
+            "User-stated modules (runtime confirmation pending): " + " · ".join(requested_modules[:12]),
+        )
     publisher = "Finance House" if _contains(context, "finance house") else "Not specified"
     platform = str(analysis.target_kind or analysis.platform or "android")
     platform_label = {"android": "Android", "ios": "iOS", "web": "Web"}.get(platform, platform.title())

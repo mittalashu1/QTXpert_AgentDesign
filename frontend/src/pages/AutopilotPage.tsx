@@ -176,7 +176,7 @@ type ScopeSection = { key: string; title: string; summary: string; source: Scope
 type AutopilotScope = {
   schema_version: string; summary: string; target: string;
   functional_scope: string[]; non_functional_scope: string[]; requested_test_types: string[]; change_impact: string[];
-  document_sections: ScopeSection[]; scope_sections: ScopeSection[]; sources: ScopeSource[]; authentication_gate: string; runtime_observed: boolean; login_observed: boolean; editable: boolean;
+  document_sections: ScopeSection[]; scope_sections: ScopeSection[]; requested_journeys?: ScopeSection[]; sources: ScopeSource[]; authentication_gate: string; runtime_observed: boolean; login_observed: boolean; editable: boolean;
 };
 type GenerationPlanItem = {
   id: string; title: string; description: string; test_type: string;
@@ -2291,6 +2291,20 @@ export default function AutopilotPage() {
         </Grid>
         <Stack spacing={.75} sx={{ mt: 1.25 }}>
           <Typography variant="caption" color="text.secondary"><b>Requested focus:</b> {analysis.scope.requested_test_types.join(" · ") || "Core journeys"}</Typography>
+          {(analysis.scope.requested_journeys || []).length > 0 && <Stack direction="row" spacing={.75} alignItems="center">
+            <Typography variant="caption" color="text.secondary"><b>Requested journeys:</b></Typography>
+            <Tooltip
+              placement="right"
+              title={<Box>{(analysis.scope.requested_journeys || []).map((journey) => <Typography key={journey.key} variant="caption" display="block"><b>{journey.title}</b> · {journey.status === "observed" ? "observed" : "awaiting discovery"}</Typography>)}</Box>}
+            >
+              <Chip
+                size="small"
+                label={`${(analysis.scope.requested_journeys || []).length} in brief · ${(analysis.scope.requested_journeys || []).filter((item) => item.status === "observed").length} observed`}
+                color={(analysis.scope.requested_journeys || []).some((item) => item.status !== "observed") ? "warning" : "success"}
+                variant="outlined"
+              />
+            </Tooltip>
+          </Stack>}
           <Typography variant="caption" color="text.secondary"><b>Change focus:</b> {analysis.scope.change_impact.join(" · ")}</Typography>
           <Stack direction="row" spacing={.75} alignItems="center">
             <Typography variant="caption" color="text.secondary"><b>Source trail:</b> {analysis.scope.sources.length} source{analysis.scope.sources.length === 1 ? "" : "s"} · {analysis.scope.document_sections.length} document section{analysis.scope.document_sections.length === 1 ? "" : "s"} · {analysis.scope.scope_sections.length} scope section{analysis.scope.scope_sections.length === 1 ? "" : "s"}</Typography>
