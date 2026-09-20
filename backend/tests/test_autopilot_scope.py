@@ -57,6 +57,62 @@ def test_editable_brief_is_not_mislabelled_as_repository_document():
     assert all(item.source != "document" for item in scope.scope_sections)
 
 
+def test_functional_only_scope_keeps_named_journeys_without_adding_quality_cases():
+    scope = compile_scope(
+        profile_id="general_mobile",
+        profile_name="General mobile",
+        target_kind="android",
+        application_name="FH Money",
+        context=(
+            "Testing scope: Functional only\n"
+            "Modules: Login, Profile, Dashboard, Cards, Send Money, AANI\n"
+            "User ID: qa.user@example.test\n"
+            "Password: [REDACTED]"
+        ),
+    )
+
+    assert scope.requested_test_types == ["Functional only"]
+    assert scope.non_functional_scope == []
+    assert [item.title for item in scope.requested_journeys] == [
+        "Login", "Profile", "Dashboard", "Cards", "Send Money", "AANI"
+    ]
+    assert all(item.status == "planned" for item in scope.requested_journeys)
+
+
+def test_named_journey_is_marked_observed_only_after_matching_runtime_evidence():
+    scope = compile_scope(
+        profile_id="general_mobile",
+        profile_name="General mobile",
+        target_kind="android",
+        context="Modules: Login, Profile",
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id="66666666-6666-4666-8666-666666666666",
+        status="completed",
+        provider="appium",
+        started_at="2026-09-20T00:00:00+00:00",
+        finished_at="2026-09-20T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Android smoke device",
+        screens=[
+            DiscoveredScreen(
+                screen_id="profile",
+                fingerprint="g" * 64,
+                journey="Account",
+                page_label="Profile",
+                controls=[],
+            )
+        ],
+        screen_count=1,
+        control_count=0,
+    )
+
+    updated = update_scope_with_discovery(scope, discovery)
+
+    states = {item.title: item.status for item in updated.requested_journeys}
+    assert states == {"Login": "planned", "Profile": "observed"}
+
+
 def test_test_provenance_retains_target_profile_context_documents_and_public_signal():
     test = AutopilotTest(
         id="scope-001",
