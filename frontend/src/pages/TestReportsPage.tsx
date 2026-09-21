@@ -33,6 +33,7 @@ import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
 import DefectLogDialog, { DefectSubmission } from "@/components/DefectLogDialog";
 import type { ExecutionResult, ExecutionRun } from "@/types/domain";
+import { qtxpertColors } from "@/theme/theme";
 
 type RunFilter = "all" | ExecutionRun["status"];
 type ResultFilter = "all" | ExecutionResult["status"];
@@ -155,14 +156,14 @@ function RunOverview({ run, counts }: { run: ExecutionRun; counts: ReturnType<ty
   const failedStop = passedStop + counts.failed / total * 100;
   const blockedStop = failedStop + counts.blocked / total * 100;
   const skippedStop = blockedStop + counts.skipped / total * 100;
-  const background = `conic-gradient(#1f9d68 0% ${passedStop}%, #d84b4b ${passedStop}% ${failedStop}%, #d28a22 ${failedStop}% ${blockedStop}%, #7d8797 ${blockedStop}% ${skippedStop}%, #dfe4e8 ${skippedStop}% 100%)`;
+  const background = `conic-gradient(${qtxpertColors.success} 0% ${passedStop}%, ${qtxpertColors.error} ${passedStop}% ${failedStop}%, ${qtxpertColors.warning} ${failedStop}% ${blockedStop}%, ${qtxpertColors.textMuted} ${blockedStop}% ${skippedStop}%, ${qtxpertColors.border} ${skippedStop}% 100%)`;
   return <Card variant="outlined" sx={{ height: "100%" }}>
     <CardContent>
       <Stack direction="row" justifyContent="space-between" alignItems="center"><Typography variant="h6" fontWeight={800}>Run overview</Typography><Chip size="small" label={displayStatus(run.status)} color={statusColor(run.status)} /></Stack>
       <Box sx={{ width: 164, height: 164, borderRadius: "50%", background, position: "relative", mx: "auto", my: 2.25, display: "grid", placeItems: "center" }} aria-label={`${counts.passed} passed, ${counts.failed} failed, ${counts.blocked} blocked, ${counts.pending} pending`}>
         <Box sx={{ width: 112, height: 112, borderRadius: "50%", bgcolor: "background.paper", display: "grid", placeItems: "center", alignContent: "center" }}><Typography variant="h4" fontWeight={800}>{counts.total}</Typography><Typography variant="caption" color="text.secondary">tests</Typography></Box>
       </Box>
-      <Stack spacing={0.9}><OverviewCount color="#1f9d68" label="Passed" value={counts.passed} /><OverviewCount color="#d84b4b" label="Failed" value={counts.failed} /><OverviewCount color="#d28a22" label="Blocked" value={counts.blocked} /><OverviewCount color="#7d8797" label="Skipped / pending" value={counts.skipped + counts.pending} /></Stack>
+      <Stack spacing={0.9}><OverviewCount color={qtxpertColors.success} label="Passed" value={counts.passed} /><OverviewCount color={qtxpertColors.error} label="Failed" value={counts.failed} /><OverviewCount color={qtxpertColors.warning} label="Blocked" value={counts.blocked} /><OverviewCount color={qtxpertColors.textMuted} label="Skipped / pending" value={counts.skipped + counts.pending} /></Stack>
       <Divider sx={{ my: 2 }} />
       <Stack spacing={1.25}><Box><Typography variant="caption" color="text.secondary">Target</Typography><Typography variant="body2" fontWeight={700}>{targetLabel(run)}</Typography></Box><Box><Typography variant="caption" color="text.secondary">Provider</Typography><Typography variant="body2" fontWeight={700}>{providerLabel(run)}</Typography></Box><Box><Typography variant="caption" color="text.secondary">Started</Typography><Typography variant="body2" fontWeight={700}>{run.started_at ? new Date(run.started_at).toLocaleString() : "Not started"}</Typography></Box><Box><Typography variant="caption" color="text.secondary">Duration</Typography><Typography variant="body2" fontWeight={700}>{runDuration(run)}</Typography></Box></Stack>
       <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 2 }}>Pass rate is calculated as passed tests ÷ total tests. Pending and blocked cases remain visible until conclusive evidence is available.</Typography>
@@ -356,3 +357,4 @@ export default function TestReportsPage() {
     />
   </Box>;
 }
+
