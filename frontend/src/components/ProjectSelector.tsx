@@ -19,6 +19,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useCreateProject, useUpdateProject } from "@/hooks/useProjects";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 
+export const PROJECT_CREATE_EVENT = "qtxpert:open-project-create";
+
 export default function ProjectSelector({ topLevel = false }: { topLevel?: boolean }) {
   const { user } = useAuth();
   const { projects, selectedProjectId, selectedProject, selectProject } = useSelectedProject();
@@ -37,6 +39,12 @@ export default function ProjectSelector({ topLevel = false }: { topLevel?: boole
     setEditName(selectedProject.name);
     setEditDescription(selectedProject.description ?? "");
   }, [selectedProject]);
+
+  useEffect(() => {
+    const openCreateDialog = () => setCreateOpen(true);
+    window.addEventListener(PROJECT_CREATE_EVENT, openCreateDialog);
+    return () => window.removeEventListener(PROJECT_CREATE_EVENT, openCreateDialog);
+  }, []);
 
   if (!topLevel) return null;
 
