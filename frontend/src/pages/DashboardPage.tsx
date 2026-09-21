@@ -9,7 +9,6 @@ import {
   CardContent,
   Checkbox,
   Chip,
-  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -26,11 +25,9 @@ import {
   Typography,
 } from "@mui/material";
 import Grid from "@mui/material/Grid2";
-import AssignmentOutlinedIcon from "@mui/icons-material/AssignmentOutlined";
 import AutoAwesomeOutlinedIcon from "@mui/icons-material/AutoAwesomeOutlined";
 import ArchitectureOutlinedIcon from "@mui/icons-material/ArchitectureOutlined";
 import AssessmentOutlinedIcon from "@mui/icons-material/AssessmentOutlined";
-import BugReportOutlinedIcon from "@mui/icons-material/BugReportOutlined";
 import CheckCircleOutlineOutlinedIcon from "@mui/icons-material/CheckCircleOutlineOutlined";
 import DescriptionOutlinedIcon from "@mui/icons-material/DescriptionOutlined";
 import HistoryOutlinedIcon from "@mui/icons-material/HistoryOutlined";
@@ -90,9 +87,9 @@ const defaultPreferences = (): DashboardPreferences => ({
     autopilot: true,
   },
   metricLabels: {
-    active_work: "Active work",
+    active_work: "In progress",
     test_cases: "Test cases",
-    attention_areas: "Attention areas",
+    attention_areas: "Open defects",
     pass_rate: "Pass rate",
   },
 });
@@ -100,7 +97,7 @@ const defaultPreferences = (): DashboardPreferences => ({
 const metricDefinitions: Array<{ key: MetricKey; helper: string }> = [
   { key: "active_work", helper: "execution runs and Autopilot analyses currently in progress" },
   { key: "test_cases", helper: "test cases saved for the selected project" },
-  { key: "attention_areas", helper: "distinct project signals with a next step; open the list below for counts" },
+  { key: "attention_areas", helper: "unresolved defects recorded for the selected project" },
   { key: "pass_rate", helper: "observed pass rate for recorded execution results; not a coverage measure" },
 ];
 
@@ -142,7 +139,12 @@ function readPreferences(projectId: string): DashboardPreferences {
       description: saved.description === LEGACY_DASHBOARD_DESCRIPTION ? fallback.description : saved.description || fallback.description,
       visibleMetrics: { ...fallback.visibleMetrics, ...(saved.visibleMetrics || {}) },
       visibleWidgets: { ...fallback.visibleWidgets, ...(saved.visibleWidgets || {}) },
-      metricLabels: { ...fallback.metricLabels, ...(saved.metricLabels || {}) },
+      metricLabels: {
+        ...fallback.metricLabels,
+        ...(saved.metricLabels || {}),
+        active_work: saved.metricLabels?.active_work === "Active work" ? fallback.metricLabels.active_work : saved.metricLabels?.active_work || fallback.metricLabels.active_work,
+        attention_areas: saved.metricLabels?.attention_areas === "Attention areas" ? fallback.metricLabels.attention_areas : saved.metricLabels?.attention_areas || fallback.metricLabels.attention_areas,
+      },
     };
   } catch {
     return fallback;
@@ -201,12 +203,6 @@ interface WorkflowStage {
   stateLabel: string;
 }
 
-const workflowStateColor: Record<WorkflowState, "success" | "info" | "default"> = {
-  ready: "success",
-  active: "info",
-  pending: "default",
-};
-
 export default function DashboardPage() {
   const { selectedProjectId, selectedProject } = useSelectedProject();
   const { user } = useAuth();
@@ -249,7 +245,7 @@ export default function DashboardPage() {
   const documentReviewData = documentReview.isFetching || documentReview.isError
     ? null
     : documentReview.data;
-  const autopilotActivity: AutopilotDashboardSummary = data?.autopilot ?? {
+  const autopilotActivity = useMemo<AutopilotDashboardSummary>(() => data?.autopilot ?? {
     report_tabs: 0,
     active_jobs: 0,
     waiting_for_input_jobs: 0,
@@ -264,7 +260,7 @@ export default function DashboardPage() {
     deferred_tests: 0,
     skipped_tests: 0,
     last_run_at: null,
-  };
+  }, [data?.autopilot]);
   const visibleMetricDefinitions = metricDefinitions.filter(({ key }) => preferences.visibleMetrics[key]);
   const visibleWidgetCount = Object.values(preferences.visibleWidgets).filter(Boolean).length;
 
@@ -302,9 +298,9 @@ export default function DashboardPage() {
   const metricValues = useMemo<Record<MetricKey, number | string>>(() => ({
     active_work: data ? activeWorkCount : "—",
     test_cases: data?.test_cases ?? "—",
-    attention_areas: data ? actionRequiredCount : "—",
+    attention_areas: data?.open_defects ?? "—",
     pass_rate: data?.total_execution_tests ? `${data.pass_rate}%` : "—",
-  }), [actionRequiredCount, activeWorkCount, data]);
+  }), [activeWorkCount, data]);
   const autopilotExecutionProgress = autopilotActivity.selected_tests > 0
     ? progressValue(autopilotActivity.executed_tests, autopilotActivity.selected_tests)
     : null;
@@ -312,57 +308,74 @@ export default function DashboardPage() {
   const latestEvidenceAt = [autopilotActivity.last_run_at, latestRun?.created_at]
     .filter((value): value is string => Boolean(value))
     .reduce<string | null>((latest, value) => !latest || Date.parse(value) > Date.parse(latest) ? value : latest, null);
-  const hasRecordedExecution = Boolean(data?.execution_runs || autopilotActivity.suite_runs || autopilotActivity.smoke_runs);
-
-  const workflowStages = useMemo<WorkflowStage[]>(() => {
-    const documentStatus = documentReviewData?.status;
-    const documentRunning = Boolean(documentStatus && ["queued", "extracting", "analyzing"].includes(documentStatus));
-    const documentCompleted = documentStatus === "completed";
-    const documentFailed = documentStatus === "failed";
-    const executionAvailable = Boolean(data?.execution_runs || data?.autopilot?.suite_runs || data?.autopilot?.smoke_runs);
+  const autopilotStages = useMemo<WorkflowStage[]>(() => {
+    const generated = autopilotActivity.generated_test_cases;
+    const selected = autopilotActivity.selected_tests;
+    const executed = autopilotActivity.executed_tests;
+    const reportCount = autopilotActivity.report_tabs;
     return [
       {
-        key: "understand",
+        key: "analyze",
         step: "01",
-        title: "Understand",
-        description: "Review requirements and surface gaps before cases are designed.",
-        to: "/documents",
-        icon: <DescriptionOutlinedIcon />,
-        state: documentRunning ? "active" : documentCompleted ? "ready" : "pending",
-        stateLabel: documentRunning ? "Reviewing" : documentCompleted ? "Baseline ready" : documentFailed ? "Review needed" : "Start here",
+        title: "Analyze",
+        description: "Inspect the selected target and saved scope.",
+        to: "/autopilot",
+        icon: <AutoAwesomeOutlinedIcon />,
+        state: autopilotActivity.active_jobs > 0 ? "active" : reportCount > 0 || generated > 0 ? "ready" : "pending",
+        stateLabel: autopilotActivity.active_jobs > 0 ? "Running" : reportCount > 0 || generated > 0 ? "Available" : "Start here",
       },
       {
-        key: "design",
+        key: "plan",
         step: "02",
-        title: "Design",
-        description: "Turn trusted context into traceable, reviewable test journeys.",
-        to: "/design",
+        title: "Plan",
+        description: "Turn observed and supplied scope into reviewable journeys.",
+        to: "/autopilot",
+        icon: <DescriptionOutlinedIcon />,
+        state: generated > 0 ? "ready" : "pending",
+        stateLabel: generated > 0 ? "Created" : "Pending",
+      },
+      {
+        key: "generate",
+        step: "03",
+        title: "Generate",
+        description: "Create test cases from the available target evidence.",
+        to: "/autopilot",
         icon: <ArchitectureOutlinedIcon />,
-        state: data?.test_cases ? "ready" : documentCompleted ? "active" : "pending",
-        stateLabel: data?.test_cases ? `${data.test_cases} cases` : documentCompleted ? "Ready to generate" : "After review",
+        state: generated > 0 ? "ready" : "pending",
+        stateLabel: generated > 0 ? `${generated} cases` : "Pending",
       },
       {
         key: "execute",
-        step: "03",
-        title: "Autopilot",
-        description: "Explore web, Android and iOS targets with safe, evidence-led execution.",
-        to: "/autopilot",
-        icon: <AutoAwesomeOutlinedIcon />,
-        state: executionAvailable ? "ready" : data?.test_cases ? "active" : "pending",
-        stateLabel: executionAvailable ? "Run available" : data?.test_cases ? "Ready to run" : "After design",
+        step: "04",
+        title: "Execute",
+        description: "Run selected checks in the approved execution mode.",
+        to: "/execution",
+        icon: <PlayArrowRoundedIcon />,
+        state: executed > 0 ? "ready" : "pending",
+        stateLabel: executed > 0 ? `${executed} executed` : selected > 0 ? `${selected} selected` : "Not run",
       },
       {
-        key: "evidence",
-        step: "04",
-        title: "Evidence",
-        description: "Inspect outcomes, defects and release readiness in one report trail.",
+        key: "validate",
+        step: "05",
+        title: "Validate",
+        description: "Review observed outcomes, failures and deferred checks.",
+        to: "/reports",
+        icon: <CheckCircleOutlineOutlinedIcon />,
+        state: executed > 0 ? "ready" : "pending",
+        stateLabel: executed > 0 ? "Results to review" : "Pending",
+      },
+      {
+        key: "report",
+        step: "06",
+        title: "Report",
+        description: "Open the saved report tabs for this project.",
         to: "/reports",
         icon: <AssessmentOutlinedIcon />,
-        state: executionAvailable ? "ready" : "pending",
-        stateLabel: executionAvailable ? "Evidence available" : "After execution",
+        state: reportCount > 0 ? "ready" : "pending",
+        stateLabel: reportCount > 0 ? `${reportCount} reports` : "Pending",
       },
     ];
-  }, [data, documentReviewData?.status]);
+  }, [autopilotActivity]);
 
   const openCustomize = () => {
     setDraftPreferences(copyPreferences(preferences));
@@ -502,12 +515,22 @@ export default function DashboardPage() {
         }}
       >
         <Box aria-hidden="true" sx={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
+          <Box
+            component="img"
+            src="/dashboard-cityscape.svg"
+            alt=""
+            sx={{
+              position: "absolute",
+              left: { xs: "-12%", md: "18%" },
+              bottom: -2,
+              width: { xs: "124%", md: "69%" },
+              height: { xs: 90, md: 162 },
+              objectFit: "fill",
+              opacity: { xs: 0.18, md: 0.38 },
+              maskImage: "linear-gradient(90deg, transparent 0%, black 20%, black 80%, transparent 100%)",
+            }}
+          />
           <Box sx={{ position: "absolute", width: 360, height: 360, borderRadius: "50%", right: { xs: -130, md: 96 }, top: -220, background: "radial-gradient(circle at 42% 38%, rgba(255,255,255,.86), rgba(237,229,255,.36) 34%, rgba(167,139,250,.20) 54%, transparent 74%)", filter: "blur(2px)" }} />
-          <Box sx={{ position: "absolute", right: 0, bottom: 0, width: "46%", height: 76, display: "flex", alignItems: "flex-end", justifyContent: "flex-end", gap: 0.65, opacity: 0.20 }}>
-            {[30, 46, 62, 38, 72, 47, 56, 32, 64, 42, 72, 50].map((height, index) => (
-              <Box key={index} sx={{ width: { xs: 13, sm: 18 }, height, borderRadius: "5px 5px 0 0", border: "1px solid", borderColor: "primary.main", background: `linear-gradient(180deg, rgba(255,255,255,.76), ${qtxpertColors.lightLavender})` }} />
-            ))}
-          </Box>
         </Box>
 
         <Grid container spacing={1} alignItems="center" sx={{ position: "relative", zIndex: 1 }}>
@@ -518,7 +541,7 @@ export default function DashboardPage() {
                 Good {greeting}, {firstName} <AutoAwesomeOutlinedIcon aria-hidden="true" sx={{ fontSize: ".75em", verticalAlign: "middle", color: "primary.main" }} />
               </Typography>
               <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 580 }}>
-                Let&apos;s keep quality moving. Your project signals and latest evidence are ready below.
+                Your project health, test progress and latest evidence—at a glance.
               </Typography>
               <Stack direction="row" spacing={0.8} useFlexGap flexWrap="wrap" sx={{ pt: 0.25 }}>
                 <Button component={RouterLink} to="/autopilot" variant="contained" startIcon={<PlayArrowRoundedIcon />} endIcon={<ArrowForwardRoundedIcon />}>
@@ -531,16 +554,16 @@ export default function DashboardPage() {
             </Stack>
           </Grid>
           <Grid size={{ xs: 12, md: 5 }}>
-            <Box sx={{ minHeight: { xs: 94, md: 138 }, position: "relative", display: "flex", alignItems: "center", justifyContent: { xs: "flex-start", md: "flex-end" } }}>
-              <Box aria-hidden="true" sx={{ position: "absolute", right: { xs: "auto", md: 84 }, left: { xs: 4, md: "auto" }, top: "50%", transform: "translateY(-50%)", width: 112, height: 112, borderRadius: "50%", border: `1px solid ${qtxpertEffects.glassBorder}`, boxShadow: "inset 0 2px 10px rgba(255,255,255,.94), inset -10px -14px 24px rgba(117,70,232,.10), 0 0 0 10px rgba(255,255,255,.28), 0 0 0 24px rgba(167,139,250,.16), 0 18px 42px rgba(117,70,232,.16)", background: "radial-gradient(circle at 28% 22%, rgba(255,255,255,.98) 0%, rgba(255,255,255,.66) 10%, transparent 28%), radial-gradient(circle at 35% 30%, rgba(255,255,255,.90), rgba(196,181,253,.56) 46%, rgba(167,139,250,.42) 70%, rgba(255,255,255,.20))", backdropFilter: "blur(20px) saturate(175%)", WebkitBackdropFilter: "blur(20px) saturate(175%)", display: "grid", placeItems: "center" }}>
-                <Box sx={{ width: 62, height: 62, display: "grid", placeItems: "center", borderRadius: "50%", border: `1px solid ${qtxpertEffects.glassBorder}`, color: "primary.main", bgcolor: qtxpertEffects.glassBackground, boxShadow: "inset 0 2px 8px rgba(255,255,255,.92), 0 8px 20px rgba(117,70,232,.14)" }}>
-                  <AutoAwesomeOutlinedIcon sx={{ fontSize: 34 }} />
+            <Box sx={{ minHeight: { xs: 76, md: 138 }, position: "relative", display: "flex", alignItems: "center", justifyContent: { xs: "flex-start", md: "flex-end" } }}>
+              <Box aria-hidden="true" sx={{ position: "absolute", right: { xs: "auto", md: 138 }, left: { xs: 0, md: "auto" }, top: "50%", transform: "translateY(-50%)", width: { xs: 90, md: 136 }, height: { xs: 90, md: 136 }, borderRadius: "50%", border: `1px solid ${qtxpertEffects.glassBorder}`, boxShadow: "inset 0 2px 10px rgba(255,255,255,.94), inset -10px -14px 24px rgba(117,70,232,.10), 0 0 0 10px rgba(255,255,255,.28), 0 0 0 24px rgba(167,139,250,.16), 0 18px 42px rgba(117,70,232,.16)", background: "radial-gradient(circle at 28% 22%, rgba(255,255,255,.98) 0%, rgba(255,255,255,.66) 10%, transparent 28%), radial-gradient(circle at 35% 30%, rgba(255,255,255,.90), rgba(196,181,253,.56) 46%, rgba(167,139,250,.42) 70%, rgba(255,255,255,.20))", backdropFilter: "blur(20px) saturate(175%)", WebkitBackdropFilter: "blur(20px) saturate(175%)", display: "grid", placeItems: "center" }}>
+                <Box sx={{ width: { xs: 52, md: 74 }, height: { xs: 52, md: 74 }, display: "grid", placeItems: "center", borderRadius: "50%", border: `1px solid ${qtxpertEffects.glassBorder}`, color: "primary.main", bgcolor: qtxpertEffects.glassBackground, boxShadow: "inset 0 2px 8px rgba(255,255,255,.92), 0 8px 20px rgba(117,70,232,.14)" }}>
+                  <AutoAwesomeOutlinedIcon sx={{ fontSize: { xs: 28, md: 40 } }} />
                 </Box>
               </Box>
-              <Paper className="dashboard-glass" variant="outlined" sx={{ position: "relative", zIndex: 1, mr: { md: 0.5 }, ml: { xs: 15, md: 0 }, p: 1.15, maxWidth: 212, borderRadius: 2.5, bgcolor: qtxpertEffects.glassBackground }}>
+              <Paper className="dashboard-glass" variant="outlined" sx={{ position: "relative", zIndex: 1, mr: { md: 0.5 }, ml: { xs: 12, md: 0 }, p: { xs: 0.85, md: 1.15 }, maxWidth: { xs: 196, md: 238 }, borderRadius: 2.5, bgcolor: qtxpertEffects.glassBackground }}>
                 <Stack direction="row" spacing={0.7} alignItems="center">
                   <SecurityOutlinedIcon color="primary" fontSize="small" />
-                  <Typography variant="body2" fontWeight={800}>Your quality copilot</Typography>
+                  <Typography variant="body2" fontWeight={800}>Your AI test copilot</Typography>
                 </Stack>
                 <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.35 }}>Ready when you are.</Typography>
                 <Typography variant="caption" color="text.secondary" sx={{ display: "block" }} noWrap>
@@ -549,43 +572,6 @@ export default function DashboardPage() {
               </Paper>
             </Box>
           </Grid>
-        </Grid>
-
-        <Divider sx={{ my: 1.25, borderColor: qtxpertColors.border }} />
-        <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1} sx={{ mb: 0.8, position: "relative", zIndex: 1 }}>
-          <Box>
-            <Typography variant="subtitle2" fontWeight={800}>Quality loop</Typography>
-            <Typography variant="caption" color="text.secondary">From source material to reviewable evidence</Typography>
-          </Box>
-          <Tooltip title="Each step opens its module. Statuses reflect saved project data, not a coverage guarantee.">
-            <InfoOutlinedIcon fontSize="small" color="action" />
-          </Tooltip>
-        </Stack>
-        <Grid container spacing={0.7} sx={{ position: "relative", zIndex: 1 }}>
-          {workflowStages.map((stage) => (
-            <Grid key={stage.key} size={{ xs: 6, md: 3 }}>
-              <CardActionArea
-                component={RouterLink}
-                to={stage.to}
-                aria-label={`Open ${stage.title}: ${stage.stateLabel}`}
-                sx={{ minHeight: 58, height: "100%", px: 0.9, py: 0.65, border: "1px solid", borderRadius: 2, bgcolor: "background.paper", "&:hover": { transform: "translateY(-1px)", borderColor: "primary.main", bgcolor: "background.paper" } }}
-              >
-                <Stack direction="row" spacing={0.75} alignItems="center">
-                  <Box sx={{ width: 30, height: 30, display: "grid", placeItems: "center", borderRadius: 1.5, bgcolor: qtxpertColors.iconLilac, color: "primary.main", flexShrink: 0, "& .MuiSvgIcon-root": { fontSize: 19 } }}>{stage.icon}</Box>
-                  <Box sx={{ minWidth: 0, flex: 1 }}>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.4}>
-                      <Typography variant="caption" color="text.secondary">{stage.step}</Typography>
-                      <Chip size="small" label={stage.stateLabel} color={workflowStateColor[stage.state]} variant="outlined" sx={{ height: 19, maxWidth: "78%", "& .MuiChip-label": { px: 0.65, overflow: "hidden", textOverflow: "ellipsis" } }} />
-                    </Stack>
-                    <Stack direction="row" spacing={0.3} alignItems="center">
-                      <Typography variant="body2" fontWeight={800} noWrap>{stage.title}</Typography>
-                      <Tooltip title={stage.description} placement="bottom-start"><InfoOutlinedIcon fontSize="inherit" color="action" sx={{ cursor: "help", flexShrink: 0 }} /></Tooltip>
-                    </Stack>
-                  </Box>
-                </Stack>
-              </CardActionArea>
-            </Grid>
-          ))}
         </Grid>
       </Paper>
 
@@ -630,8 +616,8 @@ export default function DashboardPage() {
 
       {preferences.visibleWidgets.posture && (
         <Grid container spacing={0.9} sx={{ mb: 1.2 }}>
-          <Grid size={{ xs: 12, md: 3 }}>
-            <Card variant="outlined" sx={{ height: "100%", minHeight: 194, borderRadius: 2.5 }}>
+          <Grid size={{ xs: 12, md: 4 }}>
+            <Card variant="outlined" sx={{ height: "100%", minHeight: 180, borderRadius: 2.5 }}>
               <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
                 <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.6}>
                   <Stack direction="row" spacing={0.45} alignItems="center">
@@ -665,8 +651,8 @@ export default function DashboardPage() {
             </Card>
           </Grid>
 
-          <Grid size={{ xs: 12, md: 3 }}>
-            <Card variant="outlined" sx={{ height: "100%", minHeight: 194, borderRadius: 2.5 }}>
+          <Grid size={{ xs: 12, md: 4 }}>
+            <Card variant="outlined" sx={{ height: "100%", minHeight: 180, borderRadius: 2.5 }}>
               <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
                 <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.6}>
                   <Stack direction="row" spacing={0.45} alignItems="center">
@@ -675,19 +661,33 @@ export default function DashboardPage() {
                   </Stack>
                   <AutoAwesomeOutlinedIcon color="primary" fontSize="small" />
                 </Stack>
-                <Stack direction="row" spacing={1.1} alignItems="center" sx={{ mt: 1.15 }}>
-                  <Box sx={{ position: "relative", display: "inline-flex", flexShrink: 0 }}>
-                    <CircularProgress variant="determinate" value={automationReady ?? 0} size={78} thickness={4.5} color={automationReady === null ? "inherit" : "primary"} />
-                    <Box sx={{ position: "absolute", inset: 0, display: "grid", placeItems: "center" }}>
-                      <Typography variant="subtitle2" fontWeight={800}>{automationReady === null ? "—" : `${automationReady}%`}</Typography>
-                    </Box>
+                <Stack direction="row" spacing={1.15} alignItems="center" sx={{ mt: 0.9 }}>
+                  <Box
+                    role="img"
+                    aria-label={automationReady === null ? "No test cases are available yet" : `${automationReady}% of designed cases are marked as automation candidates`}
+                    sx={{
+                      position: "relative",
+                      width: 58,
+                      height: 108,
+                      flexShrink: 0,
+                      overflow: "hidden",
+                      border: "1px solid rgba(117,70,232,.28)",
+                      borderRadius: "30px 30px 22px 22px",
+                      background: "linear-gradient(180deg, rgba(255,255,255,.9), rgba(237,229,255,.36))",
+                      boxShadow: "inset 0 2px 8px rgba(255,255,255,.95), inset 0 -8px 16px rgba(117,70,232,.08), 0 8px 16px rgba(117,70,232,.08)",
+                    }}
+                  >
+                    <Box sx={{ position: "absolute", left: 4, right: 4, bottom: 4, height: `${automationReady ?? 0}%`, minHeight: automationReady ? 5 : 0, borderRadius: "0 0 22px 22px", background: "linear-gradient(180deg, rgba(196,181,253,.66), rgba(117,70,232,.48))", transition: "height 240ms ease" }} />
+                    <Box sx={{ position: "absolute", left: 7, right: 7, top: 3, height: 10, border: "1px solid rgba(255,255,255,.94)", borderRadius: "50%", boxShadow: "0 2px 8px rgba(117,70,232,.12)" }} />
+                    <Box sx={{ position: "absolute", left: 8, right: 8, top: 18, bottom: 9, borderLeft: "1px solid rgba(255,255,255,.64)", borderRight: "1px solid rgba(255,255,255,.48)", borderRadius: "18px" }} />
                   </Box>
                   <Box sx={{ minWidth: 0 }}>
-                    <Typography variant="body2" fontWeight={800}>{data?.test_cases ? `${data.automation_candidates} of ${data.test_cases} cases` : "No cases yet"}</Typography>
-                    <Typography variant="caption" color="text.secondary">marked automation-ready</Typography>
+                    <Typography variant="h4" fontWeight={800} color={automationReady === null ? "text.secondary" : "primary.main"} sx={{ lineHeight: 1 }}>{automationReady === null ? "—" : `${automationReady}%`}</Typography>
+                    <Typography variant="body2" fontWeight={800} sx={{ mt: 0.55 }}>{data?.test_cases ? `${data.automation_candidates} of ${data.test_cases} cases` : "No cases yet"}</Typography>
+                    <Typography variant="caption" color="text.secondary">marked as automation candidates</Typography>
                   </Box>
                 </Stack>
-                <Divider sx={{ my: 1 }} />
+                <Divider sx={{ my: 0.85 }} />
                 <Stack direction="row" justifyContent="space-between" spacing={1}>
                   <Typography variant="caption" color="text.secondary">Requirements</Typography>
                   <Typography variant="caption" fontWeight={800}>{data?.requirements ?? "—"}</Typography>
@@ -699,8 +699,8 @@ export default function DashboardPage() {
           </Grid>
 
           {preferences.visibleWidgets.execution && (
-            <Grid size={{ xs: 12, md: 6 }}>
-              <Card variant="outlined" sx={{ height: "100%", minHeight: 194, borderRadius: 2.5 }}>
+            <Grid size={{ xs: 12, md: 4 }}>
+              <Card variant="outlined" sx={{ height: "100%", minHeight: 180, borderRadius: 2.5 }}>
                 <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.7} sx={{ mb: 0.7 }}>
                     <Stack direction="row" spacing={0.5} alignItems="center">
@@ -726,65 +726,78 @@ export default function DashboardPage() {
 
       {visibleWidgetCount > 0 && (
         <Grid container spacing={0.9} sx={{ mb: 1.2 }}>
+          <Grid size={{ xs: 12, md: preferences.visibleWidgets.autopilot ? 3 : 4 }}>
+            <Card variant="outlined" sx={{ height: "100%", minHeight: 164, borderRadius: 2.5 }}>
+              <CardContent sx={{ p: 1.15, "&:last-child": { pb: 1.15 } }}>
+                <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.5} sx={{ mb: 0.8 }}>
+                  <Typography variant="subtitle2" fontWeight={800}>Quick actions</Typography>
+                  <Tooltip title="Jump to the most-used project tasks."><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
+                </Stack>
+                <Grid container spacing={0.65}>
+                  <Grid size={6}><Button component={RouterLink} to="/autopilot" size="small" variant="contained" startIcon={<PlayArrowRoundedIcon />} fullWidth sx={{ minHeight: 48, justifyContent: "flex-start", px: 0.9 }}>Autopilot</Button></Grid>
+                  <Grid size={6}><Button size="small" variant="outlined" startIcon={<AddRoundedIcon />} onClick={openNewProject} fullWidth sx={{ minHeight: 48, justifyContent: "flex-start", px: 0.9 }}>New project</Button></Grid>
+                  <Grid size={6}><Button component={RouterLink} to="/design" size="small" variant="outlined" startIcon={<ArchitectureOutlinedIcon />} fullWidth sx={{ minHeight: 48, justifyContent: "flex-start", px: 0.9 }}>Test design</Button></Grid>
+                  <Grid size={6}><Button component={RouterLink} to="/reports" size="small" variant="outlined" startIcon={<AssessmentOutlinedIcon />} fullWidth sx={{ minHeight: 48, justifyContent: "flex-start", px: 0.9 }}>Reports</Button></Grid>
+                </Grid>
+              </CardContent>
+            </Card>
+          </Grid>
+
           {preferences.visibleWidgets.autopilot && (
             <Grid size={{ xs: 12, md: 6 }}>
-              <Card variant="outlined" sx={{ height: "100%", minHeight: 156, borderRadius: 2.5 }}>
-                <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+              <Card variant="outlined" sx={{ height: "100%", minHeight: 164, borderRadius: 2.5 }}>
+                <CardContent sx={{ p: 1.15, "&:last-child": { pb: 1.15 } }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.75}>
                     <Stack direction="row" spacing={0.5} alignItems="center">
                       <AutoAwesomeOutlinedIcon color="primary" fontSize="small" />
-                      <Typography variant="subtitle2" fontWeight={800}>Autopilot activity</Typography>
-                      <Tooltip title="Generated and execution counts are shown separately. Deferred checks are not counted as passed."><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
+                      <Typography variant="subtitle2" fontWeight={800}>Autopilot progress</Typography>
+                      <Tooltip title="Counts reflect saved Autopilot data. A stage is not marked complete unless its corresponding result is recorded."><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
                     </Stack>
-                    <Chip size="small" variant="outlined" color={autopilotActivity.active_jobs > 0 ? "info" : autopilotActivity.waiting_for_input_jobs > 0 ? "warning" : "default"} label={autopilotActivity.active_jobs > 0 ? "Running" : autopilotActivity.waiting_for_input_jobs > 0 ? "Input needed" : "Idle"} />
+                    <Chip size="small" variant="outlined" color={autopilotActivity.active_jobs > 0 ? "info" : autopilotActivity.waiting_for_input_jobs > 0 ? "warning" : "default"} label={autopilotActivity.active_jobs > 0 ? "Running" : autopilotActivity.waiting_for_input_jobs > 0 ? "Input needed" : autopilotActivity.generated_test_cases > 0 ? "Plan available" : "Not started"} />
                   </Stack>
-                  <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1} sx={{ mt: 0.8, mb: 0.55 }}>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1} sx={{ mt: 0.55, mb: 0.45 }}>
                     <Typography variant="caption" color="text.secondary" noWrap>
                       {autopilotExecutionProgress === null ? "No selected checks" : `${autopilotActivity.executed_tests} of ${autopilotActivity.selected_tests} selected checks executed`}
                     </Typography>
                     <Typography variant="caption" fontWeight={800}>{autopilotExecutionProgress === null ? "—" : `${autopilotExecutionProgress}%`}</Typography>
                   </Stack>
-                  <LinearProgress variant="determinate" value={autopilotExecutionProgress ?? 0} color={autopilotActivity.waiting_for_input_jobs ? "warning" : "primary"} sx={{ height: 5, borderRadius: 5 }} />
-                  <Grid container spacing={0.55} sx={{ mt: 0.8 }}>
-                    {[
-                      ["Generated", autopilotActivity.generated_test_cases],
-                      ["Selected", autopilotActivity.selected_tests],
-                      ["Executed", autopilotActivity.executed_tests],
-                      ["Passed", autopilotActivity.passed_tests],
-                      ["Failed", autopilotActivity.failed_tests],
-                      ["Deferred", autopilotActivity.deferred_tests],
-                    ].map(([label, value]) => (
-                      <Grid key={label} size={{ xs: 4, sm: 2 }}>
-                        <Box sx={{ px: 0.7, py: 0.5, borderRadius: 1.5, bgcolor: qtxpertColors.softLilac, textAlign: "center" }}>
-                          <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block" }}>{label}</Typography>
-                          <Typography variant="subtitle2" fontWeight={800}>{value}</Typography>
-                        </Box>
+                  <LinearProgress variant="determinate" value={autopilotExecutionProgress ?? 0} color={autopilotActivity.waiting_for_input_jobs ? "warning" : "primary"} sx={{ height: 4, borderRadius: 5 }} />
+                  <Grid container spacing={0.35} sx={{ mt: 1.0 }}>
+                    {autopilotStages.map((stage) => (
+                      <Grid key={stage.key} size={{ xs: 4, sm: 2 }}>
+                        <Tooltip title={stage.description} placement="top">
+                          <CardActionArea component={RouterLink} to={stage.to} aria-label={`${stage.title}: ${stage.stateLabel}`} sx={{ minHeight: 56, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", px: 0.25, py: 0.4, borderRadius: 1.5, textAlign: "center", "&:hover": { bgcolor: qtxpertColors.softLilac } }}>
+                            <Box sx={{ width: 25, height: 25, display: "grid", placeItems: "center", borderRadius: "50%", bgcolor: stage.state === "ready" ? qtxpertColors.mint : stage.state === "active" ? qtxpertColors.lightLavender : qtxpertColors.iconLilac, color: stage.state === "ready" ? "success.main" : "primary.main", "& .MuiSvgIcon-root": { fontSize: 16 } }}>{stage.icon}</Box>
+                            <Typography variant="caption" fontWeight={800} noWrap sx={{ lineHeight: 1.25, mt: 0.2, maxWidth: "100%" }}>{stage.title}</Typography>
+                            <Typography variant="caption" color="text.secondary" noWrap sx={{ fontSize: 10, lineHeight: 1.2, maxWidth: "100%" }}>{stage.stateLabel}</Typography>
+                          </CardActionArea>
+                        </Tooltip>
                       </Grid>
                     ))}
                   </Grid>
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.65 }}>
-                    {autopilotActivity.active_jobs > 0 ? "Analysis is in progress." : autopilotActivity.waiting_for_input_jobs > 0 ? "A checkpoint needs review." : autopilotActivity.last_run_at ? `Last run ${formatDate(autopilotActivity.last_run_at)}` : "No Autopilot run recorded yet."}
-                  </Typography>
                 </CardContent>
               </Card>
             </Grid>
           )}
 
-          {preferences.visibleWidgets.signals && (
-            <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-              <Card variant="outlined" sx={{ height: "100%", minHeight: 156, borderRadius: 2.5 }}>
-                <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
+          {(preferences.visibleWidgets.signals || preferences.visibleWidgets.documentation) && (
+            <Grid size={{ xs: 12, md: preferences.visibleWidgets.autopilot ? 3 : 4 }}>
+              <Card variant="outlined" sx={{ height: "100%", minHeight: 164, borderRadius: 2.5 }}>
+                <CardContent sx={{ p: 1.15, "&:last-child": { pb: 1.15 } }}>
                   <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.5} sx={{ mb: 0.55 }}>
-                    <Typography variant="subtitle2" fontWeight={800}>Needs attention</Typography>
-                    <Chip size="small" label={actionRequiredCount} color={actionRequiredCount ? "warning" : "success"} variant="outlined" />
+                    <Stack direction="row" spacing={0.45} alignItems="center">
+                      <Typography variant="subtitle2" fontWeight={800}>Project insights</Typography>
+                      <Tooltip title="Evidence-backed signals from saved project and document data; not a generated compliance or release claim."><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
+                    </Stack>
+                    {preferences.visibleWidgets.signals && <Chip size="small" label={actionRequiredCount} color={actionRequiredCount ? "warning" : "success"} variant="outlined" />}
                   </Stack>
-                  {summary.isFetching ? <Skeleton variant="rounded" height={72} /> : summary.isError ? (
+                  {preferences.visibleWidgets.signals && (summary.isFetching ? <Skeleton variant="rounded" height={54} /> : summary.isError ? (
                     <Typography variant="caption" color="text.secondary">Project signals unavailable.</Typography>
                   ) : actionItems.length ? (
-                    <Stack spacing={0.2}>
-                      {actionItems.slice(0, 4).map((item) => (
+                    <Stack spacing={0.15}>
+                      {actionItems.slice(0, preferences.visibleWidgets.documentation ? 2 : 3).map((item) => (
                         <Tooltip key={item.key} title={item.detail} placement="left">
-                          <Box component={RouterLink} to={item.route} sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 0.5, px: 0.45, py: 0.36, borderRadius: 1.2, color: "text.primary", textDecoration: "none", "&:hover": { bgcolor: "action.hover" } }}>
+                          <Box component={RouterLink} to={item.route} sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 0.5, px: 0.4, py: 0.28, borderRadius: 1.2, color: "text.primary", textDecoration: "none", "&:hover": { bgcolor: "action.hover" } }}>
                             <Typography variant="caption" noWrap sx={{ minWidth: 0 }}>{item.title}</Typography>
                             <Typography variant="caption" fontWeight={800} color="warning.main">{item.count}</Typography>
                           </Box>
@@ -792,41 +805,24 @@ export default function DashboardPage() {
                       ))}
                     </Stack>
                   ) : (
-                    <Stack direction="row" spacing={0.55} alignItems="center" sx={{ py: 1.2 }}>
+                    <Stack direction="row" spacing={0.5} alignItems="center" sx={{ py: 0.4 }}>
                       <CheckCircleOutlineOutlinedIcon color="success" fontSize="small" />
-                      <Typography variant="caption" color="text.secondary">All caught up</Typography>
+                      <Typography variant="caption" color="text.secondary">No open actions</Typography>
                     </Stack>
+                  ))}
+                  {preferences.visibleWidgets.documentation && (
+                    <>
+                      {preferences.visibleWidgets.signals && <Divider sx={{ my: 0.45 }} />}
+                      <CardActionArea component={RouterLink} to="/documents" aria-label="Open Document Intelligence" sx={{ display: "flex", justifyContent: "space-between", gap: 0.5, borderRadius: 1.2, px: 0.4, py: 0.3 }}>
+                        <Stack direction="row" spacing={0.45} alignItems="center" minWidth={0}>
+                          <DescriptionOutlinedIcon color="primary" sx={{ fontSize: 17 }} />
+                          <Typography variant="caption" fontWeight={700} noWrap>Document review</Typography>
+                        </Stack>
+                        <Chip size="small" variant="outlined" color={documentReviewData?.status === "completed" ? "success" : documentReviewData?.status === "failed" ? "error" : "default"} label={documentReview.isFetching ? "Checking" : documentReviewData?.status === "completed" ? "Reviewed" : documentReviewData?.status ? displayDocumentStatus(documentReviewData.status) : "Not reviewed"} sx={{ height: 20, maxWidth: "58%", "& .MuiChip-label": { overflow: "hidden", textOverflow: "ellipsis" } }} />
+                      </CardActionArea>
+                    </>
                   )}
                 </CardContent>
-              </Card>
-            </Grid>
-          )}
-
-          {preferences.visibleWidgets.documentation && (
-            <Grid size={{ xs: 12, sm: 6, md: 3 }}>
-              <Card variant="outlined" sx={{ height: "100%", minHeight: 156, borderRadius: 2.5 }}>
-                <CardActionArea component={RouterLink} to="/documents" aria-label="Open Document Intelligence" sx={{ height: "100%", alignItems: "stretch" }}>
-                  <CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}>
-                    <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.5}>
-                      <Stack direction="row" spacing={0.5} alignItems="center" minWidth={0}>
-                        <DescriptionOutlinedIcon color="primary" fontSize="small" />
-                        <Typography variant="subtitle2" fontWeight={800} noWrap>Document review</Typography>
-                      </Stack>
-                      <Tooltip title="Early document findings help inform test design; they do not replace runtime validation."><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
-                    </Stack>
-                    <Chip
-                      size="small"
-                      variant="outlined"
-                      color={documentReviewData?.status === "completed" ? "success" : documentReviewData?.status === "failed" ? "error" : "default"}
-                      label={documentReview.isFetching ? "Checking" : documentReviewData?.status === "completed" ? "Reviewed" : documentReviewData?.status ? displayDocumentStatus(documentReviewData.status) : "Not reviewed"}
-                      sx={{ mt: 1.2 }}
-                    />
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.65 }} noWrap>
-                      {documentReviewData?.status === "completed" ? formatDate(documentReviewData.updated_at) : documentReviewData?.status === "failed" ? "Review needs attention" : "Open Document Intelligence"}
-                    </Typography>
-                    {documentReviewData?.status === "completed" && <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>{documentReviewData.findings.filter((finding) => !["resolved", "rejected"].includes(finding.status)).length} open findings</Typography>}
-                  </CardContent>
-                </CardActionArea>
               </Card>
             </Grid>
           )}
