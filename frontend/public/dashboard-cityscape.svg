@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 340" preserveAspectRatio="none" aria-hidden="true">
+  <defs>
+    <linearGradient id="city-fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset=".42" stop-color="#b8a8e8" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#8d7bbd" stop-opacity=".28"/>
+    </linearGradient>
+    <linearGradient id="glass-fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+      <stop offset=".22" stop-color="#fff" stop-opacity=".52"/>
+      <stop offset=".78" stop-color="#fff" stop-opacity=".52"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#city-fade)" d="M0 283h42v-45h28v45h22v-76h25v76h17v-47h26v47h35v-90h29v90h20v-126h25v126h17v-65h31v65h25v-52h26v52h39v-95h23v95h29v-172h12l7-86 7 86h12v172h31v-72h34v72h22v-118h27v118h25v-85h35v85h28v-42h31v42h30v-66h30v66h26v-113h27v113h33v-56h28v56h23v-77h28v77h35v-101h28v101h28v-57h35v57h28v-87h30v87h25v-57h24v57h39v-71h31v71h25v-51h31v51h34v-93h27v93h20v-45h38v45h18v-63h30v63h29v-43h24v43h29v-73h29v73h34v-56h29v56h33v-84h30v84h29v-51h28v51h43v-68h27v68h26v-42h34v42h34v-56h32v56h53v57H0z"/>
+  <path fill="#fff" fill-opacity=".32" d="M942 283h12v-132l13 15 13 117h9V132l17 18 17 133h18V171l14 12 14 100h15v-75l12-26 13 26v75h28v-92l13-11 15 103h28v-54l12-14 14 14v54h30v-80l15-16 15 16v80h27v-55h18v55h28v-96l14-19 14 19v96h34v-60h20v60h24v-84l17-22 17 22v84h31v-54h22v54h27v-69l14-19 15 19v69h36v-49h22v49h32v-78l14-13 14 13v78h28v-52h24v52h39v-70h16v70h35v-54h18v54h46v-78h17v78h46v-47h20v47h33v-68h16v68h43v-51h18v51h46v-79h16v79h42v-48h18v48h49v-64h18v64h55v-48h18v48h72v57H942z"/>
+  <path fill="url(#glass-fade)" d="M0 278h1600v62H0z"/>
+  <g fill="none" stroke="#fff" stroke-opacity=".55" stroke-width="2">
+    <path d="M0 294c240-20 410 11 630-3s390-5 550 1 270-9 420-1"/>
+    <path d="M0 315c275-8 420 12 650 1s425-7 590 1 250-7 360-2" stroke-opacity=".3"/>
+  </g>
+</svg>
+
