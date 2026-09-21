@@ -28,6 +28,7 @@ import {
 } from "@mui/icons-material";
 import axios from "axios";
 import { useAuth } from "@/contexts/AuthContext";
+import { qtxpertColors, qtxpertEffects } from "@/theme/theme";
 
 interface LoginFormValues {
   email: string;
@@ -119,7 +120,7 @@ export default function LoginPage() {
 
   if (isAuthLoading || user) {
     return (
-      <Box sx={{ minHeight: "100vh", display: "grid", placeItems: "center", bgcolor: "#F8F9FF" }}>
+      <Box sx={{ minHeight: "100vh", display: "grid", placeItems: "center", bgcolor: qtxpertColors.mainBackground }}>
         <CircularProgress aria-label="Loading your QTXpert workspace" />
       </Box>
     );
@@ -132,7 +133,7 @@ export default function LoginPage() {
         minHeight: "100vh",
         display: "grid",
         gridTemplateColumns: { xs: "1fr", md: "minmax(430px, 1.05fr) minmax(500px, 0.95fr)" },
-        bgcolor: "#F8F9FF",
+        bgcolor: qtxpertColors.mainBackground,
       }}
     >
       <Box
@@ -146,9 +147,8 @@ export default function LoginPage() {
           justifyContent: "space-between",
           minHeight: "100vh",
           p: { md: 6, lg: 8 },
-          color: "white",
-          background:
-            "radial-gradient(circle at 78% 18%, rgba(34,211,238,.22), transparent 26%), radial-gradient(circle at 18% 82%, rgba(109,99,242,.35), transparent 34%), linear-gradient(145deg, #182033 0%, #121322 58%, #1D1B4F 100%)",
+          color: "text.primary",
+          background: qtxpertEffects.heroGradient,
         }}
       >
         <Box
@@ -158,7 +158,7 @@ export default function LoginPage() {
             inset: 0,
             opacity: 0.12,
             backgroundImage:
-              "linear-gradient(rgba(255,255,255,.18) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.18) 1px, transparent 1px)",
+              "linear-gradient(rgba(117,70,232,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(117,70,232,.06) 1px, transparent 1px)",
             backgroundSize: "56px 56px",
             maskImage: "linear-gradient(to bottom, black, transparent 82%)",
           }}
@@ -174,12 +174,12 @@ export default function LoginPage() {
               px: 1.5,
               py: 0.8,
               borderRadius: 2.25,
-              boxShadow: "0 8px 28px rgba(0,0,0,.15)",
+              boxShadow: qtxpertEffects.cardShadow,
             }}
           >
             <Box component="img" src="/qtxpert-logo.svg" alt="QTXpert" sx={{ display: "block", width: 165, height: "auto" }} />
           </Box>
-          <Typography variant="caption" sx={{ color: "rgba(255,255,255,.62)", pl: 0.5, letterSpacing: ".08em" }}>
+          <Typography variant="caption" sx={{ color: "text.secondary", pl: 0.5, letterSpacing: ".08em" }}>
             QUALITY ENGINEERING INTELLIGENCE
           </Typography>
         </Stack>
@@ -191,7 +191,7 @@ export default function LoginPage() {
           >
             From requirement to release confidence.
           </Typography>
-          <Typography sx={{ mt: 2.5, maxWidth: 540, color: "rgba(255,255,255,.72)", fontSize: 18, lineHeight: 1.65 }}>
+          <Typography sx={{ mt: 2.5, maxWidth: 540, color: "text.secondary", fontSize: 18, lineHeight: 1.65 }}>
             Design, automate, and govern software quality with an AI-assisted workspace built for modern engineering teams.
           </Typography>
 
@@ -206,16 +206,16 @@ export default function LoginPage() {
                     borderRadius: 2,
                     display: "grid",
                     placeItems: "center",
-                    color: "#67E8F9",
-                    bgcolor: "rgba(255,255,255,.08)",
-                    border: "1px solid rgba(255,255,255,.14)",
+                    color: qtxpertColors.primary,
+                    bgcolor: qtxpertColors.iconLilac,
+                    border: `1px solid ${qtxpertColors.border}`,
                   }}
                 >
                   {capability.icon}
                 </Box>
                 <Box>
                   <Typography sx={{ fontWeight: 700 }}>{capability.title}</Typography>
-                  <Typography variant="body2" sx={{ mt: 0.25, color: "rgba(255,255,255,.62)" }}>
+                  <Typography variant="body2" sx={{ mt: 0.25, color: "text.secondary" }}>
                     {capability.detail}
                   </Typography>
                 </Box>
@@ -224,7 +224,7 @@ export default function LoginPage() {
           </Stack>
         </Box>
 
-        <Typography variant="caption" sx={{ position: "relative", color: "rgba(255,255,255,.48)" }}>
+        <Typography variant="caption" sx={{ position: "relative", color: qtxpertColors.textMuted }}>
           Enterprise-ready quality engineering workspace
         </Typography>
       </Box>
@@ -239,8 +239,7 @@ export default function LoginPage() {
           justifyContent: "center",
           px: { xs: 2, sm: 4, lg: 8 },
           py: 4,
-          background:
-            "radial-gradient(circle at 90% 8%, rgba(109,99,242,.08), transparent 30%), #F8F9FF",
+          background: `${qtxpertEffects.atmosphere}, ${qtxpertColors.mainBackground}`,
         }}
       >
         <Box sx={{ width: "100%", maxWidth: 470 }}>
@@ -251,17 +250,17 @@ export default function LoginPage() {
           <Card
             elevation={0}
             sx={{
-              borderRadius: 4,
-              border: "1px solid rgba(15,23,42,.10)",
-              boxShadow: "0 24px 70px rgba(16,24,40,.10)",
-              bgcolor: "rgba(255,255,255,.96)",
+              borderRadius: "18px",
+              border: `1px solid ${qtxpertColors.border}`,
+              boxShadow: qtxpertEffects.cardShadow,
+              bgcolor: qtxpertColors.cardBackground,
             }}
           >
             <CardContent sx={{ p: { xs: 3, sm: 5 } }}>
-              <Typography component="h2" sx={{ color: "#182033", fontSize: 30, fontWeight: 750, letterSpacing: "-0.035em" }}>
+              <Typography component="h2" sx={{ color: qtxpertColors.textPrimary, fontSize: 30, fontWeight: 750, letterSpacing: "-0.035em" }}>
                 Welcome back
               </Typography>
-              <Typography sx={{ mt: 1, mb: 3.5, color: "#667085" }}>
+              <Typography sx={{ mt: 1, mb: 3.5, color: qtxpertColors.textSecondary }}>
                 Sign in to continue to your QTXpert workspace.
               </Typography>
 
@@ -285,7 +284,7 @@ export default function LoginPage() {
                     InputProps={{
                       startAdornment: (
                         <InputAdornment position="start">
-                          <AlternateEmailRounded fontSize="small" sx={{ color: "#98A2B3" }} />
+                          <AlternateEmailRounded fontSize="small" sx={{ color: qtxpertColors.textMuted }} />
                         </InputAdornment>
                       ),
                     }}
@@ -312,7 +311,7 @@ export default function LoginPage() {
                       InputProps={{
                         startAdornment: (
                           <InputAdornment position="start">
-                            <LockOutlined fontSize="small" sx={{ color: "#98A2B3" }} />
+                            <LockOutlined fontSize="small" sx={{ color: qtxpertColors.textMuted }} />
                           </InputAdornment>
                         ),
                         endAdornment: (
@@ -331,7 +330,7 @@ export default function LoginPage() {
                       {...register("password", { required: "Enter your password." })}
                     />
                     {capsLockOn && (
-                      <Typography role="status" variant="caption" sx={{ display: "block", mt: 0.75, ml: 1.75, color: "#B54708" }}>
+                      <Typography role="status" variant="caption" sx={{ display: "block", mt: 0.75, ml: 1.75, color: qtxpertColors.warningText }}>
                         Caps Lock is on
                       </Typography>
                     )}
@@ -341,7 +340,7 @@ export default function LoginPage() {
                     <FormControlLabel
                       control={<Checkbox size="small" {...register("rememberEmail")} />}
                       label={<Typography variant="body2">Remember email</Typography>}
-                      sx={{ color: "#475467", m: 0 }}
+                      sx={{ color: qtxpertColors.textBody, m: 0 }}
                     />
                     <Link
                       href="mailto:info@qtxpert.com?subject=QTXpert%20password%20assistance"
@@ -363,8 +362,8 @@ export default function LoginPage() {
                       borderRadius: 2.5,
                       fontWeight: 750,
                       textTransform: "none",
-                      boxShadow: "0 10px 22px rgba(109,99,242,.24)",
-                      "&:hover": { boxShadow: "0 12px 28px rgba(109,99,242,.32)" },
+                      boxShadow: "0 4px 12px rgba(117,70,232,.16)",
+                      "&:hover": { boxShadow: "0 6px 16px rgba(117,70,232,.18)" },
                     }}
                   >
                     {isSubmitting ? (
@@ -379,7 +378,7 @@ export default function LoginPage() {
                 </Stack>
               </Box>
 
-              <Typography variant="body2" align="center" sx={{ mt: 3, color: "#667085" }}>
+              <Typography variant="body2" align="center" sx={{ mt: 3, color: qtxpertColors.textSecondary }}>
                 Need help?{" "}
                 <Link href="mailto:info@qtxpert.com?subject=QTXpert%20workspace%20support" underline="hover" sx={{ fontWeight: 650 }}>
                   Contact your workspace administrator
@@ -389,11 +388,12 @@ export default function LoginPage() {
           </Card>
 
           <Stack direction="row" justifyContent="center" spacing={2.5} sx={{ mt: 3 }}>
-            <Typography variant="caption" sx={{ color: "#98A2B3" }}>© 2026 QTXpert</Typography>
-            <Typography variant="caption" sx={{ color: "#98A2B3" }}>Secure workspace access</Typography>
+            <Typography variant="caption" sx={{ color: qtxpertColors.textMuted }}>© 2026 QTXpert</Typography>
+            <Typography variant="caption" sx={{ color: qtxpertColors.textMuted }}>Secure workspace access</Typography>
           </Stack>
         </Box>
       </Box>
     </Box>
   );
 }
+
