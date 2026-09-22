@@ -12,7 +12,7 @@ const ThemeModeContext = createContext<ThemeModeContextValue | undefined>(undefi
 
 export function ThemeModeProvider({ children }: { children: ReactNode }) {
   const [mode, setMode] = useState<"light" | "dark">(
-    () => (localStorage.getItem("qtxpert-theme-mode") as "light" | "dark") || "dark"
+    () => (localStorage.getItem("qtxpert-theme-mode") as "light" | "dark") || "light"
   );
 
   const toggleMode = () => {

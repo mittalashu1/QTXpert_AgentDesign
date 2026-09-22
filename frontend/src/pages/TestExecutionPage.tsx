@@ -725,7 +725,7 @@ export default function TestExecutionPage() {
                 <Chip label={`${currentPlan.blocked_cases} blocked/approval`} color={currentPlan.blocked_cases ? "warning" : "default"} variant="outlined" />
                 {preflightSignature && <Chip label="Preflight matches target" color="success" variant="outlined" />}
               </Stack>
-              {inputRequirements.length > 0 && <Box sx={{ mt: 2, p: 1.75, border: "1px solid", borderColor: "warning.light", borderRadius: 2, bgcolor: "rgba(237, 108, 2, 0.04)" }}>
+              {inputRequirements.length > 0 && <Box sx={{ mt: 2, p: 1.75, border: "1px solid", borderColor: "warning.light", borderRadius: 2, bgcolor: "warning.light" }}>
                 <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={1} sx={{ mb: 1 }}>
                   <Box>
                     <Typography variant="subtitle1" sx={{ fontWeight: 800 }}>Guided setup before execution</Typography>

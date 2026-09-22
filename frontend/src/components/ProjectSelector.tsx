@@ -12,6 +12,8 @@ import {
   TextField,
   Tooltip,
   Typography,
+  useMediaQuery,
+  useTheme,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
@@ -19,11 +21,15 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useCreateProject, useUpdateProject } from "@/hooks/useProjects";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 
+export const PROJECT_CREATE_EVENT = "qtxpert:open-project-create";
+
 export default function ProjectSelector({ topLevel = false }: { topLevel?: boolean }) {
   const { user } = useAuth();
   const { projects, selectedProjectId, selectedProject, selectProject } = useSelectedProject();
   const createProject = useCreateProject();
   const updateProject = useUpdateProject();
+  const theme = useTheme();
+  const compactViewport = useMediaQuery(theme.breakpoints.down("sm"));
   const [createOpen, setCreateOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [name, setName] = useState("");
@@ -37,6 +43,12 @@ export default function ProjectSelector({ topLevel = false }: { topLevel?: boole
     setEditName(selectedProject.name);
     setEditDescription(selectedProject.description ?? "");
   }, [selectedProject]);
+
+  useEffect(() => {
+    const openCreateDialog = () => setCreateOpen(true);
+    window.addEventListener(PROJECT_CREATE_EVENT, openCreateDialog);
+    return () => window.removeEventListener(PROJECT_CREATE_EVENT, openCreateDialog);
+  }, []);
 
   if (!topLevel) return null;
 
@@ -101,14 +113,14 @@ export default function ProjectSelector({ topLevel = false }: { topLevel?: boole
   }
 
   return (
-    <Stack direction="row" spacing={1} alignItems="center">
+    <Stack direction="row" spacing={1} alignItems="center" sx={{ width: "100%", minWidth: 0 }}>
       <TextField
         select
         size="small"
         label="Project"
         value={selectedProjectId}
         onChange={(event) => selectProject(event.target.value)}
-        sx={{ minWidth: 260 }}
+        sx={{ minWidth: compactViewport ? 140 : 220, maxWidth: "100%", flex: "1 1 auto" }}
       >
         {projects.map((project) => (
           <MenuItem key={project.id} value={project.id}>
@@ -123,9 +135,17 @@ export default function ProjectSelector({ topLevel = false }: { topLevel?: boole
           </IconButton>
         </Tooltip>
       )}
-      <Button size="small" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
-        New project
-      </Button>
+      <Tooltip title="New project">
+        <Button
+          size="small"
+          startIcon={<AddIcon />}
+          onClick={() => setCreateOpen(true)}
+          aria-label="Create new project"
+          sx={{ flexShrink: 0, minWidth: compactViewport ? 32 : undefined, px: compactViewport ? 0.5 : undefined, "& .MuiButton-startIcon": { mr: compactViewport ? 0 : undefined, ml: compactViewport ? 0 : undefined } }}
+        >
+          {compactViewport ? "" : "New project"}
+        </Button>
+      </Tooltip>
       {createDialog}
       {editDialog}
     </Stack>
