@@ -1424,11 +1424,29 @@ class AutopilotSuiteService:
                 # is distinguishable from an unsupported provider command.
                 time.sleep(min(120.0, max(0.0, float(step.timeout_ms or 1000) / 1000)))
             elif step.action in {"tap", "click", "assert_visible", "assert_text", "clear", "select"}:
-                element = self._find_semantic_element(driver, step, locator_map)
+                # Native Android/iOS back controls are often present in the
+                # discovery hierarchy but are not addressable on the next
+                # fresh Appium hierarchy (the provider may expose them only
+                # through the system navigation surface).  Keep the observed
+                # locator as the first choice, then use the provider's native
+                # back action only for an explicitly labelled Back control.
+                # This repairs a genuine functional case without inventing a
+                # locator or weakening the safe-action allowlist.
+                native_back = False
+                try:
+                    element = self._find_semantic_element(driver, step, locator_map)
+                except Exception:
+                    if step.action in {"tap", "click"} and self._is_back_navigation_target(step):
+                        mechanism = safe_navigate_back(driver, target_kind=target_kind)
+                        native_back = True
+                        element = None
+                    else:
+                        raise
                 if step.action in {"tap", "click"}:
-                    if not element.is_enabled():
-                        raise AssertionError(f"Resolved control is disabled: {step.target}")
-                    element.click()
+                    if not native_back:
+                        if not element.is_enabled():
+                            raise AssertionError(f"Resolved control is disabled: {step.target}")
+                        element.click()
                     time.sleep(0.9)
                     if package:
                         target_ready, target_reason, _ = validate_target_surface(
@@ -1596,6 +1614,15 @@ class AutopilotSuiteService:
         if last_error is not None:
             raise last_error
         raise AssertionError(f"Unable to resolve deterministic locator for {step.target}")
+
+    @staticmethod
+    def _is_back_navigation_target(step: QTXIRStep) -> bool:
+        """Return true only for a clearly observed native back target."""
+
+        label = re.sub(r"\s+", " ", " ".join(
+            value for value in (step.target, step.description) if value
+        ).casefold()).strip()
+        return bool(re.search(r"(?<![a-z0-9])(?:back|go back|navigate back|close)(?![a-z0-9])", label))
 
     @staticmethod
     def _safe_name(value: str) -> str:
