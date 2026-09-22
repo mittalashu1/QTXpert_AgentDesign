@@ -47,6 +47,14 @@ export const qtxpertEffects = {
     "linear-gradient(110deg, rgba(255,255,255,0.56) 0%, rgba(248,241,255,0.42) 28%, rgba(238,233,255,0.36) 58%, rgba(234,244,255,0.34) 82%, rgba(255,255,255,0.52) 100%)",
   glassBackground: "rgba(255,255,255,0.48)",
   glassBorder: "rgba(255,255,255,0.94)",
+  glassSurfaceLight: "rgba(255,255,255,0.68)",
+  glassSurfaceStrongLight: "rgba(255,255,255,0.82)",
+  glassSurfaceDark: "rgba(48,45,58,0.78)",
+  glassSurfaceStrongDark: "rgba(52,49,64,0.88)",
+  glassSheenLight:
+    "linear-gradient(120deg, rgba(255,255,255,0.82) 0%, rgba(248,241,255,0.58) 38%, rgba(234,244,255,0.48) 72%, rgba(255,255,255,0.72) 100%)",
+  glassSheenDark:
+    "linear-gradient(120deg, rgba(69,62,87,0.82) 0%, rgba(52,49,64,0.76) 42%, rgba(43,42,55,0.82) 100%)",
   glassShadow:
     "inset 0 1px 0 rgba(255,255,255,0.98), inset 0 -1px 0 rgba(117,70,232,0.10), 0 18px 48px rgba(117,70,232,0.14)",
   cardShadow: "0 4px 20px rgba(70,50,120,0.035)",
