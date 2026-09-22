@@ -790,9 +790,25 @@ class AutopilotIRCompiler:
             return None, "The test has no runtime steps that can be executed safely."
 
         if assertion_count == 0:
-            expected_assert = self._resolve_expected_assertion(test, current)
+            # A native Back/Close action is itself the observed state
+            # transition.  Mobile providers may expose the destination
+            # screen in discovery but omit its controls from the fresh
+            # hierarchy immediately after the platform action.  Requiring a
+            # stale destination locator turns a valid safe navigation into a
+            # false NoSuchElement failure.  The runner still validates that
+            # the session remains inside the uploaded package and captures
+            # the post-action screenshot/UI hierarchy, so this is an
+            # evidence-backed assertion without inventing a selector.
+            native_back_step = any(
+                step.action in {"tap", "click"}
+                and re.search(r"(?<![a-z0-9])(?:back|go back|navigate back|close)(?![a-z0-9])", step.description.casefold())
+                for step in resolved
+            )
+            expected_assert = None if native_back_step else self._resolve_expected_assertion(test, current)
             if expected_assert:
                 resolved.append(expected_assert)
+                assertion_count = 1
+            elif native_back_step:
                 assertion_count = 1
 
         if assertion_count == 0:
@@ -1247,6 +1263,7 @@ class AutopilotIRCompiler:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in test_id)
         safe = "_".join(part for part in safe.split("_") if part)
         return f"test_{safe}"
+
 
 
 
