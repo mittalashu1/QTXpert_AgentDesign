@@ -205,6 +205,46 @@ def test_runtime_discovery_promotes_resolved_safe_journey():
     compile(generated.appium_python, "<qtx-generated>", "exec")
 
 
+def test_native_back_journey_uses_post_action_evidence_without_stale_target_locator():
+    back = _control("back", "Back")
+    login = _control("login", "Login")
+    discovery = _discovery().model_copy(
+        update={
+            "screens": [
+                _discovery().screens[1].model_copy(update={"controls": [back]}),
+                _discovery().screens[0].model_copy(update={"controls": [login]}),
+            ],
+            "transitions": [
+                DiscoveredTransition(
+                    from_screen_id="screen-002",
+                    to_screen_id="screen-001",
+                    control_id="back",
+                    control_label="Back",
+                )
+            ],
+        }
+    )
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-AUTO-BACK-001",
+            suite="Functional",
+            title="Return from the observed screen",
+            priority="high",
+            objective="Validate safe back navigation",
+            steps=["Tap Back"],
+            expected=["Login is visible"],
+            source="deterministic",
+        )
+    ])
+
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+
+    assert generated.readiness == "executable"
+    assert [step.action for step in generated.steps] == ["tap", "capture_evidence"]
+    assert generated.steps[0].locator_value.endswith("/back")
+    compile(generated.appium_python, "<qtx-generated-back>", "exec")
+
+
 def test_qtx_ir_carries_only_observed_alternate_locators_for_runtime_retry():
     help_control = _control("help", "Help")
     help_control = help_control.model_copy(
@@ -753,6 +793,7 @@ def test_short_assertion_does_not_match_a_longer_unrelated_control():
     assert compiler._semantic_score("EM", email) == 0
     assert compiler._best_control(screen, "EM", interaction=False) is None
     assert compiler._best_control(screen, "Email address", interaction=False) is email
+
 
 
 
