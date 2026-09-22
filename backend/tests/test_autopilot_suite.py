@@ -243,6 +243,39 @@ def test_suite_uses_native_back_when_observed_back_locator_is_unavailable(tmp_pa
     assert evidence["actions"][0]["mechanism"] == "android_mobile_press_key"
 
 
+def test_suite_uses_native_back_when_only_observed_locator_has_back_label(tmp_path, monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _Driver()
+    native_back_calls = []
+
+    def native_back(_driver, *, target_kind):
+        native_back_calls.append(target_kind)
+        return "android_mobile_press_key"
+
+    monkeypatch.setattr("app.services.autopilot_suite.safe_navigate_back", native_back)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    def unavailable_back(_driver, _step, _locator_map):
+        raise RuntimeError("NoSuchElementException")
+
+    monkeypatch.setattr(service, "_find_semantic_element", unavailable_back)
+    test = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Exercise the observed control",
+            target="Authentication",
+            locator_strategy="accessibility_id",
+            locator_value="Back",
+            locator_confidence=0.95,
+        ),
+    ])
+
+    evidence = service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    assert native_back_calls == ["android"]
+    assert evidence["actions"][0]["mechanism"] == "android_mobile_press_key"
+
+
 def test_suite_interpreter_blocks_when_tap_leaves_uploaded_app(tmp_path, monkeypatch):
     service = AutopilotSuiteService(Settings(), prototype=object())
 
