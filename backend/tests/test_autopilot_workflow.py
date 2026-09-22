@@ -81,6 +81,10 @@ def test_phase_transitions_are_explicit_and_idempotent():
     assert transition_phase("partial", "cases_approved") == "cases_approved"
     assert transition_phase("cases_pending_review", "cases_approved") == "cases_approved"
     assert transition_phase("cases_approved", "cases_approved") == "cases_approved"
+    # Discovery/setup retries can overlap an already running safe suite; the
+    # continuation must remain idempotent rather than failing the job.
+    assert transition_phase("running", "exploring") == "exploring"
+    assert transition_phase("running", "cases_pending_review") == "cases_pending_review"
 
     try:
         transition_phase("draft", "running")

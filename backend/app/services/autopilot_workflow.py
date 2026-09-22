@@ -64,7 +64,12 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "cases_pending_review": frozenset({"cases_approved", "exploring", "execution_ready", "failed"}),
     "cases_approved": frozenset({"execution_ready", "exploring", "failed"}),
     "execution_ready": frozenset({"running", "exploring", "failed"}),
-    "running": frozenset({"completed", "partial", "blocked", "failed", "execution_ready"}),
+    # A checkpoint continuation may arrive while the auto-run safe suite is
+    # already executing (the UI can submit the optional setup dialog after
+    # discovery has handed off to the suite).  Treat the re-entry into the
+    # exploration phase as idempotent instead of surfacing a false worker
+    # failure; the active suite remains the single source of execution truth.
+    "running": frozenset({"completed", "partial", "blocked", "failed", "execution_ready", "exploring", "cases_pending_review"}),
     "completed": frozenset({"plan_pending_review", "exploring", "execution_ready"}),
     # A partially completed legacy run can be reopened from the report's
     # explicit "Approve & discover" action.  Treat that as a valid resumable
