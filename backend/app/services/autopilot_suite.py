@@ -1619,9 +1619,19 @@ class AutopilotSuiteService:
     def _is_back_navigation_target(step: QTXIRStep) -> bool:
         """Return true only for a clearly observed native back target."""
 
-        label = re.sub(r"\s+", " ", " ".join(
-            value for value in (step.target, step.description) if value
-        ).casefold()).strip()
+        # Providers sometimes emit a generic semantic target/description and
+        # keep the observed label only in the deterministic locator.  Include
+        # that value (and its observed fallbacks) in the check so a missing
+        # system-navigation node can still use the native back action without
+        # inventing a selector.  The allow-list remains limited to explicit
+        # back/close labels captured during discovery.
+        observed_labels = [step.target, step.description, step.locator_value]
+        observed_labels.extend(locator.value for locator in step.locator_fallbacks)
+        label = re.sub(
+            r"\s+",
+            " ",
+            " ".join(value for value in observed_labels if value).casefold(),
+        ).strip()
         return bool(re.search(r"(?<![a-z0-9])(?:back|go back|navigate back|close)(?![a-z0-9])", label))
 
     @staticmethod
