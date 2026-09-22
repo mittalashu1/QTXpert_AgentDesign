@@ -40,3 +40,4 @@ export function useThemeMode() {
   if (!ctx) throw new Error("useThemeMode must be used within ThemeModeProvider");
   return ctx;
 }
+

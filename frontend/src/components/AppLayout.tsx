@@ -173,15 +173,9 @@ export default function AppLayout() {
     transition: "background-color 160ms ease, color 160ms ease, transform 160ms ease",
     "&:hover": {
       bgcolor: "action.hover",
-      backgroundImage: mode === "dark"
-        ? "linear-gradient(120deg, rgba(167,139,250,.16), rgba(255,255,255,.035))"
-        : "linear-gradient(120deg, rgba(237,229,255,.76), rgba(255,255,255,.42))",
     },
     "&.active": {
       bgcolor: "action.selected",
-      backgroundImage: mode === "dark"
-        ? "linear-gradient(120deg, rgba(167,139,250,.22), rgba(255,255,255,.045))"
-        : "linear-gradient(120deg, rgba(237,229,255,.92), rgba(255,255,255,.58))",
       color: "primary.main",
       borderLeft: "3px solid",
       borderColor: "primary.main",
@@ -199,11 +193,11 @@ export default function AppLayout() {
           zIndex: (theme) => theme.zIndex.drawer + 1,
           borderBottom: "1px solid",
           borderColor: "divider",
-          backgroundColor: mode === "dark" ? "rgba(38,35,49,.76)" : "rgba(255,255,255,.76)",
-          backgroundImage: mode === "dark" ? qtxpertEffects.glassSheenDark : qtxpertEffects.glassSheenLight,
+          backgroundColor: mode === "dark" ? "rgba(48,45,58,.90)" : "rgba(255,255,255,.90)",
+          backgroundImage: "none",
           color: "text.primary",
-          backdropFilter: "blur(22px) saturate(160%)",
-          WebkitBackdropFilter: "blur(22px) saturate(160%)",
+          backdropFilter: "blur(18px) saturate(125%)",
+          WebkitBackdropFilter: "blur(18px) saturate(125%)",
           boxShadow: (theme) => theme.palette.mode === "dark"
             ? "0 1px 0 rgba(255,255,255,.08)"
             : qtxpertEffects.cardShadow,
@@ -332,11 +326,10 @@ export default function AppLayout() {
             borderRight: "1px solid",
             borderRightColor: "divider",
             backgroundColor: "background.paper",
-            backgroundImage: mode === "dark" ? qtxpertEffects.glassSheenDark : qtxpertEffects.glassSheenLight,
             overflowX: "hidden",
             transition: "width 180ms ease, box-shadow 180ms ease",
-            backdropFilter: "blur(20px) saturate(155%)",
-            WebkitBackdropFilter: "blur(20px) saturate(155%)",
+            backdropFilter: "blur(14px) saturate(115%)",
+            WebkitBackdropFilter: "blur(14px) saturate(115%)",
             boxShadow: navExpanded && wideViewport
               ? (theme) => theme.palette.mode === "dark"
                 ? "8px 0 24px rgba(0,0,0,.18)"
@@ -419,3 +412,4 @@ export default function AppLayout() {
     </Box>
   );
 }
+
