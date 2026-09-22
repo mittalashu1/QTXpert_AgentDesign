@@ -913,6 +913,21 @@ async def _ensure_local_artifact(
         return Path(path_value)
 
     record = await _safe_job_record(db, job_id, immutable_owner_id)
+    # Older manifests may carry the project on the job while the durable
+    # Autopilot row still has a null project_id.  Resolve that context once so
+    # repository repair and materialisation cannot silently fall back to an
+    # unscoped (or another project's) APK.
+    active_project_id: Optional[UUID] = None
+    raw_project_id = (
+        getattr(record, "project_id", None)
+        if record is not None
+        else job.get("project_id")
+    ) or job.get("project_id")
+    if raw_project_id:
+        try:
+            active_project_id = UUID(str(raw_project_id))
+        except (TypeError, ValueError):
+            active_project_id = None
     # The local manifest is deliberately the first durable fallback after a
     # Render restart.  Older rows can have the repository link in that
     # manifest even when the ORM row is briefly unavailable or was written by
@@ -925,7 +940,7 @@ async def _ensure_local_artifact(
             service,
             record,
             user,
-            project_id=record.project_id,
+            project_id=active_project_id,
         )
         if repaired is not None:
             asset_id = repaired.id
@@ -933,14 +948,33 @@ async def _ensure_local_artifact(
         raw_asset_id = job.get("repository_asset_id")
         if raw_asset_id and _is_uuid(raw_asset_id):
             asset_id = UUID(str(raw_asset_id))
+    if asset_id is not None:
+        # A stale repository_asset_id must never cross project boundaries.  If
+        # its owner/status/project no longer match, discard the link and let
+        # the exact hash/filename repair below find the correct project asset.
+        try:
+            linked_asset = await db.scalar(
+                select(UploadedAsset).where(
+                    UploadedAsset.id == asset_id,
+                    UploadedAsset.owner_id == immutable_owner_id,
+                    UploadedAsset.status == "ready",
+                )
+            )
+        except Exception:
+            await db.rollback()
+            linked_asset = None
+        if linked_asset is None or (
+            active_project_id is not None
+            and linked_asset.project_id not in (None, active_project_id)
+        ):
+            asset_id = None
+        elif active_project_id is not None and linked_asset.project_id is None:
+            linked_asset.project_id = active_project_id
+            await db.commit()
     if asset_id is None:
         # Filesystem-only manifests from the pre-repository deployment can
         # still be repaired when the corresponding owned object exists.
-        raw_project = job.get("project_id")
-        try:
-            manifest_project = UUID(str(raw_project)) if raw_project else None
-        except (TypeError, ValueError):
-            manifest_project = None
+        manifest_project = active_project_id
         asset = await UploadRepositoryService.find_owned_mobile_asset(
             db,
             immutable_owner_id,
@@ -5495,5 +5529,6 @@ async def rerun_autopilot_smoke(
         job_id=job_id,
         request=request,
     )
+
 
 

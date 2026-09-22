@@ -764,6 +764,38 @@ class AutopilotSuiteService:
         return tokens
 
     @classmethod
+    def _screens_equivalent(cls, left, right) -> bool:
+        """Return whether two provider states are the same replay surface.
+
+        BrowserStack/Appium can expose the same mobile page twice with a
+        different fingerprint when dynamic copy or a carousel value changes.
+        A case generated for the first copy must still be executable when the
+        fresh session opens on the second copy.  Keep package/activity and
+        credential shape strict, then compare normalised control signatures.
+        """
+        if left is None or right is None:
+            return False
+        if (left.package_name or "") != (right.package_name or ""):
+            return False
+        if (left.activity_name or "") != (right.activity_name or ""):
+            return False
+
+        def signature(control):
+            label = re.sub(r"\d+", "<n>", cls._normalize_screen_text(control.semantic_label))
+            resource = re.sub(r"\d+", "<n>", cls._normalize_screen_text(control.resource_id))
+            return (control.class_name or "", resource, label, control.input_kind or "")
+
+        left_items = {signature(item) for item in left.controls if item.enabled}
+        right_items = {signature(item) for item in right.controls if item.enabled}
+        if not left_items or not right_items:
+            return False
+        left_inputs = sorted(item[3] for item in left_items if item[3])
+        right_inputs = sorted(item[3] for item in right_items if item[3])
+        if left_inputs != right_inputs:
+            return False
+        return len(left_items & right_items) / len(left_items | right_items) >= 0.78
+
+    @classmethod
     def _identify_discovered_screen(
         cls,
         driver,
@@ -1063,13 +1095,24 @@ class AutopilotSuiteService:
                 )
             return []
 
+        # A fresh provider session can open on a volatile copy of the same
+        # launch/login surface (for example a changed carousel number).  It is
+        # already the correct page for the case; forcing a graph traversal
+        # from one duplicate screen ID to the other produces the misleading
+        # "no safe path" block seen after a resumed checkpoint.
+        if self._screens_equivalent(current, target):
+            if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
+                raise ProviderLifecycleUnavailable(
+                    f"The observed equivalent screen {self._screen_reference(current)} was restored, but its "
+                    "saved control locator is not visible. No test action was taken."
+                )
+            return []
+
         path = self._safe_discovery_path(discovery, current.screen_id, target.screen_id)
         if path is None:
             # The saved graph is evidence, not an execution dependency. If a
             # provider dropped one safe edge, recover it from the live app
             # using only controls already observed as reversible and safe.
-            current_label = str(current.page_label or current.journey or "").strip().casefold()
-            target_label = str(target.page_label or target.journey or "").strip().casefold()
             live_navigation = (
                 self._repair_live_route(
                     driver,
@@ -1080,7 +1123,7 @@ class AutopilotSuiteService:
                     locator_map,
                     target_kind,
                 )
-                if current_label != target_label
+                if current.screen_id != target.screen_id
                 else None
             )
             if live_navigation is not None:
@@ -1557,5 +1600,6 @@ class AutopilotSuiteService:
     @staticmethod
     def _safe_name(value: str) -> str:
         return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")[:100]
+
 
 

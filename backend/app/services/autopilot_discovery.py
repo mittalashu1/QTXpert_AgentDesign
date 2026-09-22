@@ -651,6 +651,72 @@ class AutopilotDiscoveryService:
         material = "\n".join([package_name or "", activity_name or "", *semantic])
         return hashlib.sha256(material.encode("utf-8", errors="ignore")).hexdigest()
 
+    @classmethod
+    def _screen_similarity(
+        cls,
+        left: DiscoveredScreen,
+        right_package: Optional[str],
+        right_activity: Optional[str],
+        right_controls: Iterable[DiscoveredControl],
+    ) -> float:
+        """Compare two observed screens without trusting volatile text.
+
+        Mobile providers often return a new fingerprint for the same login
+        surface when a carousel, promotional number, or loading label changes.
+        Treating that as a new page creates duplicate roots (for example
+        ``screen-001`` and ``screen-002``) and makes the suite try to navigate
+        backwards from the login form to an unreachable duplicate.  This
+        comparison deliberately keeps package/activity and input shape as hard
+        boundaries, while normalising numbers in labels so volatile copy does
+        not split one screen into multiple replay roots.
+        """
+        if (left.package_name or "") != (right_package or ""):
+            return 0.0
+        if (left.activity_name or "") != (right_activity or ""):
+            return 0.0
+
+        def signature(control: DiscoveredControl) -> tuple[str, str, str, str]:
+            label = re.sub(r"\d+", "<n>", cls._normalize(control.semantic_label or ""))
+            resource = re.sub(r"\d+", "<n>", cls._normalize(control.resource_id or ""))
+            return (
+                control.class_name or "",
+                resource,
+                label,
+                control.input_kind or "",
+            )
+
+        left_items = {signature(item) for item in left.controls if item.enabled}
+        right_items = {signature(item) for item in right_controls if item.enabled}
+        if not left_items or not right_items:
+            return 0.0
+        left_inputs = sorted(item[3] for item in left_items if item[3])
+        right_inputs = sorted(item[3] for item in right_items if item[3])
+        # Never collapse a public landing surface into a credential form (or
+        # two different credential steps) merely because the surrounding copy
+        # looks alike.
+        if left_inputs != right_inputs:
+            return 0.0
+        return len(left_items & right_items) / len(left_items | right_items)
+
+    @classmethod
+    def _merge_screen_controls(
+        cls,
+        existing: DiscoveredScreen,
+        controls: Iterable[DiscoveredControl],
+    ) -> None:
+        """Keep the richer control set when a near-duplicate is observed."""
+        merged: dict[tuple[str, str, str], DiscoveredControl] = {}
+        for control in [*existing.controls, *list(controls)]:
+            key = (
+                control.class_name or "",
+                re.sub(r"\d+", "<n>", cls._normalize(control.resource_id or "")),
+                re.sub(r"\d+", "<n>", cls._normalize(control.semantic_label or "")),
+            )
+            prior = merged.get(key)
+            if prior is None or len(control.locators) > len(prior.locators):
+                merged[key] = control
+        existing.controls = list(merged.values())
+
     @staticmethod
     def _is_auth_entry_control(label: str) -> bool:
         normalized = re.sub(r"[\s_-]+", " ", str(label or "").lower()).strip()
@@ -1156,10 +1222,30 @@ class AutopilotDiscoveryService:
             package_name = identity["package"]
             activity_name = identity["activity"]
             fp = self.fingerprint(package_name, activity_name, controls)
-            duplicate = fp in seen_fingerprints
-            screen_id = seen_fingerprints.get(fp) or f"screen-{index:03d}"
+            duplicate_screen_id = seen_fingerprints.get(fp)
+            if duplicate_screen_id is None:
+                near_duplicate = next(
+                    (
+                        existing
+                        for existing in screens
+                        if self._screen_similarity(
+                            existing,
+                            package_name,
+                            activity_name,
+                            controls,
+                        ) >= 0.78
+                    ),
+                    None,
+                )
+                duplicate_screen_id = near_duplicate.screen_id if near_duplicate else None
+            duplicate = duplicate_screen_id is not None
+            screen_id = duplicate_screen_id or f"screen-{index:03d}"
             if duplicate:
                 existing = next(screen for screen in screens if screen.screen_id == screen_id)
+                # Keep one canonical replay root for a volatile-but-equivalent
+                # state while retaining the union of safe controls observed on
+                # both provider frames.
+                self._merge_screen_controls(existing, controls)
                 # The post-login capture is intentionally non-persistent to
                 # avoid writing typed credentials into evidence. Once the
                 # credentials have been submitted, persist the resulting
@@ -1628,4 +1714,5 @@ class AutopilotDiscoveryService:
             }
         finally:
             safe_quit(driver)
+
 

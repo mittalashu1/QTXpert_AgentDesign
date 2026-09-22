@@ -573,7 +573,7 @@ def test_suite_will_not_backtrack_from_a_populated_credential_form():
     assert driver.auth_submit_clicks == 0
 
 
-def test_missing_route_diagnostic_distinguishes_screens_with_same_label():
+def test_missing_route_with_same_label_is_repaired_from_observed_safe_control():
     service = AutopilotSuiteService(Settings(), prototype=object())
     discovery = _navigation_discovery().model_copy(update={"transitions": []})
     discovery.screens[0].page_label = "Authentication"
@@ -591,11 +591,14 @@ def test_missing_route_diagnostic_distinguishes_screens_with_same_label():
         )
     ])
 
-    with pytest.raises(ProviderLifecycleUnavailable) as exc_info:
-        service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+    navigation = service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
 
-    assert "Authentication [screen-root]" in str(exc_info.value)
-    assert "Authentication [screen-auth]" in str(exc_info.value)
+    assert navigation == [{
+        "from_screen": "screen-root",
+        "to_screen": "screen-auth",
+        "control": "Get started",
+    }]
+    assert driver.navigation_clicks == 1
 
 
 def test_suite_does_not_repeat_sign_in_after_discovery_returns_to_same_screen():
@@ -652,4 +655,28 @@ def test_suite_safe_route_will_not_submit_authentication_controls():
     )
 
     assert service._safe_discovery_path(discovery, auth.screen_id, landing.screen_id) is None
+
+
+def test_suite_treats_volatile_duplicate_surface_as_same_replay_page():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    first = _observed_screen("screen-001", [
+        DiscoveredControl(
+            control_id="promo-one",
+            semantic_label="100",
+            class_name="android.widget.TextView",
+            resource_id="com.qtx.demo:id/promo",
+            enabled=True,
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/promo", confidence=0.99)],
+        ),
+    ])
+    second = first.model_copy(
+        update={
+            "screen_id": "screen-002",
+            "fingerprint": "different-provider-fingerprint",
+            "controls": [first.controls[0].model_copy(update={"semantic_label": "11"})],
+        }
+    )
+
+    assert service._screens_equivalent(first, second) is True
+
 
