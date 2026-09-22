@@ -902,6 +902,106 @@ class AutopilotSuiteService:
                 continue
         return None
 
+    def _repair_live_route(
+        self,
+        driver,
+        discovery: AutopilotDiscoveryResult,
+        current,
+        target,
+        package: str | None,
+        locator_map: Dict[str, str],
+        target_kind: str,
+    ) -> list[dict[str, str]] | None:
+        """Recover a missing safe edge by replaying observed controls live.
+
+        A provider restart can leave a valid screen list but omit one edge
+        from the persisted graph (the common case is a landing ``Login`` CTA
+        followed by the real credential form).  Do not invent a transition in
+        storage.  Instead, make one bounded, reversible DFS over controls that
+        Runtime Discovery already marked safe, and return the route only when
+        the live target fingerprint confirms each hop.
+        """
+
+        if current is None or target is None:
+            return None
+        if current.screen_id == target.screen_id:
+            return []
+        max_depth = 5
+        visited_edges: set[tuple[str, str]] = set()
+
+        def restore_parent(parent_screen_id: str) -> object | None:
+            try:
+                safe_navigate_back(driver, target_kind=target_kind)
+                time.sleep(0.6)
+                if package:
+                    ready, reason, _ = validate_target_surface(
+                        driver,
+                        expected_package=package,
+                        page_source=safe_page_source(driver),
+                    )
+                    if not ready:
+                        return None
+                recovered = self._identify_discovered_screen(driver, discovery, package)
+                if recovered is not None and recovered.screen_id == parent_screen_id:
+                    return recovered
+            except Exception:
+                return None
+            return None
+
+        def walk(screen, depth: int) -> list[dict[str, str]] | None:
+            if screen.screen_id == target.screen_id:
+                return []
+            if depth >= max_depth:
+                return None
+            credential_screen = self._screen_has_credential_fields(screen)
+            for control in screen.controls:
+                if (
+                    not control.enabled
+                    or not control.clickable
+                    or control.input_capable
+                    or control.risk != "safe"
+                    or (credential_screen and self._auth_submit_label(control.semantic_label))
+                    or (screen.screen_id, control.control_id) in visited_edges
+                ):
+                    continue
+                visited_edges.add((screen.screen_id, control.control_id))
+                element = self._route_control_element(driver, control, locator_map)
+                if element is None:
+                    continue
+                try:
+                    element.click()
+                    time.sleep(0.6)
+                    if package:
+                        ready, reason, _ = validate_target_surface(
+                            driver,
+                            expected_package=package,
+                            page_source=safe_page_source(driver),
+                        )
+                        if not ready:
+                            restore_parent(screen.screen_id)
+                            continue
+                    reached = self._identify_discovered_screen(driver, discovery, package)
+                    if reached is None or reached.screen_id == screen.screen_id:
+                        restore_parent(screen.screen_id)
+                        continue
+                    edge = {
+                        "from_screen": screen.screen_id,
+                        "to_screen": reached.screen_id,
+                        "control": control.semantic_label,
+                    }
+                    if reached.screen_id == target.screen_id:
+                        return [edge]
+                    nested = walk(reached, depth + 1)
+                    if nested is not None:
+                        return [edge, *nested]
+                    if restore_parent(screen.screen_id) is None:
+                        return None
+                except Exception:
+                    restore_parent(screen.screen_id)
+            return None
+
+        return walk(current, 0)
+
     def _prepare_test_screen(
         self,
         driver,
@@ -965,6 +1065,31 @@ class AutopilotSuiteService:
 
         path = self._safe_discovery_path(discovery, current.screen_id, target.screen_id)
         if path is None:
+            # The saved graph is evidence, not an execution dependency. If a
+            # provider dropped one safe edge, recover it from the live app
+            # using only controls already observed as reversible and safe.
+            current_label = str(current.page_label or current.journey or "").strip().casefold()
+            target_label = str(target.page_label or target.journey or "").strip().casefold()
+            live_navigation = (
+                self._repair_live_route(
+                    driver,
+                    discovery,
+                    current,
+                    target,
+                    package,
+                    locator_map,
+                    target_kind,
+                )
+                if current_label != target_label
+                else None
+            )
+            if live_navigation is not None:
+                if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
+                    raise ProviderLifecycleUnavailable(
+                        f"Autopilot reached {target.page_label or target.screen_id}, but its observed entry control is not visible. "
+                        "No test action was taken."
+                    )
+                return live_navigation
             # If the provider relaunches directly onto a credential form, an
             # earlier observed public entry screen may still be safely
             # reachable by one native Back action. Permit that one reverse

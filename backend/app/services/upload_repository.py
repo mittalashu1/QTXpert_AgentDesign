@@ -15,7 +15,7 @@ from typing import AsyncIterator, Optional
 from uuid import UUID
 
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -434,6 +434,96 @@ class UploadRepositoryService:
             query = query.where(UploadedAsset.project_id == project_id)
         result = await db.scalars(query.order_by(UploadedAsset.created_at.desc()).limit(limit))
         return list(result.all())
+
+    @classmethod
+    async def find_owned_mobile_asset(
+        cls,
+        db: AsyncSession,
+        owner_id: UUID,
+        *,
+        project_id: Optional[UUID] = None,
+        sha256: Optional[str] = None,
+        filename: Optional[str] = None,
+    ) -> Optional[UploadedAsset]:
+        """Find a reusable APK/IPA while repairing legacy project metadata.
+
+        Early repository rows were created before Autopilot attached a project
+        to every binary.  They are still safe to reuse when the owner and the
+        immutable content hash match, but a strict ``project_id =`` query
+        makes those rows appear to have disappeared after a restart.  Search
+        only the caller's owned mobile assets, prefer the active project, and
+        allow an unscoped legacy row as the migration candidate.  An asset
+        already assigned to another project is never returned.
+        """
+
+        query = select(UploadedAsset).where(
+            UploadedAsset.owner_id == owner_id,
+            UploadedAsset.status == "ready",
+            UploadedAsset.extension.in_(sorted(cls.MOBILE_EXTENSIONS)),
+        )
+        normalized_sha = str(sha256 or "").strip().lower()
+        if normalized_sha:
+            query = query.where(func.lower(UploadedAsset.sha256) == normalized_sha)
+        else:
+            normalized_name = Path(filename or "").name.strip().lower()
+            if not normalized_name:
+                return None
+            query = query.where(func.lower(UploadedAsset.filename) == normalized_name)
+        if project_id is not None:
+            query = query.where(
+                or_(UploadedAsset.project_id == project_id, UploadedAsset.project_id.is_(None))
+            )
+        candidates = list(
+            (
+                await db.scalars(
+                    query.order_by(UploadedAsset.created_at.desc()).limit(50)
+                )
+            ).all()
+        )
+        if not candidates:
+            return None
+        if project_id is not None:
+            project_match = next(
+                (asset for asset in candidates if asset.project_id == project_id),
+                None,
+            )
+            if project_match is not None:
+                return project_match
+            return next((asset for asset in candidates if asset.project_id is None), None)
+        return candidates[0]
+
+    @classmethod
+    async def reconcile_mobile_asset_project(
+        cls,
+        db: AsyncSession,
+        owner_id: UUID,
+        project_id: Optional[UUID],
+        *,
+        sha256: Optional[str] = None,
+        filename: Optional[str] = None,
+    ) -> Optional[UploadedAsset]:
+        """Link one owned legacy mobile row to the active project.
+
+        This is intentionally content-addressed.  We do not bulk-assign all
+        unscoped uploads because that could leak one customer's build into a
+        different project.  Only the APK/IPA referenced by an Autopilot job
+        can be repaired, and only an unscoped row can be promoted.
+        """
+
+        asset = await cls.find_owned_mobile_asset(
+            db,
+            owner_id,
+            project_id=project_id,
+            sha256=sha256,
+            filename=filename,
+        )
+        if asset is None:
+            return None
+        if project_id is not None and asset.project_id is None:
+            asset.project_id = project_id
+            await db.commit()
+            await db.refresh(asset)
+        return asset
 
     @classmethod
     async def delete_owned(

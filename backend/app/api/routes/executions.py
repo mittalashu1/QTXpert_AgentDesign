@@ -72,6 +72,71 @@ def _int_or_zero(value: object) -> int:
         return 0
 
 
+def _validate_autopilot_case_scope(
+    cases: list[TestCase],
+    *,
+    target_kind: str,
+    app_asset_id: UUID | None,
+) -> None:
+    """Prevent one execution from mixing Autopilot surfaces.
+
+    Autopilot cases are copied into the shared Test Design library so they can
+    be reused by the normal execution module.  Their bounded metadata carries
+    the profile/target/build scope; validate it at the final execution gate
+    instead of allowing a project-wide case query to combine InvestNation,
+    Flipkart or a different mobile release into one run.
+    """
+
+    scoped = [
+        case.test_data
+        for case in cases
+        if isinstance(case.test_data, dict) and case.test_data.get("autopilot_job_id")
+    ]
+    if not scoped:
+        return
+    surface_keys = {
+        str(item.get("autopilot_surface_key") or "")
+        for item in scoped
+        if item.get("autopilot_surface_key")
+    }
+    if len(surface_keys) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Autopilot cases from different profiles, targets or builds cannot share one execution run.",
+        )
+    normalized_target = str(target_kind or "web").lower()
+    mismatched_target = next(
+        (
+            item
+            for item in scoped
+            if item.get("autopilot_target_kind")
+            and str(item.get("autopilot_target_kind")).lower() != normalized_target
+        ),
+        None,
+    )
+    if mismatched_target is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The selected Autopilot cases belong to a different application target.",
+        )
+    if app_asset_id is not None:
+        expected_asset = str(app_asset_id)
+        mismatched_asset = next(
+            (
+                item
+                for item in scoped
+                if item.get("autopilot_repository_asset_id")
+                and str(item.get("autopilot_repository_asset_id")) != expected_asset
+            ),
+            None,
+        )
+        if mismatched_asset is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The selected Autopilot cases belong to a different APK/IPA build.",
+            )
+
+
 def _parse_activity_datetime(value: object) -> datetime | None:
     if not value:
         return None
@@ -933,6 +998,11 @@ async def create_execution(
     )).unique().all()
     if len(cases) != len(set(payload.test_case_ids)):
         raise HTTPException(status_code=400, detail="One or more test cases are unavailable or not automation candidates")
+    _validate_autopilot_case_scope(
+        list(cases),
+        target_kind=target["target_kind"],
+        app_asset_id=target.get("app_asset_id"),
+    )
     run = ExecutionRun(
         project_id=payload.project_id,
         requested_by_id=user.id,

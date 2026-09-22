@@ -76,6 +76,55 @@ def test_object_storage_requires_all_credentials():
 
 
 @pytest.mark.asyncio
+async def test_find_owned_mobile_asset_prefers_project_and_allows_one_legacy_candidate():
+    owner_id = uuid4()
+    project_id = uuid4()
+    project_asset = UploadedAsset(
+        id=uuid4(),
+        owner_id=owner_id,
+        project_id=project_id,
+        filename="investnation.apk",
+        extension="apk",
+        sha256="a" * 64,
+        status="ready",
+    )
+    legacy_asset = UploadedAsset(
+        id=uuid4(),
+        owner_id=owner_id,
+        project_id=None,
+        filename="investnation.apk",
+        extension="apk",
+        sha256="a" * 64,
+        status="ready",
+    )
+
+    class Result:
+        def all(self):
+            return [legacy_asset, project_asset]
+
+    class DB:
+        async def scalars(self, _query):
+            return Result()
+
+    found = await UploadRepositoryService.find_owned_mobile_asset(
+        DB(), owner_id, project_id=project_id, sha256="A" * 64
+    )
+    assert found is project_asset
+
+    class LegacyOnlyDB:
+        async def scalars(self, _query):
+            class LegacyResult:
+                def all(self):
+                    return [legacy_asset]
+            return LegacyResult()
+
+    found_legacy = await UploadRepositoryService.find_owned_mobile_asset(
+        LegacyOnlyDB(), owner_id, project_id=project_id, sha256="a" * 64
+    )
+    assert found_legacy is legacy_asset
+
+
+@pytest.mark.asyncio
 async def test_concurrent_materialization_uses_isolated_staging_files(tmp_path, monkeypatch):
     """A resume request and a status retry may materialize the same APK together."""
     asset_id = uuid4()

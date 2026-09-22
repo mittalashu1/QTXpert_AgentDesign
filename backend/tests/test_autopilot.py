@@ -25,6 +25,7 @@ from app.schemas.autopilot import (
     DiscoveryLocator,
 )
 from app.api.routes.autopilot import (
+    _autopilot_safe_case_metadata,
     _blocking_checkpoint_requests,
     _effective_context,
     _merge_discovery_snapshot,
@@ -35,6 +36,7 @@ from app.api.routes.autopilot import (
     _setup_profile,
     _strip_suite_evidence_paths,
 )
+from app.api.routes.executions import _validate_autopilot_case_scope
 from app.services.autopilot import (
     AutopilotPrototypeService,
     AutopilotUploadTooLarge,
@@ -55,6 +57,37 @@ from app.services.autopilot_report import build_test_audit_report
 def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
     settings = Settings(AUTOPILOT_STORAGE_PATH=str(tmp_path), **overrides)
     return AutopilotPrototypeService(settings)
+
+
+def test_autopilot_case_metadata_and_execution_gate_keep_one_surface():
+    test = AutopilotTest(
+        id="QT-AUTO-FUNCTIONAL-001",
+        suite="Functional",
+        title="Open the public landing screen",
+        objective="Validate the observed entry point",
+    )
+    metadata = _autopilot_safe_case_metadata(
+        test,
+        "job-investnation",
+        scope={
+            "autopilot_surface_key": "surface-investnation-android",
+            "autopilot_surface_identity": "sha256:" + "a" * 64,
+            "autopilot_profile_id": "uae_fintech",
+            "autopilot_target_kind": "android",
+            "autopilot_repository_asset_id": "11111111-1111-4111-8111-111111111111",
+        },
+    )
+    assert metadata["autopilot_surface_key"] == "surface-investnation-android"
+    assert metadata["autopilot_target_kind"] == "android"
+
+    first = SimpleNamespace(test_data=metadata)
+    second = SimpleNamespace(test_data={**metadata, "autopilot_surface_key": "surface-other-build"})
+    with pytest.raises(Exception, match="different profiles"):
+        _validate_autopilot_case_scope(
+            [first, second],
+            target_kind="android",
+            app_asset_id=None,
+        )
 
 
 def test_initial_checkpoint_is_target_driven_and_does_not_show_plan_references():

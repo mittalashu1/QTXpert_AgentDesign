@@ -5,11 +5,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps.auth_deps import get_current_user
 from app.config import Settings, get_settings
 from app.database.models.user import User
+from app.database.models.autopilot_job import AutopilotJob
+from app.database.models.uploaded_asset import UploadedAsset
 from app.database.repositories.requirement_repository import ProjectRepository
 from app.database.session import AsyncSessionLocal, get_db_session
 from app.schemas.upload_repository import UploadedAssetOut
@@ -21,6 +24,76 @@ from app.services.upload_repository import (
 )
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
+
+
+async def _repair_project_mobile_assets(
+    db: AsyncSession,
+    owner_id: UUID,
+    project_id: UUID,
+) -> None:
+    """Make legacy Autopilot APK/IPA rows visible in the active repository.
+
+    This is deliberately job-driven: an unscoped upload is promoted only when
+    an owned Autopilot job references the same immutable SHA-256.  It avoids
+    bulk-claiming a user's unrelated build while fixing the migration gap that
+    made existing builds disappear from Test Data after a deployment.
+    """
+
+    try:
+        jobs = list(
+            (
+                await db.scalars(
+                    select(AutopilotJob).where(
+                        AutopilotJob.owner_id == owner_id,
+                        AutopilotJob.target_kind.in_(["android", "ios"]),
+                        AutopilotJob.status != "superseded",
+                        or_(AutopilotJob.project_id == project_id, AutopilotJob.project_id.is_(None)),
+                    ).order_by(AutopilotJob.created_at.desc()).limit(200)
+                )
+            ).all()
+        )
+        changed = False
+        for job in jobs:
+            analysis = job.analysis if isinstance(job.analysis, dict) else {}
+            sha256 = str(analysis.get("sha256") or "").strip().lower()
+            if not sha256 and job.repository_asset_id is None:
+                continue
+            asset = None
+            if job.repository_asset_id is not None:
+                asset = await db.scalar(
+                    select(UploadedAsset).where(
+                        UploadedAsset.id == job.repository_asset_id,
+                        UploadedAsset.owner_id == owner_id,
+                        UploadedAsset.status == "ready",
+                    )
+                )
+                if asset is not None and asset.project_id not in (None, project_id):
+                    asset = None
+            if asset is None:
+                asset = await UploadRepositoryService.find_owned_mobile_asset(
+                    db,
+                    owner_id,
+                    project_id=project_id,
+                    sha256=sha256,
+                    filename=job.filename,
+                )
+            if asset is None:
+                continue
+            if asset.project_id is None:
+                asset.project_id = project_id
+                changed = True
+            if job.repository_asset_id != asset.id:
+                job.repository_asset_id = asset.id
+                changed = True
+            if job.project_id is None:
+                job.project_id = project_id
+                changed = True
+        if changed:
+            await db.commit()
+    except Exception:
+        await db.rollback()
+        # Repository listing remains useful even when a legacy repair races a
+        # database restart; the normal query below still returns current rows.
 
 
 async def _resolve_project(
@@ -60,6 +133,7 @@ async def list_uploads(
 ):
     """List reusable files for the active project only."""
     active_project_id = await _resolve_project(db, user.id, project_id, x_qtxpert_project_id)
+    await _repair_project_mobile_assets(db, user.id, active_project_id)
     return await UploadRepositoryService.list_owned(
         db,
         user.id,

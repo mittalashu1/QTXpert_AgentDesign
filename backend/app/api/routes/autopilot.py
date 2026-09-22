@@ -569,12 +569,35 @@ async def _surface_matches(
             or_(AutopilotJob.surface_key == surface_key, AutopilotJob.surface_key == ""),
             AutopilotJob.status != "superseded",
         )
-        if project_id is not None:
-            query = query.outerjoin(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
-                or_(AutopilotJob.project_id == project_id, UploadedAsset.project_id == project_id)
+        # Do not apply the project predicate before reconstructing legacy
+        # rows.  Builds uploaded before project-aware repository metadata was
+        # introduced have a null project on both the job and asset; filtering
+        # those rows here made the exact same APK look like a new surface on
+        # every run.  The bounded repair below still rejects an asset already
+        # assigned to another project.
+        candidates = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()).limit(500))).all())
+        records = []
+        changed = False
+        for record in candidates:
+            if _record_surface_key(record)[3] != surface_key:
+                continue
+            if project_id is not None and record.project_id not in (None, project_id):
+                continue
+            asset = await _repair_legacy_repository_link(
+                db,
+                service,
+                record,
+                user,
+                project_id=project_id,
             )
-        candidates = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()))).all())
-        records = [record for record in candidates if _record_surface_key(record)[3] == surface_key]
+            if project_id is not None and asset is not None and asset.project_id not in (None, project_id):
+                continue
+            if project_id is not None and record.project_id is None:
+                record.project_id = project_id
+                changed = True
+            records.append(record)
+        if changed:
+            await db.commit()
     except Exception as exc:  # pragma: no cover - exercised by degraded storage
         try:
             await db.rollback()
@@ -774,6 +797,102 @@ async def _link_repository_asset(
         logger.warning("Autopilot repository link write skipped: %s", exc)
 
 
+def _job_analysis_sha(job: object) -> str:
+    """Read a content hash from either a durable row or a local manifest."""
+
+    analysis = getattr(job, "analysis", None)
+    if analysis is None and isinstance(job, dict):
+        analysis = job.get("analysis")
+    if isinstance(analysis, dict):
+        value = str(analysis.get("sha256") or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", value):
+            return value
+    return ""
+
+
+async def _repair_legacy_repository_link(
+    db: AsyncSession,
+    service: AutopilotPrototypeService,
+    record: AutopilotJob,
+    user: User,
+    *,
+    project_id: Optional[UUID] = None,
+) -> Optional[UploadedAsset]:
+    """Repair one old APK/IPA job without crossing project boundaries.
+
+    The repository migration added ``repository_asset_id`` after older
+    Autopilot jobs had already been created.  When that link is absent, use
+    the immutable analysis hash (or exact filename as a last resort) to find
+    the owner's existing binary, then attach it to both durable stores.  A
+    project already assigned to another asset/job is never overwritten.
+    """
+
+    target_kind = str(getattr(record, "target_kind", None) or "android").lower()
+    if target_kind == "web":
+        return None
+    active_project = project_id or getattr(record, "project_id", None)
+    asset: Optional[UploadedAsset] = None
+    raw_asset_id = getattr(record, "repository_asset_id", None)
+    if raw_asset_id is not None:
+        try:
+            asset = await db.scalar(
+                select(UploadedAsset).where(
+                    UploadedAsset.id == raw_asset_id,
+                    UploadedAsset.owner_id == user.id,
+                    UploadedAsset.status == "ready",
+                )
+            )
+        except Exception:
+            await db.rollback()
+            asset = None
+    if asset is not None and active_project is not None and asset.project_id not in (None, active_project):
+        # The stale foreign key points at another project.  Do not reuse it;
+        # try an immutable-hash match scoped to the current project instead.
+        asset = None
+    if asset is None:
+        asset = await UploadRepositoryService.find_owned_mobile_asset(
+            db,
+            user.id,
+            project_id=active_project,
+            sha256=_job_analysis_sha(record),
+            filename=getattr(record, "filename", None),
+        )
+        if active_project is None and asset is not None and asset.project_id is not None:
+            # An unscoped legacy job may only adopt an unscoped asset.  Never
+            # infer a project from a binary that already belongs elsewhere.
+            asset = None
+    if asset is None:
+        return None
+    changed = False
+    if active_project is not None and asset.project_id is None:
+        asset.project_id = active_project
+        changed = True
+    if getattr(record, "repository_asset_id", None) != asset.id:
+        record.repository_asset_id = asset.id
+        changed = True
+    if active_project is not None and getattr(record, "project_id", None) is None:
+        record.project_id = active_project
+        changed = True
+    if changed:
+        await db.commit()
+        try:
+            await db.refresh(record)
+            await db.refresh(asset)
+        except Exception:
+            # The link is already durable.  A degraded refresh must not make
+            # the caller lose the asset it just repaired.
+            logger.info("Legacy repository link refresh skipped job_id=%s", record.job_id, exc_info=True)
+        try:
+            await service.update_job(
+                record.job_id,
+                repository_asset_id=str(asset.id),
+                project_id=str(active_project) if active_project is not None else None,
+            )
+        except (FileNotFoundError, ValueError):
+            logger.info("Legacy repository link manifest mirror skipped job_id=%s", record.job_id)
+    return asset
+
+
 async def _ensure_local_artifact(
     db: AsyncSession,
     service: AutopilotPrototypeService,
@@ -800,10 +919,50 @@ async def _ensure_local_artifact(
     # an earlier deployment, so accept either source after ownership has been
     # verified by ``_require_owned_job`` above.
     asset_id = record.repository_asset_id if record is not None else None
+    if record is not None:
+        repaired = await _repair_legacy_repository_link(
+            db,
+            service,
+            record,
+            user,
+            project_id=record.project_id,
+        )
+        if repaired is not None:
+            asset_id = repaired.id
     if asset_id is None:
         raw_asset_id = job.get("repository_asset_id")
         if raw_asset_id and _is_uuid(raw_asset_id):
             asset_id = UUID(str(raw_asset_id))
+    if asset_id is None:
+        # Filesystem-only manifests from the pre-repository deployment can
+        # still be repaired when the corresponding owned object exists.
+        raw_project = job.get("project_id")
+        try:
+            manifest_project = UUID(str(raw_project)) if raw_project else None
+        except (TypeError, ValueError):
+            manifest_project = None
+        asset = await UploadRepositoryService.find_owned_mobile_asset(
+            db,
+            immutable_owner_id,
+            project_id=manifest_project,
+            sha256=_job_analysis_sha(job),
+            filename=job.get("filename"),
+        )
+        if manifest_project is None and asset is not None and asset.project_id is not None:
+            asset = None
+        if asset is not None:
+            asset_id = asset.id
+            if manifest_project is not None and asset.project_id is None:
+                asset.project_id = manifest_project
+                await db.commit()
+            try:
+                await service.update_job(
+                    job_id,
+                    repository_asset_id=str(asset.id),
+                    project_id=str(manifest_project) if manifest_project is not None else None,
+                )
+            except (FileNotFoundError, ValueError):
+                logger.info("Legacy repository manifest repair skipped job_id=%s", job_id)
     if asset_id is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -2533,11 +2692,27 @@ async def get_autopilot_report_tabs(
             AutopilotJob.owner_id == user.id,
             AutopilotJob.status != "superseded",
         )
-        if project_id is not None:
-            query = query.outerjoin(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
-                or_(AutopilotJob.project_id == project_id, UploadedAsset.project_id == project_id)
+        candidates = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()).limit(500))).all())
+        records = []
+        changed = False
+        for record in candidates:
+            if project_id is not None and record.project_id not in (None, project_id):
+                continue
+            asset = await _repair_legacy_repository_link(
+                db,
+                service,
+                record,
+                user,
+                project_id=project_id,
             )
-        records = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()))).all())
+            if project_id is not None and asset is not None and asset.project_id not in (None, project_id):
+                continue
+            if project_id is not None and record.project_id is None:
+                record.project_id = project_id
+                changed = True
+            records.append(record)
+        if changed:
+            await db.commit()
     except Exception as exc:  # pragma: no cover - exercised by degraded storage
         try:
             await db.rollback()
@@ -2831,6 +3006,19 @@ async def get_autopilot_duplicates(
                 .limit(5000)
             )
             existing = list((await db.scalars(query)).all())
+            current_surface_key = str(job.get("surface_key") or "")
+            if current_surface_key:
+                # Manual Test Design rows remain eligible for similarity
+                # checks. Autopilot rows carry an immutable surface key so a
+                # case from another profile/platform/build cannot appear in
+                # this target's duplicate report.
+                existing = [
+                    row
+                    for row in existing
+                    if not isinstance(row.test_data, dict)
+                    or not row.test_data.get("autopilot_job_id")
+                    or str(row.test_data.get("autopilot_surface_key") or "") == current_surface_key
+                ]
         except Exception:
             await db.rollback()
             logger.info("Autopilot duplicate lookup fell back to generated cases only", exc_info=True)
@@ -2895,7 +3083,12 @@ def _autopilot_test_case_type(bucket: str) -> TestCaseType:
     return mapping.get(str(bucket or "functional").strip().lower(), TestCaseType.FUNCTIONAL)
 
 
-def _autopilot_safe_case_metadata(test, job_id: str) -> dict:
+def _autopilot_safe_case_metadata(
+    test,
+    job_id: str,
+    *,
+    scope: Optional[dict] = None,
+) -> dict:
     """Build bounded, non-secret provenance for a shared TestCase row."""
 
     metadata = {
@@ -2915,6 +3108,22 @@ def _autopilot_safe_case_metadata(test, job_id: str) -> dict:
         "duplicate_status": test.duplicate_status,
         "duplicate_of": test.duplicate_of,
     }
+    if isinstance(scope, dict):
+        # These are immutable, non-secret routing keys.  Keeping them on each
+        # shared TestCase lets Test Execution reject a case copied from a
+        # different profile/platform/build instead of silently mixing suites
+        # that happen to live in the same project.
+        metadata.update({
+            key: str(value)[:500]
+            for key, value in scope.items()
+            if value not in (None, "") and key in {
+                "autopilot_surface_key",
+                "autopilot_surface_identity",
+                "autopilot_profile_id",
+                "autopilot_target_kind",
+                "autopilot_repository_asset_id",
+            }
+        })
     # Redact before JSON is written so a future generator cannot accidentally
     # turn an input-like provenance string into a persisted secret.
     safe_text = AutopilotPrototypeService._redact_context(json.dumps(metadata, ensure_ascii=False))
@@ -2959,6 +3168,13 @@ async def approve_autopilot_cases(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Project storage is temporarily unavailable; retry after storage recovers.") from exc
 
     analysis = await service.load_analysis(job_id)
+    scope_metadata = {
+        "autopilot_surface_key": job.get("surface_key"),
+        "autopilot_surface_identity": job.get("surface_identity"),
+        "autopilot_profile_id": job.get("profile_id"),
+        "autopilot_target_kind": job.get("target_kind"),
+        "autopilot_repository_asset_id": job.get("repository_asset_id"),
+    }
     candidates = {test.id: test for test in analysis.tests}
     selected_ids = set(candidates) if payload.approve_all else {str(item).strip() for item in payload.case_ids if str(item).strip()}
     if not selected_ids:
@@ -2993,7 +3209,12 @@ async def approve_autopilot_cases(
             llm_provider="autopilot",
             llm_model="evidence-first",
             generation_profile="autopilot",
-            title=f"Autopilot · {str(job.get('filename') or job.get('target_url') or 'target')}"[:500],
+            title=(
+                "Autopilot · "
+                f"{str(job.get('profile_id') or 'profile')} · "
+                f"{str(job.get('target_kind') or 'target')} · "
+                f"{str(job.get('filename') or job.get('target_url') or 'build')}"
+            )[:500],
             requirement_summary=(analysis.scope.summary or analysis.app_summary or "Autopilot evidence-backed coverage")[:1000],
         )
         db.add(shared_run)
@@ -3030,7 +3251,7 @@ async def approve_autopilot_cases(
                 priority=Priority(test.priority),
                 severity=Severity(test.severity),
                 preconditions=preconditions,
-                test_data=_autopilot_safe_case_metadata(test, job_id),
+                test_data=_autopilot_safe_case_metadata(test, job_id, scope=scope_metadata),
                 steps=steps or ["Use the observed journey and controls recorded for this case."],
                 expected_result=expected or "The observed expected outcome is satisfied.",
                 post_conditions=post_conditions,
@@ -3575,12 +3796,28 @@ async def get_latest_autopilot_job(
         # Include legacy rows whose surface key was added by migration 0019;
         # their profile/target identity is reconstructed below.
         query = query.where(or_(AutopilotJob.surface_key == surface_key, AutopilotJob.surface_key == ""))
-    if project_id is not None:
-        query = query.outerjoin(UploadedAsset, AutopilotJob.repository_asset_id == UploadedAsset.id).where(
-            or_(AutopilotJob.project_id == project_id, UploadedAsset.project_id == project_id)
-        )
     try:
-        candidates = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()))).all())
+        raw_candidates = list((await db.scalars(query.order_by(AutopilotJob.created_at.desc()).limit(500))).all())
+        candidates = []
+        changed = False
+        for item in raw_candidates:
+            if project_id is not None and item.project_id not in (None, project_id):
+                continue
+            asset = await _repair_legacy_repository_link(
+                db,
+                service,
+                item,
+                user,
+                project_id=project_id,
+            )
+            if project_id is not None and asset is not None and asset.project_id not in (None, project_id):
+                continue
+            if project_id is not None and item.project_id is None:
+                item.project_id = project_id
+                changed = True
+            candidates.append(item)
+        if changed:
+            await db.commit()
         record = next(
             (item for item in candidates if not surface_key or _record_surface_key(item)[3] == surface_key),
             None,
