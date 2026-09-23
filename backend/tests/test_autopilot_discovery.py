@@ -369,6 +369,49 @@ async def test_browserstack_discovery_does_not_resolve_custom_appium(tmp_path, m
     assert captured["options"]["userName"] == "user"
 
 
+@pytest.mark.asyncio
+async def test_browserstack_upload_quota_is_returned_as_structured_blocker(tmp_path):
+    apk_path = tmp_path / "app.apk"
+    apk_path.write_bytes(b"apk")
+
+    class Prototype:
+        async def load_job(self, _job_id):
+            return {"apk_path": str(apk_path), "filename": "app.apk"}
+
+        async def load_analysis(self, _job_id):
+            return SimpleNamespace(
+                sha256="abc", app_name="Demo", package_name="com.qtx.demo", main_activity=".MainActivity"
+            )
+
+        async def _browserstack_app_url(self, _job_id, _apk_path, _sha256):
+            raise RuntimeError("BrowserStack app upload failed (403): testing time expired")
+
+        def resolve_appium_url(self, _request):
+            raise AssertionError("BrowserStack discovery must not resolve custom Appium")
+
+        @staticmethod
+        def _looks_like_connector_problem(_exc):
+            return True
+
+    settings = SimpleNamespace(
+        BROWSERSTACK_HUB_URL="https://hub.browserstack.com/wd/hub",
+        BROWSERSTACK_USERNAME="user",
+        BROWSERSTACK_ACCESS_KEY="key",
+        BROWSERSTACK_PROJECT_NAME="QTXpert",
+        AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS=30,
+        AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS=30,
+        AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS=30,
+        AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS=30,
+    )
+    service = AutopilotDiscoveryService(settings, Prototype())
+
+    result = await service.run("job-1", AutopilotDiscoveryRequest(provider="browserstack"))
+
+    assert result.status == "blocked"
+    assert result.target_ready is False
+    assert "testing time expired" in (result.error or "")
+    assert "testing time expired" in (result.target_identity_reason or "")
+
 def test_runtime_discovery_stops_at_login_reached_after_safe_navigation(tmp_path, monkeypatch):
     import sys
     import types

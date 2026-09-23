@@ -1005,31 +1005,31 @@ class AutopilotDiscoveryService:
         if not apk_path.is_file() and not request.appium_app:
             raise RuntimeError("Uploaded APK artifact is unavailable for runtime discovery")
 
-        app_reference = request.appium_app or str(apk_path)
-        browserstack_options: Dict[str, Any] | None = None
-        if request.provider == "browserstack":
-            app_reference = await self.prototype._browserstack_app_url(job_id, apk_path, analysis.sha256)
-            appium_url = self.settings.BROWSERSTACK_HUB_URL
-            browserstack_options = {
-                "userName": self.settings.BROWSERSTACK_USERNAME,
-                "accessKey": self.settings.BROWSERSTACK_ACCESS_KEY,
-                "projectName": self.settings.BROWSERSTACK_PROJECT_NAME,
-                "buildName": f"Autopilot Discovery {analysis.app_name or analysis.package_name or job['filename']}",
-                "sessionName": f"Safe Discovery {job_id[:8]}",
-                "debug": True,
-                "networkLogs": True,
-            }
-        else:
-            # A BrowserStack run uses its configured hub and must not pass
-            # through custom-Appium validation. Resolving the custom endpoint
-            # before this branch made valid BrowserStack discovery requests
-            # fail whenever a hosted custom Appium URL was intentionally
-            # absent.
-            appium_url = self.prototype.resolve_appium_url(request)
-
         started = datetime.now(timezone.utc)
         perf = time.perf_counter()
+        app_reference = request.appium_app or str(apk_path)
+        browserstack_options: Dict[str, Any] | None = None
         try:
+            if request.provider == "browserstack":
+                # Keep the upload/provider handshake inside the guarded
+                # discovery path. A provider quota or credential failure is
+                # an actionable blocked run, not an unhandled 500/network
+                # error, and the UI can then tell the user how to proceed.
+                app_reference = await self.prototype._browserstack_app_url(job_id, apk_path, analysis.sha256)
+                appium_url = self.settings.BROWSERSTACK_HUB_URL
+                browserstack_options = {
+                    "userName": self.settings.BROWSERSTACK_USERNAME,
+                    "accessKey": self.settings.BROWSERSTACK_ACCESS_KEY,
+                    "projectName": self.settings.BROWSERSTACK_PROJECT_NAME,
+                    "buildName": f"Autopilot Discovery {analysis.app_name or analysis.package_name or job['filename']}",
+                    "sessionName": f"Safe Discovery {job_id[:8]}",
+                    "debug": True,
+                    "networkLogs": True,
+                }
+            else:
+                # BrowserStack uses its own configured hub. Custom-Appium
+                # validation must not run for that provider.
+                appium_url = self.prototype.resolve_appium_url(request)
             payload = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._run_sync,
