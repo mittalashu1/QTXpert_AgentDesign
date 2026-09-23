@@ -2064,6 +2064,65 @@ async def test_execution_history_files_are_per_run_and_reusable(tmp_path):
     assert restored is not None
     assert restored.execution_id == result.execution_id
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current_phase", "expected_phase"),
+    [
+        ("plan_pending_review", "plan_approved"),
+        ("exploring", "exploring"),
+        ("cases_pending_review", "cases_pending_review"),
+        ("execution_ready", "execution_ready"),
+    ],
+)
+async def test_plan_approval_does_not_rewind_forward_workflow_phase(
+    monkeypatch,
+    current_phase,
+    expected_phase,
+):
+    from app.api.routes import autopilot as autopilot_routes
+    from app.schemas.autopilot import AutopilotGenerationPlan
+    from app.services.autopilot_workflow import transition_phase
 
+    job_id = "55555555-5555-4555-8555-555555555555"
+    raw_plan = AutopilotGenerationPlan(
+        plan_id=f"plan-{job_id}-v1",
+        job_id=job_id,
+    ).model_dump(mode="json")
 
+    class FakeService:
+        def __init__(self):
+            self.job = {"job_id": job_id, "phase": current_phase}
+            self.updates = []
 
+        async def update_job(self, _job_id, **changes):
+            if "phase" in changes:
+                self.job["phase"] = transition_phase(self.job["phase"], changes["phase"])
+            self.job.update(changes)
+            self.updates.append(changes)
+            return self.job
+
+    service = FakeService()
+
+    async def require_owned_job(_service, _job_id, _user):
+        return service.job
+
+    async def load_or_build_plan(_service, _job_id):
+        return raw_plan, None
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: service)
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+    monkeypatch.setattr(autopilot_routes, "_load_or_build_autopilot_plan", load_or_build_plan)
+
+    approved = await autopilot_routes.approve_autopilot_generation_plan(
+        job_id,
+        SimpleNamespace(id="owner"),
+        None,
+    )
+
+    assert approved.status == "approved"
+    assert approved.approval_required is False
+    assert service.job["phase"] == expected_phase
+    if current_phase == "plan_pending_review":
+        assert service.updates[0]["phase"] == "plan_approved"
+    else:
+        assert "phase" not in service.updates[0]

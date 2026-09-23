@@ -2891,21 +2891,48 @@ async def approve_autopilot_generation_plan(
 ):
     """Approve the generated scope before Runtime Discovery may proceed."""
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
+    job = await _require_owned_job(service, job_id, user)
     raw_plan, _analysis = await _load_or_build_autopilot_plan(service, job_id)
     plan = AutopilotGenerationPlan.model_validate(raw_plan).model_copy(
         update={"status": "approved", "approval_required": False}
     )
+    # Approval is an idempotent gate, not a request to rewind the workflow.
+    # A resumed/legacy run can already be exploring when its plan still reads
+    # pending_review. Persist the approval while keeping that forward phase;
+    # Runtime Discovery will then continue from the current phase.
+    current_phase = phase_for_job(job)
+    phase_update: dict[str, str] = {}
+    try:
+        approved_phase = transition_phase(current_phase, "plan_approved")
+    except ValueError:
+        logger.info(
+            "Autopilot plan approved without phase rewind job_id=%s phase=%s",
+            job_id,
+            current_phase,
+        )
+    else:
+        if approved_phase != current_phase:
+            phase_update["phase"] = approved_phase
     try:
         await service.update_job(
             job_id,
             plan=plan.model_dump(mode="json"),
-            phase="plan_approved",
+            **phase_update,
         )
     except ValueError as exc:
+        # The phase may advance between the owner-scoped read and this write.
+        # Retry the plan-only update only when the new phase is already beyond
+        # the approval gate; never replace a concurrent workflow transition.
+        if phase_update and "Invalid Autopilot phase transition" in str(exc):
+            latest_job = await service.load_job(job_id)
+            latest_phase = phase_for_job(latest_job)
+            try:
+                transition_phase(latest_phase, "plan_approved")
+            except ValueError:
+                await service.update_job(job_id, plan=plan.model_dump(mode="json"))
+                return plan
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return plan
-
 
 @router.get("/{job_id}/context-sources", response_model=list[AutopilotScopeSource])
 async def get_autopilot_context_sources(
