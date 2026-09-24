@@ -37,7 +37,7 @@ type TestBucket =
   | "uat" | "ui" | "ui_positive" | "ui_negative" | "accessibility" | "integration" | "sit" | "performance" | "security" | "compatibility" | "resilience"
   | "permissions" | "regression";
 type TargetKind = "android" | "ios" | "web";
-type Provider = "browserstack" | "appium" | "playwright";
+type Provider = "browserstack" | "devicefarm" | "appium" | "playwright";
 type WorkflowPhase =
   | "draft" | "preflight" | "context_ready" | "plan_pending_review" | "plan_approved"
   | "exploring" | "cases_pending_review" | "cases_approved" | "execution_ready"
@@ -69,7 +69,18 @@ type Analysis = {
   phase?: WorkflowPhase; generation_plan?: GenerationPlan | null; application_map?: ApplicationMap | null;
   context_pack_version?: string; case_reviews?: Record<string, string>;
 };
-type ProviderStatus = { browserstack_configured: boolean; custom_appium_available: boolean; playwright_available?: boolean; custom_appium_reason?: string | null; custom_appium_url?: string | null; recommended_provider: Provider };
+type ProviderStatus = {
+  browserstack_configured: boolean;
+  device_farm_configured: boolean;
+  device_farm_region?: string | null;
+  device_farm_device_name?: string | null;
+  device_farm_reason?: string | null;
+  custom_appium_available: boolean;
+  playwright_available?: boolean;
+  custom_appium_reason?: string | null;
+  custom_appium_url?: string | null;
+  recommended_provider: Provider;
+};
 type AnalysisJob = {
   job_id: string; filename: string; status: "uploaded" | "analyzing" | "waiting_for_input" | "analyzed" | "failed" | "superseded";
   target_kind?: TargetKind; target_url?: string | null; profile_id?: string; report_tab_key?: string; surface_key?: string; surface_identity?: string; surface_version?: number; repository_asset_id?: string | null; stage: string; progress: number; context?: string; document_asset_ids?: string[]; document_analysis_run_id?: string | null; artifact_available?: boolean; error?: string; analysis?: Analysis | null;
@@ -913,15 +924,22 @@ export default function AutopilotPage() {
   useEffect(() => {
     apiClient.get<ProviderStatus>("/autopilot/providers").then((response) => {
       setProviderStatus(response.data);
-      const preferred = response.data.recommended_provider === "browserstack" && response.data.browserstack_configured
-        ? "browserstack"
-        : response.data.custom_appium_available
-          ? "appium"
-          : "browserstack";
+      const preferred = response.data.recommended_provider === "devicefarm" && response.data.device_farm_configured
+        ? "devicefarm"
+        : response.data.recommended_provider === "browserstack" && response.data.browserstack_configured
+          ? "browserstack"
+          : response.data.custom_appium_available
+            ? "appium"
+            : response.data.device_farm_configured
+              ? "devicefarm"
+              : "browserstack";
       setProvider(preferred);
       if (preferred === "appium") {
         setDeviceName("Android Emulator");
         setAppiumUrl(response.data.custom_appium_url || "");
+      } else if (preferred === "devicefarm") {
+        setDeviceName(response.data.device_farm_device_name || "Google Pixel 8");
+        setAppiumUrl("");
       }
     }).catch(() => setProviderStatus(null));
   }, []);
@@ -1942,10 +1960,12 @@ export default function AutopilotPage() {
   const activeTargetKind = analysis?.target_kind || targetKind;
   const activeProvider: Provider = activeTargetKind === "web" ? "playwright" : provider;
   const browserStackUnavailable = activeProvider === "browserstack" && providerStatus !== null && !providerStatus.browserstack_configured;
+  const deviceFarmUnavailable = activeProvider === "devicefarm" && activeTargetKind !== "android";
+  const deviceFarmNotConfigured = activeProvider === "devicefarm" && providerStatus !== null && !providerStatus.device_farm_configured;
   const customAppiumUnavailable = activeProvider === "appium" && providerStatus !== null && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
   const providerStatusPending = activeTargetKind !== "web" && providerStatus === null;
-  const noExecutionProvider = activeTargetKind !== "web" && providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
-  const executionUnavailable = providerStatusPending || browserStackUnavailable || customAppiumUnavailable || !artifactAvailable;
+  const noExecutionProvider = activeTargetKind !== "web" && providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.device_farm_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
+  const executionUnavailable = providerStatusPending || browserStackUnavailable || deviceFarmUnavailable || deviceFarmNotConfigured || customAppiumUnavailable || !artifactAvailable;
   const reportPending = report?.recommendation === "PENDING";
   const effectivePlan = generationPlan || analysis?.generation_plan || null;
   const effectiveApplicationMap = applicationMap || analysis?.application_map || null;
@@ -2275,7 +2295,7 @@ export default function AutopilotPage() {
                setContext(contextForTarget(selectedProfile, next, null, next === "web" ? targetUrl : null));
                setContextSource("default");
                if (next === "web") setProvider("playwright");
-              else if (provider === "playwright") setProvider(providerStatus?.browserstack_configured ? "browserstack" : "appium");
+              else if (provider === "playwright") setProvider(providerStatus?.device_farm_configured ? "devicefarm" : providerStatus?.browserstack_configured ? "browserstack" : "appium");
             }}>
               <MenuItem value="web">Web</MenuItem>
               <MenuItem value="android">Android</MenuItem>
@@ -2740,14 +2760,17 @@ export default function AutopilotPage() {
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>
       {providerStatusPending && <Alert severity="info" sx={{ mt: 2 }}>Checking execution providers…</Alert>}
       {activeTargetKind === "web" && <Alert severity="info" sx={{ mt: 2 }}>Website execution uses bounded, read-only Playwright checks. Authenticated, transactional and destructive journeys remain pending until approved setup is supplied.</Alert>}
-      {noExecutionProvider && <Alert severity="warning" sx={{ mt: 2 }}>No hosted mobile execution provider is configured. Configure BrowserStack credentials or enter a reachable HTTPS Appium endpoint before running.</Alert>}
-      {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose Custom / local Appium and enter a reachable endpoint.</Alert>}
+      {noExecutionProvider && <Alert severity="warning" sx={{ mt: 2 }}>No hosted mobile execution provider is configured. Configure AWS Device Farm, BrowserStack credentials, or enter a reachable HTTPS Appium endpoint before running.</Alert>}
+      {deviceFarmNotConfigured && activeTargetKind === "android" && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus?.device_farm_reason || "AWS Device Farm is not configured for this backend."}</Alert>}
+      {deviceFarmUnavailable && <Alert severity="warning" sx={{ mt: 2 }}>AWS Device Farm is configured for Android first. Choose BrowserStack or Custom Appium for an iOS target.</Alert>}
+      {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose AWS Device Farm, Custom / local Appium, or configure BrowserStack.</Alert>}
       {activeProvider === "appium" && providerStatus?.custom_appium_reason && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus.custom_appium_reason}</Alert>}
       <Grid container spacing={2} sx={{ mt: .5 }}>
-        {activeTargetKind === "web" ? <Grid item xs={12} md={4}><TextField fullWidth size="small" label="Website target" value={analysis?.target_url || targetUrl} InputProps={{ readOnly: true }} /></Grid> : <Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution provider</InputLabel><Select labelId="autopilot-provider-label" label="Execution provider" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><MenuItem value="browserstack" disabled={providerStatus !== null && !providerStatus.browserstack_configured}>BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid>}
+        {activeTargetKind === "web" ? <Grid item xs={12} md={4}><TextField fullWidth size="small" label="Website target" value={analysis?.target_url || targetUrl} InputProps={{ readOnly: true }} /></Grid> : <Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution provider</InputLabel><Select labelId="autopilot-provider-label" label="Execution provider" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><MenuItem value="devicefarm" disabled={(providerStatus !== null && !providerStatus.device_farm_configured) || activeTargetKind !== "android"}>AWS Device Farm (Android)</MenuItem><MenuItem value="browserstack" disabled={providerStatus !== null && !providerStatus.browserstack_configured}>BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid>}
         {activeTargetKind !== "web" && <Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid>}
         {activeTargetKind !== "web" && <Grid item xs={12} md={2}><TextField fullWidth size="small" label={`${activeTargetKind === "ios" ? "iOS" : "Android"} version`} value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid>}
         <Grid item xs={12} md={activeTargetKind === "web" ? 8 : 4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>
+        {activeTargetKind !== "web" && provider === "devicefarm" && <Grid item xs={12}><Alert severity="info">QTXpert will upload this APK to the configured AWS Device Farm project, start a temporary metered Android Appium session in {providerStatus?.device_farm_region || "us-west-2"}, run the bounded flow, and close the session.</Alert></Grid>}
         {activeTargetKind !== "web" && provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} helperText="Hosted runs require a reachable HTTPS endpoint; leave blank only when the backend has one configured." /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}
         {activeTargetKind !== "web" && <Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions" /><Typography variant="caption" color="text.secondary" display="block">Prevents unattended runs from stalling on platform permission dialogs; grant/deny behavior remains covered by generated tests.</Typography></Grid>}
       </Grid>

@@ -153,6 +153,8 @@ class AutopilotSuiteService:
         apk_path = Path(job.get("apk_path") or "")
         app_reference = request.appium_app or str(apk_path)
         browserstack_options: Dict[str, Any] | None = None
+        device_farm_service = None
+        device_farm_session = None
         results: list[AutopilotSuiteTestResult]
         try:
             if not apk_path.is_file() and not request.appium_app:
@@ -171,6 +173,16 @@ class AutopilotSuiteService:
                     "debug": True,
                     "networkLogs": True,
                 }
+            elif request.provider == "devicefarm":
+                device_farm_service, device_farm_session = await self.prototype._start_device_farm_session(
+                    job_id,
+                    request,
+                    apk_path,
+                    analysis.sha256,
+                    session_name=f"QTXpert Suite {job_id[:8]}",
+                )
+                appium_url = device_farm_session.appium_url
+                app_reference = device_farm_session.app_arn
             else:
                 appium_url = self.prototype.resolve_appium_url(request)
             results = await asyncio.wait_for(
@@ -233,6 +245,8 @@ class AutopilotSuiteService:
                 error=connector_error,
                 tests=failure_results + deferred_results,
             )
+        finally:
+            await self.prototype._stop_device_farm_session(device_farm_service, device_farm_session)
 
         result_map = {item.test_id: item for item in results}
         deferred_map = {item.test_id: item for item in deferred_results}
@@ -428,6 +442,7 @@ class AutopilotSuiteService:
         sensitive_input_keys = sensitive_input_keys or set()
 
         is_ios = request.target_kind == "ios"
+        is_device_farm = request.provider == "devicefarm"
         capabilities: Dict[str, Any] = {
             "platformName": "iOS" if is_ios else "Android",
             "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
@@ -446,6 +461,8 @@ class AutopilotSuiteService:
                     "appium:useNewWDA": False,
                 }
             )
+        elif is_device_farm:
+            capabilities["appium:autoGrantPermissions"] = request.auto_grant_permissions
         else:
             capabilities.update(
                 {
@@ -457,7 +474,7 @@ class AutopilotSuiteService:
                     "appium:appWaitDuration": adb_exec_timeout_ms,
                 }
             )
-        if request.platform_version:
+        if request.platform_version and not is_device_farm:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
             capabilities["bstack:options"] = browserstack_options

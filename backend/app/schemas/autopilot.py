@@ -27,7 +27,7 @@ AutopilotTestBucket = Literal[
     "regression",
 ]
 AutopilotTargetKind = Literal["android", "ios", "web"]
-AutopilotProvider = Literal["browserstack", "appium", "playwright"]
+AutopilotProvider = Literal["browserstack", "devicefarm", "appium", "playwright"]
 
 # The phase is intentionally separate from the legacy ``status`` field.  The
 # latter is a transport/storage status used by older clients, while this
@@ -673,6 +673,10 @@ class AutopilotJobStatus(BaseModel):
 
 class AutopilotProviderStatus(BaseModel):
     browserstack_configured: bool = False
+    device_farm_configured: bool = False
+    device_farm_region: Optional[str] = None
+    device_farm_device_name: Optional[str] = None
+    device_farm_reason: Optional[str] = None
     custom_appium_available: bool = False
     playwright_available: bool = True
     custom_appium_reason: Optional[str] = None
@@ -858,7 +862,7 @@ class AutopilotExecutionRequest(BaseModel):
     platform_version: Optional[str] = "14.0"
     appium_app: Optional[str] = Field(
         default=None,
-        description="Optional app reference for a custom remote Appium provider. BrowserStack uploads the APK automatically.",
+        description="Optional app reference for a custom remote Appium provider. Cloud providers upload the APK automatically.",
     )
     no_reset: bool = False
     auto_grant_permissions: bool = True

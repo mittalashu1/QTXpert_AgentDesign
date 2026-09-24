@@ -82,6 +82,7 @@ from app.services.autopilot_workflow import (
     phase_for_job,
     transition_phase,
 )
+from app.services.device_farm import DeviceFarmService, DeviceFarmSession
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -3895,6 +3896,55 @@ class AutopilotPrototypeService:
             )
         return value.rstrip("/")
 
+    async def _start_device_farm_session(
+        self,
+        job_id: str,
+        request: AutopilotExecutionRequest,
+        apk_path: Path,
+        sha256: str,
+        *,
+        session_name: str,
+    ) -> tuple[DeviceFarmService, DeviceFarmSession]:
+        """Upload the job artifact and open one short-lived Android session."""
+
+        if request.target_kind != "android":
+            raise RuntimeError("AWS Device Farm Appium is currently configured for Android first")
+        service = DeviceFarmService(self.settings)
+        if not service.configured:
+            raise RuntimeError(
+                "AWS Device Farm is not configured for this hosted service. "
+                "Set DEVICE_FARM_PROJECT_ARN and DEVICE_FARM_ENABLED=true."
+            )
+        if not apk_path.is_file():
+            raise RuntimeError("The uploaded APK artifact is unavailable for AWS Device Farm")
+        app_arn = await asyncio.to_thread(
+            service.upload_app,
+            apk_path,
+            sha256,
+            self._job_dir(job_id) / "devicefarm.json",
+        )
+        try:
+            session = await asyncio.to_thread(
+                service.start_session,
+                app_arn=app_arn,
+                device_name=request.device_name,
+                platform_version=request.platform_version,
+                session_name=session_name,
+            )
+        except Exception:
+            # If session creation fails after upload, no device is left running;
+            # the private upload is harmless and is reused by a retry.
+            raise
+        return service, session
+
+    @staticmethod
+    async def _stop_device_farm_session(
+        service: DeviceFarmService | None,
+        session: DeviceFarmSession | None,
+    ) -> None:
+        if service is not None and session is not None:
+            await asyncio.to_thread(service.stop_session, session.arn)
+
     async def execute_smoke(self, job_id: str, request: AutopilotExecutionRequest) -> AutopilotExecutionResult:
         job = await self.load_job(job_id)
         analysis = await self.load_analysis(job_id)
@@ -3918,6 +3968,8 @@ class AutopilotPrototypeService:
         evidence_dir.mkdir(parents=True, exist_ok=True)
         screenshot_path = evidence_dir / "launch.png"
         source_path = evidence_dir / ("page-source.html" if target_kind == "web" else "page-source.xml")
+        device_farm_service: DeviceFarmService | None = None
+        device_farm_session: DeviceFarmSession | None = None
 
         try:
             if target_kind == "web":
@@ -3958,6 +4010,16 @@ class AutopilotPrototypeService:
                         "debug": True,
                         "networkLogs": True,
                     }
+                elif request.provider == "devicefarm":
+                    device_farm_service, device_farm_session = await self._start_device_farm_session(
+                        job_id,
+                        request,
+                        apk_path,
+                        analysis.sha256,
+                        session_name=f"QTXpert Smoke {job_id[:8]}",
+                    )
+                    appium_url = device_farm_session.appium_url
+                    app_reference = device_farm_session.app_arn
                 else:
                     # Hosted custom Appium must be explicitly configured/reachable.
                     appium_url = self.resolve_appium_url(request)
@@ -3982,12 +4044,17 @@ class AutopilotPrototypeService:
                 result["target_kind"] = target_kind
                 if request.provider == "browserstack":
                     result["cloud_app_reference"] = app_reference
+                elif request.provider == "devicefarm" and device_farm_session is not None:
+                    result["device_farm_device"] = device_farm_session.device.name
+                    result["device_farm_session_arn"] = device_farm_session.arn
                 execution_status = "passed"
                 error = None
         except Exception as exc:
             result = {"provider": request.provider}
             execution_status = "blocked" if self._looks_like_connector_problem(exc) else "failed"
             error = f"{type(exc).__name__}: {exc}"
+        finally:
+            await self._stop_device_farm_session(device_farm_service, device_farm_session)
 
         finished = datetime.now(timezone.utc)
         execution = AutopilotExecutionResult(
@@ -4026,6 +4093,7 @@ class AutopilotPrototypeService:
     ) -> Dict[str, Any]:
         from appium import webdriver
         is_ios = request.target_kind == "ios"
+        is_device_farm = request.provider == "devicefarm"
         capabilities: Dict[str, Any] = {
             "platformName": "iOS" if is_ios else "Android",
             "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
@@ -4042,6 +4110,12 @@ class AutopilotPrototypeService:
                     "appium:useNewWDA": False,
                 }
             )
+        elif is_device_farm:
+            # Device Farm chooses the concrete device while opening the
+            # remote-access session. Its Appium endpoint rejects some
+            # local-device capabilities, notably platformVersion and the
+            # install/ADB timeout extensions, so keep this handshake minimal.
+            capabilities["appium:autoGrantPermissions"] = request.auto_grant_permissions
         else:
             capabilities.update(
                 {
@@ -4053,7 +4127,7 @@ class AutopilotPrototypeService:
                     "appium:appWaitDuration": adb_exec_timeout_ms,
                 }
             )
-        if request.platform_version:
+        if request.platform_version and not is_device_farm:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
             capabilities["bstack:options"] = browserstack_options
@@ -4156,6 +4230,8 @@ class AutopilotPrototypeService:
                 "browserstack is not configured",
                 "browserstack app upload failed (401)",
                 "browserstack app upload failed (403)",
+                "aws device farm",
+                "device farm",
                 "uploaded apk artifact is unavailable",
                 "uploaded apk artifact",
                 "custom appium is not configured",

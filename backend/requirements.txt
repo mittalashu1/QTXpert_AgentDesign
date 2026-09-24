@@ -25,6 +25,8 @@ openai==1.58.1
 anthropic==0.42.0
 google-generativeai==0.8.3
 aioboto3==13.3.0
+# Direct AWS SDK import used by the Device Farm remote-Appium adapter.
+boto3>=1.35.0,<2
 # Optional, opt-in AWS CloudWatch Application Signals/X-Ray APM. The
 # container entrypoint enables the auto-instrumenter only when
 # AWS_APM_ENABLED=true, so normal deployments do not export telemetry.

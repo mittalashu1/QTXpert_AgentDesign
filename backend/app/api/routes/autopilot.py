@@ -47,6 +47,7 @@ from app.schemas.autopilot import (
     AutopilotInputRequest,
     AutopilotJobStatus,
     AutopilotProviderStatus,
+    AutopilotProvider,
     AutopilotProfileOption,
     AutopilotGenerationPlan,
     AutopilotPlanUpdateRequest,
@@ -2636,6 +2637,7 @@ async def get_autopilot_providers(
 ):
     _ = user
     configured = settings.browserstack_configured
+    device_farm_configured = settings.device_farm_configured
     configured_appium_url = (settings.AUTOPILOT_CUSTOM_APPIUM_URL or "").strip() or None
     if configured_appium_url:
         parsed_appium = urlparse(configured_appium_url)
@@ -2647,15 +2649,28 @@ async def get_autopilot_providers(
     if not custom_available:
         reason = (
             "No reachable Appium endpoint is configured for this hosted service. "
-            "Use BrowserStack or set AUTOPILOT_CUSTOM_APPIUM_URL to an authenticated HTTPS endpoint."
+            "Use AWS Device Farm, BrowserStack, or set AUTOPILOT_CUSTOM_APPIUM_URL to an authenticated HTTPS endpoint."
         )
+    device_farm_reason = None
+    if not device_farm_configured:
+        device_farm_reason = (
+            "AWS Device Farm is not enabled for this backend. Set DEVICE_FARM_ENABLED=true "
+            "and provide the existing Device Farm project ARN."
+        )
+    recommended: AutopilotProvider = (
+        "devicefarm" if device_farm_configured else "browserstack" if configured else "appium"
+    )
     return AutopilotProviderStatus(
         browserstack_configured=configured,
+        device_farm_configured=device_farm_configured,
+        device_farm_region=settings.DEVICE_FARM_REGION if device_farm_configured else None,
+        device_farm_device_name=settings.DEVICE_FARM_DEVICE_NAME if device_farm_configured else None,
+        device_farm_reason=device_farm_reason,
         custom_appium_available=custom_available,
         playwright_available=True,
         custom_appium_reason=reason,
         custom_appium_url=configured_appium_url,
-        recommended_provider="browserstack" if configured else "appium",
+        recommended_provider=recommended,
     )
 
 

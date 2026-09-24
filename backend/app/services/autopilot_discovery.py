@@ -1009,6 +1009,8 @@ class AutopilotDiscoveryService:
         perf = time.perf_counter()
         app_reference = request.appium_app or str(apk_path)
         browserstack_options: Dict[str, Any] | None = None
+        device_farm_service = None
+        device_farm_session = None
         try:
             if request.provider == "browserstack":
                 # Keep the upload/provider handshake inside the guarded
@@ -1026,6 +1028,16 @@ class AutopilotDiscoveryService:
                     "debug": True,
                     "networkLogs": True,
                 }
+            elif request.provider == "devicefarm":
+                device_farm_service, device_farm_session = await self.prototype._start_device_farm_session(
+                    job_id,
+                    request,
+                    apk_path,
+                    analysis.sha256,
+                    session_name=f"QTXpert Discovery {job_id[:8]}",
+                )
+                appium_url = device_farm_session.appium_url
+                app_reference = device_farm_session.app_arn
             else:
                 # BrowserStack uses its own configured hub. Custom-Appium
                 # validation must not run for that provider.
@@ -1069,6 +1081,8 @@ class AutopilotDiscoveryService:
             }
             status = "blocked" if self.prototype._looks_like_connector_problem(exc) else "failed"
             error = payload["target_identity_reason"]
+        finally:
+            await self.prototype._stop_device_farm_session(device_farm_service, device_farm_session)
 
         finished = datetime.now(timezone.utc)
         screens: list[DiscoveredScreen] = payload["screens"]
@@ -1132,6 +1146,7 @@ class AutopilotDiscoveryService:
         from appium.webdriver.common.appiumby import AppiumBy
 
         is_ios = request.target_kind == "ios"
+        is_device_farm = request.provider == "devicefarm"
         capabilities: Dict[str, Any] = {
             "platformName": "iOS" if is_ios else "Android",
             "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
@@ -1154,6 +1169,8 @@ class AutopilotDiscoveryService:
                     "appium:useNewWDA": False,
                 }
             )
+        elif is_device_farm:
+            capabilities["appium:autoGrantPermissions"] = request.auto_grant_permissions
         else:
             capabilities.update(
                 {
@@ -1165,7 +1182,7 @@ class AutopilotDiscoveryService:
                     "appium:appWaitDuration": adb_exec_timeout_ms,
                 }
             )
-        if request.platform_version:
+        if request.platform_version and not is_device_farm:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
             capabilities["bstack:options"] = browserstack_options

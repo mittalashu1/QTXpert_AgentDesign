@@ -314,6 +314,19 @@ class Settings(BaseSettings):
     BROWSERSTACK_UPLOAD_URL: str = "https://api-cloud.browserstack.com/app-automate/upload"
     BROWSERSTACK_PROJECT_NAME: str = "QTXpert Autopilot"
 
+    # AWS Device Farm remote Appium.  These are non-secret routing settings;
+    # boto3 obtains credentials from the standard deployment credential chain.
+    DEVICE_FARM_ENABLED: bool = False
+    DEVICE_FARM_PROJECT_ARN: Optional[str] = None
+    DEVICE_FARM_REGION: str = "us-west-2"
+    DEVICE_FARM_DEVICE_ARN: Optional[str] = None
+    DEVICE_FARM_DEVICE_NAME: str = "Google Pixel 8"
+    DEVICE_FARM_BILLING_METHOD: Literal["METERED", "UNMETERED"] = "METERED"
+    DEVICE_FARM_APPIUM_VERSION: Literal["2", "3"] = "2"
+    DEVICE_FARM_UPLOAD_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
+    DEVICE_FARM_SESSION_TIMEOUT_SECONDS: int = Field(default=180, ge=30, le=900)
+    DEVICE_FARM_POLL_INTERVAL_SECONDS: float = Field(default=3, ge=1, le=15)
+
     @property
     def browserstack_configured(self) -> bool:
         return bool(self.BROWSERSTACK_USERNAME and self.BROWSERSTACK_ACCESS_KEY)
@@ -321,6 +334,10 @@ class Settings(BaseSettings):
     @property
     def custom_appium_configured(self) -> bool:
         return bool((self.AUTOPILOT_CUSTOM_APPIUM_URL or "").strip())
+
+    @property
+    def device_farm_configured(self) -> bool:
+        return bool(self.DEVICE_FARM_ENABLED and (self.DEVICE_FARM_PROJECT_ARN or "").strip())
 
     # ------------------------------------------------------------------ #
     # Rate limiting

@@ -171,6 +171,21 @@ services:
         sync: false
       - key: AWS_APM_LOG_STREAM
         sync: false
+      # Existing AWS Device Farm project used by the Android Appium adapter.
+      # Credentials are intentionally not templated here; boto3 reads the
+      # already-managed AWS credential chain from the service environment.
+      - key: DEVICE_FARM_ENABLED
+        value: "true"
+      - key: DEVICE_FARM_PROJECT_ARN
+        value: arn:aws:devicefarm:us-west-2:813202175104:project:bba2f62e-31ca-4206-ad8d-4e5139261878
+      - key: DEVICE_FARM_REGION
+        value: us-west-2
+      - key: DEVICE_FARM_DEVICE_NAME
+        value: Google Pixel 8
+      - key: DEVICE_FARM_BILLING_METHOD
+        value: METERED
+      - key: DEVICE_FARM_APPIUM_VERSION
+        value: "2"
       - key: CORS_ORIGINS
         value: https://qtxpert-agentdesign.onrender.com,https://design.qtxpert.com,https://qtxpert-frontend.onrender.com
       # Set the remaining provider/integration keys (AZURE_OPENAI_API_KEY,

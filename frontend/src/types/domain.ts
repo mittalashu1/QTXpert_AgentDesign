@@ -344,7 +344,7 @@ export interface GenerationRunSummary {
 export type ExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type ExecutionResultStatus = "pending" | "passed" | "failed" | "blocked" | "skipped";
 export type ExecutionTargetKind = "web" | "android" | "ios";
-export type ExecutionProvider = "playwright" | "browserstack" | "appium";
+export type ExecutionProvider = "playwright" | "browserstack" | "devicefarm" | "appium";
 
 export interface Defect {
   id: string;
