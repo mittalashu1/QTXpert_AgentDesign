@@ -3,8 +3,9 @@
 Device Farm's remote-access API gives QTXpert a short-lived Appium endpoint
 for one real Android device.  The adapter deliberately owns the whole
 lifecycle: upload the already-approved APK, wait for AWS to process it, select
-an available device, start a metered remote session, and stop that session when
-the bounded Autopilot operation finishes.
+an available device, start a metered remote session, install the app when the
+installed AWS SDK exposes that as a separate operation, and stop the session
+when the bounded Autopilot operation finishes.
 
 No AWS credentials are stored here.  boto3 uses the standard credential chain
 provided by the hosting environment (for example, Render environment
@@ -127,6 +128,36 @@ class DeviceFarmService:
             )
         return value
 
+    @staticmethod
+    def _operation_input_members(client: Any, operation_name: str) -> set[str]:
+        """Return the request fields known by the installed botocore model.
+
+        AWS added app installation and Appium-version parameters to the
+        Device Farm remote-access request over time.  Render may resolve a
+        botocore model older than the live service, so the adapter must shape
+        its request to the SDK that is actually installed instead of sending
+        fields that fail local parameter validation.
+        """
+
+        try:
+            operation = client.meta.service_model.operation_model(operation_name)
+            input_shape = operation.input_shape
+            return set((input_shape.members or {}).keys()) if input_shape else set()
+        except Exception:
+            return set()
+
+    @classmethod
+    def _configuration_members(cls, client: Any) -> set[str]:
+        """Return the fields supported inside CreateRemoteAccessSession.configuration."""
+
+        try:
+            operation = client.meta.service_model.operation_model("CreateRemoteAccessSession")
+            input_shape = operation.input_shape
+            configuration_shape = (input_shape.members or {}).get("configuration") if input_shape else None
+            return set((configuration_shape.members or {}).keys()) if configuration_shape else set()
+        except Exception:
+            return set()
+
     def list_android_devices(self) -> list[dict[str, Any]]:
         """Return Android devices exposed by the account/project (read-only)."""
 
@@ -241,18 +272,25 @@ class DeviceFarmService:
             preferred_name=device_name or self.settings.DEVICE_FARM_DEVICE_NAME,
             platform_version=platform_version,
         )
-        configuration: dict[str, Any] = {
-            "billingMethod": self.settings.DEVICE_FARM_BILLING_METHOD,
-            "parameters": {"appium:version": self.settings.DEVICE_FARM_APPIUM_VERSION},
+        request_members = self._operation_input_members(client, "CreateRemoteAccessSession")
+        configuration_members = self._configuration_members(client)
+        configuration: dict[str, Any] = {}
+        if "billingMethod" in configuration_members or not configuration_members:
+            configuration["billingMethod"] = self.settings.DEVICE_FARM_BILLING_METHOD
+        if "parameters" in configuration_members:
+            configuration["parameters"] = {
+                "appium:version": self.settings.DEVICE_FARM_APPIUM_VERSION,
+            }
+        request: dict[str, Any] = {
+            "projectArn": self._project_arn(),
+            "deviceArn": device.arn,
+            "name": session_name[:256],
+            "configuration": configuration,
         }
+        if "appArn" in request_members:
+            request["appArn"] = app_arn
         try:
-            created = client.create_remote_access_session(
-                projectArn=self._project_arn(),
-                deviceArn=device.arn,
-                appArn=app_arn,
-                name=session_name[:256],
-                configuration=configuration,
-            )
+            created = client.create_remote_access_session(**request)
         except Exception as exc:
             raise DeviceFarmError(f"AWS Device Farm could not start the Android session: {exc}") from exc
 
@@ -260,7 +298,25 @@ class DeviceFarmService:
         session_arn = _text(session_payload.get("arn"))
         if not session_arn:
             raise DeviceFarmError("AWS Device Farm did not return a remote session ARN")
-        return self._wait_for_session(client, session_arn, app_arn, device)
+        session = self._wait_for_session(client, session_arn, app_arn, device)
+        if "appArn" not in request_members:
+            installer = getattr(client, "install_to_remote_access_session", None)
+            if installer is None:
+                self.stop_session(session_arn)
+                raise DeviceFarmError(
+                    "The installed AWS SDK cannot install an app into a remote access session"
+                )
+            try:
+                installer(
+                    remoteAccessSessionArn=session_arn,
+                    appArn=app_arn,
+                )
+            except Exception as exc:
+                self.stop_session(session_arn)
+                raise DeviceFarmError(
+                    f"AWS Device Farm could not install the uploaded app in the Android session: {exc}"
+                ) from exc
+        return session
 
     def _wait_for_session(
         self,
@@ -283,7 +339,7 @@ class DeviceFarmService:
                     device=device,
                     appium_url=endpoint,
                 )
-            if status in {"ERRORED", "FAILED", "STOPPED", "COMPLETED"}:
+            if status in {"ERRORED", "FAILED", "STOPPED", "STOPPING", "COMPLETED"}:
                 message = _text(session.get("message")) or f"AWS Device Farm session ended with status {status}"
                 raise DeviceFarmError(message[:500])
             if time.monotonic() >= deadline:
@@ -299,3 +355,4 @@ class DeviceFarmService:
             # Cleanup is best effort. The caller already has the test outcome;
             # do not mask it with a provider cleanup error.
             return
+
