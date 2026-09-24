@@ -340,6 +340,9 @@ async def test_browserstack_discovery_does_not_resolve_custom_appium(tmp_path, m
         def _looks_like_connector_problem(_exc):
             return False
 
+        async def _stop_device_farm_session(self, service, session):
+            assert service is None and session is None
+
     settings = SimpleNamespace(
         BROWSERSTACK_HUB_URL="https://hub.browserstack.com/wd/hub",
         BROWSERSTACK_USERNAME="user",
@@ -392,6 +395,9 @@ async def test_browserstack_upload_quota_is_returned_as_structured_blocker(tmp_p
         @staticmethod
         def _looks_like_connector_problem(_exc):
             return True
+
+        async def _stop_device_farm_session(self, service, session):
+            assert service is None and session is None
 
     settings = SimpleNamespace(
         BROWSERSTACK_HUB_URL="https://hub.browserstack.com/wd/hub",

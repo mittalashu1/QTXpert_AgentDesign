@@ -447,10 +447,13 @@ class AutopilotSuiteService:
             "platformName": "iOS" if is_ios else "Android",
             "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
             "appium:deviceName": request.device_name,
-            "appium:app": app_reference,
             "appium:noReset": request.no_reset,
             "appium:newCommandTimeout": 240,
         }
+        # AWS installs the APK when opening its remote-access session. Its
+        # upload ARN is not a valid appium:app URL; retain the installed app.
+        if not is_device_farm:
+            capabilities["appium:app"] = app_reference
         if package_hint:
             capabilities["appium:appPackage"] = package_hint
         if is_ios:
