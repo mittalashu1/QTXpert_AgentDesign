@@ -4098,10 +4098,17 @@ class AutopilotPrototypeService:
             "platformName": "iOS" if is_ios else "Android",
             "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
             "appium:deviceName": request.device_name,
-            "appium:app": app_reference,
             "appium:noReset": request.no_reset,
             "appium:newCommandTimeout": 120,
         }
+        # Device Farm installs the uploaded app as part of the remote access
+        # session and injects the resulting device-local app path into later
+        # Appium sessions.  Passing the Device Farm upload ARN as a local
+        # ``appium:app`` capability makes the remote endpoint treat it as an
+        # unsupported filesystem/path value.  Other providers still need the
+        # explicit app reference.
+        if not is_device_farm:
+            capabilities["appium:app"] = app_reference
         if is_ios:
             capabilities.update(
                 {
@@ -4241,5 +4248,6 @@ class AutopilotPrototypeService:
                 "authentication",
             )
         )
+
 
 
