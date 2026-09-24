@@ -116,9 +116,48 @@ class DeviceFarmService:
         except ImportError as exc:  # pragma: no cover - covered by deployment install
             raise DeviceFarmError("The backend AWS SDK is not installed") from exc
         try:
-            return boto3.client("devicefarm", region_name=self.settings.DEVICE_FARM_REGION)
+            client = boto3.client("devicefarm", region_name=self.settings.DEVICE_FARM_REGION)
+            self._register_raw_endpoint_capture(client)
+            return client
         except Exception as exc:  # pragma: no cover - provider-specific SDK errors
             raise DeviceFarmError(f"AWS Device Farm client could not be initialized: {exc}") from exc
+
+    @staticmethod
+    def _register_raw_endpoint_capture(client: Any) -> None:
+        """Preserve new endpoint fields when an older botocore model parses the response.
+
+        Device Farm added ``remoteAccessSession.endpoints.remoteDriverEndpoint``
+        after some supported botocore releases.  The service response is JSON,
+        so the raw after-call payload remains available even when an older model
+        drops that unknown field during normal parsing.
+        """
+
+        def merge_endpoint(*, http_response: Any, parsed: Any, **_: Any) -> None:
+            try:
+                raw_content = getattr(http_response, "content", b"")
+                if isinstance(raw_content, bytes):
+                    raw_content = raw_content.decode("utf-8")
+                raw_payload = json.loads(raw_content or "{}")
+                raw_session = raw_payload.get("remoteAccessSession") or {}
+                raw_endpoints = raw_session.get("endpoints") or {}
+                if not raw_endpoints or not isinstance(parsed, dict):
+                    return
+                parsed_session = parsed.setdefault("remoteAccessSession", {})
+                if isinstance(parsed_session, dict):
+                    parsed_session["endpoints"] = raw_endpoints
+            except (AttributeError, TypeError, UnicodeDecodeError, ValueError):
+                return
+
+        try:
+            events = client.meta.events
+            events.register_first(
+                "after-call.devicefarm.GetRemoteAccessSession",
+                merge_endpoint,
+            )
+        except Exception:
+            # The compatibility hook is best effort; normal SDK parsing still
+            # works on models that already know the endpoint field.
+            return
 
     def _project_arn(self) -> str:
         value = _text(self.settings.DEVICE_FARM_PROJECT_ARN)
@@ -298,7 +337,13 @@ class DeviceFarmService:
         session_arn = _text(session_payload.get("arn"))
         if not session_arn:
             raise DeviceFarmError("AWS Device Farm did not return a remote session ARN")
-        session = self._wait_for_session(client, session_arn, app_arn, device)
+        try:
+            session = self._wait_for_session(client, session_arn, app_arn, device)
+        except Exception:
+            # A failed wait can happen before a DeviceFarmSession object exists,
+            # so the caller's normal finally block cannot clean up this ARN.
+            self.stop_session(session_arn)
+            raise
         if "appArn" not in request_members:
             installer = getattr(client, "install_to_remote_access_session", None)
             if installer is None:
