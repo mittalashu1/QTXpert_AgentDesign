@@ -2437,12 +2437,14 @@ async def _persist_execution(
     job_record: AutopilotJob,
     request: AutopilotExecutionRequest,
     result: AutopilotExecutionResult,
+    *,
+    owner_id: Optional[UUID] = None,
 ) -> AutopilotExecutionResult:
     """Persist the result and durable evidence references without masking it."""
     execution_id = result.execution_id or uuid4()
     # Rollbacks in evidence persistence expire ORM attributes.  Capture the
     # scalar identifiers before attempting either object-store upload.
-    owner_id = user.id
+    owner_id = owner_id or user.id
     job_record_id = job_record.id
     repository_asset_id = job_record.repository_asset_id
     screenshot_asset_id = await _persist_evidence_asset(
@@ -2615,7 +2617,15 @@ async def _execute_and_persist(
     result = await service.execute_smoke(job_id, request)
     record = await _safe_job_record(db, job_id, owner_id)
     if record is not None:
-        result = await _persist_execution(service, db, user, record, request, result)
+        result = await _persist_execution(
+            service,
+            db,
+            user,
+            record,
+            request,
+            result,
+            owner_id=owner_id,
+        )
     return result
 
 
