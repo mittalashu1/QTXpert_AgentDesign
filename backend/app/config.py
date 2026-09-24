@@ -324,7 +324,9 @@ class Settings(BaseSettings):
     DEVICE_FARM_BILLING_METHOD: Literal["METERED", "UNMETERED"] = "METERED"
     DEVICE_FARM_APPIUM_VERSION: Literal["2", "3"] = "2"
     DEVICE_FARM_UPLOAD_TIMEOUT_SECONDS: int = Field(default=600, ge=60, le=1800)
-    DEVICE_FARM_SESSION_TIMEOUT_SECONDS: int = Field(default=180, ge=30, le=900)
+    # Shared public devices can take several minutes to become ready on a cold start.
+    # Keep the run bounded while allowing the session to reach RUNNING before Appium connects.
+    DEVICE_FARM_SESSION_TIMEOUT_SECONDS: int = Field(default=480, ge=30, le=900)
     DEVICE_FARM_POLL_INTERVAL_SECONDS: float = Field(default=3, ge=1, le=15)
 
     @property
