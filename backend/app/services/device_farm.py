@@ -340,7 +340,14 @@ class DeviceFarmService:
                     appium_url=endpoint,
                 )
             if status in {"ERRORED", "FAILED", "STOPPED", "STOPPING", "COMPLETED"}:
-                message = _text(session.get("message")) or f"AWS Device Farm session ended with status {status}"
+                result = _text(session.get("result")).upper()
+                message = _text(session.get("message"))
+                if result in {"PASSED", "WARNED"}:
+                    message = (
+                        "AWS Device Farm completed the setup lifecycle before exposing "
+                        "an Appium endpoint"
+                    )
+                message = message or f"AWS Device Farm session ended with status {status}"
                 raise DeviceFarmError(message[:500])
             if time.monotonic() >= deadline:
                 raise DeviceFarmError("Timed out while AWS Device Farm started the Android session")
