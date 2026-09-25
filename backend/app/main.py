@@ -32,6 +32,9 @@ from app.services.cost_catalog import refresh_cost_catalog_if_due
 settings_obj = get_settings()
 
 logging.basicConfig(level=settings_obj.LOG_LEVEL)
+# httpx INFO records include complete request URLs; presigned AWS upload URLs are bearer credentials.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 # Androguard is very verbose at DEBUG and can flood production logs while parsing
 # large APK resource tables. Keep application logs useful without affecting analysis.
 logging.getLogger("androguard").setLevel(logging.WARNING)
