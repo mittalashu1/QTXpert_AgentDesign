@@ -326,6 +326,7 @@ def test_functional_only_request_filters_nonfunctional_and_installation_cases():
     tests = [
         AutopilotTest(id="FUNC", suite="Functional", bucket="functional_positive", title="Open profile", objective="Observed safe journey."),
         AutopilotTest(id="PAGE", suite="Page-level", bucket="page_level", title="Inspect profile", objective="Observed screen."),
+        AutopilotTest(id="UAT", suite="UAT · Positive", bucket="uat", title="Reach observed profile", objective="Observed functional acceptance journey."),
         AutopilotTest(id="UI", suite="UI", bucket="ui", title="Visual profile layout", objective="Visual baseline."),
         AutopilotTest(id="SEC", suite="Security", bucket="security", title="Package posture", objective="Static check."),
         AutopilotTest(id="INSTALL", suite="Smoke", bucket="installation", title="Install app", objective="Launch check."),
@@ -336,7 +337,7 @@ def test_functional_only_request_filters_nonfunctional_and_installation_cases():
         "Create all functional test cases for the modules listed below.",
     )
 
-    assert {item.bucket for item in selected} == {"functional_positive", "page_level"}
+    assert {item.bucket for item in selected} == {"functional_positive", "page_level", "uat"}
 
 
 def test_autopilot_generates_core_and_permission_tests(tmp_path):
