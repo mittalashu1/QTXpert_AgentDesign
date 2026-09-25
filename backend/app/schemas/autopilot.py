@@ -388,6 +388,8 @@ class AutopilotTest(BaseModel):
     journey: Optional[str] = None
     page_label: Optional[str] = None
     page_url: Optional[str] = None
+    # Stable Runtime Discovery screen association, used only as replay metadata.
+    runtime_screen_id: Optional[str] = None
     data_probes: List[AutopilotDataProbe] = Field(default_factory=list)
     provenance: List[AutopilotTestProvenance] = Field(default_factory=list)
     requirement_refs: List[str] = Field(default_factory=list)
