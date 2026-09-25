@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import struct
@@ -2072,6 +2073,22 @@ async def test_local_staging_cleanup_removes_only_stale_atomic_files(tmp_path):
     assert removed == 2
     assert artifact_path.exists()
     assert (artifact_path.parent / "job.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_job_updates_preserve_both_manifest_changes(tmp_path):
+    service = _service(tmp_path)
+    job_id, artifact_path = await service.save_upload("manifest-race.apk", b"x" * 2048, "owner")
+
+    await asyncio.gather(
+        service.update_job(job_id, first_checkpoint="saved"),
+        service.update_job(job_id, second_checkpoint="saved"),
+    )
+
+    manifest = json.loads((artifact_path.parent / "job.json").read_text(encoding="utf-8"))
+    assert manifest["first_checkpoint"] == "saved"
+    assert manifest["second_checkpoint"] == "saved"
+    assert not list(artifact_path.parent.glob(".job.json.*.tmp"))
 
 
 @pytest.mark.asyncio
