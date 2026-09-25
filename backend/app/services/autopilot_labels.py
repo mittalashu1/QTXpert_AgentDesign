@@ -136,6 +136,12 @@ def input_probe_guidance(label: str, field_type: str | None = None) -> list[dict
     """
 
     lower = _normalized(label)
+    if field_type == "credential":
+        return [
+            {"kind": "positive", "label": "Sign-in", "guidance": "Use an approved non-production account; Autopilot never generates or guesses credentials."},
+            {"kind": "negative", "label": "Not probed", "guidance": "Autopilot does not submit guessed invalid credentials because repeated attempts can trigger account lockout."},
+            {"kind": "boundary", "label": "Not probed", "guidance": "Password-length and lockout boundaries require an approved test policy and are not probed automatically."},
+        ]
     if any(term in lower for term in ("name", "first", "last", "surname")):
         positive = "Alphabetic name, for example Alex Morgan"
         negative = "Numbers, symbols-only or an overlong name"

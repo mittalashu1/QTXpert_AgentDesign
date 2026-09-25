@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -86,6 +87,30 @@ from app.services.device_farm import DeviceFarmService, DeviceFarmSession
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
+
+# Status polls and background materialization can update one job concurrently.
+# Serialize read/modify/write per job and scope locks to the active event loop.
+_MANIFEST_UPDATE_LOCKS: dict[tuple[int, str], dict[str, Any]] = {}
+_MANIFEST_UPDATE_LOCKS_GUARD = threading.Lock()
+
+
+@asynccontextmanager
+async def _job_manifest_write_lock(job_id: str):
+    key = (id(asyncio.get_running_loop()), job_id)
+    with _MANIFEST_UPDATE_LOCKS_GUARD:
+        entry = _MANIFEST_UPDATE_LOCKS.get(key)
+        if entry is None:
+            entry = {"lock": asyncio.Lock(), "users": 0}
+            _MANIFEST_UPDATE_LOCKS[key] = entry
+        entry["users"] += 1
+    try:
+        async with entry["lock"]:
+            yield
+    finally:
+        with _MANIFEST_UPDATE_LOCKS_GUARD:
+            entry["users"] -= 1
+            if entry["users"] == 0 and _MANIFEST_UPDATE_LOCKS.get(key) is entry:
+                _MANIFEST_UPDATE_LOCKS.pop(key, None)
 
 
 def _is_uuid(value: object) -> bool:
@@ -1147,39 +1172,40 @@ class AutopilotPrototypeService:
         return job_id
 
     async def update_job(self, job_id: str, **changes: Any) -> Dict[str, Any]:
-        path = self._job_dir(job_id) / "job.json"
-        job = await self.load_job(job_id)
-        if "phase" in changes:
-            current_phase = str(job.get("phase") or phase_for_job(job))
-            changes["phase"] = transition_phase(current_phase, str(changes["phase"]))
-            changes["phase_updated_at"] = datetime.now(timezone.utc).isoformat()
-        job.update(changes)
-        job["updated_at"] = datetime.now(timezone.utc).isoformat()
-        if path.parent.exists():
-            temporary = path.with_suffix(".tmp")
-            await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
-            await asyncio.to_thread(temporary.replace, path)
-        # The JSON manifest and analysis snapshot are both local fallbacks in
-        # degraded mode.  Whenever a caller supplies a replacement analysis,
-        # update the snapshot atomically as well; otherwise a resumed input
-        # checkpoint can be overwritten by the older pending analysis after a
-        # process restart even though the job status is already analyzed.
-        persisted_analysis = changes.get("analysis", _MISSING)
-        if persisted_analysis is not _MISSING:
-            if hasattr(persisted_analysis, "model_dump_json"):
-                analysis_json = persisted_analysis.model_dump_json(indent=2)
-            else:
-                analysis_json = json.dumps(persisted_analysis, indent=2)
-            metadata_path = self._metadata_path(job_id)
-            if metadata_path.parent.exists():
-                temporary_metadata = metadata_path.with_suffix(".tmp")
-                await asyncio.to_thread(temporary_metadata.write_text, analysis_json, "utf-8")
-                await asyncio.to_thread(temporary_metadata.replace, metadata_path)
-        # Keep the JSON analysis and setup checkpoint in sync with the durable
-        # job row.  This matters after a Render restart, where the local
-        # manifest is intentionally disposable.
-        await self._persist_job(job, analysis=persisted_analysis)
-        return job
+        async with _job_manifest_write_lock(job_id):
+            path = self._job_dir(job_id) / "job.json"
+            job = await self.load_job(job_id)
+            if "phase" in changes:
+                current_phase = str(job.get("phase") or phase_for_job(job))
+                changes["phase"] = transition_phase(current_phase, str(changes["phase"]))
+                changes["phase_updated_at"] = datetime.now(timezone.utc).isoformat()
+            job.update(changes)
+            job["updated_at"] = datetime.now(timezone.utc).isoformat()
+            if path.parent.exists():
+                temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+                await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
+                await asyncio.to_thread(temporary.replace, path)
+            # The JSON manifest and analysis snapshot are both local fallbacks in
+            # degraded mode.  Whenever a caller supplies a replacement analysis,
+            # update the snapshot atomically as well; otherwise a resumed input
+            # checkpoint can be overwritten by the older pending analysis after a
+            # process restart even though the job status is already analyzed.
+            persisted_analysis = changes.get("analysis", _MISSING)
+            if persisted_analysis is not _MISSING:
+                if hasattr(persisted_analysis, "model_dump_json"):
+                    analysis_json = persisted_analysis.model_dump_json(indent=2)
+                else:
+                    analysis_json = json.dumps(persisted_analysis, indent=2)
+                metadata_path = self._metadata_path(job_id)
+                if metadata_path.parent.exists():
+                    temporary_metadata = metadata_path.with_name(f".{metadata_path.name}.{uuid4().hex}.tmp")
+                    await asyncio.to_thread(temporary_metadata.write_text, analysis_json, "utf-8")
+                    await asyncio.to_thread(temporary_metadata.replace, metadata_path)
+            # Keep the JSON analysis and setup checkpoint in sync with the durable
+            # job row.  This matters after a Render restart, where the local
+            # manifest is intentionally disposable.
+            await self._persist_job(job, analysis=persisted_analysis)
+            return job
 
     async def get_job_status(self, job_id: str) -> AutopilotJobStatus:
         job = await self.load_job(job_id)
@@ -2895,6 +2921,39 @@ class AutopilotPrototypeService:
             anchor = next((control for control in controls if control.semantic_label), None)
             anchor_label = anchor.semantic_label if anchor else None
             navigation = ["Launch application", *paths.get(screen.screen_id, [])]
+            screen_auth_observed = screen_has_auth_checkpoint(screen)
+            auth_submit_control = None
+            if screen_auth_observed:
+                from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+                auth_submit_control = AutopilotDiscoveryService._auth_submit_control(screen.controls)
+                if auth_submit_control is not None:
+                    submit_label = auth_submit_control.semantic_label or "Sign in"
+                    queues["functional_positive"].append(
+                        AutopilotTest(
+                            id=cls._runtime_case_id("AUTH-POS", screen.screen_id, auth_submit_control.control_id),
+                            suite="Functional · Positive",
+                            bucket="functional_positive",
+                            title=f"{journey_label} — Functional positive: sign in with approved UAT credentials",
+                            priority="critical",
+                            objective="Verify the approved non-production account is accepted and the app reaches an authenticated screen.",
+                            steps=[
+                                *navigation,
+                                "Enter the approved UAT User ID/email and password",
+                                f"Activate {submit_label}",
+                                "Verify the authenticated destination is visible",
+                            ],
+                            expected=["The sign-in succeeds and an authenticated screen is visible."],
+                            requires_auth=True,
+                            autonomous_candidate=False,
+                            dependency="Provide and approve the non-production User ID/email and password in the Autopilot checkpoint; discovery must verify the destination.",
+                            evidence_required=["sign-in result screenshot", "redacted authenticated UI hierarchy"],
+                            journey=journey_label,
+                            page_label=screen_label,
+                            page_url=screen.url,
+                            runtime_screen_id=screen.screen_id,
+                        )
+                    )
 
             if anchor_label:
                 queues["page"].append(
@@ -3023,6 +3082,7 @@ class AutopilotPrototypeService:
                 control
                 for control in controls
                 if control.clickable and not control.input_capable and control.risk == "safe"
+                and not (screen_auth_observed and auth_submit_control and control.control_id == auth_submit_control.control_id)
             ]
             for control in safe_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "safe control"
@@ -3104,7 +3164,7 @@ class AutopilotPrototypeService:
             # Input coverage is evidence-scoped too; do not discard fields on
             # forms with more than four controls.  Sensitive values remain
             # checkpoint-gated and are never inferred from the UI.
-            input_controls = [control for control in controls if control.input_capable]
+            input_controls = [control for control in controls if control.input_capable and control.input_kind != "credential"]
             for control in input_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "input field"
                 input_is_sensitive = control.input_kind == "credential"

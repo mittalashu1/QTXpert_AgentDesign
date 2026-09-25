@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import struct
@@ -46,6 +47,7 @@ from app.services.autopilot import (
     normalize_surface_identity,
 )
 from app.services.autopilot_ir import AutopilotIRCompiler, credential_value_available
+from app.services.autopilot_workflow import transition_phase
 from app.services.autopilot_context import (
     DEFAULT_AUTOPILOT_CONTEXT,
     DEFAULT_AUTOPILOT_PROFILE_ID,
@@ -609,10 +611,16 @@ def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
     assert len(expanded.tests) > len(baseline)
     # A credential field is a concrete runtime checkpoint, so the deeper UAT
     # and SIT queues become eligible only in this observed branch. The engine
-    # must not create a negative credential case from a username-only screen.
+    # must not create a negative credential probe from a username-only screen.
     assert {"functional_positive", "uat", "sit"}.issubset(buckets)
-    assert "functional_negative" not in buckets
+    assert not any(
+        test.bucket == "functional_negative" and "username" in test.title.casefold()
+        for test in expanded.tests
+    )
     assert any("Sign in" in test.title for test in expanded.tests)
+    login_case = next(test for test in expanded.tests if "sign in with approved UAT credentials" in test.title)
+    assert login_case.requires_auth is True
+    assert login_case.autonomous_candidate is False
     assert any(test.requires_test_data for test in expanded.tests)
     assert any("Runtime Discovery refreshed" in item for item in expanded.analysis_basis)
 
@@ -2075,6 +2083,22 @@ async def test_local_staging_cleanup_removes_only_stale_atomic_files(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_job_updates_preserve_both_manifest_changes(tmp_path):
+    service = _service(tmp_path)
+    job_id, artifact_path = await service.save_upload("manifest-race.apk", b"x" * 2048, "owner")
+
+    await asyncio.gather(
+        service.update_job(job_id, first_checkpoint="saved"),
+        service.update_job(job_id, second_checkpoint="saved"),
+    )
+
+    manifest = json.loads((artifact_path.parent / "job.json").read_text(encoding="utf-8"))
+    assert manifest["first_checkpoint"] == "saved"
+    assert manifest["second_checkpoint"] == "saved"
+    assert not list(artifact_path.parent.glob(".job.json.*.tmp"))
+
+
+@pytest.mark.asyncio
 async def test_reused_repository_asset_is_queued_without_copying_bytes(tmp_path):
     """Reusing a stored build returns a status before its bytes are copied."""
     service = _service(tmp_path)
@@ -2214,3 +2238,7 @@ async def test_plan_approval_does_not_rewind_forward_workflow_phase(
         assert service.updates[0]["phase"] == "plan_approved"
     else:
         assert "phase" not in service.updates[0]
+
+def test_blocked_or_partial_job_can_resume_after_checkpoint_for_case_review():
+    assert transition_phase("blocked", "cases_pending_review") == "cases_pending_review"
+    assert transition_phase("partial", "cases_pending_review") == "cases_pending_review"
