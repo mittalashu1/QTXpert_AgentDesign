@@ -1177,6 +1177,29 @@ class AutopilotSuiteService:
                 )
             return []
 
+        # A hosted mobile session may expose a sparse launch hierarchy before
+        # its observed target surface is ready. Wait briefly; never click a
+        # guessed control, and retain the safe-route block if it stays sparse.
+        if (
+            current.screen_id == discovery.screens[0].screen_id
+            and current.screen_id != target.screen_id
+            and self._is_transient_launch_surface(current)
+        ):
+            settle_deadline = time.monotonic() + 3.0
+            while time.monotonic() < settle_deadline:
+                time.sleep(0.5)
+                settled = self._identify_discovered_screen(driver, discovery, package)
+                if settled is not None and settled.screen_id != current.screen_id:
+                    current = settled
+                    break
+            if current.screen_id == target.screen_id:
+                if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
+                    raise ProviderLifecycleUnavailable(
+                        f"The app settled on {self._screen_reference(current)}, but the case's observed control is not visible. "
+                        "No test action was taken."
+                    )
+                return []
+
         path = self._safe_discovery_path(discovery, current.screen_id, target.screen_id)
         if path is None:
             # The saved graph is evidence, not an execution dependency. If a
@@ -1317,6 +1340,26 @@ class AutopilotSuiteService:
     def _screen_reference(screen) -> str:
         label = str(screen.page_label or screen.journey or "Observed screen").strip()
         return f"{label} [{screen.screen_id}]"
+
+    @staticmethod
+    def _is_transient_launch_surface(screen) -> bool:
+        generic_labels = {"view", "button", "image", "text", "control"}
+        meaningful_controls = [
+            control
+            for control in screen.controls
+            if control.enabled
+            and control.semantic_label
+            and control.semantic_label.strip().casefold() not in generic_labels
+        ]
+        has_input = any(control.enabled and control.input_capable for control in screen.controls)
+        has_safe_navigation = any(
+            control.enabled
+            and control.clickable
+            and control.risk == "safe"
+            and control.locators
+            for control in screen.controls
+        )
+        return len(meaningful_controls) <= 1 and not has_input and not has_safe_navigation
 
     @staticmethod
     def _screen_has_credential_fields(screen) -> bool:
