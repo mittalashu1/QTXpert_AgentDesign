@@ -3032,6 +3032,29 @@ class AutopilotPrototypeService:
                     None,
                 )
                 target_screen = screen_map.get(transition.to_screen_id) if transition else screen
+                is_back_control = bool(
+                    re.search(
+                        r"(?<![a-z0-9])(?:back|go back|navigate back|close)(?![a-z0-9])",
+                        label.casefold(),
+                    )
+                )
+                if is_back_control and transition is None:
+                    # Infer the destination only when a unique predecessor is
+                    # already present in the observed map; ambiguous paths
+                    # remain discovery-required rather than asserting against
+                    # the screen that Back just left.
+                    predecessor_ids = {
+                        item.from_screen_id
+                        for item in discovery.transitions
+                        if item.to_screen_id == screen.screen_id
+                        and item.action == "tap"
+                        and item.from_screen_id in screen_map
+                    }
+                    target_screen = (
+                        screen_map[next(iter(predecessor_ids))]
+                        if len(predecessor_ids) == 1
+                        else None
+                    )
                 target_anchor = next(
                     (item for item in target_screen.controls if item.enabled and item.locators and item.semantic_label),
                     None,

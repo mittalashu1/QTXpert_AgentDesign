@@ -747,6 +747,23 @@ class AutopilotIRCompiler:
                 )
                 if transition and transition.to_screen_id in screens:
                     current = screens[transition.to_screen_id]
+                elif re.search(
+                    r"(?<![a-z0-9])(?:back|go back|navigate back|close)(?![a-z0-9])",
+                    control.semantic_label.casefold(),
+                ):
+                    # Runtime Discovery may record the forward tap into a
+                    # mobile page but omit the platform Back edge. Infer a
+                    # destination only when exactly one observed predecessor
+                    # exists, grounding the next assertion in that page.
+                    predecessor_ids = {
+                        item.from_screen_id
+                        for item in discovery.transitions
+                        if item.to_screen_id == current.screen_id
+                        and item.action == "tap"
+                        and item.from_screen_id in screens
+                    }
+                    if len(predecessor_ids) == 1:
+                        current = screens[next(iter(predecessor_ids))]
                 continue
 
             assert_match = self._ASSERT_RE.match(step)

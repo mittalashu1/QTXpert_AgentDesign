@@ -22,6 +22,7 @@ from app.schemas.autopilot import (
     AutopilotTest,
     DiscoveredControl,
     DiscoveredScreen,
+    DiscoveredTransition,
     DiscoveryLocator,
 )
 from app.api.routes.autopilot import (
@@ -613,6 +614,76 @@ def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
     assert any("Sign in" in test.title for test in expanded.tests)
     assert any(test.requires_test_data for test in expanded.tests)
     assert any("Runtime Discovery added" in item for item in expanded.analysis_basis)
+
+
+def test_runtime_discovery_back_case_targets_unique_observed_predecessor(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="55555555-5555-5555-5555-555555555555",
+        filename="navigation.apk",
+        sha256="5" * 64,
+        tests=service._build_deterministic_tests({"permissions": []}),
+    )
+    login = DiscoveredControl(
+        control_id="login",
+        semantic_label="Login",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/login", confidence=0.98)],
+    )
+    open_details = DiscoveredControl(
+        control_id="open-details",
+        semantic_label="Open details",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/details", confidence=0.98)],
+    )
+    back = DiscoveredControl(
+        control_id="back",
+        semantic_label="Back",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Back", confidence=0.98)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-25T00:00:00+00:00",
+        finished_at="2026-09-25T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screens=[
+            DiscoveredScreen(screen_id="screen-001", fingerprint="a" * 64, controls=[login, open_details]),
+            DiscoveredScreen(screen_id="screen-002", fingerprint="b" * 64, controls=[back]),
+        ],
+        transitions=[DiscoveredTransition(
+            from_screen_id="screen-001",
+            to_screen_id="screen-002",
+            control_id="open-details",
+            control_label="Open details",
+            action="tap",
+        )],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    back_case = next(test for test in expanded.tests if "activate Back" in test.title)
+    compiled = AutopilotIRCompiler().compile_bundle(
+        AutopilotAnalysis.model_validate(expanded.model_dump()),
+        discovery,
+    )
+    executable_back = next(test for test in compiled.tests if test.test_id == back_case.id)
+
+    assert back_case.steps[-1] == "Verify Login"
+    assert executable_back.readiness == "executable"
+    assert any(step.action == "assert_visible" and step.target == "Login" for step in executable_back.steps)
+    assert next(step for step in executable_back.steps if step.action == "assert_visible").screen_id == "screen-001"
 
 
 def test_runtime_discovery_keeps_all_observed_cases_without_fixed_cap(tmp_path):
