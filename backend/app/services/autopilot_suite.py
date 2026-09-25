@@ -1185,7 +1185,7 @@ class AutopilotSuiteService:
             and current.screen_id != target.screen_id
             and self._is_transient_launch_surface(current)
         ):
-            settle_deadline = time.monotonic() + 3.0
+            settle_deadline = time.monotonic() + 12.0
             while time.monotonic() < settle_deadline:
                 time.sleep(0.5)
                 settled = self._identify_discovered_screen(driver, discovery, package)
