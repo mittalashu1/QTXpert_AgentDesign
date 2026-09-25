@@ -613,7 +613,7 @@ def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
     assert "functional_negative" not in buckets
     assert any("Sign in" in test.title for test in expanded.tests)
     assert any(test.requires_test_data for test in expanded.tests)
-    assert any("Runtime Discovery added" in item for item in expanded.analysis_basis)
+    assert any("Runtime Discovery refreshed" in item for item in expanded.analysis_basis)
 
 
 def test_runtime_discovery_back_case_targets_unique_observed_predecessor(tmp_path):
@@ -672,6 +672,18 @@ def test_runtime_discovery_back_case_targets_unique_observed_predecessor(tmp_pat
         )],
     )
 
+    stale_back_case = AutopilotTest(
+        id=service._runtime_case_id("FUNC-POS", "screen-002", "back"),
+        suite="Functional · Positive",
+        bucket="functional_positive",
+        title="Observed journey 2 — Functional positive: activate Back on Observed page 2",
+        priority="high",
+        objective="Old assertion retained from a prior map.",
+        steps=["Launch application", "Tap Back", "Verify Back"],
+        expected=["Back remains visible"],
+    )
+    analysis = analysis.model_copy(update={"tests": [*analysis.tests, stale_back_case]})
+
     expanded = service.expand_discovered_coverage(analysis, discovery)
     back_case = next(test for test in expanded.tests if "activate Back" in test.title)
     compiled = AutopilotIRCompiler().compile_bundle(
@@ -681,6 +693,8 @@ def test_runtime_discovery_back_case_targets_unique_observed_predecessor(tmp_pat
     executable_back = next(test for test in compiled.tests if test.test_id == back_case.id)
 
     assert back_case.steps[-1] == "Verify Login"
+    refreshed_back = next(test for test in expanded.tests if test.id == stale_back_case.id)
+    assert refreshed_back.steps[-1] == "Verify Login"
     assert executable_back.readiness == "executable"
     assert any(step.action == "assert_visible" and step.target == "Login" for step in executable_back.steps)
     assert next(step for step in executable_back.steps if step.action == "assert_visible").screen_id == "screen-001"
