@@ -286,6 +286,40 @@ def test_suite_uses_native_back_when_only_observed_locator_has_back_label(tmp_pa
     assert evidence["actions"][0]["mechanism"] == "android_mobile_press_key"
 
 
+def test_suite_uses_native_back_when_observed_back_control_stales_before_click(tmp_path, monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    native_back_calls = []
+
+    class StaleBackElement(_Element):
+        def click(self):
+            raise RuntimeError("StaleElementReferenceException")
+
+    driver = _Driver()
+    driver.element = StaleBackElement()
+
+    def native_back(_driver, *, target_kind):
+        native_back_calls.append(target_kind)
+        return "android_mobile_press_key"
+
+    monkeypatch.setattr("app.services.autopilot_suite.safe_navigate_back", native_back)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    test = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Tap Back",
+            target="Back",
+            locator_strategy="accessibility_id",
+            locator_value="Back",
+            locator_confidence=0.95,
+        ),
+    ])
+
+    evidence = service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    assert native_back_calls == ["android"]
+    assert evidence["actions"][0]["mechanism"] == "android_mobile_press_key"
+
+
 def test_suite_interpreter_blocks_when_tap_leaves_uploaded_app(tmp_path, monkeypatch):
     service = AutopilotSuiteService(Settings(), prototype=object())
 

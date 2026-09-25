@@ -1516,7 +1516,19 @@ class AutopilotSuiteService:
                     if not native_back:
                         if not element.is_enabled():
                             raise AssertionError(f"Resolved control is disabled: {step.target}")
-                        element.click()
+                        try:
+                            element.click()
+                        except Exception:
+                            # A control can resolve from a snapshot and still
+                            # disappear before Appium dispatches the click.
+                            # For an observed Back control, retry through the
+                            # platform's native navigation only; never apply
+                            # this fallback to arbitrary controls.
+                            if self._is_back_navigation_target(step):
+                                mechanism = safe_navigate_back(driver, target_kind=target_kind)
+                                native_back = True
+                            else:
+                                raise
                     time.sleep(0.9)
                     if package:
                         target_ready, target_reason, _ = validate_target_surface(
