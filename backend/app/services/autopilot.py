@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -86,6 +87,30 @@ from app.services.device_farm import DeviceFarmService, DeviceFarmSession
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
+
+# Status polls and background materialization can update one job concurrently.
+# Serialize read/modify/write per job and scope locks to the active event loop.
+_MANIFEST_UPDATE_LOCKS: dict[tuple[int, str], dict[str, Any]] = {}
+_MANIFEST_UPDATE_LOCKS_GUARD = threading.Lock()
+
+
+@asynccontextmanager
+async def _job_manifest_write_lock(job_id: str):
+    key = (id(asyncio.get_running_loop()), job_id)
+    with _MANIFEST_UPDATE_LOCKS_GUARD:
+        entry = _MANIFEST_UPDATE_LOCKS.get(key)
+        if entry is None:
+            entry = {"lock": asyncio.Lock(), "users": 0}
+            _MANIFEST_UPDATE_LOCKS[key] = entry
+        entry["users"] += 1
+    try:
+        async with entry["lock"]:
+            yield
+    finally:
+        with _MANIFEST_UPDATE_LOCKS_GUARD:
+            entry["users"] -= 1
+            if entry["users"] == 0 and _MANIFEST_UPDATE_LOCKS.get(key) is entry:
+                _MANIFEST_UPDATE_LOCKS.pop(key, None)
 
 
 def _is_uuid(value: object) -> bool:
@@ -1147,39 +1172,40 @@ class AutopilotPrototypeService:
         return job_id
 
     async def update_job(self, job_id: str, **changes: Any) -> Dict[str, Any]:
-        path = self._job_dir(job_id) / "job.json"
-        job = await self.load_job(job_id)
-        if "phase" in changes:
-            current_phase = str(job.get("phase") or phase_for_job(job))
-            changes["phase"] = transition_phase(current_phase, str(changes["phase"]))
-            changes["phase_updated_at"] = datetime.now(timezone.utc).isoformat()
-        job.update(changes)
-        job["updated_at"] = datetime.now(timezone.utc).isoformat()
-        if path.parent.exists():
-            temporary = path.with_suffix(".tmp")
-            await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
-            await asyncio.to_thread(temporary.replace, path)
-        # The JSON manifest and analysis snapshot are both local fallbacks in
-        # degraded mode.  Whenever a caller supplies a replacement analysis,
-        # update the snapshot atomically as well; otherwise a resumed input
-        # checkpoint can be overwritten by the older pending analysis after a
-        # process restart even though the job status is already analyzed.
-        persisted_analysis = changes.get("analysis", _MISSING)
-        if persisted_analysis is not _MISSING:
-            if hasattr(persisted_analysis, "model_dump_json"):
-                analysis_json = persisted_analysis.model_dump_json(indent=2)
-            else:
-                analysis_json = json.dumps(persisted_analysis, indent=2)
-            metadata_path = self._metadata_path(job_id)
-            if metadata_path.parent.exists():
-                temporary_metadata = metadata_path.with_suffix(".tmp")
-                await asyncio.to_thread(temporary_metadata.write_text, analysis_json, "utf-8")
-                await asyncio.to_thread(temporary_metadata.replace, metadata_path)
-        # Keep the JSON analysis and setup checkpoint in sync with the durable
-        # job row.  This matters after a Render restart, where the local
-        # manifest is intentionally disposable.
-        await self._persist_job(job, analysis=persisted_analysis)
-        return job
+        async with _job_manifest_write_lock(job_id):
+            path = self._job_dir(job_id) / "job.json"
+            job = await self.load_job(job_id)
+            if "phase" in changes:
+                current_phase = str(job.get("phase") or phase_for_job(job))
+                changes["phase"] = transition_phase(current_phase, str(changes["phase"]))
+                changes["phase_updated_at"] = datetime.now(timezone.utc).isoformat()
+            job.update(changes)
+            job["updated_at"] = datetime.now(timezone.utc).isoformat()
+            if path.parent.exists():
+                temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+                await asyncio.to_thread(temporary.write_text, json.dumps(job, indent=2), "utf-8")
+                await asyncio.to_thread(temporary.replace, path)
+            # The JSON manifest and analysis snapshot are both local fallbacks in
+            # degraded mode.  Whenever a caller supplies a replacement analysis,
+            # update the snapshot atomically as well; otherwise a resumed input
+            # checkpoint can be overwritten by the older pending analysis after a
+            # process restart even though the job status is already analyzed.
+            persisted_analysis = changes.get("analysis", _MISSING)
+            if persisted_analysis is not _MISSING:
+                if hasattr(persisted_analysis, "model_dump_json"):
+                    analysis_json = persisted_analysis.model_dump_json(indent=2)
+                else:
+                    analysis_json = json.dumps(persisted_analysis, indent=2)
+                metadata_path = self._metadata_path(job_id)
+                if metadata_path.parent.exists():
+                    temporary_metadata = metadata_path.with_name(f".{metadata_path.name}.{uuid4().hex}.tmp")
+                    await asyncio.to_thread(temporary_metadata.write_text, analysis_json, "utf-8")
+                    await asyncio.to_thread(temporary_metadata.replace, metadata_path)
+            # Keep the JSON analysis and setup checkpoint in sync with the durable
+            # job row.  This matters after a Render restart, where the local
+            # manifest is intentionally disposable.
+            await self._persist_job(job, analysis=persisted_analysis)
+            return job
 
     async def get_job_status(self, job_id: str) -> AutopilotJobStatus:
         job = await self.load_job(job_id)
