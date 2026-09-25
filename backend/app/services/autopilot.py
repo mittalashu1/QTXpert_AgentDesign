@@ -2921,6 +2921,39 @@ class AutopilotPrototypeService:
             anchor = next((control for control in controls if control.semantic_label), None)
             anchor_label = anchor.semantic_label if anchor else None
             navigation = ["Launch application", *paths.get(screen.screen_id, [])]
+            screen_auth_observed = screen_has_auth_checkpoint(screen)
+            auth_submit_control = None
+            if screen_auth_observed:
+                from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+                auth_submit_control = AutopilotDiscoveryService._auth_submit_control(screen.controls)
+                if auth_submit_control is not None:
+                    submit_label = auth_submit_control.semantic_label or "Sign in"
+                    queues["functional_positive"].append(
+                        AutopilotTest(
+                            id=cls._runtime_case_id("AUTH-POS", screen.screen_id, auth_submit_control.control_id),
+                            suite="Functional · Positive",
+                            bucket="functional_positive",
+                            title=f"{journey_label} — Functional positive: sign in with approved UAT credentials",
+                            priority="critical",
+                            objective="Verify the approved non-production account is accepted and the app reaches an authenticated screen.",
+                            steps=[
+                                *navigation,
+                                "Enter the approved UAT User ID/email and password",
+                                f"Activate {submit_label}",
+                                "Verify the authenticated destination is visible",
+                            ],
+                            expected=["The sign-in succeeds and an authenticated screen is visible."],
+                            requires_auth=True,
+                            autonomous_candidate=False,
+                            dependency="Provide and approve the non-production User ID/email and password in the Autopilot checkpoint; discovery must verify the destination.",
+                            evidence_required=["sign-in result screenshot", "redacted authenticated UI hierarchy"],
+                            journey=journey_label,
+                            page_label=screen_label,
+                            page_url=screen.url,
+                            runtime_screen_id=screen.screen_id,
+                        )
+                    )
 
             if anchor_label:
                 queues["page"].append(
@@ -3049,6 +3082,7 @@ class AutopilotPrototypeService:
                 control
                 for control in controls
                 if control.clickable and not control.input_capable and control.risk == "safe"
+                and not (screen_auth_observed and auth_submit_control and control.control_id == auth_submit_control.control_id)
             ]
             for control in safe_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "safe control"
@@ -3130,7 +3164,7 @@ class AutopilotPrototypeService:
             # Input coverage is evidence-scoped too; do not discard fields on
             # forms with more than four controls.  Sensitive values remain
             # checkpoint-gated and are never inferred from the UI.
-            input_controls = [control for control in controls if control.input_capable]
+            input_controls = [control for control in controls if control.input_capable and control.input_kind != "credential"]
             for control in input_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "input field"
                 input_is_sensitive = control.input_kind == "credential"
