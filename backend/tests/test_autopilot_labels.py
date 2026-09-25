@@ -39,6 +39,15 @@ def test_probe_guidance_explains_positive_negative_and_boundary_name_checks():
     assert "length" in probes[2]["guidance"]
 
 
+def test_credential_probe_guidance_never_treats_user_id_as_a_personal_name():
+    probes = input_probe_guidance("Username · User ID / email", "credential")
+
+    assert "approved non-production" in probes[0]["guidance"].lower()
+    assert "guessed invalid credentials" in probes[1]["guidance"].lower()
+    assert "lockout" in probes[2]["guidance"].lower()
+    assert all("alphabetic" not in item["guidance"].lower() for item in probes)
+
+
 def test_unknown_screen_gets_an_honest_observed_fallback():
     screen = _screen(activity="MainActivity")
 

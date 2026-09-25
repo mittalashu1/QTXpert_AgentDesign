@@ -117,6 +117,16 @@ class _ColdRelaunchDriver(_ResettableDriver):
         super().activate_app(package)
 
 
+class _ObservedActivityDriver(_ColdRelaunchDriver):
+    def __init__(self):
+        super().__init__()
+        self.explicit_activity_calls = []
+
+    def start_activity(self, package, activity):
+        self.explicit_activity_calls.append((package, activity))
+        self.current_package = package
+
+
 def _test_ir(actions):
     return QTXTestIR(
         test_id="QT-AI-100",
@@ -329,6 +339,22 @@ def test_suite_reset_to_application_cold_relaunches_after_provider_reset():
     assert driver.reset_calls == 1
     assert driver.terminate_calls == ["com.qtx.demo"]
     assert driver.activate_calls == ["com.qtx.demo"]
+
+
+def test_suite_reset_relaunches_the_observed_activity_without_package_launcher_resolution(monkeypatch):
+    driver = _ObservedActivityDriver()
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    AutopilotSuiteService._reset_to_application(
+        driver,
+        "com.qtx.demo",
+        "com.qtx.demo.MainActivity",
+    )
+
+    assert driver.explicit_activity_calls == [("com.qtx.demo", "com.qtx.demo.MainActivity")]
+    assert driver.reset_calls == 0
+    assert driver.activate_calls == []
+    assert driver.terminate_calls == ["com.qtx.demo"]
 
 
 def test_suite_interpreter_rejects_non_allowlisted_ir_action(tmp_path):

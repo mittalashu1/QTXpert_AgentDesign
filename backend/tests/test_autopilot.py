@@ -606,8 +606,10 @@ def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
 
     assert len(expanded.tests) > len(baseline)
     # A credential field is a concrete runtime checkpoint, so the deeper UAT
-    # and SIT queues become eligible only in this observed branch.
-    assert {"functional_positive", "functional_negative", "uat", "sit"}.issubset(buckets)
+    # and SIT queues become eligible only in this observed branch. The engine
+    # must not create a negative credential case from a username-only screen.
+    assert {"functional_positive", "uat", "sit"}.issubset(buckets)
+    assert "functional_negative" not in buckets
     assert any("Sign in" in test.title for test in expanded.tests)
     assert any(test.requires_test_data for test in expanded.tests)
     assert any("Runtime Discovery added" in item for item in expanded.analysis_basis)

@@ -610,6 +610,29 @@ function RuntimeScreenPreview({ screen }: { screen: DiscoveredScreen }) {
   </CardContent></Card>;
 }
 
+function checkpointIsCredential(request: AutopilotInputRequest) {
+  return request.category === "credential"
+    || request.field_type === "credential"
+    || Boolean(request.credential_bundle)
+    || (request.sensitive && ["username", "password", "otp"].includes(request.input_hint || ""));
+}
+
+function checkpointProbeGuidance(request: AutopilotInputRequest) {
+  if (!checkpointIsCredential(request)) return request.probe_guidance || [];
+  return [
+    { kind: "positive", label: "Sign-in", guidance: "Use only your approved non-production account. Autopilot never generates or guesses credentials." },
+    { kind: "negative", label: "Not probed", guidance: "Invalid credentials are not guessed or submitted, to avoid account lockout." },
+    { kind: "boundary", label: "Not probed", guidance: "Password and lockout boundaries require an approved test account and explicit test policy." },
+  ];
+}
+
+function checkpointFormatHint(request: AutopilotInputRequest) {
+  if (checkpointIsCredential(request)) {
+    return "This is sign-in data. It is never randomized or sent to an AI model; provided values are encrypted and excluded from reports, screenshots and logs.";
+  }
+  return request.format_hint || request.reason;
+}
+
 function CheckpointEvidencePreview({ request }: { request: AutopilotInputRequest }) {
   const [imageUrl, setImageUrl] = useState("");
   useEffect(() => {
@@ -2929,13 +2952,13 @@ export default function AutopilotPage() {
               {activeCheckpointRequest.page_url && <Button size="small" variant="text" onClick={() => window.open(activeCheckpointRequest.page_url || "", "_blank", "noopener,noreferrer")}>Open observed page</Button>}
             </Stack>}
             <Typography variant="body2" sx={{ mt: .5 }}>{activeCheckpointRequest.question || "What should Autopilot use for this setup item?"}</Typography>
-            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{activeCheckpointRequest.format_hint || activeCheckpointRequest.reason}</Typography>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{checkpointFormatHint(activeCheckpointRequest)}</Typography>
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Needed for: {requestDependentTitles(activeCheckpointRequest, analysis?.tests || []).join(" · ") || "this checkpoint"}</Typography>
             {activeCheckpointRequest.screen_id && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>Screen: {activeCheckpointRequest.screen_id}{activeCheckpointRequest.locator ? ` · Control: ${activeCheckpointRequest.locator}` : ""}</Typography>}
             <CheckpointEvidencePreview request={activeCheckpointRequest} />
-            {(activeCheckpointRequest.probe_guidance || []).length > 0 && <Box sx={{ mt: 1.25, p: 1, borderRadius: 1.5, bgcolor: "background.paper", border: "1px solid", borderColor: "divider" }}>
+            {checkpointProbeGuidance(activeCheckpointRequest).length > 0 && <Box sx={{ mt: 1.25, p: 1, borderRadius: 1.5, bgcolor: "background.paper", border: "1px solid", borderColor: "divider" }}>
               <Typography variant="caption" fontWeight={800} color="text.secondary">What will be checked</Typography>
-              {(activeCheckpointRequest.probe_guidance || []).map((probe) => <Typography key={probe.kind} variant="caption" display="block" sx={{ mt: .35 }}><b>{probe.label}:</b> {probe.guidance}</Typography>)}
+              {checkpointProbeGuidance(activeCheckpointRequest).map((probe) => <Typography key={probe.kind} variant="caption" display="block" sx={{ mt: .35 }}><b>{probe.label}:</b> {probe.guidance}</Typography>)}
             </Box>}
             {activeCheckpointSaved?.save_for_reuse && <Alert severity="success" sx={{ mt: 1.25 }}>A saved encrypted value exists for this field. Choose “Reuse saved” to use it without revealing it.</Alert>}
             {activeCheckpointRequest.category === "approval" ? <Alert severity="info" sx={{ mt: 1.5 }}>
@@ -2967,7 +2990,7 @@ export default function AutopilotPage() {
                   <Grid item xs={12} md={6}><TextField fullWidth size="small" type="password" label="Password" placeholder="Password for this UAT account" value={activeCheckpointDraft.password} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { password: event.target.value })} autoComplete="new-password" helperText="Encrypted immediately; never echoed or sent to the model." /></Grid>
                   <Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save this sign-in securely for this target" /><FormControlLabel sx={{ ml: { sm: 2 } }} control={<Switch size="small" checked={setupDraft.safe_authentication_approved} onChange={(event) => updateSetup("safe_authentication_approved", event.target.checked)} />} label="Approve safe, non-transactional sign-in" /></Grid>
                 </Grid>
-              </> : activeCheckpointDraft.decision === "provide" && <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1 }}><TextField fullWidth size="small" type={activeCheckpointRequest.input_hint === "password" || activeCheckpointRequest.input_hint === "otp" ? "password" : "text"} label={activeCheckpointRequest.input_hint === "password" ? "Password" : activeCheckpointRequest.input_hint === "otp" ? "One-time code" : activeCheckpointRequest.input_hint === "username" ? "User ID / email" : "Value or reference"} placeholder={activeCheckpointRequest.placeholder || undefined} value={activeCheckpointDraft.value} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { value: event.target.value })} autoComplete="off" helperText={activeCheckpointRequest.format_hint || "Use synthetic/non-production data only."} /><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save encrypted" /></Stack>}
+              </> : activeCheckpointDraft.decision === "provide" && <Stack direction={{ xs: "column", md: "row" }} spacing={1} sx={{ mt: 1 }}><TextField fullWidth size="small" type={activeCheckpointRequest.input_hint === "password" || activeCheckpointRequest.input_hint === "otp" ? "password" : "text"} label={activeCheckpointRequest.input_hint === "password" ? "Password" : activeCheckpointRequest.input_hint === "otp" ? "One-time code" : activeCheckpointRequest.input_hint === "username" ? "User ID / email" : "Value or reference"} placeholder={activeCheckpointRequest.placeholder || undefined} value={activeCheckpointDraft.value} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { value: event.target.value })} autoComplete="off" helperText={checkpointFormatHint(activeCheckpointRequest)} /><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save encrypted" /></Stack>}
             </>}
             {activeCheckpointDraft.decision === "random" && <Grid container spacing={1} sx={{ mt: .25 }}><Grid item xs={12} sm={4}><FormControl fullWidth size="small"><InputLabel>Generator</InputLabel><Select label="Generator" value={activeCheckpointDraft.random_spec.kind} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, kind: event.target.value as RandomSpec["kind"] } })}>{["text", "digits", "number", "amount", "email", "phone", "date"].map((kind) => <MenuItem key={kind} value={kind}>{kind}</MenuItem>)}</Select></FormControl></Grid><Grid item xs={6} sm={2}><TextField fullWidth size="small" type="number" label="Length" value={activeCheckpointDraft.random_spec.length} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, length: Math.max(1, Number(event.target.value) || 1) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Minimum" value={activeCheckpointDraft.random_spec.minimum ?? ""} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, minimum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={6} sm={3}><TextField fullWidth size="small" type="number" label="Maximum" value={activeCheckpointDraft.random_spec.maximum ?? ""} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { random_spec: { ...activeCheckpointDraft.random_spec, maximum: event.target.value === "" ? undefined : Number(event.target.value) } })} /></Grid><Grid item xs={12}><FormControlLabel control={<Switch size="small" checked={activeCheckpointDraft.save_for_reuse} onChange={(event) => updateInputDraft(activeCheckpointRequest.key, { save_for_reuse: event.target.checked })} />} label="Save generated value encrypted" /><Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>Generated data is bounded synthetic input; it never uses production data.</Typography></Grid></Grid>}
             {activeCheckpointRequest.category !== "approval" && activeCheckpointDraft.decision !== "skip" && activeCheckpointDraft.decision !== "reuse" && <Button size="small" sx={{ mt: .75 }} onClick={() => updateInputDraft(activeCheckpointRequest.key, { decision: "skip", value: "", username: "", password: "", save_for_reuse: false })}>Skip this input</Button>}
@@ -3004,6 +3027,5 @@ export default function AutopilotPage() {
     </Dialog>
   </Stack>;
 }
-
 
 

@@ -456,6 +456,24 @@ class AutopilotSuiteService:
             capabilities["appium:app"] = app_reference
         if package_hint:
             capabilities["appium:appPackage"] = package_hint
+        # Some APKs expose more than one launcher activity. Runtime Discovery
+        # has already verified the actual foreground activity, so reuse that
+        # observed entry point instead of making ADB resolve an ambiguous
+        # MAIN/LAUNCHER intent for every test case.
+        activity_hint = None
+        if not is_ios:
+            activity_hint = str((discovery.target_activity if discovery else None) or "").strip()
+            if not activity_hint and discovery:
+                activity_hint = next(
+                    (
+                        str(screen.activity_name).strip()
+                        for screen in discovery.screens
+                        if str(screen.activity_name or "").strip()
+                    ),
+                    "",
+                )
+            if activity_hint:
+                capabilities["appium:appActivity"] = activity_hint
         if is_ios:
             capabilities.update(
                 {
@@ -526,7 +544,7 @@ class AutopilotSuiteService:
                 try:
                     if video_requested:
                         video_started, video_status = self._start_video_recording(driver)
-                    self._reset_to_application(driver, package)
+                    self._reset_to_application(driver, package, activity_hint)
                     case_target_ready, case_target_reason, _ = validate_target_surface(
                         driver,
                         expected_package=package,
@@ -555,6 +573,7 @@ class AutopilotSuiteService:
                         request.target_kind,
                         input_values=input_values,
                         sensitive_input_keys=sensitive_input_keys,
+                        launch_activity=activity_hint,
                     )
                     if setup_navigation:
                         evidence["setup_navigation"] = setup_navigation
@@ -628,8 +647,38 @@ class AutopilotSuiteService:
             safe_quit(driver)
 
     @staticmethod
-    def _reset_to_application(driver, package: str | None) -> None:
+    def _activate_application(driver, package: str, activity: str | None = None) -> None:
+        activity = str(activity or "").strip() or None
+        explicit_starter = getattr(driver, "start_activity", None)
+        if activity and callable(explicit_starter):
+            explicit_starter(package, activity)
+            return
+        driver.activate_app(package)
+
+    @staticmethod
+    def _reset_to_application(
+        driver,
+        package: str | None,
+        activity: str | None = None,
+    ) -> None:
         if not package:
+            return
+        activity = str(activity or "").strip() or None
+        explicit_starter = getattr(driver, "start_activity", None)
+        if activity and callable(explicit_starter):
+            # Reopen the exact Android entry activity observed by Runtime
+            # Discovery. Package-only reset/activate can invoke MAIN/LAUNCHER,
+            # which is ambiguous for APKs that expose multiple launchers.
+            terminator = getattr(driver, "terminate_app", None)
+            if callable(terminator):
+                terminator(package)
+            time.sleep(0.5)
+            explicit_starter(package, activity)
+            time.sleep(2.0)
+            if expected_package_state(driver, package) is False:
+                raise ProviderLifecycleUnavailable(
+                    f"The observed Android entry activity {activity} did not reopen the uploaded app."
+                )
             return
         # A hosted device can preserve the app's navigation state even when a
         # new session is created with ``noReset=false``.  Replayable runtime
@@ -1330,6 +1379,7 @@ class AutopilotSuiteService:
         target_kind: str = "android",
         input_values: Dict[str, str] | None = None,
         sensitive_input_keys: set[str] | None = None,
+        launch_activity: str | None = None,
     ) -> Dict[str, Any]:
         from appium.webdriver.common.appiumby import AppiumBy
 
@@ -1346,7 +1396,7 @@ class AutopilotSuiteService:
             mechanism: str | None = None
             if step.action == "launch_app":
                 if package and expected_package_state(driver, package) is not True:
-                    driver.activate_app(package)
+                    self._activate_application(driver, package, launch_activity)
                     time.sleep(1)
             elif step.action == "inspect_ui":
                 source = driver.page_source or ""
@@ -1368,7 +1418,7 @@ class AutopilotSuiteService:
             elif step.action == "restore_app":
                 if not package:
                     raise AssertionError("Unable to determine application package for restore")
-                driver.activate_app(package)
+                self._activate_application(driver, package, launch_activity)
                 time.sleep(1)
                 if expected_package_state(driver, package) is not True:
                     raise AssertionError("Application did not recover to foreground")
@@ -1507,7 +1557,7 @@ class AutopilotSuiteService:
                 else:
                     raise ProviderLifecycleUnavailable("The provider does not expose a safe press action for this key.")
             elif step.action == "reset":
-                self._reset_to_application(driver, package)
+                self._reset_to_application(driver, package, launch_activity)
             elif step.action == "fill":
                 input_key = step.input_key
                 # Synthetic values are embedded only for non-sensitive

@@ -4,6 +4,7 @@ import pytest
 from appium import webdriver
 
 from app.schemas.autopilot import (
+    AutopilotDiscoveryResult,
     AutopilotDiscoveryRequest,
     AutopilotExecutionRequest,
     AutopilotSuiteRequest,
@@ -62,6 +63,16 @@ def test_mobile_flows_use_the_provider_app_install_contract(
                 "job-provider-contract", endpoint, app_reference,
                 AutopilotSuiteRequest(**common), [], "com.qtx.demo",
                 None, 30_000, 30_000, 30_000,
+                discovery=AutopilotDiscoveryResult(
+                    job_id="job-provider-contract",
+                    status="completed",
+                    provider=provider,
+                    started_at="2026-09-25T00:00:00Z",
+                    finished_at="2026-09-25T00:00:01Z",
+                    duration_seconds=1,
+                    device_name="Google Pixel 8",
+                    target_activity="com.qtx.demo.MainActivity",
+                ),
             )
 
     assert captured["platformName"] == "Android"
@@ -76,3 +87,5 @@ def test_mobile_flows_use_the_provider_app_install_contract(
         assert captured["appium:platformVersion"] == "14.0"
     if flow != "smoke":
         assert captured["appium:appPackage"] == "com.qtx.demo"
+    if flow == "suite":
+        assert captured["appium:appActivity"] == "com.qtx.demo.MainActivity"
