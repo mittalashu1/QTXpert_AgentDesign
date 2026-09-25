@@ -35,6 +35,34 @@ class AutopilotInputStoreError(ValueError):
     """A safe, user-facing validation error with no secret values attached."""
 
 
+def _current_submissions(
+    submissions: Iterable[AutopilotInputSubmission],
+    requests: Mapping[str, AutopilotInputRequest],
+) -> list[AutopilotInputSubmission]:
+    """Discard only obsolete skip-only drafts from a refreshed checkpoint.
+
+    A stale draft cannot write or reuse a value. It is safe to ignore only an
+    old Skip with no value, save flag, or random-data configuration.
+    """
+    accepted: list[AutopilotInputSubmission] = []
+    known_keys = {str(key).strip() for key in requests}
+    for item in submissions:
+        if item.key in known_keys:
+            accepted.append(item)
+            continue
+        stale_skip_only = (
+            item.decision == "skip"
+            and not item.value
+            and not item.save_for_reuse
+            and item.random_spec is None
+        )
+        if not stale_skip_only:
+            raise AutopilotInputStoreError(
+                "One or more checkpoint inputs are no longer part of this analysis. Refresh and try again."
+            )
+    return accepted
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -145,13 +173,11 @@ async def apply_submissions(
     submissions = list(submissions)
     if len(submissions) > 50:
         raise AutopilotInputStoreError("At most 50 checkpoint inputs can be submitted at once.")
+    submissions = _current_submissions(submissions, requests)
     if not submissions:
         return {}, await list_metadata(db, job.owner_id, job.project_id, _scope_key(job))
 
     key_set = {str(key).strip() for key in requests}
-    unknown = [item.key for item in submissions if item.key not in key_set]
-    if unknown:
-        raise AutopilotInputStoreError("One or more checkpoint inputs are no longer part of this analysis. Refresh and try again.")
     cipher = _fernet(settings)
     scope = _scope_key(job)
     # Reuse is deliberately scoped to the exact owner *and project*.  A

@@ -108,6 +108,23 @@ from app.services.upload_repository import (
 
 router = APIRouter(prefix="/autopilot", tags=["autopilot"])
 logger = logging.getLogger(__name__)
+
+def _log_checkpoint_submission_rejection(
+    *, job_id: str, submitted_count: int, error: AutopilotInputStoreError
+) -> None:
+    """Log a checkpoint rejection without field values, keys, or secrets."""
+    error_code = (
+        "stale_input_key"
+        if "no longer part of this analysis" in str(error)
+        else "invalid_checkpoint_submission"
+    )
+    logger.warning(
+        "Autopilot checkpoint submission rejected job_id=%s submitted_count=%s error_code=%s",
+        job_id,
+        submitted_count,
+        error_code,
+    )
+
 _REPOSITORY_MATERIALIZATION_TASKS: set[str] = set()
 
 
@@ -4126,6 +4143,11 @@ async def update_autopilot_setup(
         )
     except AutopilotInputStoreError as exc:
         await db.rollback()
+        _log_checkpoint_submission_rejection(
+            job_id=job_id,
+            submitted_count=len(payload.input_submissions or []),
+            error=exc,
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     stored = payload.model_dump(exclude={"input_submissions"})
