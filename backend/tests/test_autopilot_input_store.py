@@ -5,7 +5,13 @@ from uuid import UUID
 from app.config import Settings
 from app.database.models.autopilot_input import AutopilotInputRecord
 from app.schemas.autopilot import AutopilotInputSubmission, AutopilotRandomSpec
-from app.services.autopilot_input_store import _fernet, _metadata, generate_synthetic_value
+from app.services.autopilot_input_store import (
+    AutopilotInputStoreError,
+    _current_submissions,
+    _fernet,
+    _metadata,
+    generate_synthetic_value,
+)
 
 
 def test_sensitive_values_are_fernet_encrypted_and_not_recoverable_from_metadata():
@@ -29,6 +35,30 @@ def test_checkpoint_decisions_accept_skip_reuse_and_random_without_a_value():
     for decision in ("skip", "reuse", "random"):
         submission = AutopilotInputSubmission(key="runtime_demo", decision=decision)
         assert submission.decision == decision
+
+
+def test_obsolete_skip_only_checkpoint_does_not_block_current_inputs():
+    submissions = [
+        AutopilotInputSubmission(key="old_reset_hook", decision="skip"),
+        AutopilotInputSubmission(key="current_username", decision="reuse"),
+    ]
+
+    accepted = _current_submissions(submissions, {"current_username": object()})
+
+    assert [item.key for item in accepted] == ["current_username"]
+
+
+def test_obsolete_checkpoint_cannot_write_or_reuse_a_value():
+    for submission in (
+        AutopilotInputSubmission(key="old_password", decision="provide", value="not-a-real-secret"),
+        AutopilotInputSubmission(key="old_password", decision="reuse"),
+    ):
+        try:
+            _current_submissions([submission], {})
+        except AutopilotInputStoreError as exc:
+            assert "no longer part of this analysis" in str(exc)
+        else:
+            raise AssertionError("stale value decisions must not be accepted")
 
 
 def test_checkpoint_metadata_never_exposes_the_encrypted_value():
