@@ -47,6 +47,7 @@ from app.services.autopilot import (
     normalize_surface_identity,
 )
 from app.services.autopilot_ir import AutopilotIRCompiler, credential_value_available
+from app.services.autopilot_workflow import transition_phase
 from app.services.autopilot_context import (
     DEFAULT_AUTOPILOT_CONTEXT,
     DEFAULT_AUTOPILOT_PROFILE_ID,
@@ -2231,3 +2232,6 @@ async def test_plan_approval_does_not_rewind_forward_workflow_phase(
         assert service.updates[0]["phase"] == "plan_approved"
     else:
         assert "phase" not in service.updates[0]
+
+def test_blocked_job_can_resume_after_checkpoint_for_case_review():
+    assert transition_phase("blocked", "cases_pending_review") == "cases_pending_review"
