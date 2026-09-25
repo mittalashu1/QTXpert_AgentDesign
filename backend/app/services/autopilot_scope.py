@@ -65,6 +65,9 @@ FUNCTIONAL_CASE_BUCKETS = frozenset({
     "functional",
     "functional_positive",
     "functional_negative",
+    # UAT acceptance journeys exercise user-visible functional behavior.
+    # Keep them for functional-only scope; SIT remains excluded.
+    "uat",
     # Page/navigation checks verify application behavior, not a visual or
     # non-functional quality attribute.
     "page_level",
