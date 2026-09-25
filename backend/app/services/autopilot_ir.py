@@ -565,7 +565,43 @@ class AutopilotIRCompiler:
             return None, "Runtime Discovery has no usable screen graph."
 
         screens = {screen.screen_id: screen for screen in discovery.screens}
-        current = discovery.screens[0]
+        root = discovery.screens[0]
+        current = root
+        runtime_screen = screens.get(test.runtime_screen_id or "")
+        if runtime_screen is not None and runtime_screen.screen_id != root.screen_id:
+            # Resolve against the observed screen when discovery did not establish
+            # a safe launch route. Execution still validates the live page.
+            reachable = {root.screen_id}
+            pending = [root.screen_id]
+            while pending:
+                source_id = pending.pop(0)
+                source = screens.get(source_id)
+                for transition in discovery.transitions:
+                    if (
+                        transition.from_screen_id != source_id
+                        or transition.action not in {"tap", "scroll"}
+                        or transition.to_screen_id not in screens
+                        or transition.to_screen_id in reachable
+                    ):
+                        continue
+                    if transition.action == "tap":
+                        control = next(
+                            (item for item in (source.controls if source else []) if item.control_id == transition.control_id),
+                            None,
+                        )
+                        if (
+                            not control
+                            or not control.enabled
+                            or not control.clickable
+                            or control.input_capable
+                            or control.risk != "safe"
+                        ):
+                            continue
+                    reachable.add(transition.to_screen_id)
+                    pending.append(transition.to_screen_id)
+            if runtime_screen.screen_id not in reachable:
+                current = runtime_screen
+
         transitions = {
             (transition.from_screen_id, transition.control_id): transition
             for transition in discovery.transitions
