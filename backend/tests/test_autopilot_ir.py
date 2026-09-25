@@ -205,6 +205,26 @@ def test_runtime_discovery_promotes_resolved_safe_journey():
     compile(generated.appium_python, "<qtx-generated>", "exec")
 
 
+def test_runtime_case_resolves_against_observed_screen_when_launch_route_is_unknown():
+    discovery = _discovery().model_copy(update={"transitions": []})
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-RUNTIME-FUNC-POS-UNREACHABLE",
+            suite="Functional · Positive",
+            title="Help journey — activate Help on the observed Help screen",
+            priority="high",
+            objective="Exercise an observed safe control.",
+            steps=["Launch application", "Tap Support", "Verify Support"],
+            expected=["Support is visible"],
+            runtime_screen_id="screen-002",
+        )
+    ])
+
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+
+    assert generated.readiness == "executable"
+    assert [step.screen_id for step in generated.steps[:3]] == ["screen-002", "screen-002", "screen-002"]
+
 def test_native_back_journey_uses_post_action_evidence_without_stale_target_locator():
     back = _control("back", "Back")
     login = _control("login", "Login")
