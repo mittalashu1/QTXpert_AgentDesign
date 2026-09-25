@@ -2233,5 +2233,6 @@ async def test_plan_approval_does_not_rewind_forward_workflow_phase(
     else:
         assert "phase" not in service.updates[0]
 
-def test_blocked_job_can_resume_after_checkpoint_for_case_review():
+def test_blocked_or_partial_job_can_resume_after_checkpoint_for_case_review():
     assert transition_phase("blocked", "cases_pending_review") == "cases_pending_review"
+    assert transition_phase("partial", "cases_pending_review") == "cases_pending_review"
