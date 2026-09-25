@@ -615,6 +615,9 @@ def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
     assert {"functional_positive", "uat", "sit"}.issubset(buckets)
     assert "functional_negative" not in buckets
     assert any("Sign in" in test.title for test in expanded.tests)
+    login_case = next(test for test in expanded.tests if "sign in with approved UAT credentials" in test.title)
+    assert login_case.requires_auth is True
+    assert login_case.autonomous_candidate is False
     assert any(test.requires_test_data for test in expanded.tests)
     assert any("Runtime Discovery refreshed" in item for item in expanded.analysis_basis)
 
