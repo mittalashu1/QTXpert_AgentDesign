@@ -647,6 +647,44 @@ def test_suite_replays_only_observed_safe_route_to_case_screen(tmp_path):
     assert driver.page_source == driver.auth_source
 
 
+def test_suite_waits_briefly_for_sparse_launch_screen_to_settle(monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    discovery.screens[0].controls = [DiscoveredControl(
+        control_id="splash",
+        semantic_label="Loading",
+        class_name="android.widget.TextView",
+        enabled=True,
+        risk="safe",
+    )]
+    driver = _RouteDriver()
+    observations = [discovery.screens[0], discovery.screens[0], discovery.screens[1]]
+
+    def identify(_driver, _discovery, _package):
+        result = observations.pop(0) if observations else discovery.screens[1]
+        if result.screen_id == "screen-auth":
+            driver.page_source = driver.auth_source
+        return result
+
+    monkeypatch.setattr(service, "_identify_discovered_screen", identify)
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify the User ID field on the observed sign-in screen",
+            target="User ID",
+            screen_id="screen-auth",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/user_id",
+            locator_confidence=0.98,
+        )
+    ])
+
+    navigation = service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert navigation == []
+    assert driver.navigation_clicks == 0
+    assert driver.page_source == driver.auth_source
+
 def test_suite_retraces_one_observed_safe_edge_from_empty_sign_in_form():
     service = AutopilotSuiteService(Settings(), prototype=object())
     discovery = _navigation_discovery()

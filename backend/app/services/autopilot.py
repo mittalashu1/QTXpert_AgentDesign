@@ -2911,6 +2911,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                     )
                 )
                 queues["ui_positive"].append(
@@ -2927,6 +2928,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                     )
                 )
 
@@ -2950,6 +2952,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                     )
                 )
                 queues["uat_negative"].append(
@@ -2969,6 +2972,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                     )
                 )
                 queues["sit_positive"].append(
@@ -2988,6 +2992,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                     )
                 )
                 queues["sit_negative"].append(
@@ -3007,6 +3012,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                     )
                 )
 
@@ -3074,6 +3080,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                     )
                 )
                 queues["accessibility"].append(
@@ -3090,6 +3097,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                     )
                 )
 
@@ -3126,6 +3134,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                         data_probes=input_probe_guidance(label, control.input_kind),
                     )
                 )
@@ -3147,6 +3156,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                         data_probes=input_probe_guidance(label, control.input_kind),
                     )
                 )
@@ -3168,6 +3178,7 @@ class AutopilotPrototypeService:
                         journey=journey_label,
                         page_label=screen_label,
                         page_url=screen.url,
+                        runtime_screen_id=screen.screen_id,
                         data_probes=input_probe_guidance(label, control.input_kind),
                     )
                 )
@@ -3190,6 +3201,7 @@ class AutopilotPrototypeService:
                             journey=journey_label,
                             page_label=screen_label,
                             page_url=screen.url,
+                            runtime_screen_id=screen.screen_id,
                             data_probes=input_probe_guidance(label, control.input_kind),
                         )
                     )
@@ -3199,7 +3211,8 @@ class AutopilotPrototypeService:
         # target has more than 100 cases.
         merged: list[AutopilotTest] = []
         seen_titles: set[str] = set()
-        for test in [*analysis.tests]:
+        # Refresh generated cases from the persisted graph so new observations can correct stale assertions.
+        for test in [test for test in analysis.tests if not str(test.id).startswith("QT-RUNTIME-")]:
             key = re.sub(r"\W+", " ", test.title.lower()).strip()
             if key and key not in seen_titles:
                 merged.append(test)
@@ -3215,7 +3228,7 @@ class AutopilotPrototypeService:
                     merged.append(test)
                     seen_titles.add(key)
         merged = cls._filter_tests_for_requested_scope(merged, analysis.scope.requested_test_types)
-        before = len(analysis.tests)
+        refreshed_runtime_count = sum(1 for test in merged if str(test.id).startswith("QT-RUNTIME-"))
         # Re-discovery is idempotent. Replace the previous expansion note
         # instead of accumulating a new "N to N" line on every refresh.
         basis = [
@@ -3224,10 +3237,11 @@ class AutopilotPrototypeService:
             if not (
                 str(item).startswith("Runtime Discovery expanded the plan")
                 or str(item).startswith("Runtime Discovery added ")
+                or str(item).startswith("Runtime Discovery refreshed ")
             )
         ]
         expansion_note = (
-            f"Runtime Discovery added {max(0, len(merged) - before)} observed-surface case(s); the plan now has "
+            f"Runtime Discovery refreshed {refreshed_runtime_count} observed-surface case(s); the plan now has "
             f"{len(merged)} evidence-scoped case(s) across {len(screens)} observed screen(s); no artificial case-count cap is applied."
         )
         basis.append(expansion_note)

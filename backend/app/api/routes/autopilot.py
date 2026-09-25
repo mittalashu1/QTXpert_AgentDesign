@@ -2045,21 +2045,6 @@ async def _resume_and_discover_background(
                     request,
                     input_values=discovery_input_values,
                 )
-            # Runtime Discovery is the point at which the plan can become
-            # app-specific. Expand the bounded baseline from the observed
-            # screens/controls, then persist that snapshot together with the
-            # discovery result so refreshes, reports and execution all use the
-            # same generated case inventory.
-            expanded_analysis = None
-            try:
-                discovered_analysis = await service.load_analysis(job_id)
-                expanded_analysis = service.expand_discovered_coverage(discovered_analysis, result)
-            except Exception:
-                logger.warning(
-                    "Autopilot runtime coverage expansion skipped job_id=%s",
-                    job_id,
-                    exc_info=True,
-                )
             record = await _safe_job_record(db, job_id, owner_id)
             # Do not replace a real screen graph with an empty provider/system
             # UI response.  The latest attempt is still returned to the
@@ -2069,6 +2054,17 @@ async def _resume_and_discover_background(
                 _record_discovery(record),
                 result,
             )
+            # Expand coverage from the same graph the report and runner will use.
+            expanded_analysis = None
+            try:
+                discovered_analysis = await service.load_analysis(job_id)
+                expanded_analysis = service.expand_discovered_coverage(discovered_analysis, persisted_discovery)
+            except Exception:
+                logger.warning(
+                    "Autopilot runtime coverage expansion skipped job_id=%s",
+                    job_id,
+                    exc_info=True,
+                )
             previous_map = job.get("application_map")
             map_version = int(previous_map.get("version") or 0) + 1 if isinstance(previous_map, dict) else 1
             application_map = build_application_map(
@@ -4385,12 +4381,6 @@ async def run_autopilot_discovery(
             payload,
             input_values=discovery_input_values,
         )
-    expanded_analysis = None
-    try:
-        discovered_analysis = await service.load_analysis(job_id)
-        expanded_analysis = service.expand_discovered_coverage(discovered_analysis, result)
-    except Exception:
-        logger.warning("Autopilot runtime coverage expansion skipped job_id=%s", job_id, exc_info=True)
     record = await _safe_job_record(db, job_id, owner_id)
     # A transient provider failure (or a session stuck on Android system UI)
     # must not erase a previously successful screen graph. Keep the prior map
@@ -4400,6 +4390,13 @@ async def run_autopilot_discovery(
         _record_discovery(record),
         result,
     )
+    # Expand coverage from the same graph the report and runner will use.
+    expanded_analysis = None
+    try:
+        discovered_analysis = await service.load_analysis(job_id)
+        expanded_analysis = service.expand_discovered_coverage(discovered_analysis, persisted_discovery)
+    except Exception:
+        logger.warning("Autopilot runtime coverage expansion skipped job_id=%s", job_id, exc_info=True)
     previous_map = job.get("application_map")
     map_version = int(previous_map.get("version") or 0) + 1 if isinstance(previous_map, dict) else 1
     application_map = build_application_map(
