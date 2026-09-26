@@ -1,6 +1,8 @@
 param(
     [string]$EmulatorName,
-    [string]$AppiumEntry
+    [string]$AppiumEntry,
+    [ValidateRange(1536,8192)][int]$EmulatorMemoryMB = 1536,
+    [ValidateRange(1,8)][int]$EmulatorCores = 2
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +19,7 @@ $env:PATH = "$(Join-Path $sdkRoot 'platform-tools');$env:PATH"
 $logDir = Join-Path $runnerDir "logs"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
+if (-not $EmulatorName -and (Test-Path -LiteralPath (Join-Path $env:ANDROID_USER_HOME 'avd\QTXpert_Android16.ini'))) { $EmulatorName = 'QTXpert_Android16' }
 if ($EmulatorName) {
     $adb = Join-Path $sdkRoot "platform-tools\adb.exe"
     $deviceList = & $adb devices
@@ -24,7 +27,7 @@ if ($EmulatorName) {
         $emulator = Join-Path $sdkRoot "emulator\emulator.exe"
         $available = & $emulator -list-avds
         if ($available -notcontains $EmulatorName) { throw "The selected emulator does not exist: $EmulatorName" }
-        Start-Process -FilePath $emulator -ArgumentList @("-avd", $EmulatorName, "-no-window", "-no-audio") -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir "emulator.out.log") -RedirectStandardError (Join-Path $logDir "emulator.err.log") | Out-Null
+        Start-Process -FilePath $emulator -ArgumentList @("-avd", $EmulatorName, "-memory", "$EmulatorMemoryMB", "-cores", "$EmulatorCores", "-no-window", "-no-audio", "-no-boot-anim") -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir "emulator.out.log") -RedirectStandardError (Join-Path $logDir "emulator.err.log") | Out-Null
         $deviceOnline = $false
         for ($attempt = 0; $attempt -lt 120; $attempt++) {
             $deviceList = & $adb devices

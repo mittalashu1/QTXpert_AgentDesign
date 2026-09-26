@@ -307,6 +307,13 @@ def _case_error(exc: Exception, steps: list[str]) -> str:
     return message
 
 
+def _validate_startup_ui(source: str) -> None:
+    if not source.strip():
+        raise RuntimeError("The device returned an empty UI hierarchy; startup was not validated")
+    if any(marker in source for marker in ("android:id/aerr_close", "android:id/aerr_wait", "android:id/aerr_restart")):
+        raise RuntimeError("An Android crash or application-not-responding dialog is blocking the test. Check the emulator's available memory and app logs.")
+
+
 def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, stop: threading.Event | None = None) -> dict[str, Any]:
     from appium import webdriver
     from appium.options.android import UiAutomator2Options
@@ -354,9 +361,11 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
         screenshot = driver.get_screenshot_as_png()
         if len(screenshot) > MAX_SCREENSHOT_BYTES:
             raise RuntimeError("Startup screenshot exceeds the 5MB evidence cap")
-        page_source = (driver.page_source or "").encode("utf-8")[:MAX_SOURCE_BYTES]
-        app_package = driver.capabilities.get("appium:appPackage") or driver.capabilities.get("appPackage")
-        app_activity = driver.capabilities.get("appium:appActivity") or driver.capabilities.get("appActivity")
+        source = driver.page_source or ""
+        _validate_startup_ui(source)
+        page_source = source.encode("utf-8")[:MAX_SOURCE_BYTES]
+        app_package = driver.current_package
+        app_activity = driver.current_activity
         for case in job.get("cases", []):
             started = time.monotonic()
             outcome, error = "passed", None
@@ -397,6 +406,8 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
             "results": results,
             "current_package": app_package,
             "current_activity": app_activity,
+            "device_name": configured_device,
+            "platform_version": driver.capabilities.get("platformVersion") or driver.capabilities.get("appium:platformVersion"),
             "screenshot_base64": base64.b64encode(screenshot).decode("ascii"),
             "page_source_base64": base64.b64encode(page_source).decode("ascii"),
         }

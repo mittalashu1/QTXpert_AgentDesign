@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
-from agent import compile_mobile_steps, normalize_api_url, inspect_local_stack, _download_artifact, execute_android_job, _case_error
+from agent import compile_mobile_steps, normalize_api_url, inspect_local_stack, _download_artifact, execute_android_job, _case_error, _validate_startup_ui
 
 
 class LocalRunnerProtocolTests(unittest.TestCase):
@@ -77,6 +77,8 @@ class LocalRunnerProtocolTests(unittest.TestCase):
         driver.get_screenshot_as_png.return_value = b"png"
         driver.page_source = "<screen/>"
         driver.capabilities = {}
+        driver.current_package = "com.example.app"
+        driver.current_activity = ".MainActivity"
         driver.find_element.return_value.is_displayed.return_value = False
         job = {"target_kind": "android", "cases": [
             {"result_id": "empty", "steps": []},
@@ -92,6 +94,8 @@ class LocalRunnerProtocolTests(unittest.TestCase):
         driver.get_screenshot_as_png.return_value = b"png"
         driver.page_source = "<screen/>"
         driver.capabilities = {}
+        driver.current_package = "com.example.app"
+        driver.current_activity = ".MainActivity"
         stop = threading.Event()
         stop.set()
         job = {"target_kind": "android", "cases": [{"result_id": "cancelled", "steps": ["tap Login"]}]}
@@ -103,6 +107,12 @@ class LocalRunnerProtocolTests(unittest.TestCase):
 
     def test_fill_values_do_not_leak_into_error_report(self):
         self.assertEqual(_case_error(RuntimeError("request contained private-value"), ["fill id :: password :: private-value"]), "request contained [redacted input]")
+
+    def test_system_crash_dialog_cannot_validate_app_startup(self):
+        for source in ("", '<node resource-id="android:id/aerr_close"/>', '<node resource-id="android:id/aerr_wait"/>'):
+            with self.assertRaises(RuntimeError):
+                _validate_startup_ui(source)
+        _validate_startup_ui('<node package="com.example.app" text="Sign in"/>')
 
 
 if __name__ == "__main__":

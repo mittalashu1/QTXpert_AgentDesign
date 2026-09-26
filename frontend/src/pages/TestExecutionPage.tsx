@@ -261,7 +261,7 @@ export default function TestExecutionPage() {
       : {
         app_asset_id: appAssetId || undefined,
         device_name: deviceName.trim() || undefined,
-        platform_version: platformVersion.trim() || undefined,
+        platform_version: provider === "local_runner" ? undefined : platformVersion.trim() || undefined,
         ...(provider === "appium" ? {
           appium_url: appiumUrl.trim() || undefined,
           appium_app: appiumApp.trim() || undefined,
@@ -739,7 +739,16 @@ export default function TestExecutionPage() {
                   <Grid size={{ xs: 12, md: 3 }}>
                     <FormControl fullWidth size="small">
                       <InputLabel id="mobile-provider-label">Execution provider</InputLabel>
-                      <Select labelId="mobile-provider-label" label="Execution provider" value={provider} onChange={(event) => { setProvider(event.target.value as ExecutionProvider); setPreflightSignature(""); }}>
+                      <Select labelId="mobile-provider-label" label="Execution provider" value={provider} onChange={(event) => {
+                        const nextProvider = event.target.value as ExecutionProvider;
+                        setProvider(nextProvider);
+                        if (nextProvider === "local_runner") {
+                          const devices = [...new Set((localRunners.data ?? []).filter((runner) => runner.status === "online").flatMap((runner) => runner.devices))];
+                          setDeviceName(devices.length === 1 ? devices[0] : "");
+                          setPlatformVersion("");
+                        }
+                        setPreflightSignature("");
+                      }}>
                         <MenuItem value="browserstack">BrowserStack real device</MenuItem>
                         <MenuItem value="appium">Custom / local Appium</MenuItem>
                         <MenuItem value="local_runner" disabled={targetKind !== "android"}>This Windows runner · Android</MenuItem>
@@ -752,7 +761,7 @@ export default function TestExecutionPage() {
                       : <Alert severity="warning">No compatible local runner is online for this project. Pair this laptop above and keep the runner process running before preflight.</Alert>}
                   </Grid>}
                   <Grid size={{ xs: 12, md: 3 }}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => { setDeviceName(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "iPhone 15" : "Google Pixel 8"} /></Grid>
-                  <Grid size={{ xs: 12, md: 2 }}><TextField fullWidth size="small" label="OS version" value={platformVersion} onChange={(event) => { setPlatformVersion(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "17" : "14.0"} /></Grid>
+                  <Grid size={{ xs: 12, md: 2 }}><TextField fullWidth size="small" label={provider === "local_runner" ? "OS version (automatic)" : "OS version"} disabled={provider === "local_runner"} value={platformVersion} onChange={(event) => { setPlatformVersion(event.target.value); setPreflightSignature(""); }} placeholder={provider === "local_runner" ? "Detected on device" : targetKind === "ios" ? "17" : "14.0"} /></Grid>
                   {provider === "appium" && <>
                     <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth size="small" label="Appium server URL (optional)" value={appiumUrl} onChange={(event) => { setAppiumUrl(event.target.value); setPreflightSignature(""); }} helperText="Hosted runs need a reachable HTTPS endpoint; local development can use 127.0.0.1." /></Grid>
                     <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth size="small" label="Remote app reference (optional)" value={appiumApp} onChange={(event) => { setAppiumApp(event.target.value); setPreflightSignature(""); }} helperText="Required for a hosted Appium lab unless it shares the API filesystem." /></Grid>

@@ -9,7 +9,7 @@ from pathlib import Path
 from appium import webdriver
 from appium.options.android import UiAutomator2Options
 
-from agent import DEFAULT_APPIUM_URL, inspect_local_stack
+from agent import DEFAULT_APPIUM_URL, inspect_local_stack, _validate_startup_ui
 
 
 def main() -> int:
@@ -41,7 +41,9 @@ def main() -> int:
         screenshot = driver.get_screenshot_as_png()
         (args.output / "settings.xml").write_text(source, encoding="utf-8")
         (args.output / "settings.png").write_bytes(screenshot)
+        _validate_startup_ui(source)
         assert driver.current_package == "com.android.settings", "Android Settings did not launch"
+        assert 'package="com.android.settings"' in source, "The readable UI does not belong to Android Settings"
         assert "Settings" in source, "Settings UI was not readable"
         assert screenshot.startswith(b"\x89PNG"), "Screenshot was not a PNG"
         report.update(status="passed", session_id=driver.session_id,
