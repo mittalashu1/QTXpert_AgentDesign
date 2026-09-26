@@ -142,7 +142,7 @@ def input_probe_guidance(label: str, field_type: str | None = None) -> list[dict
     )
     if is_credential:
         positive = "Use the approved non-production user ID or credential supplied for sign-in"
-        negative = "Do not guess or submit invalid credentials; avoid account lockout"
+        negative = "Do not submit guessed invalid credentials; avoid account lockout"
         boundary = "Do not probe password, OTP or lockout boundaries without an explicit safe test policy"
     elif any(term in lower for term in ("name", "first", "last", "surname")):
         positive = "Alphabetic name, for example Alex Morgan"
