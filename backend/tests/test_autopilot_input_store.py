@@ -4,10 +4,11 @@ from uuid import UUID
 
 from app.config import Settings
 from app.database.models.autopilot_input import AutopilotInputRecord
-from app.schemas.autopilot import AutopilotInputSubmission, AutopilotRandomSpec
+from app.schemas.autopilot import AutopilotInputRequest, AutopilotInputSubmission, AutopilotRandomSpec
 from app.services.autopilot_input_store import (
     AutopilotInputStoreError,
     _current_submissions,
+    _reconcile_runtime_reuse_submissions,
     _fernet,
     _metadata,
     generate_synthetic_value,
@@ -82,3 +83,94 @@ def test_checkpoint_metadata_never_exposes_the_encrypted_value():
     assert metadata.has_value is True
     assert plaintext not in metadata.model_dump_json()
     assert record.encrypted_value not in metadata.model_dump_json()
+
+
+def _saved_runtime_username(*, input_key="runtime_old_username", label="Sign-in · Username · User ID / email"):
+    return AutopilotInputRecord(
+        owner_id=UUID("11111111-1111-1111-1111-111111111111"),
+        project_id=UUID("22222222-2222-2222-2222-222222222222"),
+        job_id="33333333-3333-3333-3333-333333333333",
+        surface_key="fh-money-android",
+        input_key=input_key,
+        label=label,
+        category="credential",
+        decision="provide",
+        save_for_reuse=True,
+        encrypted_value="encrypted-test-value",
+        source="runtime",
+        expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def _runtime_username_request(*, key="runtime_new_username", label="Sign-in · Username · User ID / email"):
+    return AutopilotInputRequest(
+        key=key,
+        label=label,
+        category="credential",
+        reason="Observed sign-in field.",
+        source="runtime",
+        field_type="credential",
+        input_hint="username",
+    )
+
+
+def test_stale_saved_runtime_reuse_rebinds_to_one_matching_current_field():
+    old_row = _saved_runtime_username()
+    current = _runtime_username_request()
+    submission = AutopilotInputSubmission(key=old_row.input_key, decision="reuse")
+
+    accepted, reusable = _reconcile_runtime_reuse_submissions(
+        [submission],
+        {current.key: current},
+        [old_row],
+    )
+
+    assert [item.key for item in accepted] == [current.key]
+    assert reusable[current.key] is old_row
+    assert old_row.encrypted_value == "encrypted-test-value"
+
+
+def test_current_runtime_key_can_reuse_a_uniquely_matched_legacy_saved_value():
+    old_row = _saved_runtime_username()
+    current = _runtime_username_request()
+
+    accepted, reusable = _reconcile_runtime_reuse_submissions(
+        [AutopilotInputSubmission(key=current.key, decision="reuse")],
+        {current.key: current},
+        [old_row],
+    )
+
+    assert [item.key for item in accepted] == [current.key]
+    assert reusable[current.key] is old_row
+
+
+def test_stale_saved_runtime_reuse_rejects_ambiguous_matching_fields():
+    old_row = _saved_runtime_username()
+    first = _runtime_username_request(key="runtime_first_username")
+    second = _runtime_username_request(key="runtime_second_username")
+
+    try:
+        _reconcile_runtime_reuse_submissions(
+            [AutopilotInputSubmission(key=old_row.input_key, decision="reuse")],
+            {first.key: first, second.key: second},
+            [old_row],
+        )
+    except AutopilotInputStoreError as exc:
+        assert "no longer part of this analysis" in str(exc)
+    else:
+        raise AssertionError("ambiguous runtime fields must not receive a saved credential")
+
+
+def test_stale_runtime_direct_value_is_not_rebound_to_another_field():
+    old_row = _saved_runtime_username()
+
+    try:
+        _reconcile_runtime_reuse_submissions(
+            [AutopilotInputSubmission(key=old_row.input_key, decision="provide", value="not-a-real-secret")],
+            {"runtime_new_username": _runtime_username_request()},
+            [old_row],
+        )
+    except AutopilotInputStoreError as exc:
+        assert "no longer part of this analysis" in str(exc)
+    else:
+        raise AssertionError("direct values under stale runtime keys must be reviewed again")
