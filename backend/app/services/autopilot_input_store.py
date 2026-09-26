@@ -16,7 +16,7 @@ from typing import Iterable, Mapping, Optional
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -33,6 +33,116 @@ from app.schemas.autopilot import (
 
 class AutopilotInputStoreError(ValueError):
     """A safe, user-facing validation error with no secret values attached."""
+
+
+def _checkpoint_label_identity(label: str) -> str:
+    """Normalize user-facing field labels for a safe same-surface rebind."""
+    return " ".join(str(label or "").split()).casefold()
+
+
+def _reusable_runtime_record(record: Optional[AutopilotInputRecord]) -> bool:
+    """Return whether a stored runtime value is safe to reuse or remap."""
+    if (
+        record is None
+        or record.source != "runtime"
+        or not record.save_for_reuse
+        or not record.encrypted_value
+    ):
+        return False
+    expires_at = record.expires_at
+    if expires_at is None:
+        return True
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at > _now()
+
+
+def _runtime_record_matches_request(
+    record: AutopilotInputRecord,
+    request: AutopilotInputRequest,
+) -> bool:
+    """Match saved ciphertext to one observed field without relying on volatile IDs."""
+    return (
+        request.source == "runtime"
+        and record.source == "runtime"
+        and record.category == request.category
+        and _checkpoint_label_identity(record.label) == _checkpoint_label_identity(request.label)
+    )
+
+
+def _reconcile_runtime_reuse_submissions(
+    submissions: Iterable[AutopilotInputSubmission],
+    requests: Mapping[str, AutopilotInputRequest],
+    stored_rows: Iterable[AutopilotInputRecord],
+) -> tuple[list[AutopilotInputSubmission], dict[str, AutopilotInputRecord]]:
+    """Rebind a saved runtime value only when its observed field is unambiguous.
+
+    Runtime screen/control IDs can change after a fresh mobile discovery.  A
+    stale *reuse* decision is recoverable only from an encrypted, reusable
+    row in the same owner/project/surface query, and only when exactly one
+    current runtime request has the same source, category and human field
+    label.  Direct values, random recipes, ambiguous matches and unmatched
+    values remain rejected by the normal stale-key validator.
+    """
+    submitted = list(submissions)
+    request_keys = {str(key).strip() for key in requests}
+    rows_by_key = {row.input_key: row for row in stored_rows}
+    accepted: list[AutopilotInputSubmission] = []
+    reusable_rows: dict[str, AutopilotInputRecord] = {}
+    used_request_keys: set[str] = set()
+
+    for item in submitted:
+        if item.key in request_keys:
+            accepted.append(item)
+            used_request_keys.add(item.key)
+            if item.decision == "reuse":
+                request = requests[item.key]
+                exact = rows_by_key.get(item.key)
+                if (
+                    _reusable_runtime_record(exact)
+                    and exact.category == request.category
+                    and exact.source == request.source
+                ):
+                    reusable_rows[item.key] = exact
+                else:
+                    aliases = [
+                        row for row in stored_rows
+                        if row.input_key != item.key
+                        and _reusable_runtime_record(row)
+                        and _runtime_record_matches_request(row, request)
+                    ]
+                    if len(aliases) == 1:
+                        reusable_rows[item.key] = aliases[0]
+            continue
+
+        stale_skip_only = (
+            item.decision == "skip"
+            and not item.value
+            and not item.save_for_reuse
+            and item.random_spec is None
+        )
+        if stale_skip_only:
+            continue
+
+        if item.decision == "reuse":
+            saved_row = rows_by_key.get(item.key)
+            if _reusable_runtime_record(saved_row):
+                matches = [
+                    request for request in requests.values()
+                    if _runtime_record_matches_request(saved_row, request)
+                ]
+                if len(matches) == 1 and matches[0].key not in used_request_keys:
+                    request = matches[0]
+                    accepted.append(item.model_copy(update={"key": request.key}))
+                    reusable_rows[request.key] = saved_row
+                    used_request_keys.add(request.key)
+                    continue
+
+        raise AutopilotInputStoreError(
+            "One or more checkpoint inputs are no longer part of this analysis. Refresh and try again."
+        )
+
+    return accepted, reusable_rows
 
 
 def _current_submissions(
@@ -173,13 +283,34 @@ async def apply_submissions(
     submissions = list(submissions)
     if len(submissions) > 50:
         raise AutopilotInputStoreError("At most 50 checkpoint inputs can be submitted at once.")
-    submissions = _current_submissions(submissions, requests)
+    scope = _scope_key(job)
     if not submissions:
-        return {}, await list_metadata(db, job.owner_id, job.project_id, _scope_key(job))
+        return {}, await list_metadata(db, job.owner_id, job.project_id, scope)
 
     key_set = {str(key).strip() for key in requests}
-    cipher = _fernet(settings)
-    scope = _scope_key(job)
+    submitted_keys = {str(item.key).strip() for item in submissions}
+    lookup_keys = key_set | submitted_keys
+    runtime_requests = [request for request in requests.values() if request.source == "runtime"]
+    runtime_labels = {request.label[:240] for request in runtime_requests}
+    runtime_categories = {request.category for request in runtime_requests}
+    row_filters = []
+    if lookup_keys:
+        row_filters.append(AutopilotInputRecord.input_key.in_(lookup_keys))
+    if runtime_labels and runtime_categories:
+        row_filters.append(
+            and_(
+                AutopilotInputRecord.source == "runtime",
+                AutopilotInputRecord.category.in_(runtime_categories),
+                AutopilotInputRecord.label.in_(runtime_labels),
+                AutopilotInputRecord.save_for_reuse.is_(True),
+                AutopilotInputRecord.encrypted_value.is_not(None),
+                or_(
+                    AutopilotInputRecord.expires_at.is_(None),
+                    AutopilotInputRecord.expires_at > _now(),
+                ),
+            )
+        )
+
     # Reuse is deliberately scoped to the exact owner *and project*.  A
     # surface key identifies the profile/target/build, but it is not a tenant
     # boundary: two projects can legitimately use the same profile and APK
@@ -196,11 +327,21 @@ async def apply_submissions(
                 AutopilotInputRecord.owner_id == job.owner_id,
                 project_scope,
                 AutopilotInputRecord.surface_key == scope,
-                AutopilotInputRecord.input_key.in_(key_set),
+                or_(*row_filters),
             )
         )
     ).all()
     existing = {row.input_key: row for row in existing_rows}
+    submissions, reusable_rows = _reconcile_runtime_reuse_submissions(
+        submissions,
+        requests,
+        existing_rows,
+    )
+    submissions = _current_submissions(submissions, requests)
+    if not submissions:
+        return {}, await list_metadata(db, job.owner_id, job.project_id, scope)
+
+    cipher = _fernet(settings)
     decisions: dict[str, AutopilotInputDecision] = {}
     for item in submissions:
         request = requests[item.key]
@@ -240,7 +381,7 @@ async def apply_submissions(
             encrypted = cipher.encrypt(generate_synthetic_value(spec).encode("utf-8")).decode("ascii")
             generator_spec = spec.model_dump(mode="json")
         elif decision == "reuse":
-            row = existing.get(item.key)
+            row = existing.get(item.key) or reusable_rows.get(item.key)
             if row is None or not row.save_for_reuse or (row.expires_at and row.expires_at <= _now()) or not row.encrypted_value:
                 raise AutopilotInputStoreError(f"No saved value is available for {request.label}. Choose Enter, Random or Skip.")
             encrypted = row.encrypted_value
@@ -249,7 +390,7 @@ async def apply_submissions(
             encrypted = None
             generator_spec = None
 
-        row = existing.get(item.key)
+        row = existing.get(item.key) or reusable_rows.get(item.key)
         if row is None:
             row = AutopilotInputRecord(
                 owner_id=job.owner_id,
@@ -269,6 +410,11 @@ async def apply_submissions(
             raise AutopilotInputStoreError(
                 "The saved input belongs to a different project. Choose Enter, Random or Skip."
             )
+        if row.input_key != item.key:
+            # Move only the exact, uniquely matched encrypted runtime record
+            # after the user explicitly chose Reuse. The next checkpoint read
+            # and in-process runner will then resolve the current key directly.
+            row.input_key = item.key
         row.job_id = job.job_id
         row.label = request.label[:240]
         row.category = request.category
@@ -276,8 +422,10 @@ async def apply_submissions(
         row.save_for_reuse = bool(item.save_for_reuse) if decision in {"provide", "random"} else bool(row.save_for_reuse and decision == "reuse")
         row.encrypted_value = encrypted
         row.generator_spec = generator_spec
+        row.source = request.source or "user"
         row.expires_at = _expiry(settings, row.save_for_reuse)
         row.last_used_at = _now() if decision == "reuse" else row.last_used_at
+        existing[item.key] = row
         decisions[item.key] = decision
 
     await db.flush()
