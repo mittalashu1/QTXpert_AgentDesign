@@ -58,7 +58,10 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "draft": frozenset({"preflight", "context_ready", "cases_pending_review", "blocked", "failed"}),
     "preflight": frozenset({"context_ready", "plan_pending_review", "failed"}),
     "context_ready": frozenset({"plan_pending_review", "plan_approved", "failed"}),
-    "plan_pending_review": frozenset({"plan_approved", "context_ready", "exploring", "failed"}),
+    # Checkpoint-driven Runtime Discovery may finish after re-analysis has
+    # returned the job to plan review. Persist the discovered cases at the
+    # review gate without bypassing explicit case approval for execution.
+    "plan_pending_review": frozenset({"plan_approved", "context_ready", "exploring", "cases_pending_review", "failed"}),
     "plan_approved": frozenset({"exploring", "execution_ready", "failed"}),
     "exploring": frozenset({"preflight", "cases_pending_review", "cases_approved", "execution_ready", "partial", "blocked", "failed"}),
     "cases_pending_review": frozenset({"cases_approved", "exploring", "execution_ready", "failed"}),
