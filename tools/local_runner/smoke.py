@@ -33,6 +33,10 @@ def main() -> int:
         "appium:appActivity": ".Settings",
         "appium:noReset": True,
         "appium:newCommandTimeout": 60,
+        "appium:androidInstallTimeout": 300_000,
+        "appium:uiautomator2ServerInstallTimeout": 300_000,
+        "appium:uiautomator2ServerLaunchTimeout": 120_000,
+        "appium:adbExecTimeout": 120_000,
     })
     driver = None
     try:

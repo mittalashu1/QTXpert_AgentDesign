@@ -138,6 +138,8 @@ def inspect_local_stack(appium_url: str = DEFAULT_APPIUM_URL) -> dict[str, Any]:
         "appium_server": False,
         "adb": False,
         "adb_path": _adb_executable(),
+        "online_devices": [],
+        "boot_state": {},
         "devices": [],
         "ready": False,
     }
@@ -156,11 +158,22 @@ def inspect_local_stack(appium_url: str = DEFAULT_APPIUM_URL) -> dict[str, Any]:
     try:
         completed = subprocess.run([result["adb_path"], "devices", "-l"], capture_output=True, text=True, timeout=8, check=True)
         result["adb"] = True
-        result["devices"] = [
+        result["online_devices"] = [
             line.split()[0]
             for line in completed.stdout.splitlines()[1:]
             if len(line.split()) >= 2 and line.split()[1] == "device"
         ]
+        for device in result["online_devices"]:
+            try:
+                boot = subprocess.run(
+                    [result["adb_path"], "-s", device, "shell", "getprop", "sys.boot_completed"],
+                    capture_output=True, text=True, timeout=8, check=True,
+                )
+                result["boot_state"][device] = "ready" if boot.stdout.strip() == "1" else "booting"
+                if boot.stdout.strip() == "1":
+                    result["devices"].append(device)
+            except (OSError, subprocess.SubprocessError):
+                result["boot_state"][device] = "unavailable"
     except Exception as exc:
         detail = getattr(exc, "stderr", None) or str(exc)
         result["adb_error"] = f"{type(exc).__name__}: {detail.strip()[:240]}"

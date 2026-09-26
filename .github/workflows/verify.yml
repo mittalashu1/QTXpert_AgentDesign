@@ -6,6 +6,28 @@ on:
     branches: [main]
 
 jobs:
+  local-runner:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: tools/local_runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m unittest test_agent
+      - name: Validate PowerShell startup scripts
+        shell: pwsh
+        run: |
+          foreach ($script in @('setup.ps1', 'start.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Get-Location) $script), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors) { throw ($errors | Out-String) }
+          }
+
   backend:
     runs-on: ubuntu-latest
     defaults:

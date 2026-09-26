@@ -56,6 +56,11 @@ powershell -ExecutionPolicy Bypass -File tools/local_runner/start.ps1
 Supply `-EmulatorName` with an existing Android virtual device name to start it
 when no device is online. The startup script reuses a running Appium server and
 runner, keeps Appium on loopback, and writes logs under `tools/local_runner/logs`.
+It prefers the dedicated `QTXpert_Android14` AVD when installed. Android must
+finish booting before the doctor reports ready: an ADB connection alone is not
+enough. On low-memory laptops, the first cold boot may take several minutes.
+Place a new AVD's data on a drive with sufficient free space rather than deleting
+existing customer files or devices to make room.
 
 Run a real Android Settings smoke check and save its screenshot and result:
 

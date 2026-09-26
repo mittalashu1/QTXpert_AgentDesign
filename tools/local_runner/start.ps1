@@ -2,7 +2,8 @@ param(
     [string]$EmulatorName,
     [string]$AppiumEntry,
     [ValidateRange(1536,8192)][int]$EmulatorMemoryMB = 1536,
-    [ValidateRange(1,8)][int]$EmulatorCores = 2
+    [ValidateRange(1,8)][int]$EmulatorCores = 2,
+    [ValidateRange(30,1800)][int]$BootTimeoutSeconds = 900
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +20,11 @@ $env:PATH = "$(Join-Path $sdkRoot 'platform-tools');$env:PATH"
 $logDir = Join-Path $runnerDir "logs"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
-if (-not $EmulatorName -and (Test-Path -LiteralPath (Join-Path $env:ANDROID_USER_HOME 'avd\QTXpert_Android16.ini'))) { $EmulatorName = 'QTXpert_Android16' }
+if (-not $EmulatorName) {
+    foreach ($candidate in @('QTXpert_Android14', 'QTXpert_Android16')) {
+        if (Test-Path -LiteralPath (Join-Path $env:ANDROID_USER_HOME "avd\$candidate.ini")) { $EmulatorName = $candidate; break }
+    }
+}
 if ($EmulatorName) {
     $adb = Join-Path $sdkRoot "platform-tools\adb.exe"
     $deviceList = & $adb devices
@@ -29,12 +34,17 @@ if ($EmulatorName) {
         if ($available -notcontains $EmulatorName) { throw "The selected emulator does not exist: $EmulatorName" }
         Start-Process -FilePath $emulator -ArgumentList @("-avd", $EmulatorName, "-memory", "$EmulatorMemoryMB", "-cores", "$EmulatorCores", "-no-window", "-no-audio", "-no-boot-anim") -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logDir "emulator.out.log") -RedirectStandardError (Join-Path $logDir "emulator.err.log") | Out-Null
         $deviceOnline = $false
-        for ($attempt = 0; $attempt -lt 120; $attempt++) {
+        for ($attempt = 0; $attempt -lt $BootTimeoutSeconds; $attempt++) {
             $deviceList = & $adb devices
-            if ($deviceList | Where-Object { $_ -match '^\S+\s+device\s*$' }) { $deviceOnline = $true; break }
+            $onlineDevice = $deviceList | Where-Object { $_ -match '^\S+\s+device\s*$' } | Select-Object -First 1
+            if ($onlineDevice) {
+                $deviceSerial = ($onlineDevice -split '\s+')[0]
+                $bootCompleted = & $adb -s $deviceSerial shell getprop sys.boot_completed
+                if ($LASTEXITCODE -eq 0 -and ($bootCompleted -join '').Trim() -eq '1') { $deviceOnline = $true; break }
+            }
             Start-Sleep -Seconds 1
         }
-        if (-not $deviceOnline) { throw "The emulator did not connect within two minutes. Check the emulator logs." }
+        if (-not $deviceOnline) { throw "Android did not complete boot within $BootTimeoutSeconds seconds. Check emulator logs, free disk space and available memory." }
     }
 }
 
