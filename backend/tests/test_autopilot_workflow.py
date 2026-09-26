@@ -77,6 +77,9 @@ def test_phase_transitions_are_explicit_and_idempotent():
     assert transition_phase("draft", "preflight") == "preflight"
     assert transition_phase("draft", "cases_pending_review") == "cases_pending_review"
     assert transition_phase("draft", "blocked") == "blocked"
+    # A resumed checkpoint may finish discovery from plan review; it must
+    # enter case review without skipping the explicit approval gate.
+    assert transition_phase("plan_pending_review", "cases_pending_review") == "cases_pending_review"
     assert transition_phase("blocked", "cases_pending_review") == "cases_pending_review"
     assert transition_phase("partial", "plan_approved") == "plan_approved"
     assert transition_phase("partial", "cases_pending_review") == "cases_pending_review"

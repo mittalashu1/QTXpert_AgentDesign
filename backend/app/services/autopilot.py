@@ -3138,50 +3138,51 @@ class AutopilotPrototypeService:
                         data_probes=input_probe_guidance(label, control.input_kind),
                     )
                 )
-                queues["functional_negative"].append(
-                    AutopilotTest(
-                        id=cls._runtime_case_id("FUNC-INPUT-NEG", screen.screen_id, control.control_id),
-                        suite="Functional · Negative",
-                        bucket="functional_negative",
-                        title=f"{journey_label} — Functional negative: reject invalid {label} on {screen_label}",
-                        priority="high",
-                        objective="Verify invalid, empty and boundary values for an observed input are rejected safely.",
-                        steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
-                        expected=[f"Invalid input for {label} is rejected with specific feedback and no state corruption"],
-                        requires_test_data=True,
-                        autonomous_candidate=input_candidate,
-                        synthetic_data_strategy="invalid_field_probe" if input_candidate else None,
-                        dependency=input_dependency or "An approved invalid fixture and reset/cleanup reference are required.",
-                        evidence_required=["validation screenshot", "error/oracle evidence", "cleanup result"],
-                        journey=journey_label,
-                        page_label=screen_label,
-                        page_url=screen.url,
-                        runtime_screen_id=screen.screen_id,
-                        data_probes=input_probe_guidance(label, control.input_kind),
+                if not input_is_sensitive:
+                    queues["functional_negative"].append(
+                        AutopilotTest(
+                            id=cls._runtime_case_id("FUNC-INPUT-NEG", screen.screen_id, control.control_id),
+                            suite="Functional · Negative",
+                            bucket="functional_negative",
+                            title=f"{journey_label} — Functional negative: reject invalid {label} on {screen_label}",
+                            priority="high",
+                            objective="Verify invalid, empty and boundary values for an observed input are rejected safely.",
+                            steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
+                            expected=[f"Invalid input for {label} is rejected with specific feedback and no state corruption"],
+                            requires_test_data=True,
+                            autonomous_candidate=input_candidate,
+                            synthetic_data_strategy="invalid_field_probe" if input_candidate else None,
+                            dependency=input_dependency or "An approved invalid fixture and reset/cleanup reference are required.",
+                            evidence_required=["validation screenshot", "error/oracle evidence", "cleanup result"],
+                            journey=journey_label,
+                            page_label=screen_label,
+                            page_url=screen.url,
+                            runtime_screen_id=screen.screen_id,
+                            data_probes=input_probe_guidance(label, control.input_kind),
+                        )
                     )
-                )
-                queues["ui_negative"].append(
-                    AutopilotTest(
-                        id=cls._runtime_case_id("UI-NEG", screen.screen_id, control.control_id),
-                        suite="UI · Negative",
-                        bucket="ui_negative",
-                        title=f"{journey_label} — UI negative: show {label} validation state on {screen_label}",
-                        priority="medium",
-                        objective="Check that the observed field's invalid and empty states remain readable and accessible.",
-                        steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
-                        expected=[f"The {label} error state is visible, understandable and does not obscure primary controls"],
-                        requires_test_data=True,
-                        autonomous_candidate=input_candidate,
-                        synthetic_data_strategy="invalid_field_probe" if input_candidate else None,
-                        dependency=input_dependency or "An approved invalid fixture and visual baseline are required.",
-                        evidence_required=["error-state screenshot", "UI hierarchy"],
-                        journey=journey_label,
-                        page_label=screen_label,
-                        page_url=screen.url,
-                        runtime_screen_id=screen.screen_id,
-                        data_probes=input_probe_guidance(label, control.input_kind),
+                    queues["ui_negative"].append(
+                        AutopilotTest(
+                            id=cls._runtime_case_id("UI-NEG", screen.screen_id, control.control_id),
+                            suite="UI · Negative",
+                            bucket="ui_negative",
+                            title=f"{journey_label} — UI negative: show {label} validation state on {screen_label}",
+                            priority="medium",
+                            objective="Check that the observed field's invalid and empty states remain readable and accessible.",
+                            steps=[*input_navigation, f"Enter an invalid value into {label}", "Verify validation feedback"],
+                            expected=[f"The {label} error state is visible, understandable and does not obscure primary controls"],
+                            requires_test_data=True,
+                            autonomous_candidate=input_candidate,
+                            synthetic_data_strategy="invalid_field_probe" if input_candidate else None,
+                            dependency=input_dependency or "An approved invalid fixture and visual baseline are required.",
+                            evidence_required=["error-state screenshot", "UI hierarchy"],
+                            journey=journey_label,
+                            page_label=screen_label,
+                            page_url=screen.url,
+                            runtime_screen_id=screen.screen_id,
+                            data_probes=input_probe_guidance(label, control.input_kind),
+                        )
                     )
-                )
                 if auth_observed and input_candidate:
                     queues["uat_negative"].append(
                         AutopilotTest(

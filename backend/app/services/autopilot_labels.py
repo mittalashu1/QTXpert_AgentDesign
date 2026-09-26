@@ -136,7 +136,15 @@ def input_probe_guidance(label: str, field_type: str | None = None) -> list[dict
     """
 
     lower = _normalized(label)
-    if any(term in lower for term in ("name", "first", "last", "surname")):
+    credential_type = (field_type or "").strip().casefold()
+    is_credential = credential_type in {"credential", "password", "otp", "secret"} or any(
+        term in lower for term in ("username", "user name", "password", "passcode", "otp", "one time code", "credential")
+    )
+    if is_credential:
+        positive = "Use the approved non-production user ID or credential supplied for sign-in"
+        negative = "Do not submit guessed invalid credentials; avoid account lockout"
+        boundary = "Do not probe password, OTP or lockout boundaries without an explicit safe test policy"
+    elif any(term in lower for term in ("name", "first", "last", "surname")):
         positive = "Alphabetic name, for example Alex Morgan"
         negative = "Numbers, symbols-only or an overlong name"
         boundary = "Minimum and maximum accepted name length"
