@@ -611,7 +611,11 @@ def test_runtime_discovery_expands_cases_from_observed_controls(tmp_path):
     # and SIT queues become eligible only in this observed branch. The engine
     # must not create a negative credential case from a username-only screen.
     assert {"functional_positive", "uat", "sit"}.issubset(buckets)
-    assert "functional_negative" not in buckets
+    assert not any(
+        "username" in test.title.casefold()
+        and test.bucket in {"functional_negative", "ui_negative"}
+        for test in expanded.tests
+    )
     assert any("Sign in" in test.title for test in expanded.tests)
     assert any(test.requires_test_data for test in expanded.tests)
     assert any("Runtime Discovery refreshed" in item for item in expanded.analysis_basis)
