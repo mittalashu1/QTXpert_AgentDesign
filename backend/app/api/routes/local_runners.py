@@ -67,6 +67,8 @@ class RunnerCompleteRequest(BaseModel):
     results: list[RunnerCaseResult] = Field(min_length=1, max_length=2000)
     current_package: str | None = Field(default=None, max_length=300)
     current_activity: str | None = Field(default=None, max_length=500)
+    device_name: str | None = Field(default=None, max_length=120)
+    platform_version: str | None = Field(default=None, max_length=40)
     screenshot_base64: str | None = Field(default=None, max_length=7_100_000)
     page_source_base64: str | None = Field(default=None, max_length=2_900_000)
 
@@ -511,6 +513,11 @@ async def complete_job(
     updates = {item.result_id: item for item in payload.results}
     if len(updates) != len(payload.results) or set(updates) != set(pending):
         raise HTTPException(status_code=409, detail="Runner results must contain each pending test exactly once")
+
+    if payload.device_name:
+        run.device_name = payload.device_name
+    if payload.platform_version:
+        run.platform_version = payload.platform_version
 
     screenshot = _decode_evidence(payload.screenshot_base64, SCREENSHOT_LIMIT, "Screenshot")
     page_source = _decode_evidence(payload.page_source_base64, PAGE_SOURCE_LIMIT, "Page source")
