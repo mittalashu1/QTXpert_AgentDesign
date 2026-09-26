@@ -47,6 +47,22 @@ Start the outbound worker in a terminal:
 tools/local_runner/.venv/Scripts/python.exe tools/local_runner/agent.py run
 ```
 
+To start the installed stack and runner in the background:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/local_runner/start.ps1
+```
+
+Supply `-EmulatorName` with an existing Android virtual device name to start it
+when no device is online. The startup script reuses a running Appium server and
+runner, keeps Appium on loopback, and writes logs under `tools/local_runner/logs`.
+
+Run a real Android Settings smoke check and save its screenshot and result:
+
+```powershell
+tools/local_runner/.venv/Scripts/python.exe tools/local_runner/smoke.py --output outputs/android-smoke
+```
+
 Use `tools/local_runner/.venv/Scripts/python.exe tools/local_runner/agent.py run --once` to claim at most one run,
 or `tools/local_runner/.venv/Scripts/python.exe tools/local_runner/agent.py doctor` to diagnose the local stack. The
 runner currently supports Android only; iOS requires a separate macOS/XCUITest
