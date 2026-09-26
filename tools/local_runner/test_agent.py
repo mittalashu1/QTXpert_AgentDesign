@@ -17,12 +17,33 @@ class LocalRunnerProtocolTests(unittest.TestCase):
                   "usb-device\tdevice product:test\n"
                   "offline-device\toffline\n"
                   "locked-device unauthorized\n")
-        with patch("agent.subprocess.run") as adb, patch("httpx.get") as status:
-            adb.return_value.stdout = output
+        with patch("agent.subprocess.run") as adb, patch("httpx.get") as status, patch("agent.platform.system", return_value="Windows"):
+            adb.side_effect = [MagicMock(stdout=output), MagicMock(stdout="1\n"), MagicMock(stdout="1\n")]
             status.return_value.is_success = True
             status.return_value.json.return_value = {"value": {"ready": True}}
             result = inspect_local_stack()
         self.assertEqual(result["devices"], ["emulator-5554", "usb-device"])
+
+    def test_online_but_booting_device_is_not_ready(self):
+        with patch("agent.subprocess.run") as adb, patch("httpx.get") as status, patch("agent.platform.system", return_value="Windows"):
+            adb.side_effect = [MagicMock(stdout="List of devices attached\nemulator-5554 device\n"), MagicMock(stdout="\n")]
+            status.return_value.is_success = True
+            status.return_value.json.return_value = {"value": {"ready": True}}
+            result = inspect_local_stack()
+        self.assertEqual(result["online_devices"], ["emulator-5554"])
+        self.assertEqual(result["devices"], [])
+        self.assertEqual(result["boot_state"]["emulator-5554"], "booting")
+        self.assertFalse(result["ready"])
+
+    def test_device_boot_probe_timeout_is_not_ready(self):
+        import subprocess
+        with patch("agent.subprocess.run") as adb, patch("httpx.get") as status, patch("agent.platform.system", return_value="Windows"):
+            adb.side_effect = [MagicMock(stdout="List of devices attached\nemulator-5554 device\n"), subprocess.TimeoutExpired("adb", 8)]
+            status.return_value.is_success = True
+            status.return_value.json.return_value = {"value": {"ready": True}}
+            result = inspect_local_stack()
+        self.assertEqual(result["boot_state"]["emulator-5554"], "unavailable")
+        self.assertFalse(result["ready"])
 
     def test_artifact_download_keeps_one_api_prefix_and_checks_hash(self):
         import hashlib
