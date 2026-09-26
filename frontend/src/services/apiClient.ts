@@ -1,6 +1,7 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
+const BASE_URL = API_BASE_URL;
 
 export const apiClient = axios.create({ baseURL: BASE_URL });
 

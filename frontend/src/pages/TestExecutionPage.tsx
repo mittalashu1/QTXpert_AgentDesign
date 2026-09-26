@@ -39,7 +39,8 @@ import OpenInNewOutlinedIcon from "@mui/icons-material/OpenInNewOutlined";
 import SearchOutlinedIcon from "@mui/icons-material/SearchOutlined";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import { AxiosError } from "axios";
-import { executionPlansApi, executionsApi, testCasesApi, uploadsApi } from "@/services/api";
+import { executionPlansApi, executionsApi, localRunnersApi, testCasesApi, uploadsApi } from "@/services/api";
+import { API_BASE_URL } from "@/services/apiClient";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
 import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
@@ -176,6 +177,7 @@ export default function TestExecutionPage() {
   } | null>(null);
   const [caseEditorError, setCaseEditorError] = useState("");
   const [uploadError, setUploadError] = useState("");
+  const [enrollmentToken, setEnrollmentToken] = useState("");
 
   const history = useQuery({
     queryKey: ["execution-source-runs", selectedProjectId],
@@ -188,6 +190,20 @@ export default function TestExecutionPage() {
     excludeCategories: ["autopilot_evidence", "execution_evidence"],
     excludeSourceModules: ["autopilot_evidence", "execution_report"],
     cacheKey: "execution-mobile-assets",
+  });
+  const localRunners = useQuery({
+    queryKey: ["local-device-runners", selectedProjectId],
+    queryFn: () => localRunnersApi.list(selectedProjectId!).then((response) => response.data),
+    enabled: Boolean(selectedProjectId),
+    refetchInterval: (query) => query.state.data?.some((runner) => runner.status === "online") ? 15000 : 30000,
+  });
+  const enrollLocalRunner = useMutation({
+    mutationFn: () => localRunnersApi.createEnrollment(selectedProjectId!).then((response) => response.data),
+    onSuccess: (response) => setEnrollmentToken(response.enrollment_token),
+  });
+  const revokeLocalRunner = useMutation({
+    mutationFn: (runnerId: string) => localRunnersApi.revoke(runnerId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["local-device-runners", selectedProjectId] }),
   });
   const plans = useQuery({
     queryKey: ["execution-plans", selectedProjectId],
@@ -257,7 +273,14 @@ export default function TestExecutionPage() {
   const targetSignature = useMemo(() => JSON.stringify(targetPayload), [targetPayload]);
   const targetConfigured = targetKind === "web"
     ? Boolean(baseUrl.trim())
-    : Boolean(appAssetId && deviceName.trim() && provider !== "playwright");
+    : Boolean(appAssetId && deviceName.trim() && provider !== "playwright"
+      && (provider !== "local_runner" || localRunners.data?.some((runner) => runner.status === "online" && runner.platforms.includes(targetKind))));
+
+  const localRunnerApiUrl = new URL(API_BASE_URL, window.location.origin).toString().replace(/\/$/, "");
+  const localRunnerPython = "tools/local_runner/.venv/Scripts/python.exe";
+  const localRunnerPairCommand = enrollmentToken
+    ? `${localRunnerPython} tools/local_runner/agent.py pair --api-url "${localRunnerApiUrl}" --token "${enrollmentToken}"`
+    : "";
 
   useEffect(() => {
     if (!currentPlan) return;
@@ -482,6 +505,29 @@ export default function TestExecutionPage() {
         description="Import a Test Design set, select cases, validate readiness, and retain run evidence."
       />
 
+      <Card variant="outlined" sx={{ mb: 2 }}>
+        <CardContent>
+          <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1.5} alignItems={{ md: "center" }}>
+            <Box>
+              <Typography variant="subtitle1" fontWeight={800}>Local device runner</Typography>
+              <Typography variant="body2" color="text.secondary">Connect this Windows laptop to run Android suites on its local emulator. The runner makes outbound HTTPS requests; Appium stays on loopback.</Typography>
+            </Box>
+            <Stack direction="row" spacing={1} alignItems="center">
+              {localRunners.isFetching && <LinearProgress sx={{ width: 48 }} />}
+              <Chip size="small" variant="outlined" label={`${(localRunners.data ?? []).filter((runner) => runner.status === "online").length} online`} color={(localRunners.data ?? []).some((runner) => runner.status === "online") ? "success" : "default"} />
+              <Button size="small" variant="outlined" disabled={enrollLocalRunner.isPending} onClick={() => enrollLocalRunner.mutate()}>
+                {enrollLocalRunner.isPending ? "Preparing…" : "Pair this laptop"}
+              </Button>
+            </Stack>
+          </Stack>
+          {localRunners.isError && <Alert severity="warning" sx={{ mt: 1 }}>Runner status is unavailable. Refresh this page after the API update is deployed.</Alert>}
+          {enrollLocalRunner.isError && <Alert severity="error" sx={{ mt: 1 }}>{apiErrorMessage(enrollLocalRunner.error, "Could not create a runner pairing token.")}</Alert>}
+          {(localRunners.data ?? []).length > 0 && <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap sx={{ mt: 1 }}>
+            {localRunners.data!.map((runner) => <Chip key={runner.id} size="small" label={`${runner.name} · ${runner.status}`} color={runner.status === "online" ? "success" : runner.status === "revoked" ? "default" : "warning"} variant="outlined" onDelete={runner.status !== "revoked" ? () => revokeLocalRunner.mutate(runner.id) : undefined} />)}
+          </Stack>}
+        </CardContent>
+      </Card>
+
       <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 2 }}>
         {STEPS.map((label) => <Step key={label}><StepLabel>{label}</StepLabel></Step>)}
       </Stepper>
@@ -696,9 +742,15 @@ export default function TestExecutionPage() {
                       <Select labelId="mobile-provider-label" label="Execution provider" value={provider} onChange={(event) => { setProvider(event.target.value as ExecutionProvider); setPreflightSignature(""); }}>
                         <MenuItem value="browserstack">BrowserStack real device</MenuItem>
                         <MenuItem value="appium">Custom / local Appium</MenuItem>
+                        <MenuItem value="local_runner" disabled={targetKind !== "android"}>This Windows runner · Android</MenuItem>
                       </Select>
                     </FormControl>
                   </Grid>
+                  {provider === "local_runner" && <Grid size={{ xs: 12 }}>
+                    {localRunners.data?.some((runner) => runner.status === "online" && runner.platforms.includes(targetKind))
+                      ? <Alert severity="success">A local runner is online. Use the device ID shown by ADB (for example, emulator-5554) below.</Alert>
+                      : <Alert severity="warning">No compatible local runner is online for this project. Pair this laptop above and keep the runner process running before preflight.</Alert>}
+                  </Grid>}
                   <Grid size={{ xs: 12, md: 3 }}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => { setDeviceName(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "iPhone 15" : "Google Pixel 8"} /></Grid>
                   <Grid size={{ xs: 12, md: 2 }}><TextField fullWidth size="small" label="OS version" value={platformVersion} onChange={(event) => { setPlatformVersion(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "17" : "14.0"} /></Grid>
                   {provider === "appium" && <>
@@ -879,6 +931,25 @@ export default function TestExecutionPage() {
           <Button variant="contained" startIcon={<SaveOutlinedIcon />} onClick={saveCaseEditor} disabled={saveSelection.isPending}>
             {saveSelection.isPending ? "Saving…" : "Save and recheck"}
           </Button>
+        </DialogActions>
+      </Dialog>
+      <Dialog open={Boolean(enrollmentToken)} onClose={() => setEnrollmentToken("")} fullWidth maxWidth="md">
+        <DialogTitle>Pair this Windows laptop</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.5}>
+            <Alert severity="info">This one-time pairing code expires in 10 minutes. It is not the FH Money or QTXpert password. The agent stores its runner identity encrypted with Windows DPAPI for this Windows account.</Alert>
+            <Typography variant="body2">From the QTXpert repository root, first check the local stack:</Typography>
+            <TextField fullWidth size="small" value={`${localRunnerPython} tools/local_runner/agent.py doctor`} InputProps={{ readOnly: true }} />
+            <Typography variant="body2">Then pair the runner with this project using the command below:</Typography>
+            <TextField fullWidth multiline minRows={2} value={localRunnerPairCommand} InputProps={{ readOnly: true }} />
+            <Typography variant="body2">After pairing, keep this laptop awake and run:</Typography>
+            <TextField fullWidth size="small" value={`${localRunnerPython} tools/local_runner/agent.py run`} InputProps={{ readOnly: true }} />
+            <Typography variant="caption" color="text.secondary">The agent polls over HTTPS, downloads only a leased project APK, checks its SHA-256, and sends run results and capped evidence. Appium must remain bound to 127.0.0.1:4723. Revoke the runner here if this laptop is retired.</Typography>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEnrollmentToken("")}>Close</Button>
+          <Button onClick={() => { void navigator.clipboard?.writeText(localRunnerPairCommand); }}>Copy pairing command</Button>
         </DialogActions>
       </Dialog>
     </Box>

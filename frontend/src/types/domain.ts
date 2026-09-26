@@ -344,7 +344,17 @@ export interface GenerationRunSummary {
 export type ExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type ExecutionResultStatus = "pending" | "passed" | "failed" | "blocked" | "skipped";
 export type ExecutionTargetKind = "web" | "android" | "ios";
-export type ExecutionProvider = "playwright" | "browserstack" | "devicefarm" | "appium";
+export type ExecutionProvider = "playwright" | "browserstack" | "devicefarm" | "appium" | "local_runner";
+
+export interface LocalDeviceRunner {
+  id: string;
+  name: string;
+  status: "pending" | "active" | "online" | "revoked" | string;
+  platforms: ExecutionTargetKind[];
+  devices: string[];
+  last_seen_at: string | null;
+  created_at: string;
+}
 
 export interface Defect {
   id: string;

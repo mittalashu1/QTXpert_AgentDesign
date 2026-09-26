@@ -12,6 +12,7 @@ from app.api.deps.auth_deps import get_current_user
 from app.api.routes.executions import _compile_mobile_steps, _compile_steps, _run_execution, _validate_execution_target
 from app.config import Settings, get_settings
 from app.database.models.execution import ExecutionResult, ExecutionRun, ResultStatus
+from app.database.models.local_runner import LocalRunnerJob
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
 from app.database.models.generation_run import GenerationRun, RunStatus
 from app.database.models.project import Project
@@ -516,6 +517,8 @@ async def _queue_plan_execution(
                 evidence={"preflight": case.readiness} if blocked else None,
             )
         )
+    if provider == "local_runner":
+        db.add(LocalRunnerJob(execution_run_id=run.id, status="queued"))
     await db.commit()
     persisted = await db.scalar(
         select(ExecutionRun)
@@ -528,7 +531,8 @@ async def _queue_plan_execution(
     )
     if persisted is None:  # pragma: no cover - the just-created row must exist
         raise HTTPException(status_code=500, detail="Execution run could not be loaded after creation")
-    background.add_task(_run_execution, persisted.id)
+    if provider != "local_runner":
+        background.add_task(_run_execution, persisted.id)
     return persisted
 
 
