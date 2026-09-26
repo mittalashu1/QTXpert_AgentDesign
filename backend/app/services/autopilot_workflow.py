@@ -60,7 +60,7 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "context_ready": frozenset({"plan_pending_review", "plan_approved", "failed"}),
     "plan_pending_review": frozenset({"plan_approved", "context_ready", "exploring", "failed"}),
     "plan_approved": frozenset({"exploring", "execution_ready", "failed"}),
-    "exploring": frozenset({"cases_pending_review", "cases_approved", "execution_ready", "partial", "blocked", "failed"}),
+    "exploring": frozenset({"preflight", "cases_pending_review", "cases_approved", "execution_ready", "partial", "blocked", "failed"}),
     "cases_pending_review": frozenset({"cases_approved", "exploring", "execution_ready", "failed"}),
     "cases_approved": frozenset({"execution_ready", "exploring", "failed"}),
     "execution_ready": frozenset({"running", "exploring", "failed"}),
