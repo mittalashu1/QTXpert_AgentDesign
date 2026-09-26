@@ -1,6 +1,8 @@
 # Python caches and local test scratch space
 __pycache__/
 *.py[cod]
+.venv/
+tools/local_runner/.venv/
 .pytest_cache/
 backend/pytest-run-*/
 backend/.pytest-tmp/

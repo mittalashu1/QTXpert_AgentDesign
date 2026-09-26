@@ -5,7 +5,7 @@ import logging
 import tempfile
 import socket
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urljoin, urlparse
@@ -22,6 +22,7 @@ from app.config import Settings, get_settings
 from app.database.models.autopilot_execution import AutopilotExecution
 from app.database.models.autopilot_job import AutopilotJob
 from app.database.models.execution import Defect, DefectStatus, ExecutionResult, ExecutionRun, ExecutionStatus, ResultStatus
+from app.database.models.local_runner import LocalDeviceRunner, LocalRunnerJob
 from app.database.models.generation_run import GenerationRun
 from app.database.models.project import Project
 from app.database.models.requirement import Requirement
@@ -304,8 +305,8 @@ async def _validate_execution_target(
 
     if target_kind not in {"android", "ios"}:
         raise HTTPException(status_code=400, detail="Target type must be web, android, or ios.")
-    if provider not in {"browserstack", "appium"}:
-        raise HTTPException(status_code=400, detail="Mobile execution uses BrowserStack or custom Appium.")
+    if provider not in {"browserstack", "appium", "local_runner"}:
+        raise HTTPException(status_code=400, detail="Mobile execution uses BrowserStack, custom Appium, or a paired local runner.")
     if app_asset_id is None:
         raise HTTPException(status_code=400, detail="Select an APK or IPA from the project repository before running mobile tests.")
     asset = await UploadRepositoryService.get_owned(db, app_asset_id, user.id)
@@ -326,6 +327,47 @@ async def _validate_execution_target(
             status_code=409,
             detail="BrowserStack is not configured on the execution service. Add BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY or choose custom Appium.",
         )
+
+    if provider == "local_runner":
+        active_runners = (await db.scalars(
+            select(LocalDeviceRunner).where(
+                LocalDeviceRunner.project_id == project_id,
+                LocalDeviceRunner.owner_id == user.id,
+                LocalDeviceRunner.status == "active",
+            )
+        )).all()
+        runner_online_after = datetime.now(timezone.utc) - timedelta(seconds=75)
+        capable = [
+            runner for runner in active_runners
+            if target_kind in (runner.capabilities or {}).get("platforms", [])
+            and runner.last_seen_at is not None
+            and runner.last_seen_at >= runner_online_after
+        ]
+        if not capable:
+            raise HTTPException(
+                status_code=409,
+                detail=f"No paired local runner for {target_kind} is connected to this project. Pair a runner in Test Execution first.",
+            )
+        return {
+            "target_kind": target_kind,
+            "provider": "local_runner",
+            "base_url": None,
+            "app_asset_id": asset.id,
+            "device_name": normalized_device,
+            "platform_version": (platform_version or "").strip() or None,
+            "appium_url": None,
+            "appium_app": None,
+            "target_metadata": {
+                "target_kind": target_kind,
+                "provider": "local_runner",
+                "asset_filename": asset.filename,
+                "asset_sha256": asset.sha256,
+                "device_name": normalized_device,
+                "platform_version": (platform_version or "").strip() or None,
+                "no_reset": bool(no_reset),
+                "auto_grant_permissions": bool(auto_grant_permissions),
+            },
+        }
 
     normalized_appium_url: str | None = None
     if provider == "appium":
@@ -698,6 +740,10 @@ async def _run_mobile_execution(run_id: UUID) -> None:
         )
         if run is None:
             return
+        if run.provider == "local_runner":
+            # Local execution is leased by the outbound runner API. Never let
+            # the hosted process try to resolve a laptop-only Appium address.
+            return
         run.status = ExecutionStatus.RUNNING
         run.started_at = datetime.now(timezone.utc)
         if run.execution_plan is not None:
@@ -1023,13 +1069,16 @@ async def create_execution(
     await db.flush()
     for case in cases:
         db.add(ExecutionResult(execution_run_id=run.id, test_case_id=case.id))
+    if target["provider"] == "local_runner":
+        db.add(LocalRunnerJob(execution_run_id=run.id, status="queued"))
     await db.commit()
     run = await db.scalar(select(ExecutionRun).options(
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.test_case),
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.execution_plan_case),
         selectinload(ExecutionRun.results).selectinload(ExecutionResult.defects),
     ).where(ExecutionRun.id == run.id))
-    background.add_task(_run_execution, run.id)
+    if target["provider"] != "local_runner":
+        background.add_task(_run_execution, run.id)
     return run
 
 

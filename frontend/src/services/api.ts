@@ -30,6 +30,7 @@ import {
   IntegrationProvider,
   IntegrationScope,
   IntegrationUserPreferences,
+  LocalDeviceRunner,
 } from "@/types/domain";
 
 const activeProjectId = () => localStorage.getItem("qtxpert-selected-project") || undefined;
@@ -141,6 +142,13 @@ export const executionPlansApi = {
       source_execution_id: sourceExecutionId,
       name,
     }),
+};
+
+export const localRunnersApi = {
+  list: (projectId: string) => apiClient.get<LocalDeviceRunner[]>("/local-runners", { params: { project_id: projectId } }),
+  createEnrollment: (project_id: string, name = "Windows Android runner") =>
+    apiClient.post<{ runner_id: string; enrollment_token: string; expires_in_seconds: number }>("/local-runners/enrollment", { project_id, name }),
+  revoke: (runnerId: string) => apiClient.delete(`/local-runners/${runnerId}`),
 };
 
 export const usersApi = {

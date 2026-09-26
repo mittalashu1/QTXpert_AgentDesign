@@ -15,6 +15,7 @@ from app.api.routes import (
     execution_plans,
     export,
     health,
+    local_runners,
     requirements,
     retention,
     settings,
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(document_intelligence.router, prefix=prefix)
     app.include_router(test_cases.router, prefix=prefix)
     app.include_router(executions.router, prefix=prefix)
+    app.include_router(local_runners.router, prefix=prefix)
     app.include_router(execution_plans.router, prefix=prefix)
     app.include_router(autopilot.router, prefix=prefix)
     app.include_router(export.router, prefix=prefix)

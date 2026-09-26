@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 ExecutionSuiteType = Literal["smoke", "feature", "regression", "deep_regression"]
 ExecutionMode = Literal["automated", "manual"]
 ExecutionTargetKind = Literal["web", "android", "ios"]
-ExecutionProvider = Literal["playwright", "browserstack", "appium"]
+ExecutionProvider = Literal["playwright", "browserstack", "appium", "local_runner"]
 
 class ExecutionCreate(BaseModel):
     project_id: UUID
