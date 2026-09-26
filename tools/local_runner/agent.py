@@ -92,6 +92,8 @@ def normalize_api_url(value: str) -> str:
     if not base:
         raise ValueError("QTXpert API URL is required")
     parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Use a plain HTTP(S) API URL without embedded credentials, query parameters, or fragments")
     if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1"}:
         raise ValueError("Runner-to-cloud traffic must use HTTPS")
     if not parsed.path.rstrip("/").endswith("/api/v1"):
@@ -294,7 +296,18 @@ def _parse_locator(value: str) -> tuple[str, str]:
     return "accessibility_id", raw
 
 
-def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str) -> dict[str, Any]:
+def _case_error(exc: Exception, steps: list[str]) -> str:
+    message = str(exc)[:4000]
+    # Even synthetic fill values may include a password or personal data.
+    for step in steps:
+        if str(step).lower().startswith("fill ") and " :: " in str(step):
+            value = str(step).split(" :: ")[-1].strip()
+            if value:
+                message = message.replace(value, "[redacted input]")
+    return message
+
+
+def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, stop: threading.Event | None = None) -> dict[str, Any]:
     from appium import webdriver
     from appium.options.android import UiAutomator2Options
 
@@ -336,6 +349,7 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str) ->
     driver = webdriver.Remote(appium_url, options=options)
     results: list[dict[str, Any]] = []
     try:
+        driver.implicitly_wait(5)
         time.sleep(2)
         screenshot = driver.get_screenshot_as_png()
         if len(screenshot) > MAX_SCREENSHOT_BYTES:
@@ -347,7 +361,13 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str) ->
             started = time.monotonic()
             outcome, error = "passed", None
             try:
+                if stop is not None and stop.is_set():
+                    raise RuntimeError("Execution lease was revoked or lost; no further device actions are allowed")
+                if not case.get("steps"):
+                    raise ValueError("This test has no executable steps; it has not been validated")
                 for action, strategy, value in compile_mobile_steps(case.get("steps") or []):
+                    if stop is not None and stop.is_set():
+                        raise RuntimeError("Execution lease was revoked or lost; no further device actions are allowed")
                     if action == "back":
                         driver.back()
                     elif action == "tap":
@@ -361,11 +381,12 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str) ->
                         if (value or "").casefold() not in (driver.page_source or "").casefold():
                             raise AssertionError(f"Expected UI text {value!r} was not visible")
                     elif action == "assert-visible":
-                        driver.find_element(_locator(strategy), value or "")
+                        if not driver.find_element(_locator(strategy), value or "").is_displayed():
+                            raise AssertionError("The expected UI control exists but is not visible")
             except ValueError as exc:
-                outcome, error = "blocked", str(exc)
+                outcome, error = "blocked", _case_error(exc, case.get("steps") or [])
             except Exception as exc:
-                outcome, error = "failed", str(exc)[:4000]
+                outcome, error = "failed", _case_error(exc, case.get("steps") or [])
             results.append({
                 "result_id": case["result_id"],
                 "status": outcome,
@@ -392,8 +413,8 @@ def _heartbeat_loop(credentials: dict[str, str], run_id: str, lease: str, stop: 
         while not stop.wait(LEASE_HEARTBEAT_SECONDS):
             try:
                 response = client.post(endpoint, headers=_headers(credentials, lease))
-                if response.status_code == 401:
-                    LOG.error("Runner authorization was revoked; stopping this job")
+                if response.status_code in {401, 409}:
+                    LOG.error("Runner authorization or execution lease is no longer valid; stopping this job")
                     stop.set()
                     return
                 response.raise_for_status()
@@ -415,7 +436,9 @@ def _execute_claimed_job(client: httpx.Client, credentials: dict[str, str], job:
         with tempfile.TemporaryDirectory(prefix="qtxpert-local-runner-") as temp_dir:
             app_path = Path(temp_dir) / Path(str(job.get("app_filename") or "application.apk")).name
             _download_artifact(client, credentials, job, lease, app_path)
-            report = execute_android_job(app_path, job, credentials.get("appium_url", DEFAULT_APPIUM_URL))
+            if stop_heartbeat.is_set():
+                raise RuntimeError("Execution lease is no longer valid")
+            report = execute_android_job(app_path, job, credentials.get("appium_url", DEFAULT_APPIUM_URL), stop_heartbeat)
             endpoint = f"{credentials['api_url']}/local-runners/{credentials['runner_id']}/jobs/{run_id}/complete"
             response = client.post(endpoint, headers=_headers(credentials, lease), json=report, timeout=60)
             response.raise_for_status()
@@ -426,7 +449,9 @@ def _execute_claimed_job(client: httpx.Client, credentials: dict[str, str], job:
             )
     except Exception as exc:
         message = f"Local runner could not complete the Android job ({type(exc).__name__}): {str(exc)[:1200]}"
-        LOG.exception("Run %s failed", run_id)
+        # HTTP/Appium exceptions can contain request bodies. Never write their
+        # full traceback to a persistent log, where test credentials may leak.
+        LOG.error("Run %s failed (%s)", run_id, type(exc).__name__)
         endpoint = f"{credentials['api_url']}/local-runners/{credentials['runner_id']}/jobs/{run_id}/fail"
         try:
             response = client.post(endpoint, headers=_headers(credentials, lease), json={"message": message})

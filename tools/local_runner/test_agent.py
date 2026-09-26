@@ -2,11 +2,12 @@
 import unittest
 from pathlib import Path
 import tempfile
-from unittest.mock import patch
+import threading
+from unittest.mock import MagicMock, patch
 
 import httpx
 
-from agent import compile_mobile_steps, normalize_api_url, inspect_local_stack, _download_artifact
+from agent import compile_mobile_steps, normalize_api_url, inspect_local_stack, _download_artifact, execute_android_job, _case_error
 
 
 class LocalRunnerProtocolTests(unittest.TestCase):
@@ -48,6 +49,9 @@ class LocalRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(normalize_api_url("http://127.0.0.1:8000"), "http://127.0.0.1:8000/api/v1")
         with self.assertRaisesRegex(ValueError, "HTTPS"):
             normalize_api_url("http://design.example")
+        for invalid in ("ftp://localhost", "https://user:secret@design.example", "https://design.example?token=secret", "https://design.example#secret"):
+            with self.assertRaises(ValueError):
+                normalize_api_url(invalid)
 
     def test_mobile_compiler_accepts_only_explicit_actions(self):
         actions = compile_mobile_steps([
@@ -67,6 +71,38 @@ class LocalRunnerProtocolTests(unittest.TestCase):
             compile_mobile_steps(["explore the investment page and choose something suitable"])
         with self.assertRaisesRegex(ValueError, "strategy"):
             compile_mobile_steps(["tap css :: .submit"])
+
+    def test_empty_steps_and_hidden_control_are_not_passed(self):
+        driver = MagicMock()
+        driver.get_screenshot_as_png.return_value = b"png"
+        driver.page_source = "<screen/>"
+        driver.capabilities = {}
+        driver.find_element.return_value.is_displayed.return_value = False
+        job = {"target_kind": "android", "cases": [
+            {"result_id": "empty", "steps": []},
+            {"result_id": "hidden", "steps": ["assert-visible id :: target"]},
+        ]}
+        with patch("appium.webdriver.Remote", return_value=driver), patch("agent.inspect_local_stack", return_value={"devices": ["emulator-5554"]}), patch("agent.time.sleep"):
+            report = execute_android_job(Path("app.apk"), job, "http://127.0.0.1:4723")
+        self.assertEqual([item["status"] for item in report["results"]], ["blocked", "failed"])
+        driver.quit.assert_called_once()
+
+    def test_cancelled_lease_prevents_device_actions(self):
+        driver = MagicMock()
+        driver.get_screenshot_as_png.return_value = b"png"
+        driver.page_source = "<screen/>"
+        driver.capabilities = {}
+        stop = threading.Event()
+        stop.set()
+        job = {"target_kind": "android", "cases": [{"result_id": "cancelled", "steps": ["tap Login"]}]}
+        with patch("appium.webdriver.Remote", return_value=driver), patch("agent.inspect_local_stack", return_value={"devices": ["emulator-5554"]}), patch("agent.time.sleep"):
+            report = execute_android_job(Path("app.apk"), job, "http://127.0.0.1:4723", stop)
+        self.assertEqual(report["results"][0]["status"], "failed")
+        driver.find_element.assert_not_called()
+        driver.quit.assert_called_once()
+
+    def test_fill_values_do_not_leak_into_error_report(self):
+        self.assertEqual(_case_error(RuntimeError("request contained private-value"), ["fill id :: password :: private-value"]), "request contained [redacted input]")
 
 
 if __name__ == "__main__":
