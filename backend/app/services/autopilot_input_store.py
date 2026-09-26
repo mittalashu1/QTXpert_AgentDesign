@@ -44,7 +44,7 @@ def _reusable_runtime_record(record: Optional[AutopilotInputRecord]) -> bool:
     """Return whether a stored runtime value is safe to reuse or remap."""
     if (
         record is None
-        or record.source != "runtime"
+        or record.source not in {"runtime", "user"}
         or not record.save_for_reuse
         or not record.encrypted_value
     ):
@@ -64,7 +64,7 @@ def _runtime_record_matches_request(
     """Match saved ciphertext to one observed field without relying on volatile IDs."""
     return (
         request.source == "runtime"
-        and record.source == "runtime"
+        and record.source in {"runtime", "user"}
         and record.category == request.category
         and _checkpoint_label_identity(record.label) == _checkpoint_label_identity(request.label)
     )
@@ -101,7 +101,8 @@ def _reconcile_runtime_reuse_submissions(
                 if (
                     _reusable_runtime_record(exact)
                     and exact.category == request.category
-                    and exact.source == request.source
+                    and exact.source in {"runtime", "user"}
+                    and _checkpoint_label_identity(exact.label) == _checkpoint_label_identity(request.label)
                 ):
                     reusable_rows[item.key] = exact
                 else:
@@ -299,7 +300,7 @@ async def apply_submissions(
     if runtime_labels and runtime_categories:
         row_filters.append(
             and_(
-                AutopilotInputRecord.source == "runtime",
+                AutopilotInputRecord.source.in_({"runtime", "user"}),
                 AutopilotInputRecord.category.in_(runtime_categories),
                 AutopilotInputRecord.label.in_(runtime_labels),
                 AutopilotInputRecord.save_for_reuse.is_(True),
@@ -381,8 +382,16 @@ async def apply_submissions(
             encrypted = cipher.encrypt(generate_synthetic_value(spec).encode("utf-8")).decode("ascii")
             generator_spec = spec.model_dump(mode="json")
         elif decision == "reuse":
-            row = existing.get(item.key) or reusable_rows.get(item.key)
-            if row is None or not row.save_for_reuse or (row.expires_at and row.expires_at <= _now()) or not row.encrypted_value:
+            row = reusable_rows.get(item.key) or existing.get(item.key)
+            if (
+                row is None
+                or not row.save_for_reuse
+                or (row.expires_at and row.expires_at <= _now())
+                or not row.encrypted_value
+                or row.category != request.category
+                or _checkpoint_label_identity(row.label) != _checkpoint_label_identity(request.label)
+                or (request.source == "runtime" and row.source not in {"runtime", "user"})
+            ):
                 raise AutopilotInputStoreError(f"No saved value is available for {request.label}. Choose Enter, Random or Skip.")
             encrypted = row.encrypted_value
             generator_spec = row.generator_spec
@@ -390,7 +399,7 @@ async def apply_submissions(
             encrypted = None
             generator_spec = None
 
-        row = existing.get(item.key) or reusable_rows.get(item.key)
+        row = reusable_rows.get(item.key) or existing.get(item.key)
         if row is None:
             row = AutopilotInputRecord(
                 owner_id=job.owner_id,
