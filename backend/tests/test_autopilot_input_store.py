@@ -85,7 +85,7 @@ def test_checkpoint_metadata_never_exposes_the_encrypted_value():
     assert record.encrypted_value not in metadata.model_dump_json()
 
 
-def _saved_runtime_username(*, input_key="runtime_old_username", label="Sign-in · Username · User ID / email"):
+def _saved_runtime_username(*, input_key="runtime_old_username", label="Sign-in · Username · User ID / email", source="runtime"):
     return AutopilotInputRecord(
         owner_id=UUID("11111111-1111-1111-1111-111111111111"),
         project_id=UUID("22222222-2222-2222-2222-222222222222"),
@@ -97,7 +97,7 @@ def _saved_runtime_username(*, input_key="runtime_old_username", label="Sign-in 
         decision="provide",
         save_for_reuse=True,
         encrypted_value="encrypted-test-value",
-        source="runtime",
+        source=source,
         expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
     )
 
@@ -174,3 +174,17 @@ def test_stale_runtime_direct_value_is_not_rebound_to_another_field():
         assert "no longer part of this analysis" in str(exc)
     else:
         raise AssertionError("direct values under stale runtime keys must be reviewed again")
+
+
+def test_stale_legacy_user_source_value_can_rebind_when_field_match_is_unique():
+    old_row = _saved_runtime_username(source="user")
+    current = _runtime_username_request()
+
+    accepted, reusable = _reconcile_runtime_reuse_submissions(
+        [AutopilotInputSubmission(key=old_row.input_key, decision="reuse")],
+        {current.key: current},
+        [old_row],
+    )
+
+    assert [item.key for item in accepted] == [current.key]
+    assert reusable[current.key] is old_row
