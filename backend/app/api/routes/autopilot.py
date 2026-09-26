@@ -1925,6 +1925,41 @@ def _pending_runtime_auth_requests(setup: Optional[AutopilotSetupProfile]) -> li
     ]
 
 
+def _auth_discovery_needs_retry(
+    discovery: Optional[AutopilotDiscoveryResult],
+    setup: Optional[AutopilotSetupProfile],
+) -> bool:
+    """Retry a partial login crawl after approved credentials are available.
+
+    A saved report can retain an incomplete sign-in attempt without a pending
+    credential request (for example, after the login field was previously
+    misclassified). In that state, ordinary input confirmation must retry the
+    live crawl rather than only refreshing the static plan.
+    """
+    if discovery is None or setup is None or not setup.safe_authentication_approved:
+        return False
+    if str(discovery.status or "").casefold() == "completed":
+        return False
+    reason = str(discovery.stop_reason or "").casefold()
+    return any(
+        marker in reason
+        for marker in (
+            "credentials were supplied, but no safe sign-in control was found",
+            "sign-in returned to the same screen",
+            "authentication could not be completed safely",
+        )
+    )
+
+
+def _resume_should_run_discovery(
+    requested: bool,
+    discovery: Optional[AutopilotDiscoveryResult],
+    setup: Optional[AutopilotSetupProfile],
+) -> bool:
+    """Make the first live map and an approved incomplete login resumable."""
+    return bool(requested or discovery is None or _auth_discovery_needs_retry(discovery, setup))
+
+
 def _pending_checkpoint_requests(setup: Optional[AutopilotSetupProfile]) -> list:
     """Return every unresolved plan or live-field checkpoint."""
     if setup is None:
@@ -4248,15 +4283,45 @@ async def resume_autopilot_checkpoint(
                 checkpoint_message="Rehydrating the stored mobile build before validating checkpoint inputs.",
                 error=None,
             )
-            background_tasks.add_task(service.analyze_safely, job_id)
+            recovered_discovery = _record_discovery(record)
+            recovered_setup = await _setup_with_input_metadata(
+                db,
+                record,
+                job_id,
+                None,
+                recovered_discovery,
+            )
+            if _resume_should_run_discovery(
+                payload.run_runtime_discovery,
+                recovered_discovery,
+                recovered_setup,
+            ):
+                # Rebuild a missing analysis snapshot and continue through the
+                # checkpoint-aware discovery path. Do not stop at a fresh
+                # static analysis after the user has already supplied inputs.
+                background_tasks.add_task(
+                    _resume_and_discover_background,
+                    job_id,
+                    owner_id,
+                    settings,
+                    payload,
+                )
+            else:
+                background_tasks.add_task(service.analyze_safely, job_id)
             return await service.get_job_status(job_id)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Autopilot analysis is not ready for input validation yet. Re-run analysis from the stored target.",
         ) from exc
-    setup = await _setup_with_input_metadata(db, record, job_id, analysis, _record_discovery(record))
+    current_discovery = _record_discovery(record)
+    setup = await _setup_with_input_metadata(db, record, job_id, analysis, current_discovery)
     if not payload.confirm_saved_inputs:
         return await service.get_job_status(job_id)
+    run_runtime_discovery = _resume_should_run_discovery(
+        payload.run_runtime_discovery,
+        current_discovery,
+        setup,
+    )
     pending_inputs = _blocking_checkpoint_requests(setup)
     pending_runtime_credentials = [
         item
@@ -4269,9 +4334,7 @@ async def resume_autopilot_checkpoint(
     # a login form or which exact fields it exposes. Once Runtime Discovery
     # has found credentials, they remain a hard stop until the user supplies
     # or explicitly skips them.
-    allow_discovery_with_pending_setup = bool(
-        payload.run_runtime_discovery and not pending_runtime_credentials
-    )
+    allow_discovery_with_pending_setup = bool(run_runtime_discovery and not pending_runtime_credentials)
     if pending_inputs and not allow_discovery_with_pending_setup:
         current = await service.get_job_status(job_id)
         current.checkpoint_stage = "input_collection"
@@ -4288,7 +4351,7 @@ async def resume_autopilot_checkpoint(
         input_requests=[],
         error=None,
     )
-    if payload.run_runtime_discovery:
+    if run_runtime_discovery:
         background_tasks.add_task(
             _resume_and_discover_background,
             job_id,
