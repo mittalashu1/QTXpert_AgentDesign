@@ -1772,7 +1772,10 @@ export default function AutopilotPage() {
         );
         const firstPending = nextRequests.findIndex(isBlockingCheckpoint);
         if (firstPending >= 0) setCheckpointStep(firstPending);
-        checkpointPending = checkpointPending || nextRequests.some(isBlockingCheckpoint);
+        // Discovery describes the observed fields before saved-value
+        // resolution. The refreshed setup is authoritative: stale "pending"
+        // flags must not open an empty dialog for already-saved credentials.
+        checkpointPending = nextRequests.some(isBlockingCheckpoint);
       } catch { /* discovery evidence remains visible */ }
       await refreshAutomation(jobId);
       await refreshReport(jobId);

@@ -479,7 +479,10 @@ class AutopilotDiscoveryService:
             for control in controls
             if control.enabled and control.input_capable and control.locators
         ]
-        submit = cls._auth_submit_control(controls)
+        # A staged login button is commonly disabled until a field is filled.
+        # Its presence can ground field semantics, but it is not executable
+        # until a fresh, post-fill hierarchy reports it as enabled.
+        submit = cls._auth_submit_control(controls, include_disabled=True)
         if not inputs or submit is None:
             return controls
         submit_label = cls._normalize(submit.semantic_label)
@@ -713,8 +716,13 @@ class AutopilotDiscoveryService:
                 re.sub(r"\d+", "<n>", cls._normalize(control.semantic_label or "")),
             )
             prior = merged.get(key)
-            if prior is None or len(control.locators) > len(prior.locators):
+            if prior is None:
                 merged[key] = control
+            else:
+                # Enabled/clickable state belongs to the latest frame. Keeping
+                # the old frame with equally good locators freezes Continue
+                # as disabled even after valid input has enabled it.
+                merged[key] = control.model_copy(update={"locators": control.locators or prior.locators})
         existing.controls = list(merged.values())
 
     @staticmethod
@@ -891,7 +899,9 @@ class AutopilotDiscoveryService:
         return str(value) if value is not None and str(value).strip() else None
 
     @classmethod
-    def _auth_submit_control(cls, controls: Iterable[DiscoveredControl]) -> Optional[DiscoveredControl]:
+    def _auth_submit_control(
+        cls, controls: Iterable[DiscoveredControl], *, include_disabled: bool = False,
+    ) -> Optional[DiscoveredControl]:
         controls = list(controls)
         inputs = [
             control
@@ -915,7 +925,15 @@ class AutopilotDiscoveryService:
         )
         candidates: list[DiscoveredControl] = []
         for control in controls:
-            if not control.enabled or not control.clickable or control.input_capable or not control.locators:
+            disabled_button = (
+                include_disabled and not control.enabled
+                and control.class_name in {"android.widget.Button", "XCUIElementTypeButton"}
+            )
+            if (
+                (not control.enabled and not include_disabled)
+                or (not control.clickable and not disabled_button)
+                or control.input_capable or not control.locators
+            ):
                 continue
             label = cls._normalize(control.semantic_label)
             generic_continue = label in {"continue", "next"}
@@ -945,6 +963,39 @@ class AutopilotDiscoveryService:
                 candidates.append(control)
         candidates.sort(key=lambda item: (-max(locator.confidence for locator in item.locators), item.semantic_label.lower()))
         return candidates[0] if candidates else None
+
+    @classmethod
+    def _refresh_auth_submit(
+        cls, driver: Any, screen: DiscoveredScreen,
+        package_hint: Optional[str], activity_hint: Optional[str],
+    ) -> Optional[DiscoveredControl]:
+        """Observe a newly enabled login submit without recording filled fields.
+
+        Flutter and native staged forms re-render/enable Continue after entry.
+        The pre-fill snapshot cannot decide whether submission is possible.
+        Keyboard dismissal is best-effort; never use Back, which may leave the
+        form. Every retry is grounded in the uploaded app's fresh hierarchy.
+        """
+        try:
+            driver.hide_keyboard()
+        except Exception:
+            pass
+        for attempt in range(5):
+            source = safe_page_source(driver)
+            controls = cls._ensure_auth_input_semantics(cls.parse_controls(cls._redact_page_source(source)))
+            target_ok, reason, _ = validate_target_surface(
+                driver, expected_package=package_hint, expected_activity=activity_hint,
+                page_source=source, control_labels=[control.semantic_label for control in controls],
+            )
+            if not target_ok:
+                raise _UnexpectedTargetSurface(reason)
+            submit = cls._auth_submit_control(controls)
+            if submit is not None:
+                screen.controls = controls
+                return submit
+            if attempt < 4:
+                time.sleep(0.4)
+        return None
 
     @staticmethod
     def _find_discovered_element(driver: Any, control: DiscoveredControl, appium_by: Any) -> Any:
@@ -1485,7 +1536,7 @@ class AutopilotDiscoveryService:
                             except Exception:
                                 pass
                             element.send_keys(value)
-                        submit = self._auth_submit_control(screen.controls)
+                        submit = self._refresh_auth_submit(driver, screen, package_hint, activity_hint)
                         if submit is None:
                             return screen, True, "Credentials were supplied, but no safe sign-in control was found"
                         if actions_attempted >= request.max_actions:
@@ -1533,7 +1584,7 @@ class AutopilotDiscoveryService:
                         )
                     except Exception as exc:
                         warnings.append(
-                            f"Could not safely submit the approved sign-in form: {type(exc).__name__}: {str(exc)[:180]}"
+                            f"Could not safely submit the approved sign-in form: {type(exc).__name__}"
                         )
                         return (
                             screen,
