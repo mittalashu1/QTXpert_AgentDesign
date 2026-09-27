@@ -982,7 +982,25 @@ class AutopilotDiscoveryService:
             pass
         for attempt in range(5):
             source = safe_page_source(driver)
-            controls = cls._ensure_auth_input_semantics(cls.parse_controls(cls._redact_page_source(source)))
+            controls = cls.parse_controls(cls._redact_page_source(source))
+            # Flutter may expose the empty field's label only as ``text``.
+            # Redacting the post-fill value then removes that label too. Carry
+            # forward only the already-observed credential purpose through an
+            # unchanged deterministic locator; never infer it from typed text.
+            for control in controls:
+                if not control.input_capable:
+                    continue
+                current_locators = {(item.strategy, item.value) for item in control.locators}
+                prior = [
+                    item for item in screen.controls
+                    if item.input_capable and item.input_kind == "credential"
+                    and item.class_name == control.class_name
+                    and current_locators.intersection((loc.strategy, loc.value) for loc in item.locators)
+                ]
+                if len(prior) == 1:
+                    control.input_kind = "credential"
+                    control.semantic_label = prior[0].semantic_label
+            controls = cls._ensure_auth_input_semantics(controls)
             target_ok, reason, _ = validate_target_surface(
                 driver, expected_package=package_hint, expected_activity=activity_hint,
                 page_source=source, control_labels=[control.semantic_label for control in controls],
