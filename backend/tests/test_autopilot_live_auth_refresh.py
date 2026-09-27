@@ -14,12 +14,14 @@ from app.services.autopilot_discovery import AutopilotDiscoveryService
 class StagedLoginDriver:
     capabilities = {"appium:appPackage": "com.qtx.demo", "appium:appActivity": ".MainActivity"}
 
-    def __init__(self, *, enable_submit=True, text_only_label=False):
+    def __init__(self, *, enable_submit=True, text_only_label=False, require_focus=False):
         self.state = "username"
         self.values = {}
         self.keyboard_visible = False
         self.enable_submit = enable_submit
         self.text_only_label = text_only_label
+        self.require_focus = require_focus
+        self.focused = False
         self.submitted = []
         self.quit_called = False
         self.persisted_states = []
@@ -58,15 +60,20 @@ class StagedLoginDriver:
                 driver.values[driver.state] = ""
 
             def send_keys(self, text):
-                driver.values[driver.state] = text
+                if not driver.require_focus or driver.focused:
+                    driver.values[driver.state] = text
                 driver.keyboard_visible = True
 
             def click(self):
+                if value != "Continue":
+                    driver.focused = True
+                    return
                 assert value == "Continue"
                 assert driver.values.get(driver.state) and not driver.keyboard_visible
                 assert driver.enable_submit
                 driver.submitted.append(driver.state)
                 driver.state = "password" if driver.state == "username" else "home"
+                driver.focused = False
 
         return Element()
 
@@ -175,6 +182,14 @@ def test_disabled_continue_still_grounds_a_single_username_checkpoint():
     assert AutopilotDiscoveryService._auth_submit_control(normalized, include_disabled=True) is not None
 
 
+def test_flutter_credential_input_is_focused_before_entry(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.text_only_label = True
+    driver.require_focus = True
+    run()
+    assert driver.submitted == ["username", "password"]
+
+
 def test_duplicate_screen_merge_refreshes_enabled_state():
     from app.schemas.autopilot import DiscoveredScreen
 
@@ -193,5 +208,5 @@ def test_auth_submit_that_remains_disabled_is_not_clicked(mobile_discovery):
     result = run()
 
     assert driver.submitted == []
-    assert "sign-in control" in result["stop_reason"]
+    assert "did not become enabled" in result["stop_reason"]
     assert driver.quit_called
