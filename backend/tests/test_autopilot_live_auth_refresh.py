@@ -14,11 +14,12 @@ from app.services.autopilot_discovery import AutopilotDiscoveryService
 class StagedLoginDriver:
     capabilities = {"appium:appPackage": "com.qtx.demo", "appium:appActivity": ".MainActivity"}
 
-    def __init__(self, *, enable_submit=True):
+    def __init__(self, *, enable_submit=True, text_only_label=False):
         self.state = "username"
         self.values = {}
         self.keyboard_visible = False
         self.enable_submit = enable_submit
+        self.text_only_label = text_only_label
         self.submitted = []
         self.quit_called = False
         self.persisted_states = []
@@ -38,6 +39,15 @@ class StagedLoginDriver:
                 f'<node class="android.widget.Button" content-desc="Continue" '
                 f'clickable="{str(enabled).lower()}" enabled="{str(enabled).lower()}" />'
             )
+            if self.text_only_label:
+                # FH Money/Flutter exposes the empty input label as text,
+                # replacing it with the value once Appium fills the widget.
+                body = (
+                    f'<node class="android.widget.EditText" text={quoteattr(value or label)} '
+                    'clickable="true" enabled="true" />'
+                    f'<node class="android.widget.Button" content-desc="Continue" '
+                    f'clickable="{str(enabled).lower()}" enabled="{str(enabled).lower()}" />'
+                )
         return '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">' + body + '</node></hierarchy>'
 
     def find_element(self, by, value):
@@ -135,6 +145,19 @@ def test_staged_login_refreshes_submit_after_each_credential_fill(mobile_discove
     serialized = str(result)
     for path in tmp_path.rglob("*.xml"):
         serialized += path.read_text(encoding="utf-8")
+    assert "synthetic-secret" not in serialized
+    assert "synthetic-user@example.test" not in serialized
+
+
+def test_flutter_text_only_login_label_survives_post_fill_redaction(mobile_discovery):
+    driver, run, tmp_path = mobile_discovery
+    driver.text_only_label = True
+    result = run()
+
+    assert driver.submitted == ["username", "password"]
+    assert any(control.semantic_label == "Dashboard" for screen in result["screens"] for control in screen.controls)
+    assert all(state == "home" or not values for state, values in driver.persisted_states)
+    serialized = str(result) + "".join(path.read_text(encoding="utf-8") for path in tmp_path.rglob("*.xml"))
     assert "synthetic-secret" not in serialized
     assert "synthetic-user@example.test" not in serialized
 
