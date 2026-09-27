@@ -906,7 +906,8 @@ class AutopilotDiscoveryService:
         inputs = [
             control
             for control in controls
-            if control.enabled and control.input_capable and control.locators
+            if control.input_capable and control.locators
+            and (control.enabled or control.input_kind == "credential")
         ]
         credentialish = any(
             control.input_kind == "credential"
@@ -980,7 +981,7 @@ class AutopilotDiscoveryService:
             driver.hide_keyboard()
         except Exception:
             pass
-        for attempt in range(5):
+        for attempt in range(21):
             source = safe_page_source(driver)
             controls = cls.parse_controls(cls._redact_page_source(source))
             # Flutter may expose the empty field's label only as ``text``.
@@ -1011,8 +1012,8 @@ class AutopilotDiscoveryService:
             submit = cls._auth_submit_control(controls)
             if submit is not None:
                 return submit
-            if attempt < 4:
-                time.sleep(0.4)
+            if attempt < 20:
+                time.sleep(0.5)
         return None
 
     @staticmethod
@@ -1128,8 +1129,8 @@ class AutopilotDiscoveryService:
                 ),
                 timeout=self.settings.AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS,
             )
-            checkpoint_stop = str(payload.get("stop_reason") or "").lower().startswith(
-                ("authentication", "sign-in", "credentials")
+            checkpoint_stop = bool(payload.get("authentication_blocked")) or str(payload.get("stop_reason") or "").lower().startswith(
+                ("authentication", "sign-in", "credentials", "saved credentials", "the observed sign-in")
             )
             launch_wait_exhausted = "non-interactive launch screen" in str(payload.get("stop_reason") or "").lower()
             target_ready = payload.get("target_ready")
@@ -1544,6 +1545,7 @@ class AutopilotDiscoveryService:
                             f"Authentication values are ready, but max_actions={request.max_actions} was reached",
                         )
                     try:
+                        entry_confirmations: list[bool] = []
                         for control in credential_controls:
                             value = self._credential_value(screen.screen_id, control, input_values)
                             if value is None:
@@ -1557,10 +1559,53 @@ class AutopilotDiscoveryService:
                                 element.clear()
                             except Exception:
                                 pass
-                            element.send_keys(value)
+                            keyboard_type = getattr(driver, "execute_script", None)
+                            if not is_ios and callable(keyboard_type):
+                                try:
+                                    # UiAutomator send_keys can set accessibility
+                                    # text without Flutter's keyboard callbacks.
+                                    # The supported mobile:type extension types
+                                    # into this already-observed, focused field.
+                                    keyboard_type("mobile: type", {"text": value})
+                                except Exception as typing_error:
+                                    unsupported = any(marker in str(typing_error).casefold() for marker in (
+                                        "unknown mobile command", "unknown command", "not implemented",
+                                        "unsupported command", "not supported",
+                                    ))
+                                    if not unsupported:
+                                        # Never append a second copy after a
+                                        # possibly partial keyboard operation.
+                                        raise
+                                    element.send_keys(value)
+                            else:
+                                element.send_keys(value)
+                            # Verify delivery in memory, never retaining or
+                            # logging the value. Password widgets can expose
+                            # bullets instead, so only verify the user-ID field.
+                            if self._credential_hint(control) == "username":
+                                try:
+                                    echoed = element.get_attribute("text")
+                                    if echoed is not None:
+                                        entry_confirmations.append(str(echoed) == value)
+                                except Exception:
+                                    pass
                         submit = self._refresh_auth_submit(driver, screen, package_hint, activity_hint)
                         if submit is None:
                             observed_submit = self._auth_submit_control(screen.controls, include_disabled=True)
+                            submit_buttons = [
+                                item for item in screen.controls
+                                if item.class_name in {"android.widget.Button", "XCUIElementTypeButton"}
+                                and self._normalize(item.semantic_label) in _AUTH_SUBMIT_TERMS
+                            ]
+                            warnings.append(
+                                "Sign-in diagnostics: "
+                                f"observed_fields={len(credential_controls)}, "
+                                f"user_id_entry_confirmed={all(entry_confirmations) if entry_confirmations else 'unavailable'}, "
+                                f"submit_buttons={len(submit_buttons)}, "
+                                f"submit_enabled={sum(item.enabled for item in submit_buttons)}, "
+                                f"submit_clickable={sum(item.clickable for item in submit_buttons)}. "
+                                "No input values were recorded."
+                            )
                             return screen, True, (
                                 "The observed sign-in button did not become enabled after entering the saved credentials. "
                                 "Authentication was not submitted; review the app's sign-in field validation."
@@ -1806,6 +1851,7 @@ class AutopilotDiscoveryService:
                 "actions_attempted": actions_attempted,
                 "stop_reason": stop_reason,
                 "warnings": warnings,
+                "authentication_blocked": authentication_blocked,
                 "target_ready": target_ready,
                 "target_identity": target_identity,
                 "target_activity": target_activity,
