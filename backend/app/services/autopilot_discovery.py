@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -1606,6 +1607,7 @@ class AutopilotDiscoveryService:
                                 f"submit_clickable={sum(item.clickable for item in submit_buttons)}. "
                                 "No input values were recorded."
                             )
+                            logging.getLogger(__name__).info("%s", warnings[-1])
                             return screen, True, (
                                 "The observed sign-in button did not become enabled after entering the saved credentials. "
                                 "Authentication was not submitted; review the app's sign-in field validation."

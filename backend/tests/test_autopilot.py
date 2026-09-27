@@ -485,7 +485,8 @@ def test_generic_credential_reference_label_does_not_satisfy_runtime_credentials
     assert credential_value_available(setup) is False
 
 
-def test_saved_bundle_clears_pending_runtime_credential_bundle_with_generic_hint():
+@pytest.mark.parametrize("requires_auth", [True, False])
+def test_saved_bundle_clears_pending_runtime_credential_bundle_with_generic_hint(requires_auth):
     analysis = AutopilotAnalysis(
         job_id="44444444-4444-4444-4444-444444444444",
         filename="investnation.apk",
@@ -495,7 +496,7 @@ def test_saved_bundle_clears_pending_runtime_credential_bundle_with_generic_hint
             suite="Functional",
             title="Authenticated journey",
             objective="Validate the authenticated journey",
-            requires_auth=True,
+            requires_auth=requires_auth,
             bucket="functional_positive",
         )],
     )
@@ -549,6 +550,9 @@ def test_saved_bundle_clears_pending_runtime_credential_bundle_with_generic_hint
     bundle = next(item for item in setup.input_requests if item.key == "credential_reference")
     assert bundle.status == "provided"
     assert bundle.reference_present is True
+    assert bundle.credential_bundle is True
+    assert bundle.source == "runtime"
+    assert bundle.screen_id == "login"
     assert _pending_runtime_auth_requests(setup) == []
 
 
