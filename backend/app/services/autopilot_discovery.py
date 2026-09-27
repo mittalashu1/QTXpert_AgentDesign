@@ -29,6 +29,7 @@ from app.schemas.autopilot import (
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
+    enter_observed_text,
     safe_app_identity,
     safe_page_source,
     safe_navigate_back,
@@ -1552,44 +1553,13 @@ class AutopilotDiscoveryService:
                             if value is None:
                                 continue
                             element = self._find_discovered_element(driver, control, AppiumBy)
-                            # Flutter's text controller may not receive an
-                            # unfocused UiAutomator setText update. Focus the
-                            # already observed input before clear/send_keys.
-                            element.click()
-                            try:
-                                element.clear()
-                            except Exception:
-                                pass
-                            keyboard_type = getattr(driver, "execute_script", None)
-                            if not is_ios and callable(keyboard_type):
-                                try:
-                                    # UiAutomator send_keys can set accessibility
-                                    # text without Flutter's keyboard callbacks.
-                                    # The supported mobile:type extension types
-                                    # into this already-observed, focused field.
-                                    keyboard_type("mobile: type", {"text": value})
-                                except Exception as typing_error:
-                                    unsupported = any(marker in str(typing_error).casefold() for marker in (
-                                        "unknown mobile command", "unknown command", "not implemented",
-                                        "unsupported command", "not supported",
-                                    ))
-                                    if not unsupported:
-                                        # Never append a second copy after a
-                                        # possibly partial keyboard operation.
-                                        raise
-                                    element.send_keys(value)
-                            else:
-                                element.send_keys(value)
-                            # Verify delivery in memory, never retaining or
-                            # logging the value. Password widgets can expose
-                            # bullets instead, so only verify the user-ID field.
-                            if self._credential_hint(control) == "username":
-                                try:
-                                    echoed = element.get_attribute("text")
-                                    if echoed is not None:
-                                        entry_confirmations.append(str(echoed) == value)
-                                except Exception:
-                                    pass
+                            confirmed = enter_observed_text(
+                                driver, element, value,
+                                target_kind="ios" if is_ios else "android",
+                                verify_text=self._credential_hint(control) == "username",
+                            )
+                            if confirmed is not None:
+                                entry_confirmations.append(confirmed)
                         submit = self._refresh_auth_submit(driver, screen, package_hint, activity_hint)
                         if submit is None:
                             observed_submit = self._auth_submit_control(screen.controls, include_disabled=True)

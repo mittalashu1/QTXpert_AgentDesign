@@ -141,6 +141,7 @@ type DiscoveredScreen = {
 };
 type Discovery = {
   job_id: string; status: "completed" | "partial" | "blocked" | "failed";
+  started_at?: string; finished_at?: string;
   target_kind?: TargetKind; target_url?: string | null; provider: Provider; duration_seconds: number; device_name: string;
   observe_only: boolean; screen_count: number; control_count: number; safe_control_count: number;
   blocked_control_count: number; actions_attempted: number; stop_reason: string;
@@ -1651,6 +1652,11 @@ export default function AutopilotPage() {
       setResumeBusy(true);
       try {
         const pendingAuthCheckpoint = priorAuthCheckpoint || responsePendingAuth;
+        const runRuntimeDiscovery = !discovery || pendingAuthCheckpoint || (
+          discovery.status === "partial" && /auth|sign-in|credentials/i.test(discovery.stop_reason)
+        );
+        if (runRuntimeDiscovery) setDiscoveryBusy(true);
+        const previousDiscoveryStartedAt = discovery?.started_at;
         const resumeResponse = await apiClient.post<AnalysisJob>(
           `/autopilot/${analysis.job_id}/resume`,
           {
@@ -1661,7 +1667,7 @@ export default function AutopilotPage() {
             // A discovery that stopped on a sign-in screen must be resumed
             // with the newly saved values. Reusing the prior map without a
             // second pass would leave the user in the login checkpoint loop.
-            run_runtime_discovery: !discovery || pendingAuthCheckpoint,
+            run_runtime_discovery: runRuntimeDiscovery,
             discovery_provider: executionPayload().provider,
             auto_run_safe_suite: autoRunFirstPass,
             discovery_device_name: deviceName,
@@ -1694,8 +1700,13 @@ export default function AutopilotPage() {
         while (Date.now() < discoveryDeadline) {
           try {
             const discoveryResponse = await apiClient.get<Discovery | null>(`/autopilot/${analysis.job_id}/discovery`, { timeout: 15000 });
-            if (discoveryResponse.data) {
-              setDiscovery(discoveryResponse.data);
+            const nextDiscovery = discoveryResponse.data;
+            const freshDiscovery = !runRuntimeDiscovery || Boolean(
+              nextDiscovery?.started_at && (!previousDiscoveryStartedAt
+                || Date.parse(nextDiscovery.started_at) > Date.parse(previousDiscoveryStartedAt)),
+            );
+            if (nextDiscovery && freshDiscovery) {
+              setDiscovery(nextDiscovery);
               discoveryReady = true;
               break;
             }
@@ -1726,6 +1737,7 @@ export default function AutopilotPage() {
         if (!discoveryReady && !latestPending) setContextNotice("Setup validated. Runtime Discovery is continuing in the background; refresh this tab to see its evidence.");
       } finally {
         setResumeBusy(false);
+        setDiscoveryBusy(false);
       }
     } catch (err) { setError(readableError(err, "Test setup could not be saved")); }
     finally { setSetupBusy(false); }
@@ -1996,7 +2008,7 @@ export default function AutopilotPage() {
   const customAppiumUnavailable = activeProvider === "appium" && providerStatus !== null && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
   const providerStatusPending = activeTargetKind !== "web" && providerStatus === null;
   const noExecutionProvider = activeTargetKind !== "web" && providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.device_farm_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
-  const executionUnavailable = providerStatusPending || browserStackUnavailable || deviceFarmUnavailable || deviceFarmNotConfigured || customAppiumUnavailable || !artifactAvailable;
+  const executionUnavailable = resumeBusy || discoveryBusy || providerStatusPending || browserStackUnavailable || deviceFarmUnavailable || deviceFarmNotConfigured || customAppiumUnavailable || !artifactAvailable;
   const reportPending = report?.recommendation === "PENDING";
   const effectivePlan = generationPlan || analysis?.generation_plan || null;
   const effectiveApplicationMap = applicationMap || analysis?.application_map || null;

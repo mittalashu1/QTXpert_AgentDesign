@@ -26,6 +26,7 @@ from app.schemas.autopilot import (
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
+    enter_observed_text,
     ProviderLifecycleUnavailable,
     expected_package_state,
     safe_app_identity,
@@ -1629,10 +1630,8 @@ class AutopilotSuiteService:
                 element = self._find_semantic_element(driver, step, locator_map)
                 if not element.is_enabled():
                     raise AssertionError(f"Resolved input control is disabled: {step.target}")
-                if hasattr(element, "clear"):
-                    element.clear()
                 try:
-                    element.send_keys(value)
+                    enter_observed_text(driver, element, str(value), target_kind=target_kind)
                 except Exception:
                     # Provider errors occasionally echo command arguments;
                     # never propagate a password, OTP or test value into the
