@@ -261,8 +261,13 @@ function emptySetup(jobId = ""): SetupProfile {
 
 const DEFAULT_RANDOM_SPEC: RandomSpec = { kind: "text", length: 12, minimum: 0, maximum: 100000, seed: "" };
 
+function editableCheckpointRequests(requests: AutopilotInputRequest[]): AutopilotInputRequest[] {
+  if (!requests.some((item) => item.key === "credential_reference" && item.credential_bundle)) return requests;
+  return requests.filter((item) => item.key === "credential_reference" || item.category !== "credential" || item.input_hint === "otp");
+}
+
 function buildInputDrafts(profile: SetupProfile | null | undefined): Record<string, InputDraft> {
-  const requests = [...(profile?.input_requests || []), ...(profile?.runtime_input_requests || [])];
+  const requests = editableCheckpointRequests([...(profile?.input_requests || []), ...(profile?.runtime_input_requests || [])]);
   const decisions = profile?.input_decisions || {};
   const saved = new Map((profile?.saved_inputs || []).map((item) => [item.key, item]));
   return Object.fromEntries(requests.map((request) => {
@@ -1477,7 +1482,7 @@ export default function AutopilotPage() {
     };
     setSetupDraft(nextSetup);
     setInputDrafts(buildInputDrafts(nextSetup));
-    const nextRequests = [...(nextSetup.input_requests || []), ...(nextSetup.runtime_input_requests || [])];
+    const nextRequests = editableCheckpointRequests([...(nextSetup.input_requests || []), ...(nextSetup.runtime_input_requests || [])]);
     const requestedIndex = requestKey
       ? nextRequests.findIndex((item) => item.key === requestKey)
       : -1;
@@ -2018,10 +2023,10 @@ export default function AutopilotPage() {
   const activeSetup = setupCandidates.find((candidate) => (candidate.input_requests || []).length > 0 || (candidate.runtime_input_requests || []).length > 0)
     || setupCandidates[0]
     || emptySetup(analysis?.job_id || "");
-  const allCheckpointRequests = [
+  const allCheckpointRequests = editableCheckpointRequests([
     ...((activeSetup.input_requests || []).length > 0 ? activeSetup.input_requests : concreteCheckpointRequests(analysis?.input_requests)),
     ...(activeSetup.runtime_input_requests || []),
-  ];
+  ]);
   const pendingInputRequests = allCheckpointRequests.filter((item) => item.status === "pending");
   const pendingCheckpointRequests = pendingInputRequests.filter(isBlockingCheckpoint);
   const deferredInputRequests = pendingInputRequests.filter((item) => !isBlockingCheckpoint(item));
@@ -2734,6 +2739,7 @@ export default function AutopilotPage() {
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, destructive submits, confirmations and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable || planAwaitingApproval} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : planAwaitingApproval ? "Approve plan first" : "Run discovery"}</Button></Stack></Stack>
         {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
         {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.target_ready === false && <Alert severity="warning" sx={{ mt: 1.25 }}><b>Target not attached.</b> The provider did not expose the uploaded application, so no new coverage was generated. {discovery.target_identity_reason || discovery.error || "Check the app package/activity or the device session and retry."}</Alert>}{discovery.last_attempt_status && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The previous evidence map is retained. Latest attach attempt: {discovery.last_attempt_status}{discovery.last_attempt_reason ? ` · ${discovery.last_attempt_reason}` : ""}</Typography>}{discovery.screens.length > 0 && <Grid container spacing={1.5} sx={{ mt: .5 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Journey / page</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen.screen_id}-${control.control_id}`} hover><TableCell><Typography variant="body2" fontWeight={700}>{screen.page_label || screen.title || screen.journey || "Observed page"}</Typography><Typography variant="caption" color="text.secondary">{screen.journey || "Observed journey"} · {screen.screen_id}</Typography></TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+        {discovery && (discovery.warnings || []).length > 0 && <Box component="details" sx={{ mt: 1 }}><Typography component="summary" variant="caption" sx={{ cursor: "pointer" }}>Discovery details</Typography>{discovery.warnings.map((warning, index) => <Typography key={index} variant="caption" display="block" sx={{ mt: .5 }}>{warning}</Typography>)}</Box>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent>

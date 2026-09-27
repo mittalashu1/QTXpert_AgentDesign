@@ -1509,10 +1509,10 @@ def _setup_profile(
         raw["runtime_input_requests"] = [item.model_dump(mode="json") for item in runtime_requests]
         pending_requests = [item for item in normalized_requests if item.status == "pending"]
         pending_runtime_requests = [item for item in runtime_requests if item.status == "pending"]
-        pending_runtime_credentials = [
-            item for item in pending_runtime_requests if item.category == "credential"
+        runtime_signin_credentials = [
+            item for item in runtime_requests if item.category == "credential" and item.input_hint != "otp"
         ]
-        if pending_runtime_credentials and discovery is not None:
+        if runtime_signin_credentials and discovery is not None:
             # Login is the first checkpoint in a live journey. Keep unrelated
             # UAT/SIT/data references out of the dialog until the user has
             # supplied (or explicitly skipped) the concrete sign-in fields.
@@ -1529,7 +1529,6 @@ def _setup_profile(
                     for item in normalized_requests
                     if item.key == "credential_reference"
                     and item.category == "credential"
-                    and item.status == "pending"
                 ),
                 None,
             )
@@ -1551,10 +1550,10 @@ def _setup_profile(
             primary_runtime_credential = next(
                 (
                     item
-                    for item in pending_runtime_credentials
+                    for item in runtime_signin_credentials
                     if str(item.input_hint or "").strip().lower() == "username"
                 ),
-                pending_runtime_credentials[0],
+                runtime_signin_credentials[0],
             )
             if credential_bundle_request is None:
                 # A runtime adapter can observe a login before the expanded
@@ -1568,7 +1567,7 @@ def _setup_profile(
                     reason="A live sign-in form was observed. Enter the non-production User ID/email and password before authenticated journeys continue.",
                     required_for=sorted({
                         required
-                        for item in pending_runtime_credentials
+                        for item in runtime_signin_credentials
                         for required in item.required_for
                     }),
                     sensitive=True,
@@ -1583,7 +1582,7 @@ def _setup_profile(
                 )
             runtime_required_for = {
                 required
-                for item in pending_runtime_credentials
+                for item in runtime_signin_credentials
                 for required in item.required_for
             }
             credential_bundle_request = credential_bundle_request.model_copy(
@@ -1611,7 +1610,16 @@ def _setup_profile(
                 }
             )
             credential_bundle_skipped = decisions.get("credential_reference") == "skip"
-            normalized_requests = [credential_bundle_request] if credential_bundle_request else []
+            # Keep the observed sign-in pair editable after it is saved.
+            # Hide unrelated references only while the actual login gate is
+            # unresolved, not forever after a successful credential save.
+            normalized_requests = (
+                [credential_bundle_request]
+                if any(item.status == "pending" for item in runtime_signin_credentials)
+                else [credential_bundle_request, *[
+                    item for item in normalized_requests if item.key != "credential_reference"
+                ]]
+            )
             pending_requests = [item for item in normalized_requests if item.status == "pending"]
             runtime_requests = [
                 item.model_copy(update={"status": "skipped", "reference_present": False})
@@ -1786,6 +1794,15 @@ async def _resolve_suite_input_values(
     values: dict[str, str] = {}
     sensitive_keys: set[str] = set()
 
+    def saved_at(key: str) -> Optional[datetime]:
+        metadata = next((item for item in (getattr(setup, "saved_inputs", None) or []) if item.key == key), None)
+        raw_time = getattr(metadata, "updated_at", None) if metadata is not None else None
+        try:
+            stamp = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+            return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
     async def read(key: str) -> Optional[str]:
         try:
             return await resolve_value(
@@ -1834,7 +1851,11 @@ async def _resolve_suite_input_values(
                 # An explicitly saved field is newer/more specific than the
                 # reusable bundle. Never silently replace the user's corrected
                 # username/password with an older bundled value.
-                values.setdefault(request.key, str(value))
+                bundle_time, field_time = saved_at("credential_reference"), saved_at(request.key)
+                if bundle_time is not None and field_time is not None and bundle_time > field_time:
+                    values[request.key] = str(value)
+                else:
+                    values.setdefault(request.key, str(value))
                 sensitive_keys.add(request.key)
 
     # Keep the local mapping limited to request keys. This protects against a
