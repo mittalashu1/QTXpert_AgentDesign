@@ -26,6 +26,8 @@ class StagedLoginDriver:
         self.ignore_set_text = False
         self.unsupported_keyboard = False
         self.keyboard_calls = []
+        self.clear_blurs_focus = False
+        self.ignore_keyboard_type = False
         self.submitted = []
         self.quit_called = False
         self.persisted_states = []
@@ -64,6 +66,8 @@ class StagedLoginDriver:
         class Element:
             def clear(self):
                 driver.values[driver.state] = ""
+                if driver.clear_blurs_focus:
+                    driver.focused = False
 
             def send_keys(self, text):
                 if not driver.ignore_set_text and (not driver.require_focus or driver.focused):
@@ -92,7 +96,8 @@ class StagedLoginDriver:
             raise RuntimeError("Unknown mobile command")
         assert self.focused
         self.keyboard_calls.append(self.state)
-        self.values[self.state] = arguments["text"]
+        if not self.ignore_keyboard_type:
+            self.values[self.state] = arguments["text"]
         self.keyboard_visible = True
 
     def hide_keyboard(self):
@@ -231,6 +236,24 @@ def test_unsupported_keyboard_extension_falls_back_to_standard_entry(mobile_disc
     run()
     assert driver.keyboard_calls == []
     assert driver.submitted == ["username", "password"]
+
+
+def test_credential_clear_restores_focus_before_keyboard_entry(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.clear_blurs_focus = True
+    driver.require_focus = True
+    run()
+    assert driver.submitted == ["username", "password"]
+
+
+def test_silent_keyboard_delivery_failure_replaces_observed_username(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.ignore_keyboard_type = True
+    result = run()
+    assert driver.submitted == ["username"]
+    assert driver.values["username"] == "synthetic-user@example.test"
+    assert result["authentication_blocked"] is True
+    assert "synthetic-user@example.test" not in str(result)
 
 
 def test_duplicate_screen_merge_refreshes_enabled_state():

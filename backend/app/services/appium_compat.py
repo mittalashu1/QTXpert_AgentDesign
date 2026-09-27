@@ -329,6 +329,61 @@ def safe_navigate_back(driver: Any, *, target_kind: str = "android") -> str:
             "Android back navigation is unavailable through this device provider."
         ) from exc
 
+def enter_observed_text(
+    driver: Any, element: Any, value: str, *, target_kind: str = "android", verify_text: bool = False,
+) -> Optional[bool]:
+    """Replace one observed field, restoring focus after clear and checking delivery.
+
+    Some Flutter/native adapters lose input focus during clear. Keyboard input
+    must focus the field afterwards. A confirmed failed delivery may fall back
+    to targeted entry, always replacing rather than appending. Only a boolean
+    leaves this function; provider errors must never expose supplied values.
+    """
+    def prepare() -> None:
+        element.clear()
+        element.click()
+
+    def confirmation() -> Optional[bool]:
+        if not verify_text:
+            return None
+        try:
+            actual = element.get_attribute("text")
+            return str(actual) == value if actual is not None else None
+        except Exception:
+            return None
+
+    try:
+        prepare()
+        keyboard = getattr(driver, "execute_script", None)
+        if target_kind == "android" and callable(keyboard):
+            try:
+                keyboard("mobile: type", {"text": value})
+            except Exception as exc:
+                if not any(term in str(exc).casefold() for term in (
+                    "unknown mobile command", "unknown command", "not implemented",
+                    "unsupported command", "not supported",
+                )):
+                    raise
+                element.send_keys(value)
+        else:
+            element.send_keys(value)
+        confirmed = confirmation()
+        if confirmed is False:
+            # The keyboard command can succeed without delivering text to a
+            # Flutter field. Retry only the same observed input, with a clear
+            # between attempts. This does not submit authentication.
+            prepare()
+            element.send_keys(value)
+            confirmed = confirmation()
+            element_id = getattr(element, "id", None)
+            if confirmed is False and target_kind == "android" and callable(keyboard) and element_id:
+                keyboard("mobile: replaceElementValue", {"elementId": element_id, "text": value})
+                confirmed = confirmation()
+        return confirmed
+    except Exception:
+        raise ProviderLifecycleUnavailable("The observed input could not be entered through this device provider.") from None
+
+
 def safe_quit(driver: Any) -> None:
     """Best-effort session cleanup that cannot mask the recorded result."""
     try:
