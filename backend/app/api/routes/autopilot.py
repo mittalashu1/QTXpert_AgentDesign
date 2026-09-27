@@ -1831,7 +1831,10 @@ async def _resolve_suite_input_values(
                 value = parsed.get(hint) if hint else None
                 if value is None or not str(value).strip():
                     continue
-                values[request.key] = str(value)
+                # An explicitly saved field is newer/more specific than the
+                # reusable bundle. Never silently replace the user's corrected
+                # username/password with an older bundled value.
+                values.setdefault(request.key, str(value))
                 sensitive_keys.add(request.key)
 
     # Keep the local mapping limited to request keys. This protects against a
@@ -1947,6 +1950,8 @@ def _auth_discovery_needs_retry(
             "credentials were supplied, but no safe sign-in control was found",
             "sign-in returned to the same screen",
             "authentication could not be completed safely",
+            "sign-in button did not become enabled",
+            "no enabled observed sign-in action was available",
         )
     )
 

@@ -1007,9 +1007,9 @@ class AutopilotDiscoveryService:
             )
             if not target_ok:
                 raise _UnexpectedTargetSurface(reason)
+            screen.controls = controls
             submit = cls._auth_submit_control(controls)
             if submit is not None:
-                screen.controls = controls
                 return submit
             if attempt < 4:
                 time.sleep(0.4)
@@ -1549,6 +1549,10 @@ class AutopilotDiscoveryService:
                             if value is None:
                                 continue
                             element = self._find_discovered_element(driver, control, AppiumBy)
+                            # Flutter's text controller may not receive an
+                            # unfocused UiAutomator setText update. Focus the
+                            # already observed input before clear/send_keys.
+                            element.click()
                             try:
                                 element.clear()
                             except Exception:
@@ -1556,7 +1560,13 @@ class AutopilotDiscoveryService:
                             element.send_keys(value)
                         submit = self._refresh_auth_submit(driver, screen, package_hint, activity_hint)
                         if submit is None:
-                            return screen, True, "Credentials were supplied, but no safe sign-in control was found"
+                            observed_submit = self._auth_submit_control(screen.controls, include_disabled=True)
+                            return screen, True, (
+                                "The observed sign-in button did not become enabled after entering the saved credentials. "
+                                "Authentication was not submitted; review the app's sign-in field validation."
+                                if observed_submit is not None and not observed_submit.enabled
+                                else "Saved credentials were entered, but no enabled observed sign-in action was available."
+                            )
                         if actions_attempted >= request.max_actions:
                             return (
                                 screen,
