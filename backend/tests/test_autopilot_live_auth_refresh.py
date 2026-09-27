@@ -22,6 +22,10 @@ class StagedLoginDriver:
         self.text_only_label = text_only_label
         self.require_focus = require_focus
         self.focused = False
+        self.disable_field_after_entry = False
+        self.ignore_set_text = False
+        self.unsupported_keyboard = False
+        self.keyboard_calls = []
         self.submitted = []
         self.quit_called = False
         self.persisted_states = []
@@ -50,6 +54,8 @@ class StagedLoginDriver:
                     f'<node class="android.widget.Button" content-desc="Continue" '
                     f'clickable="{str(enabled).lower()}" enabled="{str(enabled).lower()}" />'
                 )
+            if value and self.disable_field_after_entry:
+                body = body.replace('clickable="true" enabled="true"', 'clickable="true" enabled="false"', 1)
         return '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">' + body + '</node></hierarchy>'
 
     def find_element(self, by, value):
@@ -60,9 +66,12 @@ class StagedLoginDriver:
                 driver.values[driver.state] = ""
 
             def send_keys(self, text):
-                if not driver.require_focus or driver.focused:
+                if not driver.ignore_set_text and (not driver.require_focus or driver.focused):
                     driver.values[driver.state] = text
                 driver.keyboard_visible = True
+
+            def get_attribute(self, name):
+                return driver.values.get(driver.state, "") if name == "text" else None
 
             def click(self):
                 if value != "Continue":
@@ -76,6 +85,15 @@ class StagedLoginDriver:
                 driver.focused = False
 
         return Element()
+
+    def execute_script(self, script, arguments):
+        assert script == "mobile: type"
+        if self.unsupported_keyboard:
+            raise RuntimeError("Unknown mobile command")
+        assert self.focused
+        self.keyboard_calls.append(self.state)
+        self.values[self.state] = arguments["text"]
+        self.keyboard_visible = True
 
     def hide_keyboard(self):
         self.keyboard_visible = False
@@ -190,6 +208,31 @@ def test_flutter_credential_input_is_focused_before_entry(mobile_discovery):
     assert driver.submitted == ["username", "password"]
 
 
+def test_enabled_submit_keeps_auth_identity_when_filled_field_is_disabled(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.text_only_label = True
+    driver.disable_field_after_entry = True
+    run()
+    assert driver.submitted == ["username", "password"]
+
+
+def test_flutter_uses_keyboard_events_when_native_set_text_is_ignored(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.text_only_label = True
+    driver.ignore_set_text = True
+    run()
+    assert driver.keyboard_calls == ["username", "password"]
+    assert driver.submitted == ["username", "password"]
+
+
+def test_unsupported_keyboard_extension_falls_back_to_standard_entry(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.unsupported_keyboard = True
+    run()
+    assert driver.keyboard_calls == []
+    assert driver.submitted == ["username", "password"]
+
+
 def test_duplicate_screen_merge_refreshes_enabled_state():
     from app.schemas.autopilot import DiscoveredScreen
 
@@ -209,4 +252,45 @@ def test_auth_submit_that_remains_disabled_is_not_clicked(mobile_discovery):
 
     assert driver.submitted == []
     assert "did not become enabled" in result["stop_reason"]
+    assert result["authentication_blocked"] is True
+    assert "user_id_entry_confirmed=True" in result["warnings"][0]
+    assert "synthetic-user@example.test" not in str(result)
     assert driver.quit_called
+
+
+def test_auth_block_status_does_not_depend_on_message_wording(monkeypatch, tmp_path):
+    import asyncio
+    from app.schemas.autopilot import DiscoveredScreen
+
+    app_file = tmp_path / "sample.apk"
+    app_file.write_bytes(b"synthetic artifact")
+
+    async def load_job(_job_id):
+        return {"apk_path": str(app_file), "target_kind": "android"}
+
+    async def load_analysis(_job_id):
+        return SimpleNamespace(package_name="com.qtx.demo", main_activity=".MainActivity")
+
+    async def stop_session(*args):
+        pass
+
+    prototype = SimpleNamespace(
+        load_job=load_job, load_analysis=load_analysis,
+        resolve_appium_url=lambda _request: "https://example.test/appium",
+        _stop_device_farm_session=stop_session,
+    )
+    settings = SimpleNamespace(
+        AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS=30,
+        AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS=30,
+        AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS=30,
+        AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS=30,
+    )
+    service = AutopilotDiscoveryService(settings, prototype)
+    monkeypatch.setattr(service, "_run_sync", lambda *args: {
+        "screens": [DiscoveredScreen(screen_id="login", fingerprint="login")],
+        "transitions": [], "actions_attempted": 1, "warnings": [],
+        "stop_reason": "A newly worded validation message", "target_ready": True,
+        "authentication_blocked": True,
+    })
+    result = asyncio.run(service.run("job", AutopilotDiscoveryRequest(provider="appium")))
+    assert result.status == "partial"
