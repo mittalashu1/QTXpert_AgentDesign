@@ -75,6 +75,10 @@ type ProviderStatus = {
   device_farm_region?: string | null;
   device_farm_device_name?: string | null;
   device_farm_reason?: string | null;
+  device_farm_trial_minutes_remaining?: number | null;
+  device_farm_trial_minutes_total?: number | null;
+  device_farm_trial_minutes_checked_at?: string | null;
+  device_farm_trial_minutes_error?: string | null;
   custom_appium_available: boolean;
   playwright_available?: boolean;
   custom_appium_reason?: string | null;
@@ -2807,6 +2811,8 @@ export default function AutopilotPage() {
       {noExecutionProvider && <Alert severity="warning" sx={{ mt: 2 }}>No hosted mobile execution provider is configured. Configure AWS Device Farm, BrowserStack credentials, or enter a reachable HTTPS Appium endpoint before running.</Alert>}
       {deviceFarmNotConfigured && activeTargetKind === "android" && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus?.device_farm_reason || "AWS Device Farm is not configured for this backend."}</Alert>}
       {deviceFarmUnavailable && <Alert severity="warning" sx={{ mt: 2 }}>AWS Device Farm is configured for Android first. Choose BrowserStack or Custom Appium for an iOS target.</Alert>}
+      {activeProvider === "devicefarm" && providerStatus?.device_farm_trial_minutes_remaining != null && <Alert severity={providerStatus.device_farm_trial_minutes_remaining <= 100 ? "warning" : "info"} sx={{ mt: 1 }}>AWS free device minutes: <b>{providerStatus.device_farm_trial_minutes_remaining.toFixed(1)}</b>{providerStatus.device_farm_trial_minutes_checked_at ? ` · Verified ${new Date(providerStatus.device_farm_trial_minutes_checked_at).toLocaleString()}` : ""}. This balance is not a billing cap.</Alert>}
+      {activeProvider === "devicefarm" && providerStatus?.device_farm_trial_minutes_error && <Alert severity="warning" sx={{ mt: 1 }}>{providerStatus.device_farm_trial_minutes_error}</Alert>}
       {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose AWS Device Farm, Custom / local Appium, or configure BrowserStack.</Alert>}
       {activeProvider === "appium" && providerStatus?.custom_appium_reason && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus.custom_appium_reason}</Alert>}
       <Grid container spacing={2} sx={{ mt: .5 }}>

@@ -14,6 +14,7 @@ secrets, an attached role, or a local AWS profile).
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -121,6 +122,31 @@ class DeviceFarmService:
             return client
         except Exception as exc:  # pragma: no cover - provider-specific SDK errors
             raise DeviceFarmError(f"AWS Device Farm client could not be initialized: {exc}") from exc
+
+    def get_trial_minutes(self) -> dict[str, Any]:
+        """Read the account's actual allowance without creating any device usage.
+
+        Missing/invalid values are unavailable, never an assumed 1,000-minute
+        trial or zero. Return no credentials, account identifiers or SDK payload.
+        """
+        try:
+            response = self._client().get_account_settings()
+        except Exception as exc:
+            raise DeviceFarmError(f"Could not read AWS Device Farm free minutes ({type(exc).__name__})") from None
+        trial = (response.get("accountSettings") or {}).get("trialMinutes") or {}
+        remaining = trial.get("remaining")
+        total = trial.get("total")
+
+        def valid_minutes(value: Any) -> bool:
+            return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+
+        if not valid_minutes(remaining):
+            raise DeviceFarmError("AWS Device Farm did not provide a verified remaining trial balance")
+        return {
+            "remaining": float(remaining),
+            "total": float(total) if valid_minutes(total) else None,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     @staticmethod
     def _register_raw_endpoint_capture(client: Any) -> None:

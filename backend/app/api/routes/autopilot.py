@@ -87,6 +87,7 @@ from app.services.autopilot_ir import (
 )
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
+from app.services.device_farm import DeviceFarmService
 from app.services.autopilot_workflow import (
     build_application_map,
     build_execution_control_payload,
@@ -2744,12 +2745,31 @@ async def get_autopilot_providers(
     recommended: AutopilotProvider = (
         "devicefarm" if device_farm_configured else "browserstack" if configured else "appium"
     )
+    trial_minutes: dict = {}
+    trial_minutes_error = None
+    if device_farm_configured:
+        try:
+            trial_minutes = await asyncio.wait_for(
+                asyncio.to_thread(DeviceFarmService(settings).get_trial_minutes), timeout=15,
+            )
+            logger.info(
+                "AWS Device Farm verified trial balance: remaining=%s total=%s checked_at=%s",
+                trial_minutes.get("remaining"), trial_minutes.get("total"), trial_minutes.get("checked_at"),
+            )
+        except Exception as exc:
+            # SDK errors may echo credentials or signed URLs. Only the error
+            # class is exposed; provider readiness does not imply free balance.
+            trial_minutes_error = f"Free-minute balance unavailable ({type(exc).__name__}); verify AWS usage before running."
     return AutopilotProviderStatus(
         browserstack_configured=configured,
         device_farm_configured=device_farm_configured,
         device_farm_region=settings.DEVICE_FARM_REGION if device_farm_configured else None,
         device_farm_device_name=settings.DEVICE_FARM_DEVICE_NAME if device_farm_configured else None,
         device_farm_reason=device_farm_reason,
+        device_farm_trial_minutes_remaining=trial_minutes.get("remaining"),
+        device_farm_trial_minutes_total=trial_minutes.get("total"),
+        device_farm_trial_minutes_checked_at=trial_minutes.get("checked_at"),
+        device_farm_trial_minutes_error=trial_minutes_error,
         custom_appium_available=custom_available,
         playwright_available=True,
         custom_appium_reason=reason,
