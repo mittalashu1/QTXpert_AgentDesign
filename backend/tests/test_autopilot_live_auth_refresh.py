@@ -28,6 +28,7 @@ class StagedLoginDriver:
         self.keyboard_calls = []
         self.clear_blurs_focus = False
         self.ignore_keyboard_type = False
+        self.semantic_button_not_clickable = False
         self.submitted = []
         self.quit_called = False
         self.persisted_states = []
@@ -58,6 +59,9 @@ class StagedLoginDriver:
                 )
             if value and self.disable_field_after_entry:
                 body = body.replace('clickable="true" enabled="true"', 'clickable="true" enabled="false"', 1)
+            if self.semantic_button_not_clickable:
+                body = body.replace(f'clickable="{str(enabled).lower()}" enabled="{str(enabled).lower()}" />',
+                                    f'clickable="false" enabled="{str(enabled).lower()}" />')
         return '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">' + body + '</node></hierarchy>'
 
     def find_element(self, by, value):
@@ -266,6 +270,32 @@ def test_duplicate_screen_merge_refreshes_enabled_state():
     current = AutopilotDiscoveryService.parse_controls(driver.page_source)
     AutopilotDiscoveryService._merge_screen_controls(screen, current)
     assert AutopilotDiscoveryService._auth_submit_control(screen.controls) is not None
+
+
+def test_enabled_semantic_continue_with_false_clickable_is_normally_clicked(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.semantic_button_not_clickable = True
+    result = run()
+    assert driver.submitted == ["username", "password"]
+    assert result["authentication_blocked"] is False
+    assert any(control.semantic_label == "Dashboard" for screen in result["screens"] for control in screen.controls)
+
+
+def test_disabled_semantic_button_remains_unsubmitted(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.semantic_button_not_clickable = True
+    driver.enable_submit = False
+    result = run()
+    assert driver.submitted == []
+    assert result["authentication_blocked"] is True
+
+
+def test_nonclickable_static_continue_is_not_an_auth_action():
+    controls = AutopilotDiscoveryService.parse_controls('''<hierarchy>
+        <node class="android.widget.EditText" content-desc="Username" enabled="true" />
+        <node class="android.widget.TextView" content-desc="Continue" enabled="true" clickable="false" />
+    </hierarchy>''')
+    assert AutopilotDiscoveryService._auth_submit_control(controls) is None
 
 
 def test_auth_submit_that_remains_disabled_is_not_clicked(mobile_discovery):

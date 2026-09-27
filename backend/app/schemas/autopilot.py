@@ -679,6 +679,10 @@ class AutopilotProviderStatus(BaseModel):
     device_farm_region: Optional[str] = None
     device_farm_device_name: Optional[str] = None
     device_farm_reason: Optional[str] = None
+    device_farm_trial_minutes_remaining: Optional[float] = None
+    device_farm_trial_minutes_total: Optional[float] = None
+    device_farm_trial_minutes_checked_at: Optional[str] = None
+    device_farm_trial_minutes_error: Optional[str] = None
     custom_appium_available: bool = False
     playwright_available: bool = True
     custom_appium_reason: Optional[str] = None

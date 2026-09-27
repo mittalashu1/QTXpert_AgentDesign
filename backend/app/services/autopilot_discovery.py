@@ -928,13 +928,16 @@ class AutopilotDiscoveryService:
         )
         candidates: list[DiscoveredControl] = []
         for control in controls:
-            disabled_button = (
-                include_disabled and not control.enabled
-                and control.class_name in {"android.widget.Button", "XCUIElementTypeButton"}
-            )
+            # Flutter can expose an enabled semantic Button with clickable=false
+            # even though the normal WebDriver click activates it. The native
+            # button role is sufficient to attempt that normal click, but only
+            # after the observed form/label below identifies authentication.
+            # Disabled controls remain discovery-only; no coordinate/force click
+            # or general navigation policy is relaxed here.
+            semantic_button = control.class_name in {"android.widget.Button", "XCUIElementTypeButton"}
             if (
                 (not control.enabled and not include_disabled)
-                or (not control.clickable and not disabled_button)
+                or (not control.clickable and not semantic_button)
                 or control.input_capable or not control.locators
             ):
                 continue
