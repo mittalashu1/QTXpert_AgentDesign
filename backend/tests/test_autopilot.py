@@ -709,6 +709,48 @@ def test_runtime_discovery_back_case_targets_unique_observed_predecessor(tmp_pat
     assert next(step for step in executable_back.steps if step.action == "assert_visible").screen_id == "screen-001"
 
 
+def test_runtime_expansion_keeps_unobserved_destinations_without_crashing_or_promoting(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="66666666-6666-6666-6666-666666666666",
+        filename="partial-crawl.apk",
+        sha256="6" * 64,
+        tests=service._build_deterministic_tests({"permissions": []}),
+    )
+    controls = [DiscoveredControl(
+        control_id="back",
+        semantic_label="Back",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Back", confidence=0.99)],
+    )]
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="partial",
+        provider="appium",
+        started_at="2026-09-28T00:00:00+00:00",
+        finished_at="2026-09-28T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screens=[DiscoveredScreen(screen_id="screen-001", fingerprint="6" * 64, controls=controls)],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    compiled = AutopilotIRCompiler().compile_bundle(
+        AutopilotAnalysis.model_validate(expanded.model_dump()), discovery,
+    )
+
+    case = next(test for test in expanded.tests if "activate Back" in test.title)
+    ir_case = next(test for test in compiled.tests if test.test_id == case.id)
+    assert case.autonomous_candidate is False
+    assert "has not observed" in case.dependency
+    assert case.steps[-1] == "Tap Back"
+    assert ir_case.readiness == "discovery_required"
+    assert "has not observed" in ir_case.readiness_reason
+
+
 def test_runtime_discovery_keeps_all_observed_cases_without_fixed_cap(tmp_path):
     service = _service(tmp_path)
     analysis = AutopilotAnalysis(

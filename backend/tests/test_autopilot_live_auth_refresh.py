@@ -29,12 +29,23 @@ class StagedLoginDriver:
         self.clear_blurs_focus = False
         self.ignore_keyboard_type = False
         self.semantic_button_not_clickable = False
+        self.native_username_click_ignored = False
+        self.transition_delay_reads = 0
+        self.pending_state = None
+        self.delay_remaining = 0
+        self.gesture_calls = 0
         self.submitted = []
         self.quit_called = False
         self.persisted_states = []
 
     @property
     def page_source(self):
+        if self.pending_state is not None:
+            if self.delay_remaining:
+                self.delay_remaining -= 1
+            else:
+                self.state = self.pending_state
+                self.pending_state = None
         if self.state == "home":
             body = '<node text="Dashboard" class="android.widget.TextView" />'
         else:
@@ -68,6 +79,8 @@ class StagedLoginDriver:
         driver = self
 
         class Element:
+            id = "observed-continue-element"
+
             def clear(self):
                 driver.values[driver.state] = ""
                 if driver.clear_blurs_focus:
@@ -88,13 +101,28 @@ class StagedLoginDriver:
                 assert value == "Continue"
                 assert driver.values.get(driver.state) and not driver.keyboard_visible
                 assert driver.enable_submit
+                if driver.state == "username" and driver.native_username_click_ignored:
+                    return
                 driver.submitted.append(driver.state)
-                driver.state = "password" if driver.state == "username" else "home"
+                next_state = "password" if driver.state == "username" else "home"
+                if driver.transition_delay_reads:
+                    driver.pending_state = next_state
+                    driver.delay_remaining = driver.transition_delay_reads
+                else:
+                    driver.state = next_state
                 driver.focused = False
 
         return Element()
 
     def execute_script(self, script, arguments):
+        if script == "mobile: clickGesture":
+            assert arguments == {"elementId": "observed-continue-element"}
+            assert self.state == "username" and self.semantic_button_not_clickable
+            self.gesture_calls += 1
+            self.submitted.append(self.state)
+            self.state = "password"
+            self.focused = False
+            return
         assert script == "mobile: type"
         if self.unsupported_keyboard:
             raise RuntimeError("Unknown mobile command")
@@ -279,6 +307,31 @@ def test_enabled_semantic_continue_with_false_clickable_is_normally_clicked(mobi
     assert driver.submitted == ["username", "password"]
     assert result["authentication_blocked"] is False
     assert any(control.semantic_label == "Dashboard" for screen in result["screens"] for control in screen.controls)
+
+
+def test_username_continue_waits_for_delayed_observed_password_screen(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.semantic_button_not_clickable = True
+    driver.transition_delay_reads = 3
+    result = run()
+    assert driver.submitted == ["username", "password"]
+    assert driver.gesture_calls == 0
+    assert result["authentication_blocked"] is False
+
+
+def test_stuck_semantic_username_continue_uses_one_observed_element_gesture(mobile_discovery):
+    driver, run, tmp_path = mobile_discovery
+    driver.semantic_button_not_clickable = True
+    driver.native_username_click_ignored = True
+    result = run()
+    assert driver.gesture_calls == 1
+    assert driver.submitted == ["username", "password"]
+    assert result["actions_attempted"] == 3
+    assert result["authentication_blocked"] is False
+    assert all(state == "home" or not values for state, values in driver.persisted_states)
+    serialized = str(result) + "".join(path.read_text(encoding="utf-8") for path in tmp_path.rglob("*.xml"))
+    assert "synthetic-secret" not in serialized
+    assert "synthetic-user@example.test" not in serialized
 
 
 def test_disabled_semantic_button_remains_unsubmitted(mobile_discovery):
