@@ -31,6 +31,17 @@ class DeviceFarmError(RuntimeError):
     """Raised when Device Farm cannot prepare or expose an Appium session."""
 
 
+class DeviceFarmTrialBalanceError(DeviceFarmError):
+    """A value-free reason why the account balance could not be verified."""
+
+    def __init__(self, code: str):
+        self.code = code if code in {
+            "access_denied", "expired_credentials", "credentials_unavailable",
+            "provider_unavailable", "missing_balance", "unknown",
+        } else "unknown"
+        super().__init__(f"AWS Device Farm trial balance unavailable: {self.code}")
+
+
 @dataclass(frozen=True)
 class DeviceFarmDevice:
     arn: str
@@ -132,7 +143,19 @@ class DeviceFarmService:
         try:
             response = self._client().get_account_settings()
         except Exception as exc:
-            raise DeviceFarmError(f"Could not read AWS Device Farm free minutes ({type(exc).__name__})") from None
+            root_error = exc.__cause__ or exc
+            sdk_code = ((getattr(root_error, "response", {}) or {}).get("Error") or {}).get("Code")
+            if sdk_code in {"AccessDenied", "AccessDeniedException", "UnauthorizedException"}:
+                code = "access_denied"
+            elif sdk_code in {"ExpiredToken", "ExpiredTokenException", "UnrecognizedClientException", "InvalidClientTokenId"}:
+                code = "expired_credentials"
+            elif type(root_error).__name__ in {"NoCredentialsError", "PartialCredentialsError"}:
+                code = "credentials_unavailable"
+            elif type(root_error).__name__ in {"ConnectTimeoutError", "ReadTimeoutError", "EndpointConnectionError"}:
+                code = "provider_unavailable"
+            else:
+                code = "unknown"
+            raise DeviceFarmTrialBalanceError(code) from None
         trial = (response.get("accountSettings") or {}).get("trialMinutes") or {}
         remaining = trial.get("remaining")
         total = trial.get("total")
@@ -141,7 +164,7 @@ class DeviceFarmService:
             return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
 
         if not valid_minutes(remaining):
-            raise DeviceFarmError("AWS Device Farm did not provide a verified remaining trial balance")
+            raise DeviceFarmTrialBalanceError("missing_balance")
         return {
             "remaining": float(remaining),
             "total": float(total) if valid_minutes(total) else None,

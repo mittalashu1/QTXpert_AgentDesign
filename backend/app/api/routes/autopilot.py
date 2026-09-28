@@ -87,7 +87,7 @@ from app.services.autopilot_ir import (
 )
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
-from app.services.device_farm import DeviceFarmService
+from app.services.device_farm import DeviceFarmService, DeviceFarmTrialBalanceError
 from app.services.autopilot_workflow import (
     build_application_map,
     build_execution_control_payload,
@@ -2756,6 +2756,15 @@ async def get_autopilot_providers(
                 "AWS Device Farm verified trial balance: remaining=%s total=%s checked_at=%s",
                 trial_minutes.get("remaining"), trial_minutes.get("total"), trial_minutes.get("checked_at"),
             )
+        except DeviceFarmTrialBalanceError as exc:
+            logger.warning("AWS Device Farm trial balance check: %s", exc.code)
+            trial_minutes_error = {
+                "access_denied": "AWS denied the read-only GetAccountSettings balance check. Verify free minutes in the AWS console before running.",
+                "expired_credentials": "AWS credentials for the balance check have expired. Verify the configured AWS connection before running.",
+                "credentials_unavailable": "The AWS connection has no usable credentials for the balance check.",
+                "provider_unavailable": "AWS could not be reached for the free-minute balance check. Try again before running.",
+                "missing_balance": "AWS did not return a usable free-minute balance. Verify minutes in the AWS console before running.",
+            }.get(exc.code, "AWS free-minute balance could not be verified. Check the AWS console before running.")
         except Exception as exc:
             # SDK errors may echo credentials or signed URLs. Only the error
             # class is exposed; provider readiness does not imply free balance.
