@@ -28,6 +28,7 @@ class StagedLoginDriver:
         self.keyboard_calls = []
         self.clear_blurs_focus = False
         self.ignore_keyboard_type = False
+        self.corrupt_password_keyboard_type = False
         self.unreadable_text_attribute = False
         self.semantic_button_not_clickable = False
         self.native_username_click_ignored = False
@@ -109,6 +110,8 @@ class StagedLoginDriver:
                     return
                 if driver.state == "password" and driver.native_password_click_ignored:
                     return
+                if driver.state == "password" and driver.values["password"] != "synthetic-secret":
+                    return
                 driver.submitted.append(driver.state)
                 next_state = "password" if driver.state == "username" else "home"
                 if driver.transition_delay_reads:
@@ -135,7 +138,11 @@ class StagedLoginDriver:
         assert self.focused
         self.keyboard_calls.append(self.state)
         if not self.ignore_keyboard_type:
-            self.values[self.state] = arguments["text"]
+            self.values[self.state] = (
+                arguments["text"][:-1]
+                if self.state == "password" and self.corrupt_password_keyboard_type
+                else arguments["text"]
+            )
         self.keyboard_visible = True
 
     def hide_keyboard(self):
@@ -266,6 +273,17 @@ def test_flutter_uses_keyboard_events_when_native_set_text_is_ignored(mobile_dis
     run()
     assert driver.keyboard_calls == ["username", "password"]
     assert driver.submitted == ["username", "password"]
+
+
+def test_secure_password_uses_observed_field_when_keyboard_can_silently_change_it(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.corrupt_password_keyboard_type = True
+    result = run()
+    assert driver.submitted == ["username", "password"]
+    assert driver.values["password"] == "synthetic-secret"
+    assert driver.keyboard_calls == ["username"]
+    assert result["authentication_blocked"] is False
+    assert "synthetic-secret" not in str(result)
 
 
 def test_unsupported_keyboard_extension_falls_back_to_standard_entry(mobile_discovery):
