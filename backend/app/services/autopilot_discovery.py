@@ -1560,6 +1560,11 @@ class AutopilotDiscoveryService:
                                 driver, element, value,
                                 target_kind="ios" if is_ios else "android",
                                 verify_text=self._credential_hint(control) == "username",
+                                # Secure Flutter fields cannot be read back.
+                                # Target the observed element first: Android's
+                                # generic keyboard extension may silently
+                                # alter punctuation while still enabling Login.
+                                prefer_element_entry=self._credential_hint(control) == "password",
                             )
                             if confirmed is not None:
                                 entry_confirmations.append(confirmed)
@@ -1585,7 +1590,11 @@ class AutopilotDiscoveryService:
                                     enter_observed_text(
                                         driver, password_element, password_value,
                                         target_kind="android", verify_text=False,
-                                        prefer_element_entry=True,
+                                        # The element path did not enable the
+                                        # observed submit. Retry the alternate
+                                        # keyboard path exactly once, replacing
+                                        # the same field rather than appending.
+                                        prefer_element_entry=False,
                                     )
                                     submit = self._refresh_auth_submit(
                                         driver, screen, package_hint, activity_hint,
