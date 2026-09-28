@@ -331,6 +331,7 @@ def safe_navigate_back(driver: Any, *, target_kind: str = "android") -> str:
 
 def enter_observed_text(
     driver: Any, element: Any, value: str, *, target_kind: str = "android", verify_text: bool = False,
+    prefer_element_entry: bool = False,
 ) -> Optional[bool]:
     """Replace one observed field, restoring focus after clear and checking delivery.
 
@@ -355,9 +356,11 @@ def enter_observed_text(
     try:
         prepare()
         keyboard = getattr(driver, "execute_script", None)
-        if target_kind == "android" and callable(keyboard):
+        keyboard_attempted = False
+        if target_kind == "android" and callable(keyboard) and not prefer_element_entry:
             try:
                 keyboard("mobile: type", {"text": value})
+                keyboard_attempted = True
             except Exception as exc:
                 if not any(term in str(exc).casefold() for term in (
                     "unknown mobile command", "unknown command", "not implemented",
@@ -368,10 +371,13 @@ def enter_observed_text(
         else:
             element.send_keys(value)
         confirmed = confirmation()
-        if confirmed is False:
+        if confirmed is False or (confirmed is None and keyboard_attempted and verify_text):
             # The keyboard command can succeed without delivering text to a
-            # Flutter field. Retry only the same observed input, with a clear
-            # between attempts. This does not submit authentication.
+            # Flutter field. Some providers also return no readable ``text``
+            # attribute, making success unknowable. In either case replace
+            # only this observed field through ordinary element entry before
+            # allowing the caller to inspect whether Continue became enabled.
+            # Clear first so an uncertain first delivery cannot be appended.
             prepare()
             element.send_keys(value)
             confirmed = confirmation()
