@@ -28,6 +28,7 @@ class StagedLoginDriver:
         self.keyboard_calls = []
         self.clear_blurs_focus = False
         self.ignore_keyboard_type = False
+        self.unreadable_text_attribute = False
         self.semantic_button_not_clickable = False
         self.native_username_click_ignored = False
         self.transition_delay_reads = 0
@@ -92,6 +93,8 @@ class StagedLoginDriver:
                 driver.keyboard_visible = True
 
             def get_attribute(self, name):
+                if driver.unreadable_text_attribute and name == "text":
+                    return None
                 return driver.values.get(driver.state, "") if name == "text" else None
 
             def click(self):
@@ -282,10 +285,23 @@ def test_silent_keyboard_delivery_failure_replaces_observed_username(mobile_disc
     driver, run, _ = mobile_discovery
     driver.ignore_keyboard_type = True
     result = run()
-    assert driver.submitted == ["username"]
+    assert driver.submitted == ["username", "password"]
     assert driver.values["username"] == "synthetic-user@example.test"
-    assert result["authentication_blocked"] is True
+    assert result["authentication_blocked"] is False
     assert "synthetic-user@example.test" not in str(result)
+
+
+def test_unreadable_username_attribute_does_not_prevent_staged_login(mobile_discovery):
+    driver, run, tmp_path = mobile_discovery
+    driver.unreadable_text_attribute = True
+    driver.ignore_keyboard_type = True
+    result = run()
+    assert driver.submitted == ["username", "password"], (result["stop_reason"], result["warnings"])
+    assert result["authentication_blocked"] is False
+    assert all(state == "home" or not values for state, values in driver.persisted_states)
+    serialized = str(result) + "".join(path.read_text(encoding="utf-8") for path in tmp_path.rglob("*.xml"))
+    assert "synthetic-secret" not in serialized
+    assert "synthetic-user@example.test" not in serialized
 
 
 def test_duplicate_screen_merge_refreshes_enabled_state():

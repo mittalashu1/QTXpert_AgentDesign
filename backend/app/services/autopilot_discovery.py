@@ -1564,6 +1564,32 @@ class AutopilotDiscoveryService:
                             if confirmed is not None:
                                 entry_confirmations.append(confirmed)
                         submit = self._refresh_auth_submit(driver, screen, package_hint, activity_hint)
+                        if submit is None and not is_ios:
+                            # Secure fields intentionally cannot be read back.
+                            # If the observed submit remains disabled, retry
+                            # only the same password field through ordinary
+                            # element entry; this does not submit a login or
+                            # expose its value in evidence/diagnostics.
+                            password_control = next(
+                                (item for item in credential_controls if self._credential_hint(item) == "password"),
+                                None,
+                            )
+                            if password_control is not None:
+                                password_value = self._credential_value(
+                                    screen.screen_id, password_control, input_values,
+                                )
+                                if password_value is not None:
+                                    password_element = self._find_discovered_element(
+                                        driver, password_control, AppiumBy,
+                                    )
+                                    enter_observed_text(
+                                        driver, password_element, password_value,
+                                        target_kind="android", verify_text=False,
+                                        prefer_element_entry=True,
+                                    )
+                                    submit = self._refresh_auth_submit(
+                                        driver, screen, package_hint, activity_hint,
+                                    )
                         if submit is None:
                             observed_submit = self._auth_submit_control(screen.controls, include_disabled=True)
                             submit_buttons = [
