@@ -396,6 +396,11 @@ class AutopilotIRCompiler:
         elif missing_setup:
             readiness = "discovery_required"
             readiness_reason = "Provide setup: " + "; ".join(missing_setup) + "."
+        elif test.id.startswith("QT-RUNTIME-FUNC-POS-") and test.dependency and not test.autonomous_candidate:
+            # A control seen on screen is a legitimate case candidate, but a
+            # missing destination is not evidence that the action is replayable.
+            readiness = "discovery_required"
+            readiness_reason = test.dependency
         elif analysis.target_kind == "web" and test.id in self.WEB_EXECUTABLE_IDS:
             readiness = "executable"
             readiness_reason = "Deterministic Playwright public-surface check."

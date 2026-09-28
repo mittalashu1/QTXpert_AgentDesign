@@ -3062,10 +3062,18 @@ class AutopilotPrototypeService:
                         else None
                     )
                 target_anchor = next(
-                    (item for item in target_screen.controls if item.enabled and item.locators and item.semantic_label),
+                    (
+                        item for item in (target_screen.controls if target_screen else [])
+                        if item.enabled and item.locators and item.semantic_label
+                    ),
                     None,
                 )
                 assertion_label = target_anchor.semantic_label if target_anchor else label
+                destination_observed = target_screen is not None
+                destination_dependency = (
+                    None if destination_observed else
+                    f"Runtime Discovery has not observed where {label} leads; safely map its destination before executing this case."
+                )
                 queues["functional_positive"].append(
                     AutopilotTest(
                         id=cls._runtime_case_id("FUNC-POS", screen.screen_id, control.control_id),
@@ -3074,8 +3082,13 @@ class AutopilotPrototypeService:
                         title=f"{journey_label} — Functional positive: activate {label} on {screen_label}",
                         priority="high",
                         objective="Exercise one observed safe control and verify the resulting evidence-backed state.",
-                        steps=[*navigation, f"Tap {label}", f"Verify {assertion_label}"],
-                        expected=[f"Activating {label} reaches a stable state with {assertion_label} visible"],
+                        steps=[*navigation, f"Tap {label}", *([f"Verify {assertion_label}"] if destination_observed else [])],
+                        expected=(
+                            [f"Activating {label} reaches a stable state with {assertion_label} visible"]
+                            if destination_observed else [f"The destination of {label} requires runtime observation"]
+                        ),
+                        autonomous_candidate=destination_observed,
+                        dependency=destination_dependency,
                         evidence_required=["before/after screenshots", "UI hierarchy"],
                         journey=journey_label,
                         page_label=screen_label,

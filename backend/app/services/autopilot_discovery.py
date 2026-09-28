@@ -1593,15 +1593,60 @@ class AutopilotDiscoveryService:
                                 True,
                                 f"Authentication values are ready, but max_actions={request.max_actions} was reached",
                             )
-                        self._find_discovered_element(driver, submit, AppiumBy).click()
+                        submit_element = self._find_discovered_element(driver, submit, AppiumBy)
+                        submit_element.click()
                         actions_attempted += 1
-                        time.sleep(1.5)
-                        # Never persist the post-fill frame until it has been
-                        # checked for remaining sensitive fields.
-                        next_screen, duplicate = capture(
-                            persist_evidence=False,
-                            require_target=True,
+                        # A staged native login may take several seconds to
+                        # render its next form. Observe a bounded series of
+                        # credential-safe frames before calling the tap a
+                        # failure; none of these frames is persisted.
+                        next_screen, duplicate = screen, True
+                        for observation in range(8):
+                            time.sleep(1.0 if observation else 1.5)
+                            next_screen, duplicate = capture(
+                                persist_evidence=False,
+                                require_target=True,
+                            )
+                            if not duplicate:
+                                break
+                        # Some Flutter/Android semantic buttons advertise
+                        # enabled=true, clickable=false and ignore WebDriver's
+                        # native click. Only on the observed username stage,
+                        # after the normal click stayed on the same form, try
+                        # Appium's element-targeted gesture once. Never force
+                        # a password submit or infer screen coordinates.
+                        username_stage = any(
+                            self._credential_hint(control) == "username"
+                            for control in credential_controls
                         )
+                        current_submit = self._auth_submit_control(next_screen.controls) if duplicate else None
+                        if (
+                            duplicate and username_stage and not submit.clickable
+                            and submit.enabled and not is_ios
+                            and current_submit is not None
+                            and current_submit.control_id == submit.control_id
+                            and current_submit.enabled
+                            and actions_attempted < request.max_actions
+                        ):
+                            try:
+                                refreshed_element = self._find_discovered_element(driver, current_submit, AppiumBy)
+                                if not getattr(refreshed_element, "id", None):
+                                    raise LookupError("No observed element identifier for gesture")
+                                driver.execute_script("mobile: clickGesture", {"elementId": refreshed_element.id})
+                                actions_attempted += 1
+                                for observation in range(8):
+                                    time.sleep(1.0 if observation else 1.5)
+                                    next_screen, duplicate = capture(
+                                        persist_evidence=False,
+                                        require_target=True,
+                                    )
+                                    if not duplicate:
+                                        break
+                            except Exception as gesture_error:
+                                warnings.append(
+                                    "Observed username Continue gesture was unavailable: "
+                                    f"{type(gesture_error).__name__}. No credential values were recorded."
+                                )
                         next_has_sensitive_inputs = bool(self._credential_controls(next_screen))
                         if not duplicate and not next_has_sensitive_inputs:
                             next_screen, _ = capture(
@@ -1621,7 +1666,7 @@ class AutopilotDiscoveryService:
                             return (
                                 screen,
                                 True,
-                                "Sign-in returned to the same screen; credentials may be invalid or the flow needs supervision.",
+                                "The observed sign-in action did not advance beyond this form; review its on-screen validation or continue under supervision.",
                             )
                         screen = next_screen
                     except _UnexpectedTargetSurface as exc:
