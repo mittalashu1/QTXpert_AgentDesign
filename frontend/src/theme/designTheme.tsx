@@ -208,7 +208,17 @@ function createDesignTheme(mode: DesignMode) {
 export const designLightTheme = createDesignTheme("light");
 export const designDarkTheme = createDesignTheme("dark");
 
-const designRoutePaths = ["/autopilot", "/documents", "/design"];
+const designRoutePaths = [
+  "/",
+  "/autopilot",
+  "/documents",
+  "/design",
+  "/execution",
+  "/reports",
+  "/settings",
+  "/test-data",
+  "/cost-center",
+];
 
 export function isDesignModulePath(pathname: string) {
   return designRoutePaths.some((path) => pathname === path || pathname.startsWith(`${path}/`));
@@ -223,7 +233,17 @@ export function DesignModuleTheme({ mode, children }: { mode: DesignMode; childr
     "--design-surface-subtle": colors.surfaceSubtle,
     "--design-surface-muted": colors.surfaceMuted,
     "--design-surface-translucent": colors.surfaceTranslucent,
+    "--design-primary": colors.primary,
+    "--design-primary-hover": colors.primaryHover,
     "--design-primary-soft": colors.primarySoft,
+    "--design-primary-soft-strong": colors.primarySoftStrong,
+    "--design-healthy": colors.healthy,
+    "--design-neutral": colors.neutral,
+    "--design-neutral-soft": colors.neutralSoft,
+    "--design-warning": colors.warning,
+    "--design-warning-soft": colors.warningSoft,
+    "--design-attention": colors.attention,
+    "--design-attention-soft": colors.attentionSoft,
     "--design-healthy-soft": colors.healthySoft,
     "--design-border": colors.border,
     "--design-border-strong": colors.borderStrong,
