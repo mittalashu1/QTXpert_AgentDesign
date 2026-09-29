@@ -28,6 +28,7 @@ import { dashboardApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import type { DashboardSummary } from "@/types/domain";
 import { qtxpertColors, qtxpertEffects } from "@/theme/theme";
+import { DesignModuleTheme, designTokens, isDesignModulePath } from "@/theme/designTheme";
 
 const drawerWidth = 224;
 const compactDrawerWidth = 60;
@@ -111,6 +112,8 @@ export default function AppLayout() {
   const { mode, toggleMode } = useThemeMode();
   const { selectedProjectId, selectedProject } = useSelectedProject();
   const theme = useTheme();
+  const isDesignModule = isDesignModulePath(location.pathname);
+  const designColors = designTokens[mode];
   const wideViewport = useMediaQuery(theme.breakpoints.up("md"));
   const fullHeader = useMediaQuery(theme.breakpoints.up("lg"));
   const showProfileDetails = useMediaQuery("(min-width: 840px)");
@@ -175,10 +178,10 @@ export default function AppLayout() {
       bgcolor: "action.hover",
     },
     "&.active": {
-      bgcolor: "action.selected",
-      color: "primary.main",
+      bgcolor: isDesignModule ? designColors.primarySoft : "action.selected",
+      color: isDesignModule ? designColors.primary : "primary.main",
       borderLeft: "3px solid",
-      borderColor: "primary.main",
+      borderColor: isDesignModule ? designColors.primary : "primary.main",
       boxShadow: mode === "dark" ? "none" : qtxpertEffects.cardShadow,
       "& .MuiListItemIcon-root": { color: "inherit" },
     },
@@ -193,14 +196,14 @@ export default function AppLayout() {
           zIndex: (theme) => theme.zIndex.drawer + 1,
           borderBottom: "1px solid",
           borderColor: "divider",
-          backgroundColor: mode === "dark" ? "rgba(48,45,58,.90)" : "rgba(255,255,255,.90)",
+          backgroundColor: isDesignModule ? designColors.surface : mode === "dark" ? "rgba(48,45,58,.90)" : "rgba(255,255,255,.90)",
           backgroundImage: "none",
           color: "text.primary",
           backdropFilter: "blur(18px) saturate(125%)",
           WebkitBackdropFilter: "blur(18px) saturate(125%)",
           boxShadow: (theme) => theme.palette.mode === "dark"
             ? "0 1px 0 rgba(255,255,255,.08)"
-            : qtxpertEffects.cardShadow,
+            : isDesignModule ? designColors.cardShadow : qtxpertEffects.cardShadow,
         }}
       >
         <Toolbar sx={{ gap: { xs: 0.6, sm: 1.1, md: 1.5 }, px: { xs: 1, sm: 1.5, md: 2 }, minWidth: 0 }}>
@@ -225,7 +228,7 @@ export default function AppLayout() {
                 justifyContent: { xs: "center", lg: "flex-start" },
                 color: "text.secondary",
                 borderColor: "divider",
-                bgcolor: mode === "dark" ? "background.paper" : qtxpertColors.searchBackground,
+                bgcolor: isDesignModule ? designColors.surfaceSubtle : mode === "dark" ? "background.paper" : qtxpertColors.searchBackground,
                 "& .MuiButton-startIcon": { mx: { xs: 0, lg: 0.5 } },
               }}
             >
@@ -288,7 +291,7 @@ export default function AppLayout() {
               endIcon={showProfileDetails ? <ExpandMoreIcon fontSize="small" /> : undefined}
               sx={{ minWidth: 0, px: { xs: 0.2, sm: 0.6 }, color: "text.primary", borderRadius: 2.5, textAlign: "left" }}
             >
-                <Avatar sx={{ width: 36, height: 36, mr: showProfileDetails ? 1 : 0, color: "#fff", background: `linear-gradient(140deg, ${qtxpertColors.lavender}, ${qtxpertColors.primary})` }}>
+                <Avatar sx={{ width: 36, height: 36, mr: showProfileDetails ? 1 : 0, color: "#fff", background: isDesignModule ? designColors.primary : `linear-gradient(140deg, ${qtxpertColors.lavender}, ${qtxpertColors.primary})` }}>
                 {user?.full_name?.charAt(0).toUpperCase() ?? "U"}
               </Avatar>
               {showProfileDetails && <Stack sx={{ alignItems: "flex-start", minWidth: 90, maxWidth: 140 }}>
@@ -325,7 +328,7 @@ export default function AppLayout() {
             boxSizing: "border-box",
             borderRight: "1px solid",
             borderRightColor: "divider",
-            backgroundColor: "background.paper",
+            backgroundColor: isDesignModule ? designColors.surface : "background.paper",
             overflowX: "hidden",
             transition: "width 180ms ease, box-shadow 180ms ease",
             backdropFilter: "blur(14px) saturate(115%)",
@@ -333,7 +336,7 @@ export default function AppLayout() {
             boxShadow: navExpanded && wideViewport
               ? (theme) => theme.palette.mode === "dark"
                 ? "8px 0 24px rgba(0,0,0,.18)"
-                : qtxpertEffects.cardShadow
+                : isDesignModule ? designColors.cardShadow : qtxpertEffects.cardShadow
               : "none",
             // Keep the header above the rail so the wordmark is never clipped.
             zIndex: (theme) => theme.zIndex.drawer,
@@ -352,7 +355,7 @@ export default function AppLayout() {
                 {navExpanded && item.badge && <Chip label={item.badge} size="small" sx={{ height: 20, fontSize: 10, fontWeight: 800 }} />}
               </ListItemButton>
             ))}
-            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={!navExpanded ? "Repositories" : undefined} sx={{ borderRadius: 1.5, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? "action.selected" : undefined, color: location.pathname.startsWith("/test-data") ? "primary.main" : undefined, justifyContent: navExpanded ? undefined : "center", px: navExpanded ? undefined : 1 }}>
+            <ListItemButton onClick={() => setTestDataOpen((open) => !open)} title={!navExpanded ? "Repositories" : undefined} sx={{ borderRadius: 1.5, mb: 0.5, bgcolor: location.pathname.startsWith("/test-data") ? (isDesignModule ? designColors.primarySoft : "action.selected") : undefined, color: location.pathname.startsWith("/test-data") ? (isDesignModule ? designColors.primary : "primary.main") : undefined, justifyContent: navExpanded ? undefined : "center", px: navExpanded ? undefined : 1 }}>
               <ListItemIcon sx={{ minWidth: navExpanded ? 38 : "auto", color: "text.secondary", justifyContent: "center" }}><StorageOutlinedIcon /></ListItemIcon>
               {navExpanded && <ListItemText primary="Repositories" primaryTypographyProps={{ fontWeight: 600, fontSize: 14 }} />}
               {navExpanded && (testDataOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />)}
@@ -380,9 +383,9 @@ export default function AppLayout() {
           </List>
         </Box>
       </Drawer>
-      <Box component="main" className="qtxpert-workspace-main" sx={{ ml: `${drawerRootWidth}px`, p: { xs: 1.5, md: 2.25 }, minHeight: "100vh", minWidth: 0, bgcolor: "transparent", transition: "margin-left 180ms ease" }}>
+      <Box component="main" className="qtxpert-workspace-main" sx={{ ml: `${drawerRootWidth}px`, p: { xs: 1.5, md: 2.25 }, minHeight: "100vh", minWidth: 0, bgcolor: isDesignModule ? designColors.page : "transparent", transition: "margin-left 180ms ease" }}>
         <Toolbar />
-        <Outlet />
+        {isDesignModule ? <DesignModuleTheme mode={mode}><Outlet /></DesignModuleTheme> : <Outlet />}
       </Box>
       <Dialog open={searchOpen} onClose={() => { setSearchOpen(false); setSearchValue(""); }} fullWidth maxWidth="sm">
         <DialogTitle sx={{ pb: 1 }}>Find a page or tool</DialogTitle>
@@ -402,7 +405,7 @@ export default function AppLayout() {
           <List dense sx={{ mt: 1, maxHeight: 360, overflowY: "auto" }}>
             {filteredPages.length ? filteredPages.map((page) => (
               <ListItemButton key={page.to} onClick={() => openPage(page.to)} sx={{ borderRadius: 1.5 }}>
-                <ListItemIcon sx={{ minWidth: 38, color: "primary.main" }}>{page.icon}</ListItemIcon>
+                <ListItemIcon sx={{ minWidth: 38, color: isDesignModule ? designColors.primary : "primary.main" }}>{page.icon}</ListItemIcon>
                 <ListItemText primary={page.label} secondary={page.to} primaryTypographyProps={{ fontWeight: 700 }} />
               </ListItemButton>
             )) : <Typography variant="body2" color="text.secondary" sx={{ px: 2, py: 2 }}>No matching page or tool.</Typography>}

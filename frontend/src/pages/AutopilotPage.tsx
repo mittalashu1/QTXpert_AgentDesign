@@ -30,7 +30,6 @@ import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
 import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
 import DefectLogDialog, { type DefectSubmission } from "@/components/DefectLogDialog";
 import type { Defect } from "@/types/domain";
-import { qtxpertEffects } from "@/theme/theme";
 
 type TestBucket =
   | "installation" | "page_level" | "functional" | "functional_positive" | "functional_negative"
@@ -2132,14 +2131,14 @@ export default function AutopilotPage() {
     pb: 2.5,
     "&::before": {
       content: "\"\"", position: "absolute", zIndex: -1, top: -28, left: -28, right: -28,
-      height: 480, pointerEvents: "none", background: qtxpertEffects.atmosphere,
+      height: 480, pointerEvents: "none", background: "var(--design-atmosphere)",
     },
     "& .autopilot-glass": {
-      borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,.16)" : "rgba(255,255,255,.94)",
-      background: (theme) => theme.palette.mode === "dark" ? qtxpertEffects.glassSurfaceDark : qtxpertEffects.glassBackground,
-      backdropFilter: "blur(28px) saturate(155%)",
-      WebkitBackdropFilter: "blur(28px) saturate(155%)",
-      boxShadow: (theme) => theme.palette.mode === "dark" ? "0 8px 24px rgba(0,0,0,.20)" : qtxpertEffects.glassShadow,
+      borderColor: "var(--design-border)",
+      background: "var(--design-surface-translucent)",
+      backdropFilter: "none",
+      WebkitBackdropFilter: "none",
+      boxShadow: "var(--design-card-shadow)",
     },
     "& .autopilot-compact .MuiCardContent-root": { p: { xs: 1.2, md: 1.5 }, "&:last-child": { pb: { xs: 1.2, md: 1.5 } } },
     "@media (prefers-reduced-motion: reduce)": { "& *": { scrollBehavior: "auto !important", transition: "none !important" } },
@@ -2147,37 +2146,36 @@ export default function AutopilotPage() {
     <Paper component="section" aria-labelledby="autopilot-page-title" className="autopilot-glass" variant="outlined" sx={{
       position: "relative", overflow: "hidden", p: { xs: 1.6, sm: 2.2, lg: 2.8 },
       borderRadius: { xs: 3, md: 4 },
-      background: `linear-gradient(110deg, rgba(255,255,255,.78), rgba(248,241,255,.60) 36%, rgba(238,233,255,.54) 66%, rgba(234,244,255,.54))`,
+      background: "var(--design-hero-gradient)",
       minHeight: { xs: 188, md: 202 },
     }}>
       <Box aria-hidden="true" sx={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none" }}>
-        <Box component="img" src="/dashboard-cityscape.svg" alt="" sx={{ position: "absolute", left: "14%", bottom: -3, width: "72%", height: { xs: 84, md: 142 }, objectFit: "fill", opacity: .32, maskImage: "linear-gradient(90deg, transparent, black 18%, black 82%, transparent)" }} />
-        <Box sx={{ position: "absolute", width: 390, height: 390, right: { xs: -170, md: 120 }, top: -255, borderRadius: "50%", background: "radial-gradient(circle at 42% 38%, rgba(255,255,255,.88), rgba(237,229,255,.36) 35%, rgba(167,139,250,.20) 58%, transparent 76%)" }} />
-        <Box sx={{ position: "absolute", inset: "auto 0 0", height: 1, background: "linear-gradient(90deg, transparent, rgba(117,70,232,.22), transparent)" }} />
+        <Box sx={{ position: "absolute", width: 390, height: 390, right: { xs: -170, md: 120 }, top: -255, borderRadius: "50%", background: "var(--design-hero-accent-gradient)" }} />
+        <Box sx={{ position: "absolute", inset: "auto 0 0", height: 1, background: "linear-gradient(90deg, transparent, var(--design-primary-line), transparent)" }} />
       </Box>
       <Grid container alignItems="center" spacing={1.5} sx={{ position: "relative", zIndex: 1 }}>
         <Grid item xs={12} md={7}>
           <Stack spacing={.8} sx={{ maxWidth: 680 }}>
-            <Chip size="small" icon={<AutoAwesomeIcon />} label="QTXPERT · AUTONOMOUS TESTING" color="primary" variant="outlined" sx={{ alignSelf: "flex-start", bgcolor: "rgba(255,255,255,.72)", fontWeight: 800, letterSpacing: ".06em" }} />
+            <Chip size="small" icon={<AutoAwesomeIcon />} label="QTXPERT · AUTONOMOUS TESTING" color="primary" variant="outlined" sx={{ alignSelf: "flex-start", bgcolor: "var(--design-surface-translucent)", fontWeight: 800, letterSpacing: ".06em" }} />
             <Typography id="autopilot-page-title" component="h1" variant="h2" sx={{ fontWeight: 800, letterSpacing: "-.045em", lineHeight: 1.05 }}>Autopilot <AutoAwesomeIcon aria-hidden="true" sx={{ fontSize: ".62em", color: "primary.main", verticalAlign: "middle" }} /></Typography>
             <Typography variant="body1" color="text.secondary" sx={{ maxWidth: 520 }}>From idea to impact. Powered by AI.</Typography>
             <Stack direction="row" spacing={.8} useFlexGap flexWrap="wrap" sx={{ pt: .3 }}>
               <Button size="small" variant="contained" startIcon={<PlayArrowRoundedIcon />} onClick={() => analysis ? scrollToSection("autopilot-test-coverage") : openScopeSetup()}>
                 {analysis ? "View test plan" : "Set up Autopilot"}
               </Button>
-              <Button size="small" variant="outlined" startIcon={<AutoAwesomeIcon />} onClick={() => { openScopeSetup(); void generateContext(context.trim() ? "improve" : "generate"); }} disabled={contextBusy || busy} sx={{ bgcolor: "rgba(255,255,255,.60)" }}>
+              <Button size="small" variant="outlined" startIcon={<AutoAwesomeIcon />} onClick={() => { openScopeSetup(); void generateContext(context.trim() ? "improve" : "generate"); }} disabled={contextBusy || busy} sx={{ bgcolor: "var(--design-surface-translucent)" }}>
                 {contextBusy ? "Improving scope…" : "Improve with AI"}
               </Button>
-              <Chip size="small" label={busy ? "Analyzing" : checkpointWaiting ? "Input needed" : analysis ? workflowPhaseLabel(workflowPhase) : targetIsSelected ? "Ready to start" : "Choose a target"} color={busy ? "info" : checkpointWaiting || planAwaitingApproval ? "warning" : workflowPhase === "completed" ? "success" : "default"} variant="outlined" sx={{ alignSelf: "center", bgcolor: "rgba(255,255,255,.58)" }} />
+              <Chip size="small" label={busy ? "Analyzing" : checkpointWaiting ? "Input needed" : analysis ? workflowPhaseLabel(workflowPhase) : targetIsSelected ? "Ready to start" : "Choose a target"} color={busy ? "info" : checkpointWaiting || planAwaitingApproval ? "warning" : workflowPhase === "completed" ? "success" : "default"} variant="outlined" sx={{ alignSelf: "center", bgcolor: "var(--design-surface-translucent)" }} />
             </Stack>
           </Stack>
         </Grid>
         <Grid item xs={12} md={5}>
           <Box aria-hidden="true" sx={{ minHeight: { xs: 76, md: 138 }, position: "relative", display: "flex", alignItems: "center", justifyContent: { xs: "flex-start", md: "flex-end" } }}>
-            <Box sx={{ position: "absolute", right: { xs: "auto", md: 140 }, left: { xs: 0, md: "auto" }, top: "50%", transform: "translateY(-50%)", width: { xs: 88, md: 128 }, height: { xs: 88, md: 128 }, display: "grid", placeItems: "center", borderRadius: "50%", border: "1px solid rgba(255,255,255,.92)", background: "radial-gradient(circle at 30% 22%, rgba(255,255,255,.98), rgba(237,229,255,.68) 44%, rgba(167,139,250,.42) 74%, rgba(255,255,255,.26))", boxShadow: "inset 0 2px 12px rgba(255,255,255,.96), inset -9px -12px 22px rgba(117,70,232,.12), 0 0 0 10px rgba(255,255,255,.28), 0 0 0 23px rgba(167,139,250,.14), 0 18px 42px rgba(117,70,232,.16)", backdropFilter: "blur(20px) saturate(175%)", WebkitBackdropFilter: "blur(20px) saturate(175%)" }}>
-              <Box sx={{ width: { xs: 54, md: 76 }, height: { xs: 54, md: 76 }, display: "grid", placeItems: "center", borderRadius: "50%", border: "1px solid rgba(255,255,255,.92)", color: "primary.main", bgcolor: "rgba(255,255,255,.62)", boxShadow: "inset 0 2px 8px rgba(255,255,255,.96), 0 8px 22px rgba(117,70,232,.16)" }}><SmartToyOutlinedIcon sx={{ fontSize: { xs: 34, md: 46 } }} /></Box>
+            <Box sx={{ position: "absolute", right: { xs: "auto", md: 140 }, left: { xs: 0, md: "auto" }, top: "50%", transform: "translateY(-50%)", width: { xs: 88, md: 128 }, height: { xs: 88, md: 128 }, display: "grid", placeItems: "center", borderRadius: "50%", border: "1px solid", borderColor: "var(--design-border-strong)", background: "var(--design-hero-orb-gradient)", boxShadow: "var(--design-hero-shadow)", backdropFilter: "none", WebkitBackdropFilter: "none" }}>
+              <Box sx={{ width: { xs: 54, md: 76 }, height: { xs: 54, md: 76 }, display: "grid", placeItems: "center", borderRadius: "50%", border: "1px solid", borderColor: "var(--design-border-strong)", color: "primary.main", bgcolor: "var(--design-surface-translucent)", boxShadow: "var(--design-card-shadow)" }}><SmartToyOutlinedIcon sx={{ fontSize: { xs: 34, md: 46 } }} /></Box>
             </Box>
-            <Paper variant="outlined" sx={{ position: "relative", zIndex: 1, mr: { md: .5 }, ml: { xs: 11, md: 0 }, p: 1.2, maxWidth: 238, borderRadius: 2.5, bgcolor: "rgba(255,255,255,.70)", borderColor: "rgba(255,255,255,.92)", backdropFilter: "blur(20px)" }}>
+            <Paper variant="outlined" sx={{ position: "relative", zIndex: 1, mr: { md: .5 }, ml: { xs: 11, md: 0 }, p: 1.2, maxWidth: 238, borderRadius: 2.5, bgcolor: "var(--design-surface-translucent)", borderColor: "var(--design-border-strong)" }}>
               <Stack direction="row" spacing={.7} alignItems="center"><SmartToyOutlinedIcon color="primary" fontSize="small" /><Typography variant="body2" fontWeight={800}>Your quality copilot</Typography></Stack>
               <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: .35 }}>{analysis ? aiBadge.label : "Ready when you are."}</Typography>
               <Typography variant="caption" color="text.secondary" sx={{ display: "block" }} noWrap>{analysis ? `${stats?.tests ?? 0} test cases · ${contextSources.filter((source) => source.used !== false).length} context sources` : "Grounded in your target and project context"}</Typography>
@@ -2196,8 +2194,8 @@ export default function AutopilotPage() {
         {autopilotStages.map((stage, index) => {
           const isActive = index === activeStageIndex && !stage.complete;
           return <Grid item xs={6} sm={4} md key={stage.label}>
-            <Box sx={{ minHeight: 54, p: .8, display: "flex", alignItems: "center", gap: .8, border: "1px solid", borderColor: isActive ? "primary.light" : "rgba(255,255,255,.92)", borderRadius: 2, bgcolor: isActive ? "rgba(237,229,255,.62)" : "rgba(255,255,255,.50)", boxShadow: isActive ? "0 4px 18px rgba(117,70,232,.10)" : "none" }}>
-              <Box sx={{ width: 34, height: 34, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: "50%", color: stage.complete ? "success.main" : isActive ? "primary.main" : "text.secondary", bgcolor: stage.complete ? "rgba(221,248,236,.8)" : isActive ? "rgba(255,255,255,.9)" : "rgba(255,255,255,.68)" }}>
+            <Box sx={{ minHeight: 54, p: .8, display: "flex", alignItems: "center", gap: .8, border: "1px solid", borderColor: isActive ? "primary.light" : "var(--design-border)", borderRadius: 2, bgcolor: isActive ? "var(--design-primary-soft)" : "var(--design-surface-subtle)", boxShadow: isActive ? "var(--design-card-shadow)" : "none" }}>
+              <Box sx={{ width: 34, height: 34, flexShrink: 0, display: "grid", placeItems: "center", borderRadius: "50%", color: stage.complete ? "success.main" : isActive ? "primary.main" : "text.secondary", bgcolor: stage.complete ? "var(--design-healthy-soft)" : isActive ? "var(--design-surface)" : "var(--design-surface-subtle)" }}>
                 {stage.complete ? <CheckCircleRoundedIcon fontSize="small" /> : stage.icon}
               </Box>
               <Box sx={{ minWidth: 0 }}><Typography variant="caption" color="text.secondary">0{index + 1}</Typography><Typography variant="body2" fontWeight={800} noWrap>{stage.label}</Typography></Box>
@@ -2235,7 +2233,7 @@ export default function AutopilotPage() {
                 ["Functional", functionalCaseCount],
                 ["Ready", automation?.executable_count ?? 0],
                 ["Executed", executionCount],
-              ].map(([label, value]) => <Grid item xs={3} key={String(label)}><Box sx={{ p: .7, borderRadius: 1.5, bgcolor: "rgba(255,255,255,.60)" }}><Typography variant="caption" color="text.secondary" noWrap>{label}</Typography><Typography variant="h6" fontWeight={800} lineHeight={1.1}>{value}</Typography></Box></Grid>)}
+              ].map(([label, value]) => <Grid item xs={3} key={String(label)}><Box sx={{ p: .7, borderRadius: 1.5, bgcolor: "var(--design-surface-subtle)" }}><Typography variant="caption" color="text.secondary" noWrap>{label}</Typography><Typography variant="h6" fontWeight={800} lineHeight={1.1}>{value}</Typography></Box></Grid>)}
             </Grid>
             <Stack direction="row" spacing={.6} useFlexGap flexWrap="wrap" sx={{ mt: .9 }}>
               {analysis ? <><Chip size="small" label={`${stats?.suites ?? 0} journeys`} color="primary" variant="outlined" /><Chip size="small" label={`${discovery?.screen_count ?? 0} screens found`} variant="outlined" /></> : <Typography variant="caption" color="text.secondary">Your test coverage will appear here after analysis.</Typography>}
@@ -2264,7 +2262,7 @@ export default function AutopilotPage() {
         <Card className="autopilot-glass autopilot-compact" variant="outlined" sx={{ height: "100%", borderRadius: 3 }}>
           <CardContent>
             <Stack direction="row" justifyContent="space-between" alignItems="center"><Stack direction="row" spacing={.7} alignItems="center"><FactCheckOutlinedIcon color="primary" fontSize="small" /><Typography variant="subtitle2" fontWeight={800}>Generated test plan</Typography></Stack><Chip size="small" label={`${stats?.tests ?? 0} tests`} color="primary" variant="outlined" /></Stack>
-            {visibleJourneyPreview.length ? <Stack spacing={.55} sx={{ mt: .8 }}>{visibleJourneyPreview.map(([journey, count]) => <Stack key={journey} direction="row" spacing={.8} alignItems="center" sx={{ p: .6, borderRadius: 1.5, bgcolor: "rgba(255,255,255,.56)" }}><AccountTreeOutlinedIcon sx={{ fontSize: 16, color: "primary.main" }} /><Typography variant="caption" fontWeight={700} noWrap sx={{ flex: 1 }}>{journey}</Typography><Chip size="small" label={`${count} ${count === 1 ? "case" : "cases"}`} variant="outlined" sx={{ height: 22 }} /></Stack>)}</Stack> : <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Journeys appear here when Autopilot analyzes the target.</Typography>}
+            {visibleJourneyPreview.length ? <Stack spacing={.55} sx={{ mt: .8 }}>{visibleJourneyPreview.map(([journey, count]) => <Stack key={journey} direction="row" spacing={.8} alignItems="center" sx={{ p: .6, borderRadius: 1.5, bgcolor: "var(--design-surface-subtle)" }}><AccountTreeOutlinedIcon sx={{ fontSize: 16, color: "primary.main" }} /><Typography variant="caption" fontWeight={700} noWrap sx={{ flex: 1 }}>{journey}</Typography><Chip size="small" label={`${count} ${count === 1 ? "case" : "cases"}`} variant="outlined" sx={{ height: 22 }} /></Stack>)}</Stack> : <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Journeys appear here when Autopilot analyzes the target.</Typography>}
             {analysis && <Button size="small" sx={{ mt: .5 }} onClick={() => scrollToSection("autopilot-test-coverage")}>Review cases</Button>}
           </CardContent>
         </Card>
@@ -2298,13 +2296,13 @@ export default function AutopilotPage() {
     <Accordion id="autopilot-scope" className="autopilot-glass" variant="outlined" expanded={scopeExpanded} onChange={(_, expanded) => setScopeExpanded(expanded)} sx={{ borderRadius: "16px !important", overflow: "hidden", "&::before": { display: "none" }, scrollMarginTop: 16 }}>
       <AccordionSummary expandIcon={<ExpandMoreRoundedIcon />} aria-controls="autopilot-scope-content" id="autopilot-scope-header" sx={{ px: { xs: 1.25, md: 1.75 }, minHeight: 58, "& .MuiAccordionSummary-content": { my: .8 } }}>
         <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flex: 1 }}>
-          <Box sx={{ width: 36, height: 36, display: "grid", placeItems: "center", borderRadius: 1.5, bgcolor: "rgba(237,229,255,.75)", color: "primary.main" }}><FolderOutlinedIcon fontSize="small" /></Box>
+          <Box sx={{ width: 36, height: 36, display: "grid", placeItems: "center", borderRadius: 1.5, bgcolor: "var(--design-primary-soft)", color: "primary.main" }}><FolderOutlinedIcon fontSize="small" /></Box>
           <Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="subtitle2" fontWeight={800}>Target &amp; scope</Typography><Typography variant="caption" color="text.secondary" noWrap>{selectedProfile.name} · {activeTargetKind === "ios" ? "iOS" : activeTargetKind === "web" ? "Web" : "Android"} · {targetName}</Typography></Box>
           <Chip size="small" label={targetIsSelected ? "Target selected" : "Setup needed"} color={targetIsSelected ? "success" : "warning"} variant="outlined" sx={{ mr: 1 }} />
         </Stack>
       </AccordionSummary>
       <AccordionDetails id="autopilot-scope-content" sx={{ px: { xs: 1.25, md: 1.75 }, pt: 0, pb: 1.5 }}>
-    <Paper variant="outlined" sx={{ p: { xs: 1.25, md: 1.5 }, borderRadius: 2, bgcolor: "rgba(255,255,255,.55)" }}>
+    <Paper variant="outlined" sx={{ p: { xs: 1.25, md: 1.5 }, borderRadius: 2, bgcolor: "var(--design-surface-subtle)" }}>
       <Box sx={{ mb: 1.75 }}>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} alignItems={{ sm: "center" }} justifyContent="space-between">
           <Box>
