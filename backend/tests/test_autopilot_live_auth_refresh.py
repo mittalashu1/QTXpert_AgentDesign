@@ -38,6 +38,7 @@ class StagedLoginDriver:
         self.delay_remaining = 0
         self.gesture_calls = 0
         self.reject_password = False
+        self.unclassified_password_feedback = False
         self.feedback = ""
         self.submitted = []
         self.quit_called = False
@@ -117,6 +118,9 @@ class StagedLoginDriver:
                 if driver.state == "password" and driver.reject_password:
                     driver.feedback = "Invalid password for this account"
                     return
+                if driver.state == "password" and driver.unclassified_password_feedback:
+                    driver.feedback = "Please contact the UAT support team"
+                    return
                 if driver.state == "password" and driver.values["password"] != "synthetic-secret":
                     return
                 driver.submitted.append(driver.state)
@@ -133,7 +137,7 @@ class StagedLoginDriver:
     def execute_script(self, script, arguments):
         if script == "mobile: clickGesture":
             assert arguments == {"elementId": "observed-continue-element"}
-            assert self.state in {"username", "password"} and self.semantic_button_not_clickable
+            assert self.state in {"username", "password"}
             self.gesture_calls += 1
             self.submitted.append(self.state)
             self.state = "password" if self.state == "username" else "home"
@@ -395,6 +399,26 @@ def test_stuck_semantic_password_login_uses_one_observed_element_gesture(mobile_
     assert "synthetic-user@example.test" not in serialized
 
 
+def test_clickable_password_login_uses_gesture_only_after_unchanged_source(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.native_password_click_ignored = True
+    result = run()
+    assert driver.gesture_calls == 1
+    assert driver.submitted == ["username", "password"]
+    assert result["authentication_blocked"] is False
+
+
+def test_unclassified_changed_login_feedback_prevents_second_tap(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.unclassified_password_feedback = True
+    result = run()
+    assert result["authentication_blocked"] is True
+    assert driver.gesture_calls == 0
+    assert "still requests the same credentials" in result["stop_reason"]
+    assert any("Sign-in UI changed" in warning for warning in result["warnings"])
+    assert "synthetic-secret" not in str(result)
+
+
 def test_visible_password_rejection_stops_before_second_tap(mobile_discovery):
     driver, run, _ = mobile_discovery
     driver.semantic_button_not_clickable = True
@@ -404,8 +428,8 @@ def test_visible_password_rejection_stops_before_second_tap(mobile_discovery):
     assert result["authentication_blocked"] is True
     assert "rejected" in result["stop_reason"]
     assert driver.gesture_calls == 0
-    # Landing-page navigation, username Continue, and one password Login.
-    assert result["actions_attempted"] == 3
+    # Username Continue and one password Login; rejection is not retried.
+    assert result["actions_attempted"] == 2
     assert "Sign-in feedback category: credential_rejected" in result["warnings"][-1]
     assert "synthetic-secret" not in str(result)
 
