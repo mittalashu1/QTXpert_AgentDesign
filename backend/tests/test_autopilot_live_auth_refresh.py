@@ -37,6 +37,8 @@ class StagedLoginDriver:
         self.pending_state = None
         self.delay_remaining = 0
         self.gesture_calls = 0
+        self.reject_password = False
+        self.feedback = ""
         self.submitted = []
         self.quit_called = False
         self.persisted_states = []
@@ -76,6 +78,8 @@ class StagedLoginDriver:
             if self.semantic_button_not_clickable:
                 body = body.replace(f'clickable="{str(enabled).lower()}" enabled="{str(enabled).lower()}" />',
                                     f'clickable="false" enabled="{str(enabled).lower()}" />')
+            if self.feedback:
+                body += f'<node class="android.widget.TextView" text={quoteattr(self.feedback)} />'
         return '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">' + body + '</node></hierarchy>'
 
     def find_element(self, by, value):
@@ -109,6 +113,9 @@ class StagedLoginDriver:
                 if driver.state == "username" and driver.native_username_click_ignored:
                     return
                 if driver.state == "password" and driver.native_password_click_ignored:
+                    return
+                if driver.state == "password" and driver.reject_password:
+                    driver.feedback = "Invalid password for this account"
                     return
                 if driver.state == "password" and driver.values["password"] != "synthetic-secret":
                     return
@@ -386,6 +393,35 @@ def test_stuck_semantic_password_login_uses_one_observed_element_gesture(mobile_
     serialized = str(result) + "".join(path.read_text(encoding="utf-8") for path in tmp_path.rglob("*.xml"))
     assert "synthetic-secret" not in serialized
     assert "synthetic-user@example.test" not in serialized
+
+
+def test_visible_password_rejection_stops_before_second_tap(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.semantic_button_not_clickable = True
+    driver.reject_password = True
+    result = run()
+
+    assert result["authentication_blocked"] is True
+    assert "rejected" in result["stop_reason"]
+    assert driver.gesture_calls == 0
+    # Landing-page navigation, username Continue, and one password Login.
+    assert result["actions_attempted"] == 3
+    assert "Sign-in feedback category: credential_rejected" in result["warnings"][-1]
+    assert "synthetic-secret" not in str(result)
+
+
+@pytest.mark.parametrize("message, category", [
+    ("Your account is locked", "account_locked"),
+    ("Enter the verification code", "additional_verification"),
+    ("Network error. Please try later.", "service_unavailable"),
+])
+def test_auth_feedback_is_classified_without_returning_raw_copy(message, category):
+    source = (
+        '<hierarchy><node class="android.widget.EditText" text="synthetic-secret" />'
+        f'<node class="android.widget.TextView" text={quoteattr(message)} />'
+        '</hierarchy>'
+    )
+    assert AutopilotDiscoveryService._auth_feedback_code(source) == category
 
 
 def test_disabled_semantic_button_remains_unsubmitted(mobile_discovery):
