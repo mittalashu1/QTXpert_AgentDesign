@@ -46,7 +46,6 @@ import { useSelectedProject } from "@/hooks/useSelectedProject";
 import { useAuth } from "@/contexts/AuthContext";
 import { PROJECT_CREATE_EVENT } from "@/components/ProjectSelector";
 import type { AutopilotDashboardSummary, DocumentAnalysisRun, ExecutionRun } from "@/types/domain";
-import { qtxpertColors, qtxpertEffects } from "@/theme/theme";
 
 type MetricKey =
   | "active_work"
@@ -443,20 +442,14 @@ export default function DashboardPage() {
           right: -30,
           height: 420,
           pointerEvents: "none",
-          background: (theme) => theme.palette.mode === "dark"
-            ? "radial-gradient(ellipse at 12% 8%, rgba(167,139,250,.12), transparent 42%), radial-gradient(ellipse at 88% 12%, rgba(196,181,253,.08), transparent 40%)"
-            : qtxpertEffects.atmosphere,
+          background: "var(--design-atmosphere)",
         },
         "& .dashboard-glass": {
-          borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,.14)" : qtxpertEffects.glassBorder,
-          background: (theme) => theme.palette.mode === "dark"
-            ? "rgba(48,45,58,.82)"
-            : qtxpertEffects.glassBackground,
-          backdropFilter: "blur(28px) saturate(155%)",
-          WebkitBackdropFilter: "blur(28px) saturate(155%)",
-          boxShadow: (theme) => theme.palette.mode === "dark"
-            ? "0 8px 24px rgba(0,0,0,.18)"
-            : qtxpertEffects.glassShadow,
+          borderColor: "var(--design-border)",
+          background: "var(--design-surface-translucent)",
+          backdropFilter: "none",
+          WebkitBackdropFilter: "none",
+          boxShadow: "var(--design-card-shadow)",
         },
       }}
     >
@@ -489,7 +482,7 @@ export default function DashboardPage() {
         </Stack>
       </Stack>
 
-      {summary.isFetching && <LinearProgress sx={{ mb: 1, height: 3, borderRadius: 9, bgcolor: qtxpertColors.lightLavender }} />}
+      {summary.isFetching && <LinearProgress sx={{ mb: 1, height: 3, borderRadius: 9, bgcolor: "var(--design-primary-soft)" }} />}
       {summary.isError && <Alert severity="warning" sx={{ mb: 1 }}>Dashboard data is temporarily unavailable. Refresh to try again.</Alert>}
 
       <Paper
@@ -503,15 +496,11 @@ export default function DashboardPage() {
           overflow: "hidden",
           borderRadius: { xs: 3, md: 4 },
           border: "1px solid",
-          borderColor: (theme) => theme.palette.mode === "dark" ? "rgba(255,255,255,.18)" : qtxpertEffects.glassBorder,
-          background: (theme) => theme.palette.mode === "dark"
-            ? "linear-gradient(110deg, rgba(48,45,58,.92), rgba(63,55,79,.88) 58%, rgba(48,52,63,.88))"
-            : qtxpertEffects.heroGradient,
-          backdropFilter: "blur(28px) saturate(155%)",
-          WebkitBackdropFilter: "blur(28px) saturate(155%)",
-          boxShadow: (theme) => theme.palette.mode === "dark"
-            ? "0 12px 32px rgba(0,0,0,.20)"
-            : qtxpertEffects.glassShadow,
+          borderColor: "var(--design-border)",
+          background: "var(--design-hero-gradient)",
+          backdropFilter: "none",
+          WebkitBackdropFilter: "none",
+          boxShadow: "var(--design-card-shadow)",
         }}
       >
         <Box aria-hidden="true" sx={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
@@ -530,13 +519,13 @@ export default function DashboardPage() {
               maskImage: "linear-gradient(90deg, transparent 0%, black 20%, black 80%, transparent 100%)",
             }}
           />
-          <Box sx={{ position: "absolute", width: 360, height: 360, borderRadius: "50%", right: { xs: -130, md: 96 }, top: -220, background: "radial-gradient(circle at 42% 38%, rgba(255,255,255,.86), rgba(237,229,255,.36) 34%, rgba(167,139,250,.20) 54%, transparent 74%)", filter: "blur(2px)" }} />
+          <Box sx={{ position: "absolute", width: 360, height: 360, borderRadius: "50%", right: { xs: -130, md: 96 }, top: -220, background: "var(--design-hero-accent-gradient)" }} />
         </Box>
 
         <Grid container spacing={1} alignItems="center" sx={{ position: "relative", zIndex: 1 }}>
           <Grid size={{ xs: 12, md: 7 }}>
             <Stack spacing={0.85} sx={{ maxWidth: 660 }}>
-              <Chip size="small" icon={<AutoAwesomeOutlinedIcon />} label="AUTONOMOUS QUALITY LOOP" variant="outlined" color="primary" sx={{ alignSelf: "flex-start", bgcolor: "rgba(255,255,255,.76)", fontWeight: 800, letterSpacing: ".04em" }} />
+              <Chip size="small" icon={<AutoAwesomeOutlinedIcon />} label="AUTONOMOUS QUALITY LOOP" variant="outlined" color="primary" sx={{ alignSelf: "flex-start", bgcolor: "var(--design-surface-translucent)", fontWeight: 800, letterSpacing: ".04em" }} />
               <Typography id="dashboard-welcome" component="h1" variant="h3" sx={{ fontSize: { xs: "1.65rem", md: "2rem", xl: "2.25rem" }, fontWeight: 800, letterSpacing: "-.045em" }}>
                 Good {greeting}, {firstName} <AutoAwesomeOutlinedIcon aria-hidden="true" sx={{ fontSize: ".75em", verticalAlign: "middle", color: "primary.main" }} />
               </Typography>
@@ -547,7 +536,7 @@ export default function DashboardPage() {
                 <Button component={RouterLink} to="/autopilot" variant="contained" startIcon={<PlayArrowRoundedIcon />} endIcon={<ArrowForwardRoundedIcon />}>
                   Start Autopilot
                 </Button>
-                <Button variant="outlined" startIcon={<AddRoundedIcon />} onClick={openNewProject} sx={{ bgcolor: qtxpertColors.softLilac }}>
+                <Button variant="outlined" startIcon={<AddRoundedIcon />} onClick={openNewProject} sx={{ bgcolor: "var(--design-primary-soft)" }}>
                   New project
                 </Button>
               </Stack>
@@ -555,12 +544,12 @@ export default function DashboardPage() {
           </Grid>
           <Grid size={{ xs: 12, md: 5 }}>
             <Box sx={{ minHeight: { xs: 76, md: 138 }, position: "relative", display: "flex", alignItems: "center", justifyContent: { xs: "flex-start", md: "flex-end" } }}>
-              <Box aria-hidden="true" sx={{ position: "absolute", right: { xs: "auto", md: 138 }, left: { xs: 0, md: "auto" }, top: "50%", transform: "translateY(-50%)", width: { xs: 90, md: 136 }, height: { xs: 90, md: 136 }, borderRadius: "50%", border: `1px solid ${qtxpertEffects.glassBorder}`, boxShadow: "inset 0 2px 10px rgba(255,255,255,.94), inset -10px -14px 24px rgba(117,70,232,.10), 0 0 0 10px rgba(255,255,255,.28), 0 0 0 24px rgba(167,139,250,.16), 0 18px 42px rgba(117,70,232,.16)", background: "radial-gradient(circle at 28% 22%, rgba(255,255,255,.98) 0%, rgba(255,255,255,.66) 10%, transparent 28%), radial-gradient(circle at 35% 30%, rgba(255,255,255,.90), rgba(196,181,253,.56) 46%, rgba(167,139,250,.42) 70%, rgba(255,255,255,.20))", backdropFilter: "blur(20px) saturate(175%)", WebkitBackdropFilter: "blur(20px) saturate(175%)", display: "grid", placeItems: "center" }}>
-                <Box sx={{ width: { xs: 52, md: 74 }, height: { xs: 52, md: 74 }, display: "grid", placeItems: "center", borderRadius: "50%", border: `1px solid ${qtxpertEffects.glassBorder}`, color: "primary.main", bgcolor: qtxpertEffects.glassBackground, boxShadow: "inset 0 2px 8px rgba(255,255,255,.92), 0 8px 20px rgba(117,70,232,.14)" }}>
+              <Box aria-hidden="true" sx={{ position: "absolute", right: { xs: "auto", md: 138 }, left: { xs: 0, md: "auto" }, top: "50%", transform: "translateY(-50%)", width: { xs: 90, md: 136 }, height: { xs: 90, md: 136 }, borderRadius: "50%", border: "1px solid var(--design-border)", boxShadow: "var(--design-hero-shadow)", background: "var(--design-hero-orb-gradient)", display: "grid", placeItems: "center" }}>
+                <Box sx={{ width: { xs: 52, md: 74 }, height: { xs: 52, md: 74 }, display: "grid", placeItems: "center", borderRadius: "50%", border: "1px solid var(--design-border)", color: "primary.main", bgcolor: "var(--design-surface)", boxShadow: "var(--design-card-shadow)" }}>
                   <AutoAwesomeOutlinedIcon sx={{ fontSize: { xs: 28, md: 40 } }} />
                 </Box>
               </Box>
-              <Paper className="dashboard-glass" variant="outlined" sx={{ position: "relative", zIndex: 1, mr: { md: 0.5 }, ml: { xs: 12, md: 0 }, p: { xs: 0.85, md: 1.15 }, maxWidth: { xs: 196, md: 238 }, borderRadius: 2.5, bgcolor: qtxpertEffects.glassBackground }}>
+              <Paper className="dashboard-glass" variant="outlined" sx={{ position: "relative", zIndex: 1, mr: { md: 0.5 }, ml: { xs: 12, md: 0 }, p: { xs: 0.85, md: 1.15 }, maxWidth: { xs: 196, md: 238 }, borderRadius: 2.5, bgcolor: "var(--design-surface)" }}>
                 <Stack direction="row" spacing={0.7} alignItems="center">
                   <SecurityOutlinedIcon color="primary" fontSize="small" />
                   <Typography variant="body2" fontWeight={800}>Your AI test copilot</Typography>
@@ -581,7 +570,7 @@ export default function DashboardPage() {
             const value = metricValues[key];
             const tone = key === "pass_rate" ? "success.main" : key === "attention_areas" ? "warning.main" : "primary.main";
             const iconTone = key === "test_cases" ? "info.main" : tone;
-            const iconSurface = key === "test_cases" ? qtxpertColors.paleSkyBlue : key === "attention_areas" ? qtxpertColors.peach : key === "pass_rate" ? qtxpertColors.mint : qtxpertColors.iconLilac;
+            const iconSurface = key === "test_cases" ? "var(--design-neutral-soft)" : key === "attention_areas" ? "var(--design-warning-soft)" : key === "pass_rate" ? "var(--design-healthy-soft)" : "var(--design-primary-soft)";
             const metricHelper = key === "pass_rate" && data
               ? data.total_execution_tests
                 ? `${data.passed_tests} passed · ${data.executed_tests} executed checks`
@@ -628,7 +617,7 @@ export default function DashboardPage() {
                 </Stack>
                 <Stack direction="row" spacing={1.1} alignItems="center" sx={{ mt: 1.1 }}>
                   <Box role="img" aria-label={passRate === null ? "No execution results" : `${passRate}% observed pass rate`} sx={{ width: 88, height: 88, p: 0.8, borderRadius: "50%", flexShrink: 0, background: (theme) => `conic-gradient(${theme.palette.success.main} ${passRate ?? 0}%, ${theme.palette.action.hover} 0)` }}>
-                    <Box sx={{ height: "100%", display: "grid", placeItems: "center", borderRadius: "50%", bgcolor: "background.paper", boxShadow: "inset 0 2px 8px rgba(41,38,61,.08)" }}>
+                    <Box sx={{ height: "100%", display: "grid", placeItems: "center", borderRadius: "50%", bgcolor: "background.paper", boxShadow: "var(--design-card-shadow)" }}>
                       <Typography variant="subtitle1" fontWeight={800} color={passRate === null ? "text.secondary" : "success.main"}>{passRate === null ? "—" : `${passRate}%`}</Typography>
                     </Box>
                   </Box>
@@ -671,15 +660,15 @@ export default function DashboardPage() {
                       height: 108,
                       flexShrink: 0,
                       overflow: "hidden",
-                      border: "1px solid rgba(117,70,232,.28)",
+                      border: "1px solid var(--design-border-strong)",
                       borderRadius: "30px 30px 22px 22px",
-                      background: "linear-gradient(180deg, rgba(255,255,255,.9), rgba(237,229,255,.36))",
-                      boxShadow: "inset 0 2px 8px rgba(255,255,255,.95), inset 0 -8px 16px rgba(117,70,232,.08), 0 8px 16px rgba(117,70,232,.08)",
+                      background: "var(--design-surface-subtle)",
+                      boxShadow: "var(--design-card-shadow)",
                     }}
                   >
-                    <Box sx={{ position: "absolute", left: 4, right: 4, bottom: 4, height: `${automationReady ?? 0}%`, minHeight: automationReady ? 5 : 0, borderRadius: "0 0 22px 22px", background: "linear-gradient(180deg, rgba(196,181,253,.66), rgba(117,70,232,.48))", transition: "height 240ms ease" }} />
-                    <Box sx={{ position: "absolute", left: 7, right: 7, top: 3, height: 10, border: "1px solid rgba(255,255,255,.94)", borderRadius: "50%", boxShadow: "0 2px 8px rgba(117,70,232,.12)" }} />
-                    <Box sx={{ position: "absolute", left: 8, right: 8, top: 18, bottom: 9, borderLeft: "1px solid rgba(255,255,255,.64)", borderRight: "1px solid rgba(255,255,255,.48)", borderRadius: "18px" }} />
+                    <Box sx={{ position: "absolute", left: 4, right: 4, bottom: 4, height: `${automationReady ?? 0}%`, minHeight: automationReady ? 5 : 0, borderRadius: "0 0 22px 22px", background: "linear-gradient(180deg, var(--design-healthy-soft), var(--design-primary-soft-strong))", transition: "height 240ms ease" }} />
+                    <Box sx={{ position: "absolute", left: 7, right: 7, top: 3, height: 10, border: "1px solid var(--design-border)", borderRadius: "50%", boxShadow: "var(--design-card-shadow)" }} />
+                    <Box sx={{ position: "absolute", left: 8, right: 8, top: 18, bottom: 9, borderLeft: "1px solid var(--design-border)", borderRight: "1px solid var(--design-border)", borderRadius: "18px" }} />
                   </Box>
                   <Box sx={{ minWidth: 0 }}>
                     <Typography variant="h4" fontWeight={800} color={automationReady === null ? "text.secondary" : "primary.main"} sx={{ lineHeight: 1 }}>{automationReady === null ? "—" : `${automationReady}%`}</Typography>
@@ -766,8 +755,8 @@ export default function DashboardPage() {
                     {autopilotStages.map((stage) => (
                       <Grid key={stage.key} size={{ xs: 4, sm: 2 }}>
                         <Tooltip title={stage.description} placement="top">
-                          <CardActionArea component={RouterLink} to={stage.to} aria-label={`${stage.title}: ${stage.stateLabel}`} sx={{ minHeight: 56, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", px: 0.25, py: 0.4, borderRadius: 1.5, textAlign: "center", "&:hover": { bgcolor: qtxpertColors.softLilac } }}>
-                            <Box sx={{ width: 25, height: 25, display: "grid", placeItems: "center", borderRadius: "50%", bgcolor: stage.state === "ready" ? qtxpertColors.mint : stage.state === "active" ? qtxpertColors.lightLavender : qtxpertColors.iconLilac, color: stage.state === "ready" ? "success.main" : "primary.main", "& .MuiSvgIcon-root": { fontSize: 16 } }}>{stage.icon}</Box>
+                          <CardActionArea component={RouterLink} to={stage.to} aria-label={`${stage.title}: ${stage.stateLabel}`} sx={{ minHeight: 56, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", px: 0.25, py: 0.4, borderRadius: 1.5, textAlign: "center", "&:hover": { bgcolor: "var(--design-primary-soft)" } }}>
+                            <Box sx={{ width: 25, height: 25, display: "grid", placeItems: "center", borderRadius: "50%", bgcolor: stage.state === "ready" ? "success.light" : stage.state === "active" ? "primary.light" : "info.light", color: stage.state === "ready" ? "success.main" : "primary.main", "& .MuiSvgIcon-root": { fontSize: 16 } }}>{stage.icon}</Box>
                             <Typography variant="caption" fontWeight={800} noWrap sx={{ lineHeight: 1.25, mt: 0.2, maxWidth: "100%" }}>{stage.title}</Typography>
                             <Typography variant="caption" color="text.secondary" noWrap sx={{ fontSize: 10, lineHeight: 1.2, maxWidth: "100%" }}>{stage.stateLabel}</Typography>
                           </CardActionArea>
