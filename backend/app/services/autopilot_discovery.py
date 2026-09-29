@@ -1672,7 +1672,8 @@ class AutopilotDiscoveryService:
                                 f"Authentication values are ready, but max_actions={request.max_actions} was reached",
                             )
                         submit_element = self._find_discovered_element(driver, submit, AppiumBy)
-                        pre_submit_feedback = self._auth_feedback_code(safe_page_source(driver))
+                        pre_submit_source = safe_page_source(driver)
+                        pre_submit_feedback = self._auth_feedback_code(pre_submit_source)
                         submit_element.click()
                         actions_attempted += 1
                         # A staged native login may take several seconds to
@@ -1697,26 +1698,44 @@ class AutopilotDiscoveryService:
                         # A validation message is often static text and does
                         # not change the actionable-control fingerprint. Never
                         # turn an explicit rejection into a second login tap.
-                        feedback_code = self._auth_feedback_code(safe_page_source(driver)) if duplicate else None
+                        post_native_source = safe_page_source(driver)
+                        feedback_code = self._auth_feedback_code(post_native_source)
                         if feedback_code and (
                             feedback_code != pre_submit_feedback
                             or feedback_code in {"credential_rejected", "account_locked", "service_unavailable"}
                         ):
                             warnings.append(f"Sign-in feedback category: {feedback_code}. No credential values were recorded.")
                             return screen, True, self._auth_feedback_reason(feedback_code)
-                        # Some Flutter/Android semantic buttons advertise
-                        # enabled=true, clickable=false and ignore WebDriver's
-                        # native click. After a bounded wait on the unchanged
-                        # observed form, try one element-targeted gesture.
-                        # Any visible transition or validation feedback skips
-                        # this fallback. Never infer screen coordinates.
+                        if not duplicate and self._credential_controls(next_screen):
+                            prior_hints = {self._credential_hint(item) for item in credential_controls}
+                            next_hints = {
+                                self._credential_hint(item)
+                                for item in self._credential_controls(next_screen)
+                            }
+                            if prior_hints == next_hints:
+                                warnings.append(
+                                    "Sign-in UI changed but still requested the same credential stage; "
+                                    "no credential values or page text were recorded."
+                                )
+                                return screen, True, (
+                                    "The app changed its sign-in display but still requests the same credentials. "
+                                    "Review the app's visible validation or service response before retrying."
+                                )
+                        # Flutter/Android can ignore WebDriver's native click
+                        # even when the semantic button advertises clickable.
+                        # Retry once with an observed-element gesture only if
+                        # the form and its source stayed unchanged after the
+                        # bounded wait. A validation message, challenge, or
+                        # other visible source change must not be tapped again.
                         username_stage = any(
                             self._credential_hint(control) == "username"
                             for control in credential_controls
                         )
+                        gesture_attempted = False
                         current_submit = self._auth_submit_control(next_screen.controls) if duplicate else None
                         if (
-                            duplicate and (username_stage or password_stage) and not submit.clickable
+                            duplicate and (username_stage or password_stage)
+                            and post_native_source == pre_submit_source
                             and submit.enabled and not is_ios
                             and current_submit is not None
                             and current_submit.control_id == submit.control_id
@@ -1727,6 +1746,7 @@ class AutopilotDiscoveryService:
                                 refreshed_element = self._find_discovered_element(driver, current_submit, AppiumBy)
                                 if not getattr(refreshed_element, "id", None):
                                     raise LookupError("No observed element identifier for gesture")
+                                gesture_attempted = True
                                 driver.execute_script("mobile: clickGesture", {"elementId": refreshed_element.id})
                                 actions_attempted += 1
                                 for observation in range(18 if password_stage else 8):
@@ -1758,13 +1778,24 @@ class AutopilotDiscoveryService:
                             )
                         )
                         if duplicate:
-                            feedback_code = self._auth_feedback_code(safe_page_source(driver))
+                            final_source = safe_page_source(driver)
+                            feedback_code = self._auth_feedback_code(final_source)
                             if feedback_code and (
                                 feedback_code != pre_submit_feedback
                                 or feedback_code in {"credential_rejected", "account_locked", "service_unavailable"}
                             ):
                                 warnings.append(f"Sign-in feedback category: {feedback_code}. No credential values were recorded.")
                                 return screen, True, self._auth_feedback_reason(feedback_code)
+                            warnings.append(
+                                "Sign-in interaction diagnostics: "
+                                f"stage={'password' if password_stage else 'username'}, "
+                                f"semantic_clickable={submit.clickable}, "
+                                f"native_source_changed={post_native_source != pre_submit_source}, "
+                                f"gesture_attempted={gesture_attempted}, "
+                                f"final_source_changed={final_source != pre_submit_source}. "
+                                "No credential values or page text were recorded."
+                            )
+                            logging.getLogger(__name__).info("%s", warnings[-1])
                             return (
                                 screen,
                                 True,
