@@ -1062,6 +1062,49 @@ class AutopilotDiscoveryService:
             # avoid copying the raw source when it cannot be safely redacted.
             return "<hierarchy><node class=\"redacted\" /></hierarchy>"
 
+    @classmethod
+    def _auth_feedback_code(cls, page_source: str) -> Optional[str]:
+        """Classify sign-in feedback without retaining UI copy or credentials.
+
+        Validation text is usually a non-clickable Flutter sibling, so it is
+        absent from ``parse_controls`` and from the screen fingerprint. Only a
+        fixed category leaves this method; the raw hierarchy is discarded.
+        """
+        try:
+            root = ET.fromstring(cls._redact_page_source(page_source))
+        except ET.ParseError:
+            return None
+        labels = []
+        for node in root.iter():
+            if node.attrib.get("class") in _INPUT_CLASSES or node.attrib.get("class") in {
+                "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeSearchField",
+            }:
+                continue
+            labels.extend(str(node.attrib.get(key) or "").casefold() for key in (
+                "text", "content-desc", "label", "name", "value",
+            ))
+        text = " ".join(labels)
+        if re.search(r"\b(?:locked|too many attempts|too many tries|temporarily suspended)\b", text):
+            return "account_locked"
+        if re.search(r"\b(?:incorrect|invalid|wrong|unrecognized|not recognised|not recognized)\b", text) and re.search(
+            r"\b(?:password|credential|user|account|login|sign.?in|email)\b", text,
+        ):
+            return "credential_rejected"
+        if re.search(r"\b(?:otp|one.time password|verification code|captcha|two.factor|mfa)\b", text):
+            return "additional_verification"
+        if re.search(r"\b(?:network error|connection error|server error|service unavailable|timed out|timeout)\b", text):
+            return "service_unavailable"
+        return None
+
+    @staticmethod
+    def _auth_feedback_reason(code: str) -> str:
+        return {
+            "account_locked": "The app reports that the UAT account is locked; no further sign-in was attempted.",
+            "credential_rejected": "The app rejected the saved UAT sign-in details; no further sign-in was attempted.",
+            "additional_verification": "The app requested another verification step; Autopilot did not guess or bypass it.",
+            "service_unavailable": "The app reported a network or service error after sign-in; no further sign-in was attempted.",
+        }[code]
+
     async def run(
         self,
         job_id: str,
@@ -1629,6 +1672,7 @@ class AutopilotDiscoveryService:
                                 f"Authentication values are ready, but max_actions={request.max_actions} was reached",
                             )
                         submit_element = self._find_discovered_element(driver, submit, AppiumBy)
+                        pre_submit_feedback = self._auth_feedback_code(safe_page_source(driver))
                         submit_element.click()
                         actions_attempted += 1
                         # A staged native login may take several seconds to
@@ -1650,6 +1694,16 @@ class AutopilotDiscoveryService:
                             )
                             if not duplicate:
                                 break
+                        # A validation message is often static text and does
+                        # not change the actionable-control fingerprint. Never
+                        # turn an explicit rejection into a second login tap.
+                        feedback_code = self._auth_feedback_code(safe_page_source(driver)) if duplicate else None
+                        if feedback_code and (
+                            feedback_code != pre_submit_feedback
+                            or feedback_code in {"credential_rejected", "account_locked", "service_unavailable"}
+                        ):
+                            warnings.append(f"Sign-in feedback category: {feedback_code}. No credential values were recorded.")
+                            return screen, True, self._auth_feedback_reason(feedback_code)
                         # Some Flutter/Android semantic buttons advertise
                         # enabled=true, clickable=false and ignore WebDriver's
                         # native click. After a bounded wait on the unchanged
@@ -1704,10 +1758,18 @@ class AutopilotDiscoveryService:
                             )
                         )
                         if duplicate:
+                            feedback_code = self._auth_feedback_code(safe_page_source(driver))
+                            if feedback_code and (
+                                feedback_code != pre_submit_feedback
+                                or feedback_code in {"credential_rejected", "account_locked", "service_unavailable"}
+                            ):
+                                warnings.append(f"Sign-in feedback category: {feedback_code}. No credential values were recorded.")
+                                return screen, True, self._auth_feedback_reason(feedback_code)
                             return (
                                 screen,
                                 True,
-                                "The observed sign-in action did not advance beyond this form; review its on-screen validation or continue under supervision.",
+                                "The observed sign-in form stayed unchanged after bounded submission, with no recognized validation message. "
+                                "Whether the cause is the input, app service, or device interaction remains unverified.",
                             )
                         screen = next_screen
                     except _UnexpectedTargetSurface as exc:
