@@ -675,3 +675,16 @@ def test_auth_submit_does_not_guess_between_equally_ranked_duplicate_buttons():
     second = first.model_copy(update={"control_id": "login-button-b"})
 
     assert AutopilotDiscoveryService._auth_submit_control([credential, first, second]) is None
+
+@pytest.mark.parametrize("message", [
+    "Your account credentials are temporarily blocked.",
+    "Too many login attempts. Try again later.",
+])
+def test_auth_feedback_detects_temporary_account_lock_without_returning_copy(message):
+    source = (
+        '<hierarchy><node class="android.widget.TextView" '
+        f'text="{message}" /></hierarchy>'
+    )
+
+    assert AutopilotDiscoveryService._auth_feedback_code(source) == "account_locked"
+
