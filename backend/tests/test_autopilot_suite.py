@@ -117,6 +117,21 @@ class _ColdRelaunchDriver(_ResettableDriver):
         super().activate_app(package)
 
 
+class _SystemUiForegroundDriver(_Driver):
+    def __init__(self, *, launch_target=True):
+        super().__init__()
+        self.current_package = "com.google.android.gms"
+        self.page_source = '<hierarchy><node package="com.google.android.gms" text="Google Play services" /></hierarchy>'
+        self.launch_target = launch_target
+        self.activate_calls = []
+
+    def activate_app(self, package):
+        self.activate_calls.append(package)
+        if self.launch_target:
+            self.current_package = package
+            self.page_source = f'<hierarchy><node package="{package}" text="Sign in" /></hierarchy>'
+
+
 class _ObservedActivityDriver(_ColdRelaunchDriver):
     def __init__(self):
         super().__init__()
@@ -372,6 +387,39 @@ def test_suite_reset_to_application_cold_relaunches_after_provider_reset():
 
     assert driver.reset_calls == 1
     assert driver.terminate_calls == ["com.qtx.demo"]
+    assert driver.activate_calls == ["com.qtx.demo"]
+
+
+def test_suite_reactivates_uploaded_app_when_new_session_starts_in_system_ui(monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _SystemUiForegroundDriver()
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    ready, reason, identity = service._activate_verified_target(
+        driver,
+        "com.qtx.demo",
+        timeout_seconds=0,
+    )
+
+    assert ready is True, reason
+    assert driver.activate_calls == ["com.qtx.demo"]
+    assert identity["package"] == "com.qtx.demo"
+
+
+def test_suite_keeps_wrong_foreground_blocked_after_activation_retry(monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _SystemUiForegroundDriver(launch_target=False)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    ready, reason, _ = service._activate_verified_target(
+        driver,
+        "com.qtx.demo",
+        timeout_seconds=0,
+    )
+
+    assert ready is False
+    assert "com.google.android.gms" in reason
+    assert "com.qtx.demo" in reason
     assert driver.activate_calls == ["com.qtx.demo"]
 
 

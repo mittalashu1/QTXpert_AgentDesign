@@ -307,13 +307,16 @@ def test_screen_fingerprint_ignores_control_order():
 
 def test_discovery_request_is_bounded():
     with pytest.raises(ValidationError):
-        AutopilotDiscoveryRequest(max_screens=100)
+        AutopilotDiscoveryRequest(max_screens=121)
     with pytest.raises(ValidationError):
-        AutopilotDiscoveryRequest(max_actions=99)
+        AutopilotDiscoveryRequest(max_actions=301)
 
     request = AutopilotDiscoveryRequest(observe_only=True, max_screens=1, max_actions=0)
     assert request.observe_only is True
     assert request.max_actions == 0
+    normal = AutopilotDiscoveryRequest()
+    assert normal.max_screens == 120
+    assert normal.max_actions == 300
 
 
 @pytest.mark.asyncio
