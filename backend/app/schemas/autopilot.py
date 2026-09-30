@@ -925,11 +925,11 @@ class AutopilotAnalysisRerunRequest(BaseModel):
 class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
     """Bounded safe runtime exploration configuration."""
 
-    # These are safety budgets per pass, not a product-level test-count cap.
-    # Continuation is supported by the cursor fields on the result so a large
-    # app can be explored over multiple resumable passes.
-    max_screens: int = Field(default=12, ge=1, le=40)
-    max_actions: int = Field(default=10, ge=0, le=50)
+    # These are exploration safety budgets, not a product-level test-count
+    # cap. A normal app crawl gets room to traverse a large set of screens and
+    # controls; transactional/destructive actions remain blocked separately.
+    max_screens: int = Field(default=120, ge=1, le=120)
+    max_actions: int = Field(default=300, ge=0, le=300)
     observe_only: bool = False
     continuation_token: Optional[str] = Field(default=None, max_length=512)
 

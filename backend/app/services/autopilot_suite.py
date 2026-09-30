@@ -516,19 +516,24 @@ class AutopilotSuiteService:
         try:
             time.sleep(2)
             initial_source = safe_page_source(driver)
-            identity = safe_app_identity(
+            target_ready, target_reason, target_identity = self._activate_verified_target(
                 driver,
-                page_source=initial_source,
-                package_hint=package_hint,
-            )
-            package = identity["package"]
-            target_ready, target_reason, _ = validate_target_surface(
-                driver,
-                expected_package=package_hint,
+                package_hint,
+                activity_hint=activity_hint,
+                timeout_seconds=15.0,
+                poll_interval=0.5,
                 page_source=initial_source,
             )
             if not target_ready:
                 raise ProviderLifecycleUnavailable(target_reason)
+            # The package hint is safe to use for lifecycle calls only after
+            # the actual foreground surface has been checked against it.
+            identity = safe_app_identity(
+                driver,
+                page_source=safe_page_source(driver),
+                package_hint=package_hint,
+            )
+            package = str(package_hint or target_identity.get("package") or identity["package"] or "").strip() or None
             for test in tests:
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -646,6 +651,54 @@ class AutopilotSuiteService:
             return results
         finally:
             safe_quit(driver)
+
+    @staticmethod
+    def _activate_verified_target(
+        driver,
+        package: str | None,
+        *,
+        activity_hint: str | None = None,
+        timeout_seconds: float = 15.0,
+        poll_interval: float = 0.5,
+        page_source: str | None = None,
+    ) -> tuple[bool, str, Dict[str, Any]]:
+        """Activate a known target and wait for verified foreground evidence.
+
+        A newly-created cloud session can expose system UI before the uploaded
+        APK is foreground. Retry only the package/activity already obtained
+        from the uploaded build and observed discovery; never treat requested
+        capabilities alone as proof that the app launched.
+        """
+        source = page_source if page_source is not None else safe_page_source(driver)
+        ready, reason, identity = validate_target_surface(
+            driver,
+            expected_package=package,
+            page_source=source,
+        )
+        if ready or not package:
+            return ready, reason, identity
+
+        activation_error: Exception | None = None
+        try:
+            AutopilotSuiteService._activate_application(driver, package, activity_hint)
+        except Exception as exc:
+            activation_error = exc
+
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            time.sleep(max(0.0, float(poll_interval)))
+            source = safe_page_source(driver)
+            ready, reason, identity = validate_target_surface(
+                driver,
+                expected_package=package,
+                page_source=source,
+            )
+            if ready or time.monotonic() >= deadline:
+                break
+
+        if not ready and activation_error is not None:
+            reason = f"{reason} Reopening the uploaded app was unavailable ({type(activation_error).__name__})."
+        return ready, reason, identity
 
     @staticmethod
     def _activate_application(driver, package: str, activity: str | None = None) -> None:

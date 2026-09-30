@@ -2106,11 +2106,12 @@ async def _resume_and_discover_background(
                 device_name=resume_payload.discovery_device_name or "Google Pixel 8",
                 platform_version=resume_payload.discovery_platform_version or "14.0",
                 observe_only=False,
-                # Explore a meaningful app surface while keeping navigation
-                # bounded to safe/reversible controls only. The compiler keeps
-                # every distinct case derived from the resulting evidence.
-                max_screens=40,
-                max_actions=50,
+                # Traverse a broad app surface, not just a representative
+                # sample. The device-side safety policy still excludes
+                # transactional/destructive actions; the compiler retains all
+                # distinct cases derived from observed evidence.
+                max_screens=120,
+                max_actions=300,
             )
             if target_kind == "web":
                 result = await AutopilotWebService(settings, service).discover(

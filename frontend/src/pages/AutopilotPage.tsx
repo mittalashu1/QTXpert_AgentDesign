@@ -1763,12 +1763,10 @@ export default function AutopilotPage() {
       const response = await apiClient.post<Discovery>(`/autopilot/${jobId}/discover`, {
         ...executionPayload(),
         observe_only: discoveryMode === "observe",
-        // Safe navigation is still bounded, but a normal run should map a
-        // representative end-to-end surface rather than stopping after a
-        // couple of screens. Transactional/destructive controls remain gated
-        // by the backend policy.
-        max_screens: discoveryMode === "observe" ? 1 : 40,
-        max_actions: discoveryMode === "observe" ? 0 : 50,
+        // Map a broad end-to-end surface in safe-navigation mode. The backend
+        // still blocks transactional/destructive actions independently.
+        max_screens: discoveryMode === "observe" ? 1 : 120,
+        max_actions: discoveryMode === "observe" ? 0 : 300,
       }, { timeout: 660000 });
       setDiscovery(response.data);
       let checkpointPending = Boolean(
