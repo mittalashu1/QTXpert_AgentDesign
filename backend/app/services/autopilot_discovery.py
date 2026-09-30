@@ -1177,7 +1177,7 @@ class AutopilotDiscoveryService:
                 "text", "content-desc", "label", "name", "value",
             ))
         text = " ".join(labels)
-        if re.search(r"\b(?:locked|too many attempts|too many tries|temporarily suspended)\b", text):
+        if re.search(r"\b(?:locked|too many attempts|too many tries|temporarily suspended|temporarily blocked)\b", text):
             return "account_locked"
         if re.search(r"\b(?:incorrect|invalid|wrong|unrecognized|not recognised|not recognized)\b", text) and re.search(
             r"\b(?:password|credential|user|account|login|sign.?in|email)\b", text,
