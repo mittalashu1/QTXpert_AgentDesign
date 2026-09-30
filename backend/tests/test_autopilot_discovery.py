@@ -582,3 +582,47 @@ def test_send_money_bottom_tab_remains_blocked_after_suffix_normalization():
 
     assert risk == "blocked"
     assert "send money" in reason.lower()
+
+
+def test_flutter_duplicate_login_label_prefers_clickable_action_when_semantics_are_not_clickable():
+    class AppiumBy:
+        ACCESSIBILITY_ID = "accessibility id"
+        ID = "id"
+        XPATH = "xpath"
+
+    class Element:
+        def __init__(self, clickable=False):
+            self.clickable = clickable
+
+        def get_attribute(self, name):
+            return {
+                "class": "android.view.View",
+                "clickable": str(self.clickable).lower(),
+                "enabled": "true",
+            }.get(name)
+
+    heading = Element()
+    button = Element(clickable=True)
+
+    class Driver:
+        def find_elements(self, strategy, value):
+            assert strategy == AppiumBy.ACCESSIBILITY_ID
+            assert value == "Login"
+            return [heading, button]
+
+        def find_element(self, *_args):
+            raise AssertionError("Ambiguous first-match lookup must not be used")
+
+    login = DiscoveredControl(
+        control_id="login-button",
+        semantic_label="Login",
+        class_name="android.view.View",
+        clickable=False,
+        enabled=True,
+        input_capable=False,
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Login", confidence=0.99)],
+    )
+
+    resolved = AutopilotDiscoveryService._find_discovered_element(Driver(), login, AppiumBy)
+
+    assert resolved is button
