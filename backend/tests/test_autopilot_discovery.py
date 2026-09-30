@@ -626,3 +626,52 @@ def test_flutter_duplicate_login_label_prefers_clickable_action_when_semantics_a
     resolved = AutopilotDiscoveryService._find_discovered_element(Driver(), login, AppiumBy)
 
     assert resolved is button
+
+
+
+def test_auth_submit_prefers_native_button_over_duplicate_login_view():
+    credential = DiscoveredControl(
+        control_id="username",
+        semantic_label="Username",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="username", confidence=0.99)],
+    )
+    view = DiscoveredControl(
+        control_id="login-label",
+        semantic_label="Login",
+        class_name="android.view.View",
+        clickable=True,
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Login", confidence=0.99)],
+    )
+    button = DiscoveredControl(
+        control_id="login-button",
+        semantic_label="Login",
+        class_name="android.widget.Button",
+        clickable=False,
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Login", confidence=0.99)],
+    )
+
+    assert AutopilotDiscoveryService._auth_submit_control([credential, view, button]) is button
+
+
+def test_auth_submit_does_not_guess_between_equally_ranked_duplicate_buttons():
+    credential = DiscoveredControl(
+        control_id="username",
+        semantic_label="Username",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="username", confidence=0.99)],
+    )
+    first = DiscoveredControl(
+        control_id="login-button-a",
+        semantic_label="Login",
+        class_name="android.widget.Button",
+        clickable=True,
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Login", confidence=0.99)],
+    )
+    second = first.model_copy(update={"control_id": "login-button-b"})
+
+    assert AutopilotDiscoveryService._auth_submit_control([credential, first, second]) is None
