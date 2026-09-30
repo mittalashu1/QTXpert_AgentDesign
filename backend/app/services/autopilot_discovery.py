@@ -967,7 +967,27 @@ class AutopilotDiscoveryService:
                 auth_label = False
             if (auth_label and control.risk != "blocked") or (contextual_submit and control.risk == "blocked"):
                 candidates.append(control)
-        candidates.sort(key=lambda item: (-max(locator.confidence for locator in item.locators), item.semantic_label.lower()))
+        def submit_priority(item: DiscoveredControl) -> tuple[Any, ...]:
+            class_name = str(item.class_name or "").casefold()
+            native_button = class_name in {"android.widget.button", "xcuielementtypebutton"}
+            # Prefer an explicit native button role over a text/view node sharing
+            # the same label. Among same-role candidates, prefer observed native
+            # clickability, then enabled state, before locator confidence.
+            return (
+                -int(native_button),
+                -int(item.clickable),
+                -int(item.enabled),
+                -max(locator.confidence for locator in item.locators),
+            )
+
+        candidates.sort(key=lambda item: (*submit_priority(item), item.semantic_label.casefold(), item.control_id))
+        if len(candidates) > 1:
+            first, second = candidates[:2]
+            if (
+                cls._normalize(first.semantic_label) == cls._normalize(second.semantic_label)
+                and submit_priority(first) == submit_priority(second)
+            ):
+                return None
         return candidates[0] if candidates else None
 
     @classmethod
