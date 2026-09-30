@@ -1023,7 +1023,13 @@ class AutopilotDiscoveryService:
 
     @staticmethod
     def _find_discovered_element(driver: Any, control: DiscoveredControl, appium_by: Any) -> Any:
-        """Resolve one control using only locators observed on that control."""
+        """Resolve one observed control without confusing duplicate labels.
+
+        Flutter/native views can expose the same label for a heading and an
+        action while reporting clickable=False on the semantic action. Prefer
+        an observed actionable native match for actions; if the locator remains
+        ambiguous, try the next observed locator rather than guessing.
+        """
         locator_map = {
             "accessibility_id": appium_by.ACCESSIBILITY_ID,
             "id": appium_by.ID,
@@ -1031,11 +1037,78 @@ class AutopilotDiscoveryService:
         }
         candidates = sorted(control.locators, key=lambda locator: -locator.confidence)
         last_error: Optional[Exception] = None
+
+        def attribute(element: Any, name: str) -> str:
+            try:
+                return str(element.get_attribute(name) or "").strip()
+            except Exception:
+                return ""
+
         for locator in candidates[:3]:
             strategy = locator_map.get(locator.strategy)
             if strategy is None:
                 continue
             try:
+                find_elements = getattr(driver, "find_elements", None)
+                if callable(find_elements):
+                    matches = list(find_elements(strategy, locator.value) or [])
+                    if len(matches) > 1:
+                        expected_class = str(control.class_name or "").strip()
+                        expected_resource = str(control.resource_id or "").strip()
+
+                        if expected_class:
+                            exact_class = [
+                                element for element in matches
+                                if attribute(element, "class") == expected_class
+                                or attribute(element, "type") == expected_class
+                            ]
+                            if exact_class:
+                                matches = exact_class
+
+                        if expected_resource:
+                            exact_resource = [
+                                element for element in matches
+                                if attribute(element, "resource-id") == expected_resource
+                                or attribute(element, "resourceId") == expected_resource
+                            ]
+                            if exact_resource:
+                                matches = exact_resource
+
+                        if control.enabled:
+                            enabled = [
+                                element for element in matches
+                                if attribute(element, "enabled").casefold() == "true"
+                            ]
+                            if enabled:
+                                matches = enabled
+
+                        # The semantic map can under-report Flutter actionability.
+                        # For non-input controls, use the native clickable flag to
+                        # distinguish the actual action from a duplicate heading.
+                        if control.clickable or not control.input_capable:
+                            clickable = [
+                                element for element in matches
+                                if attribute(element, "clickable").casefold() == "true"
+                            ]
+                            if clickable:
+                                matches = clickable
+
+                        if len(matches) == 1:
+                            return matches[0]
+                        last_error = LookupError(
+                            f"Observed locator is ambiguous for {control.semantic_label}"
+                        )
+                        continue
+                    if len(matches) == 1:
+                        match = matches[0]
+                        expected_class = str(control.class_name or "").strip()
+                        actual_class = attribute(match, "class") or attribute(match, "type")
+                        if expected_class and actual_class and actual_class != expected_class:
+                            last_error = LookupError(
+                                f"Observed locator resolved to the wrong control type for {control.semantic_label}"
+                            )
+                            continue
+                        return match
                 return driver.find_element(strategy, locator.value)
             except Exception as exc:
                 last_error = exc
