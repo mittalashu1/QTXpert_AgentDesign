@@ -1195,6 +1195,16 @@ def _merge_discovery_snapshot(
     )
 
 
+def _discovery_target_is_verified(discovery: Optional[AutopilotDiscoveryResult]) -> bool:
+    """Only a successful latest attempt can authorize execution."""
+    return bool(
+        discovery
+        and discovery.target_ready is True
+        and discovery.status in {"completed", "partial"}
+        and discovery.last_attempt_status not in {"blocked", "failed"}
+    )
+
+
 async def _available_evidence_asset_ids(
     db: AsyncSession,
     user: User,
@@ -2220,6 +2230,7 @@ async def _resume_and_discover_background(
                 "discovery": persisted_discovery.model_dump(mode="json"),
                 "application_map": application_map.model_dump(mode="json"),
             }
+            latest_target_ready = _discovery_target_is_verified(result)
             persisted_analysis = expanded_analysis
             persisted_setup = None
             pending_checkpoints: list = []
@@ -2258,20 +2269,36 @@ async def _resume_and_discover_background(
                     job_changes["analysis"] = record.analysis
                 except FileNotFoundError:
                     pass
-            if persisted_analysis is not None and "analysis" not in job_changes:
+            if persisted_analysis is not None:
+                persisted_analysis = persisted_analysis.model_copy(
+                    update={
+                        "phase": "cases_pending_review" if latest_target_ready else "blocked",
+                        "checkpoint_stage": (
+                            "input_collection" if pending_checkpoints and latest_target_ready
+                            else "ready_for_execution" if latest_target_ready
+                            else "runtime_discovery"
+                        ),
+                        "input_requests": pending_checkpoints if pending_checkpoints and latest_target_ready else [],
+                        "application_map": application_map,
+                    }
+                )
+                job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
                 job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
             pending_auth = _pending_runtime_auth_requests(persisted_setup)
-            latest_target_blocked = result.target_ready is False
+            latest_target_blocked = not latest_target_ready
             await service.update_job(
                 job_id,
                 **job_changes,
-                status="waiting_for_input" if pending_checkpoints else "analyzed",
-                stage="input_collection" if pending_checkpoints else "ready_for_execution" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
-                progress=85 if pending_checkpoints else 100,
-                phase="cases_pending_review" if persisted_discovery.screens and not latest_target_blocked else "blocked",
-                checkpoint_stage="input_collection" if pending_checkpoints else "ready" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
+                status="waiting_for_input" if pending_checkpoints and latest_target_ready else "analyzed",
+                stage="input_collection" if pending_checkpoints and latest_target_ready else "ready_for_execution" if latest_target_ready else "runtime_discovery",
+                progress=85 if pending_checkpoints and latest_target_ready else 100,
+                phase="cases_pending_review" if latest_target_ready else "blocked",
+                checkpoint_stage="input_collection" if pending_checkpoints and latest_target_ready else "ready" if latest_target_ready else "runtime_discovery",
                 checkpoint_message=(
-                    "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
+                    "The latest Runtime Discovery attempt did not attach to the uploaded application. "
+                    f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
+                    if latest_target_blocked
+                    else "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
                     if pending_auth
                     else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
                     if pending_checkpoints
@@ -2286,7 +2313,7 @@ async def _resume_and_discover_background(
                 ),
                 input_requests=(
                     [item.model_dump(mode="json") for item in pending_checkpoints]
-                    if pending_checkpoints
+                    if pending_checkpoints and latest_target_ready
                     else []
                 ),
             )
@@ -2303,7 +2330,7 @@ async def _resume_and_discover_background(
             # Runtime Discovery has completed and no live credential field is
             # still unresolved. The suite compiler keeps those dependent
             # cases deferred and reports their exact dependencies.
-            if resume_payload.auto_run_safe_suite and result.screens and not pending_auth:
+            if resume_payload.auto_run_safe_suite and latest_target_ready and result.screens and not pending_auth:
                 await execute_autopilot_suite(
                     job_id,
                     AutopilotSuiteRequest(**request.model_dump(exclude={"observe_only", "max_screens", "max_actions"})),
@@ -4610,6 +4637,7 @@ async def run_autopilot_discovery(
             "discovery": persisted_discovery.model_dump(mode="json"),
             "application_map": application_map.model_dump(mode="json"),
         }
+        latest_target_ready = _discovery_target_is_verified(result)
         persisted_analysis = expanded_analysis
         persisted_setup = None
         pending_checkpoints: list = []
@@ -4648,7 +4676,20 @@ async def run_autopilot_discovery(
                 job_changes["analysis"] = record.analysis
             except FileNotFoundError:
                 pass
-        if persisted_analysis is not None and "analysis" not in job_changes:
+        if persisted_analysis is not None:
+            persisted_analysis = persisted_analysis.model_copy(
+                update={
+                    "phase": "cases_pending_review" if latest_target_ready else "blocked",
+                    "checkpoint_stage": (
+                        "input_collection" if pending_checkpoints and latest_target_ready
+                        else "ready_for_execution" if latest_target_ready
+                        else "runtime_discovery"
+                    ),
+                    "input_requests": pending_checkpoints if pending_checkpoints and latest_target_ready else [],
+                    "application_map": application_map,
+                }
+            )
+            job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
             job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
         pending_auth = _pending_runtime_auth_requests(persisted_setup)
         latest_target_blocked = result.target_ready is False
@@ -4661,7 +4702,10 @@ async def run_autopilot_discovery(
             phase="cases_pending_review" if persisted_discovery.screens and not latest_target_blocked else "blocked",
             checkpoint_stage="input_collection" if pending_checkpoints else "ready" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
             checkpoint_message=(
-                "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
+                "The latest Runtime Discovery attempt did not attach to the uploaded application. "
+                f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
+                if latest_target_blocked
+                else "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
                 if pending_auth
                 else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
                 if pending_checkpoints
@@ -4674,7 +4718,7 @@ async def run_autopilot_discovery(
                     else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
                 )
             ),
-            input_requests=[item.model_dump(mode="json") for item in pending_checkpoints] if pending_checkpoints else [],
+            input_requests=[item.model_dump(mode="json") for item in pending_checkpoints] if pending_checkpoints and latest_target_ready else [],
         )
     except Exception:
         logger.warning("Autopilot discovery manifest update skipped job_id=%s", job_id, exc_info=True)
@@ -4856,6 +4900,33 @@ async def execute_autopilot_suite(
     # back the request session and expire the User ORM instance.
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    phase = phase_for_job(job)
+    runnable_phases = {
+        "cases_pending_review", "cases_approved", "execution_ready",
+        "completed", "partial",
+    }
+    if phase not in runnable_phases:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Safe execution cannot start while Autopilot is in the {phase} phase.",
+        )
+    record = await _safe_job_record(db, job_id, owner_id)
+    latest_discovery = _record_discovery(record)
+    if not _discovery_target_is_verified(latest_discovery):
+        reason = (
+            latest_discovery.last_attempt_reason
+            or latest_discovery.target_identity_reason
+            or latest_discovery.error
+            if latest_discovery
+            else None
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Safe execution is waiting for a successful Runtime Discovery of the selected app. "
+                f"{reason or 'Retry discovery after the app is attached in the foreground.'}"
+            ),
+        )
     # Case execution is the second user approval boundary.  A plan/map can be
     # generated automatically, but entering the suite endpoint records that
     # the selected cases are approved for the shared execution control plane.
