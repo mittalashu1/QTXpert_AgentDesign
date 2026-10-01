@@ -2282,7 +2282,6 @@ async def _resume_and_discover_background(
                     }
                 )
                 job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
-                job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
             pending_auth = _pending_runtime_auth_requests(persisted_setup)
             latest_target_blocked = not latest_target_ready
             await service.update_job(
@@ -4688,7 +4687,6 @@ async def run_autopilot_discovery(
                     "application_map": application_map,
                 }
             )
-            job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
             job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
         pending_auth = _pending_runtime_auth_requests(persisted_setup)
         latest_target_blocked = not latest_target_ready
