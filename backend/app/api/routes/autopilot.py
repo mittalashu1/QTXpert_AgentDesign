@@ -1204,7 +1204,6 @@ def _discovery_target_is_verified(discovery: Optional[AutopilotDiscoveryResult])
         and discovery.last_attempt_status not in {"blocked", "failed"}
     )
 
-
 async def _available_evidence_asset_ids(
     db: AsyncSession,
     user: User,
@@ -4692,15 +4691,15 @@ async def run_autopilot_discovery(
             job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
             job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
         pending_auth = _pending_runtime_auth_requests(persisted_setup)
-        latest_target_blocked = result.target_ready is False
+        latest_target_blocked = not latest_target_ready
         await service.update_job(
             job_id,
             **job_changes,
-            status="waiting_for_input" if pending_checkpoints else "analyzed",
-            stage="input_collection" if pending_checkpoints else "ready_for_execution" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
-            progress=85 if pending_checkpoints else 100,
-            phase="cases_pending_review" if persisted_discovery.screens and not latest_target_blocked else "blocked",
-            checkpoint_stage="input_collection" if pending_checkpoints else "ready" if persisted_discovery.screens and not latest_target_blocked else "runtime_discovery",
+            status="waiting_for_input" if pending_checkpoints and latest_target_ready else "analyzed",
+            stage="input_collection" if pending_checkpoints and latest_target_ready else "ready_for_execution" if latest_target_ready else "runtime_discovery",
+            progress=85 if pending_checkpoints and latest_target_ready else 100,
+            phase="cases_pending_review" if latest_target_ready else "blocked",
+            checkpoint_stage="input_collection" if pending_checkpoints and latest_target_ready else "ready" if latest_target_ready else "runtime_discovery",
             checkpoint_message=(
                 "The latest Runtime Discovery attempt did not attach to the uploaded application. "
                 f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
@@ -4914,9 +4913,11 @@ async def execute_autopilot_suite(
     latest_discovery = _record_discovery(record)
     if not _discovery_target_is_verified(latest_discovery):
         reason = (
-            latest_discovery.last_attempt_reason
-            or latest_discovery.target_identity_reason
-            or latest_discovery.error
+            (
+                latest_discovery.last_attempt_reason
+                or latest_discovery.target_identity_reason
+                or latest_discovery.error
+            )
             if latest_discovery
             else None
         )
@@ -4927,6 +4928,7 @@ async def execute_autopilot_suite(
                 f"{reason or 'Retry discovery after the app is attached in the foreground.'}"
             ),
         )
+
     # Case execution is the second user approval boundary.  A plan/map can be
     # generated automatically, but entering the suite endpoint records that
     # the selected cases are approved for the shared execution control plane.
