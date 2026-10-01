@@ -1248,7 +1248,7 @@ export default function AutopilotPage() {
 
   const stats = useMemo(() => analysis ? {
     tests: analysis.tests.length,
-    suites: new Set(analysis.tests.map((test) => test.suite)).size,
+    journeys: new Set(analysis.tests.map((test) => test.journey?.trim()).filter(Boolean)).size,
     autonomous: analysis.tests.filter((test) => test.autonomous).length,
     critical: analysis.tests.filter((test) => ["critical", "high"].includes(test.priority)).length,
     buckets: new Set(analysis.tests.map((test) => normalizedBucket(test))).size,
@@ -1936,6 +1936,7 @@ export default function AutopilotPage() {
         return;
       }
       // Approval failures stop here; they never fall through to suite submission.
+
       const response = await apiClient.post<SuiteResult>(`/autopilot/${jobId}/suite`, {
         ...executionPayload(),
         max_tests: suiteMaxTests,
@@ -2289,7 +2290,7 @@ export default function AutopilotPage() {
               ].map(([label, value]) => <Grid item xs={3} key={String(label)}><Box sx={{ p: .7, borderRadius: 1.5, bgcolor: "var(--design-surface-subtle)" }}><Typography variant="caption" color="text.secondary" noWrap>{label}</Typography><Typography variant="h6" fontWeight={800} lineHeight={1.1}>{value}</Typography></Box></Grid>)}
             </Grid>
             <Stack direction="row" spacing={.6} useFlexGap flexWrap="wrap" sx={{ mt: .9 }}>
-              {analysis ? <><Chip size="small" label={`${stats?.suites ?? 0} journeys`} color="primary" variant="outlined" /><Chip size="small" label={`${discovery?.screen_count ?? 0} screens found`} variant="outlined" /></> : <Typography variant="caption" color="text.secondary">Your test coverage will appear here after analysis.</Typography>}
+              {analysis ? <><Chip size="small" label={`${stats?.journeys ?? 0} planned journeys`} color="primary" variant="outlined" /><Chip size="small" label={`${discovery?.screen_count ?? 0} screens found`} variant="outlined" /></> : <Typography variant="caption" color="text.secondary">Your test coverage will appear here after analysis.</Typography>}
             </Stack>
           </CardContent>
         </Card>
@@ -3105,5 +3106,7 @@ export default function AutopilotPage() {
     </Dialog>
   </Stack>;
 }
+
+
 
 
