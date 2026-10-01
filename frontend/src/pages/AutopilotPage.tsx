@@ -473,6 +473,16 @@ function workflowPhaseLabel(phase: WorkflowPhase) {
   return phase.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function discoveryVerifiedForExecution(discovery: Discovery | null | undefined) {
+  return Boolean(
+    discovery
+    && discovery.target_ready === true
+    && (discovery.status === "completed" || discovery.status === "partial")
+    && discovery.last_attempt_status !== "blocked"
+    && discovery.last_attempt_status !== "failed",
+  );
+}
+
 function isBlockingCheckpoint(request: AutopilotInputRequest) {
   if (request.status !== "pending") return false;
   // The only automatic pause is a real live authentication/sensitive-field
@@ -1769,6 +1779,14 @@ export default function AutopilotPage() {
         max_actions: discoveryMode === "observe" ? 0 : 300,
       }, { timeout: 660000 });
       setDiscovery(response.data);
+      let latestJob: AnalysisJob;
+      try {
+        latestJob = (await apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 })).data;
+        applyJob(latestJob);
+      } catch {
+        setContextNotice("Discovery returned, but Autopilot could not refresh the saved run state. Safe execution was not started; retry after the run status is reachable.");
+        return;
+      }
       let checkpointPending = Boolean(
         (response.data.input_requests || []).some(isBlockingCheckpoint),
       );
@@ -1798,6 +1816,17 @@ export default function AutopilotPage() {
       await refreshAutomation(jobId);
       await refreshReport(jobId);
       await refreshWorkflow(jobId);
+      const verifiedDiscovery = discoveryVerifiedForExecution(response.data);
+      const latestPhase = latestJob.phase || latestJob.analysis?.phase;
+      if (!verifiedDiscovery || latestPhase === "blocked" || latestJob.status === "failed") {
+        const reason = response.data.last_attempt_reason
+          || response.data.target_identity_reason
+          || response.data.error
+          || latestJob.checkpoint_message
+          || "The uploaded app was not verified in the foreground.";
+        setContextNotice(`Runtime Discovery did not verify the selected app, so no test batch was launched. ${reason}`);
+        return;
+      }
       if (checkpointPending) {
         setSetupOpen(true);
         setContextNotice(
@@ -1855,21 +1884,23 @@ export default function AutopilotPage() {
       await refreshWorkflow(analysis.job_id);
     } catch (err) { setError(readableError(err, "The case review could not be saved")); }
   };
-  const approveCases = async () => {
-    if (!analysis) return;
+  const approveCases = async (requestedJobId?: string): Promise<boolean> => {
+    const jobId = requestedJobId || analysis?.job_id;
+    if (!analysis || !jobId || analysis.job_id !== jobId) return false;
     setWorkflowBusy(true); setError("");
     try {
       const response = await apiClient.post<{ persisted_count: number; message: string }>(
-        `/autopilot/${analysis.job_id}/cases/approve`,
+        `/autopilot/${jobId}/cases/approve`,
         { approve_all: true, case_ids: [] },
         { timeout: 60000 },
       );
       setContextNotice(response.data.message || `${response.data.persisted_count} cases are now available in Test Design.`);
-      setAnalysis((current) => current ? { ...current, phase: "cases_approved", case_reviews: Object.fromEntries(current.tests.map((test) => [test.id, "approve"])) } : current);
-      await refreshWorkflow(analysis.job_id);
-      await refreshAutomation(analysis.job_id);
-      await refreshReport(analysis.job_id);
-    } catch (err) { setError(readableError(err, "The generated cases could not be approved")); }
+      setAnalysis((current) => current?.job_id === jobId ? { ...current, phase: "cases_approved", case_reviews: Object.fromEntries(current.tests.map((test) => [test.id, "approve"])) } : current);
+      await refreshWorkflow(jobId);
+      await refreshAutomation(jobId);
+      await refreshReport(jobId);
+      return true;
+    } catch (err) { setError(readableError(err, "The generated cases could not be approved")); return false; }
     finally { setWorkflowBusy(false); }
   };
   const runSuite = async (requestedJobId?: unknown) => {
@@ -1877,10 +1908,34 @@ export default function AutopilotPage() {
     if (!jobId) return;
     setSuiteBusy(true); setError("");
     try {
-      // Keep the shared Test Design hand-off as the execution boundary. The
-      // backend remains idempotent for legacy clients, while this workspace
-      // makes approval explicit before the first safe batch is sent.
-      if (casesAwaitingApproval && jobId === analysis?.job_id) await approveCases();
+      const [jobResponse, discoveryResponse] = await Promise.all([
+        apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 }),
+        apiClient.get<Discovery | null>(`/autopilot/${jobId}/discovery`, { timeout: 15000 }),
+      ]);
+      const latestJob = jobResponse.data;
+      const latestDiscovery = discoveryResponse.data;
+      if (analysis?.job_id === jobId) applyJob(latestJob);
+      if (!discoveryVerifiedForExecution(latestDiscovery) || latestJob.phase === "blocked" || latestJob.analysis?.phase === "blocked") {
+        const reason = latestDiscovery?.last_attempt_reason
+          || latestDiscovery?.target_identity_reason
+          || latestDiscovery?.error
+          || latestJob.checkpoint_message
+          || "The uploaded app was not verified in the foreground.";
+        setContextNotice(`Safe execution was not started because Runtime Discovery did not verify the selected app. ${reason}`);
+        return;
+      }
+      const phase = latestJob.phase || latestJob.analysis?.phase || "context_ready";
+      const runnablePhases: WorkflowPhase[] = ["cases_approved", "execution_ready", "completed", "partial"];
+      if (phase === "cases_pending_review") {
+        if (analysis?.job_id !== jobId || !(await approveCases(jobId))) return;
+      } else if (phase === "running") {
+        setContextNotice("A safe execution batch is already running for this app. I did not start a duplicate batch.");
+        return;
+      } else if (!runnablePhases.includes(phase)) {
+        setContextNotice(`Safe execution is waiting for Autopilot to reach case review. Current phase: ${workflowPhaseLabel(phase)}.`);
+        return;
+      }
+      // Approval failures stop here; they never fall through to suite submission.
       const response = await apiClient.post<SuiteResult>(`/autopilot/${jobId}/suite`, {
         ...executionPayload(),
         max_tests: suiteMaxTests,
@@ -2016,7 +2071,7 @@ export default function AutopilotPage() {
   const workflowPhase: WorkflowPhase = analysis?.phase
     || (effectivePlan?.status === "pending_review" ? "plan_pending_review" : effectivePlan?.status === "approved" ? "plan_approved" : "context_ready");
   const planAwaitingApproval = effectivePlan?.status === "pending_review" || workflowPhase === "plan_pending_review";
-  const casesAwaitingApproval = Boolean(analysis && (workflowPhase === "cases_pending_review" || (effectiveApplicationMap && !["cases_approved", "execution_ready", "running", "completed", "partial"].includes(workflowPhase))));
+  const casesAwaitingApproval = Boolean(analysis && !["blocked", "failed"].includes(workflowPhase) && (workflowPhase === "cases_pending_review" || (effectiveApplicationMap && !["cases_approved", "execution_ready", "running", "completed", "partial"].includes(workflowPhase))));
   const reviewedCaseCount = analysis ? Object.values(analysis.case_reviews || {}).filter((value) => value === "approve").length : 0;
   const usedContextSourceCount = contextSources.filter((source) => source.used !== false).length;
   const unusedContextSourceCount = Math.max(0, contextSources.length - usedContextSourceCount);
@@ -2681,7 +2736,7 @@ export default function AutopilotPage() {
              {reviewedCaseCount > 0 && <Chip size="small" label={`${reviewedCaseCount}/${stats.tests} cases reviewed`} color="success" variant="outlined" />}
              <Tooltip title="Sources include the profile, user context, attached document sections, public research hypotheses and runtime observations. Raw document bodies and secrets stay out of this panel."><InfoOutlinedIcon sx={{ fontSize: 16, color: "text.secondary" }} /></Tooltip>
            </Stack>
-           {effectiveApplicationMap && workflowPhase !== "cases_approved" && workflowPhase !== "execution_ready" && workflowPhase !== "running" && workflowPhase !== "completed" && workflowPhase !== "partial" && <Button size="small" variant="contained" color="success" onClick={() => { void approveCases(); }} disabled={workflowBusy} startIcon={workflowBusy ? <CircularProgress size={14} color="inherit" /> : <FactCheckOutlinedIcon />}>{workflowBusy ? "Saving cases…" : "Approve cases for Test Design"}</Button>}
+           {casesAwaitingApproval && <Button size="small" variant="contained" color="success" onClick={() => { void approveCases(); }} disabled={workflowBusy} startIcon={workflowBusy ? <CircularProgress size={14} color="inherit" /> : <FactCheckOutlinedIcon />}>{workflowBusy ? "Saving cases…" : "Approve cases for Test Design"}</Button>}
          </Stack>
          <TableContainer sx={{ mt: 1.5, maxHeight: 460 }}>
            <Table stickyHeader size="small">
