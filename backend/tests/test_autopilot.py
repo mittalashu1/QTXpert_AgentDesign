@@ -1,3 +1,4 @@
+import asyncio
 import json
 import asyncio
 import os
@@ -29,6 +30,7 @@ from app.schemas.autopilot import (
 from app.api.routes.autopilot import (
     _autopilot_safe_case_metadata,
     _blocking_checkpoint_requests,
+    _discovery_target_is_verified,
     _effective_context,
     _discovery_target_is_verified,
     _merge_discovery_snapshot,
@@ -1565,6 +1567,47 @@ def test_report_pass_rate_uses_all_designed_cases_as_denominator():
     assert report.metrics.pass_rate == 40.0
 
 
+def test_report_does_not_count_unstarted_blocked_cases_as_executed():
+    analysis = AutopilotAnalysis(
+        job_id="11111111-1111-4111-8111-111111111101",
+        filename="investnation.apk",
+        sha256="b" * 64,
+        app_name="Investnation",
+        package_name="com.example.investnation",
+        tests=[
+            AutopilotTest(
+                id=f"QT-FUNC-{index:03d}",
+                suite="Functional",
+                title=f"Functional case {index}",
+                objective="Validate an observed application flow.",
+            )
+            for index in range(1, 4)
+        ],
+    )
+    suite = AutopilotSuiteResult(
+        job_id=analysis.job_id,
+        status="blocked",
+        provider="appium",
+        started_at="2026-09-19T00:00:00+00:00",
+        finished_at="2026-09-19T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Test device",
+        selected_count=3,
+        executed_count=0,
+        tests=[
+            AutopilotSuiteTestResult(test_id=f"QT-FUNC-{index:03d}", title=f"Case {index}", status="blocked")
+            for index in range(1, 4)
+        ],
+    )
+
+    report = build_test_audit_report(analysis, DEFAULT_AUTOPILOT_CONTEXT, suite=suite)
+
+    assert report.metrics.designed_test_cases == 3
+    assert report.metrics.executed_test_cases == 0
+    assert report.metrics.blocked_count == 3
+    assert report.metrics.pass_rate == 0.0
+
+
 def test_report_preserves_user_stated_modules_as_unverified_scope():
     analysis = AutopilotAnalysis(
         job_id="11111111-1111-4111-8111-111111111199",
@@ -1718,6 +1761,106 @@ def test_failed_retry_keeps_last_usable_discovery_snapshot():
     assert merged.last_attempt_status == "blocked"
     assert "system UI" in (merged.last_attempt_reason or "")
     assert any("Latest discovery attempt blocked" in warning for warning in merged.warnings)
+    assert _discovery_target_is_verified(merged) is False
+
+
+def test_discovery_must_be_verified_and_successful_before_suite_gate():
+    valid = AutopilotDiscoveryResult(
+        job_id="verified-job",
+        status="completed",
+        target_kind="android",
+        provider="devicefarm",
+        started_at="2026-10-01T00:00:00+00:00",
+        finished_at="2026-10-01T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Pixel",
+        target_ready=True,
+    )
+    blocked = valid.model_copy(update={"status": "blocked", "target_ready": False})
+    unknown = valid.model_copy(update={"target_ready": None})
+
+    assert _discovery_target_is_verified(valid) is True
+    assert _discovery_target_is_verified(blocked) is False
+    assert _discovery_target_is_verified(unknown) is False
+
+
+@pytest.mark.asyncio
+async def test_safe_suite_endpoint_rejects_blocked_phase_before_provider(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.routes import autopilot as autopilot_routes
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    job_id = "66666666-6666-4666-8666-666666666666"
+    blocked_job = {"job_id": job_id, "phase": "blocked", "target_kind": "android"}
+
+    class FakeService:
+        pass
+
+    async def require_owned_job(_service, _job_id, _user, **_kwargs):
+        return blocked_job
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: FakeService())
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+
+    with pytest.raises(HTTPException) as error:
+        await autopilot_routes.execute_autopilot_suite(
+            job_id,
+            AutopilotSuiteRequest(provider="devicefarm", device_name="Pixel"),
+            SimpleNamespace(id="owner"),
+            Settings(),
+            None,
+        )
+
+    assert error.value.status_code == 409
+    assert "blocked phase" in error.value.detail
+
+
+@pytest.mark.asyncio
+async def test_safe_suite_endpoint_rejects_stale_map_after_failed_latest_attempt(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.routes import autopilot as autopilot_routes
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    job_id = "77777777-7777-4777-8777-777777777777"
+    stale_discovery = AutopilotDiscoveryResult(
+        job_id=job_id,
+        status="completed",
+        provider="devicefarm",
+        started_at="2026-10-01T00:00:00+00:00",
+        finished_at="2026-10-01T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Pixel",
+        target_ready=True,
+        last_attempt_status="blocked",
+        last_attempt_reason="The latest device attempt stayed in Google Play services.",
+    )
+    job = {"job_id": job_id, "phase": "cases_pending_review", "target_kind": "android"}
+
+    class FakeService:
+        pass
+
+    async def require_owned_job(_service, _job_id, _user, **_kwargs):
+        return job
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: FakeService())
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+    monkeypatch.setattr(
+        autopilot_routes,
+        "_safe_job_record",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=SimpleNamespace(discovery=stale_discovery.model_dump(mode="json"))),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await autopilot_routes.execute_autopilot_suite(
+            job_id,
+            AutopilotSuiteRequest(provider="devicefarm", device_name="Pixel"),
+            SimpleNamespace(id="owner"),
+            Settings(),
+            None,
+        )
+
+    assert error.value.status_code == 409
+    assert "Google Play services" in error.value.detail
 
 
 def test_successful_retry_replaces_old_discovery_snapshot():
@@ -2368,4 +2511,6 @@ async def test_safe_suite_endpoint_rejects_stale_map_after_latest_attempt_failed
 
     assert error.value.status_code == 409
     assert "Google Play services" in error.value.detail
+
+
 

@@ -896,3 +896,5 @@ def test_suite_treats_volatile_duplicate_surface_as_same_replay_page():
     assert service._screens_equivalent(first, second) is True
 
 
+
+

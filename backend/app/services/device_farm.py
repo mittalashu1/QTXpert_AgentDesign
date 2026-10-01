@@ -58,6 +58,11 @@ class DeviceFarmSession:
     app_arn: str
     device: DeviceFarmDevice
     appium_url: str
+    attached_app_arn: str | None = None
+
+    @property
+    def app_attachment_verified(self) -> bool:
+        return bool(self.app_arn and self.attached_app_arn == self.app_arn)
 
 
 def _text(value: Any) -> str:
@@ -173,12 +178,12 @@ class DeviceFarmService:
 
     @staticmethod
     def _register_raw_endpoint_capture(client: Any) -> None:
-        """Preserve new endpoint fields when an older botocore model parses the response.
+        """Preserve session endpoint and app-upload fields omitted by old SDK models.
 
         Device Farm added ``remoteAccessSession.endpoints.remoteDriverEndpoint``
         after some supported botocore releases.  The service response is JSON,
         so the raw after-call payload remains available even when an older model
-        drops that unknown field during normal parsing.
+        drops those unknown fields during normal parsing.
         """
 
         def merge_endpoint(*, http_response: Any, parsed: Any, **_: Any) -> None:
@@ -189,11 +194,15 @@ class DeviceFarmService:
                 raw_payload = json.loads(raw_content or "{}")
                 raw_session = raw_payload.get("remoteAccessSession") or {}
                 raw_endpoints = raw_session.get("endpoints") or {}
-                if not raw_endpoints or not isinstance(parsed, dict):
+                has_app_upload = "appUpload" in raw_session
+                if (not raw_endpoints and not has_app_upload) or not isinstance(parsed, dict):
                     return
                 parsed_session = parsed.setdefault("remoteAccessSession", {})
                 if isinstance(parsed_session, dict):
-                    parsed_session["endpoints"] = raw_endpoints
+                    if raw_endpoints:
+                        parsed_session["endpoints"] = raw_endpoints
+                    if has_app_upload:
+                        parsed_session["appUpload"] = raw_session.get("appUpload")
             except (AttributeError, TypeError, UnicodeDecodeError, ValueError):
                 return
 
@@ -386,14 +395,21 @@ class DeviceFarmService:
         session_arn = _text(session_payload.get("arn"))
         if not session_arn:
             raise DeviceFarmError("AWS Device Farm did not return a remote session ARN")
+        app_arn_in_request = "appArn" in request_members
         try:
-            session = self._wait_for_session(client, session_arn, app_arn, device)
+            session = self._wait_for_session(
+                client,
+                session_arn,
+                app_arn,
+                device,
+                require_app_attachment=app_arn_in_request,
+            )
         except Exception:
             # A failed wait can happen before a DeviceFarmSession object exists,
             # so the caller's normal finally block cannot clean up this ARN.
             self.stop_session(session_arn)
             raise
-        if "appArn" not in request_members:
+        if not app_arn_in_request:
             installer = getattr(client, "install_to_remote_access_session", None)
             if installer is None:
                 self.stop_session(session_arn)
@@ -401,7 +417,7 @@ class DeviceFarmService:
                     "The installed AWS SDK cannot install an app into a remote access session"
                 )
             try:
-                installer(
+                installation = installer(
                     remoteAccessSessionArn=session_arn,
                     appArn=app_arn,
                 )
@@ -410,6 +426,29 @@ class DeviceFarmService:
                 raise DeviceFarmError(
                     f"AWS Device Farm could not install the uploaded app in the Android session: {exc}"
                 ) from exc
+            reported_upload = (installation or {}).get("appUpload") or {}
+            reported_arn = _text(reported_upload.get("arn")) if isinstance(reported_upload, dict) else ""
+            if reported_arn and reported_arn != app_arn:
+                self.stop_session(session_arn)
+                raise DeviceFarmError(
+                    "AWS Device Farm installed a different app upload than the selected build"
+                )
+            try:
+                session = self._wait_for_session(
+                    client,
+                    session_arn,
+                    app_arn,
+                    device,
+                    require_app_attachment=True,
+                )
+            except Exception:
+                self.stop_session(session_arn)
+                raise
+        if not session.app_attachment_verified:
+            self.stop_session(session_arn)
+            raise DeviceFarmError(
+                "AWS Device Farm did not verify that the selected app upload is attached to the session"
+            )
         return session
 
     def _wait_for_session(
@@ -418,6 +457,8 @@ class DeviceFarmService:
         session_arn: str,
         app_arn: str,
         device: DeviceFarmDevice,
+        *,
+        require_app_attachment: bool = True,
     ) -> DeviceFarmSession:
         deadline = time.monotonic() + self.settings.DEVICE_FARM_SESSION_TIMEOUT_SECONDS
         while True:
@@ -427,12 +468,19 @@ class DeviceFarmService:
             endpoints = session.get("endpoints") or {}
             endpoint = _text(endpoints.get("remoteDriverEndpoint"))
             if status == "RUNNING" and endpoint:
-                return DeviceFarmSession(
-                    arn=session_arn,
-                    app_arn=app_arn,
-                    device=device,
-                    appium_url=endpoint,
-                )
+                attached_app_arn = _text(session.get("appUpload")) or None
+                if attached_app_arn and attached_app_arn != app_arn:
+                    raise DeviceFarmError(
+                        "AWS Device Farm session reports a different app upload than the selected build"
+                    )
+                if attached_app_arn == app_arn or not require_app_attachment:
+                    return DeviceFarmSession(
+                        arn=session_arn,
+                        app_arn=app_arn,
+                        device=device,
+                        appium_url=endpoint,
+                        attached_app_arn=attached_app_arn,
+                    )
             if status in {"ERRORED", "FAILED", "STOPPED", "STOPPING", "COMPLETED"}:
                 result = _text(session.get("result")).upper()
                 message = _text(session.get("message"))
@@ -444,6 +492,10 @@ class DeviceFarmService:
                 message = message or f"AWS Device Farm session ended with status {status}"
                 raise DeviceFarmError(message[:500])
             if time.monotonic() >= deadline:
+                if require_app_attachment:
+                    raise DeviceFarmError(
+                        "Timed out while AWS Device Farm verified the selected app upload was attached"
+                    )
                 raise DeviceFarmError("Timed out while AWS Device Farm started the Android session")
             time.sleep(self.settings.DEVICE_FARM_POLL_INTERVAL_SECONDS)
 
@@ -456,4 +508,5 @@ class DeviceFarmService:
             # Cleanup is best effort. The caller already has the test outcome;
             # do not mask it with a provider cleanup error.
             return
+
 

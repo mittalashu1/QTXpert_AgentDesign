@@ -168,7 +168,11 @@ def _metrics(
 
     if suite is not None:
         statuses = [test.status for test in suite.tests]
-        executed = suite.executed_count or sum(status != "skipped" for status in statuses)
+        # Blocked cases may never have started (for example, when the target
+        # app failed to launch). Do not present them as executed. Older stored
+        # suite rows may have a default zero counter, so infer only from
+        # outcomes that prove a runtime attempt occurred.
+        executed = suite.executed_count or statuses.count("passed") + statuses.count("failed")
         passed = suite.passed_count or statuses.count("passed")
         failed = suite.failed_count or statuses.count("failed")
         blocked = statuses.count("blocked")
@@ -634,6 +638,7 @@ def build_test_audit_report(
             else None
         ),
     )
+
 
 
 

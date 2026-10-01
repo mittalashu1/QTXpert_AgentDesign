@@ -87,7 +87,7 @@ from app.services.autopilot_ir import (
 )
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
-from app.services.device_farm import DeviceFarmService, DeviceFarmTrialBalanceError
+from app.services.device_farm import DeviceFarmService
 from app.services.autopilot_workflow import (
     build_application_map,
     build_execution_control_payload,
@@ -1196,13 +1196,20 @@ def _merge_discovery_snapshot(
 
 
 def _discovery_target_is_verified(discovery: Optional[AutopilotDiscoveryResult]) -> bool:
-    """Only a successful latest attempt can authorize execution."""
+    """Require the latest attempt to prove the real target is usable.
+
+    A retained prior map remains useful report evidence, but must not make a
+    failed/latest device attachment look executable. The merge helper records
+    that condition in ``last_attempt_status`` while preserving the old graph.
+    """
+
     return bool(
         discovery
         and discovery.target_ready is True
         and discovery.status in {"completed", "partial"}
         and discovery.last_attempt_status not in {"blocked", "failed"}
     )
+
 
 async def _available_evidence_asset_ids(
     db: AsyncSession,
@@ -2247,19 +2254,19 @@ async def _resume_and_discover_background(
                     if pending_checkpoints:
                         persisted_analysis = persisted_analysis.model_copy(
                             update={
-                                "checkpoint_stage": "input_collection",
-                                "input_requests": pending_checkpoints,
+                                "checkpoint_stage": "input_collection" if latest_target_ready else "runtime_discovery",
+                                "input_requests": pending_checkpoints if latest_target_ready else [],
                                 "application_map": application_map,
-                                "phase": "cases_pending_review",
+                                "phase": "cases_pending_review" if latest_target_ready else "blocked",
                             }
                         )
                     else:
                         persisted_analysis = persisted_analysis.model_copy(
                             update={
-                                "checkpoint_stage": "ready_for_execution",
+                                "checkpoint_stage": "ready_for_execution" if latest_target_ready else "runtime_discovery",
                                 "input_requests": [],
                                 "application_map": application_map,
-                                "phase": "cases_pending_review",
+                                "phase": "cases_pending_review" if latest_target_ready else "blocked",
                             }
                         )
                     record.setup_profile = persisted_setup.model_dump(mode="json")
@@ -2292,6 +2299,7 @@ async def _resume_and_discover_background(
                 progress=85 if pending_checkpoints and latest_target_ready else 100,
                 phase="cases_pending_review" if latest_target_ready else "blocked",
                 checkpoint_stage="input_collection" if pending_checkpoints and latest_target_ready else "ready" if latest_target_ready else "runtime_discovery",
+
                 checkpoint_message=(
                     "The latest Runtime Discovery attempt did not attach to the uploaded application. "
                     f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
@@ -2301,13 +2309,8 @@ async def _resume_and_discover_background(
                     else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
                     if pending_checkpoints
                     else "Runtime Discovery completed. Review the discovered map and run safe execution."
-                    if persisted_discovery.screens and not latest_target_blocked
-                    else (
-                        "The latest Runtime Discovery attempt did not attach to the uploaded application. "
-                        f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
-                        if latest_target_blocked
-                        else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
-                    )
+                    if persisted_discovery.screens
+                    else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
                 ),
                 input_requests=(
                     [item.model_dump(mode="json") for item in pending_checkpoints]
@@ -2771,40 +2774,13 @@ async def get_autopilot_providers(
     recommended: AutopilotProvider = (
         "devicefarm" if device_farm_configured else "browserstack" if configured else "appium"
     )
-    trial_minutes: dict = {}
-    trial_minutes_error = None
-    if device_farm_configured:
-        try:
-            trial_minutes = await asyncio.wait_for(
-                asyncio.to_thread(DeviceFarmService(settings).get_trial_minutes), timeout=15,
-            )
-            logger.info(
-                "AWS Device Farm verified trial balance: remaining=%s total=%s checked_at=%s",
-                trial_minutes.get("remaining"), trial_minutes.get("total"), trial_minutes.get("checked_at"),
-            )
-        except DeviceFarmTrialBalanceError as exc:
-            logger.warning("AWS Device Farm trial balance check: %s", exc.code)
-            trial_minutes_error = {
-                "access_denied": "AWS denied the read-only GetAccountSettings balance check. Verify free minutes in the AWS console before running.",
-                "expired_credentials": "AWS credentials for the balance check have expired. Verify the configured AWS connection before running.",
-                "credentials_unavailable": "The AWS connection has no usable credentials for the balance check.",
-                "provider_unavailable": "AWS could not be reached for the free-minute balance check. Try again before running.",
-                "missing_balance": "AWS did not return a usable free-minute balance. Verify minutes in the AWS console before running.",
-            }.get(exc.code, "AWS free-minute balance could not be verified. Check the AWS console before running.")
-        except Exception as exc:
-            # SDK errors may echo credentials or signed URLs. Only the error
-            # class is exposed; provider readiness does not imply free balance.
-            trial_minutes_error = f"Free-minute balance unavailable ({type(exc).__name__}); verify AWS usage before running."
+
     return AutopilotProviderStatus(
         browserstack_configured=configured,
         device_farm_configured=device_farm_configured,
         device_farm_region=settings.DEVICE_FARM_REGION if device_farm_configured else None,
         device_farm_device_name=settings.DEVICE_FARM_DEVICE_NAME if device_farm_configured else None,
         device_farm_reason=device_farm_reason,
-        device_farm_trial_minutes_remaining=trial_minutes.get("remaining"),
-        device_farm_trial_minutes_total=trial_minutes.get("total"),
-        device_farm_trial_minutes_checked_at=trial_minutes.get("checked_at"),
-        device_farm_trial_minutes_error=trial_minutes_error,
         custom_appium_available=custom_available,
         playwright_available=True,
         custom_appium_reason=reason,
@@ -4653,19 +4629,19 @@ async def run_autopilot_discovery(
                 if pending_checkpoints:
                     persisted_analysis = persisted_analysis.model_copy(
                         update={
-                            "checkpoint_stage": "input_collection",
-                            "input_requests": pending_checkpoints,
+                            "checkpoint_stage": "input_collection" if latest_target_ready else "runtime_discovery",
+                            "input_requests": pending_checkpoints if latest_target_ready else [],
                             "application_map": application_map,
-                            "phase": "cases_pending_review",
+                            "phase": "cases_pending_review" if latest_target_ready else "blocked",
                         }
                     )
                 else:
                     persisted_analysis = persisted_analysis.model_copy(
                         update={
-                            "checkpoint_stage": "ready_for_execution",
+                            "checkpoint_stage": "ready_for_execution" if latest_target_ready else "runtime_discovery",
                             "input_requests": [],
                             "application_map": application_map,
-                            "phase": "cases_pending_review",
+                            "phase": "cases_pending_review" if latest_target_ready else "blocked",
                         }
                     )
                 record.setup_profile = persisted_setup.model_dump(mode="json")
@@ -4698,6 +4674,7 @@ async def run_autopilot_discovery(
             progress=85 if pending_checkpoints and latest_target_ready else 100,
             phase="cases_pending_review" if latest_target_ready else "blocked",
             checkpoint_stage="input_collection" if pending_checkpoints and latest_target_ready else "ready" if latest_target_ready else "runtime_discovery",
+
             checkpoint_message=(
                 "The latest Runtime Discovery attempt did not attach to the uploaded application. "
                 f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
@@ -4707,13 +4684,8 @@ async def run_autopilot_discovery(
                 else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
                 if pending_checkpoints
                 else "Runtime Discovery completed. Generated an evidence-scoped coverage plan; review it and run safe execution."
-                if persisted_discovery.screens and not latest_target_blocked
-                else (
-                    "The latest Runtime Discovery attempt did not attach to the uploaded application. "
-                    f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
-                    if latest_target_blocked
-                    else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
-                )
+                if persisted_discovery.screens
+                else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
             ),
             input_requests=[item.model_dump(mode="json") for item in pending_checkpoints] if pending_checkpoints and latest_target_ready else [],
         )
@@ -4927,11 +4899,11 @@ async def execute_autopilot_suite(
             ),
         )
 
+
     # Case execution is the second user approval boundary.  A plan/map can be
     # generated automatically, but entering the suite endpoint records that
     # the selected cases are approved for the shared execution control plane.
     try:
-        current_phase = phase_for_job(job)
         if current_phase == "plan_pending_review":
             await service.update_job(job_id, phase="plan_approved")
             current_phase = "plan_approved"
@@ -4941,7 +4913,6 @@ async def execute_autopilot_suite(
         await service.update_job(job_id, phase="running")
     except ValueError:
         logger.info("Autopilot suite phase transition skipped for legacy job_id=%s", job_id)
-    record = await _safe_job_record(db, job_id, owner_id)
     if str(job.get("target_kind") or "android") == "web":
         analysis = await service.load_analysis(job_id)
         discovery = _record_discovery(record)
@@ -5790,6 +5761,8 @@ async def rerun_autopilot_smoke(
         job_id=job_id,
         request=request,
     )
+
+
 
 
 
