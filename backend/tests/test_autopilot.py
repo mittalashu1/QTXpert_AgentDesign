@@ -1,5 +1,5 @@
-import asyncio
 import json
+import asyncio
 import os
 import struct
 import time
@@ -2267,7 +2267,6 @@ async def test_plan_approval_does_not_rewind_forward_workflow_phase(
     else:
         assert "phase" not in service.updates[0]
 
-
 def test_discovery_verification_requires_latest_attempt_to_be_usable():
     valid = AutopilotDiscoveryResult(
         job_id="verified-job",
@@ -2369,3 +2368,4 @@ async def test_safe_suite_endpoint_rejects_stale_map_after_latest_attempt_failed
 
     assert error.value.status_code == 409
     assert "Google Play services" in error.value.detail
+
