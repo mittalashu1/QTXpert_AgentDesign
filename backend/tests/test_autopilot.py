@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import struct
@@ -29,6 +30,7 @@ from app.api.routes.autopilot import (
     _autopilot_safe_case_metadata,
     _blocking_checkpoint_requests,
     _effective_context,
+    _discovery_target_is_verified,
     _merge_discovery_snapshot,
     _pending_runtime_auth_requests,
     _refresh_mobile_analysis_identity,
@@ -2264,3 +2266,106 @@ async def test_plan_approval_does_not_rewind_forward_workflow_phase(
         assert service.updates[0]["phase"] == "plan_approved"
     else:
         assert "phase" not in service.updates[0]
+
+
+def test_discovery_verification_requires_latest_attempt_to_be_usable():
+    valid = AutopilotDiscoveryResult(
+        job_id="verified-job",
+        status="completed",
+        target_kind="android",
+        provider="devicefarm",
+        started_at="2026-10-01T00:00:00+00:00",
+        finished_at="2026-10-01T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Pixel",
+        target_ready=True,
+    )
+    blocked = valid.model_copy(update={"status": "blocked", "target_ready": False})
+    retained_but_stale = valid.model_copy(update={"last_attempt_status": "blocked"})
+    unknown = valid.model_copy(update={"target_ready": None})
+
+    assert _discovery_target_is_verified(valid) is True
+    assert _discovery_target_is_verified(blocked) is False
+    assert _discovery_target_is_verified(retained_but_stale) is False
+    assert _discovery_target_is_verified(unknown) is False
+
+
+@pytest.mark.asyncio
+async def test_safe_suite_endpoint_rejects_blocked_phase_before_provider(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.routes import autopilot as autopilot_routes
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    job_id = "66666666-6666-4666-8666-666666666666"
+    blocked_job = {"job_id": job_id, "phase": "blocked", "target_kind": "android"}
+
+    class FakeService:
+        pass
+
+    async def require_owned_job(_service, _job_id, _user, **_kwargs):
+        return blocked_job
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: FakeService())
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+
+    with pytest.raises(HTTPException) as error:
+        await autopilot_routes.execute_autopilot_suite(
+            job_id,
+            AutopilotSuiteRequest(provider="devicefarm", device_name="Pixel"),
+            SimpleNamespace(id="owner"),
+            Settings(),
+            None,
+        )
+
+    assert error.value.status_code == 409
+    assert "blocked phase" in error.value.detail
+
+
+@pytest.mark.asyncio
+async def test_safe_suite_endpoint_rejects_stale_map_after_latest_attempt_failed(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.routes import autopilot as autopilot_routes
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    job_id = "77777777-7777-4777-8777-777777777777"
+    stale_discovery = AutopilotDiscoveryResult(
+        job_id=job_id,
+        status="completed",
+        provider="devicefarm",
+        started_at="2026-10-01T00:00:00+00:00",
+        finished_at="2026-10-01T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Pixel",
+        target_ready=True,
+        last_attempt_status="blocked",
+        last_attempt_reason="The latest device attempt stayed in Google Play services.",
+    )
+    job = {"job_id": job_id, "phase": "cases_pending_review", "target_kind": "android"}
+
+    class FakeService:
+        pass
+
+    async def require_owned_job(_service, _job_id, _user, **_kwargs):
+        return job
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: FakeService())
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+    monkeypatch.setattr(
+        autopilot_routes,
+        "_safe_job_record",
+        lambda *_args, **_kwargs: asyncio.sleep(
+            0, result=SimpleNamespace(discovery=stale_discovery.model_dump(mode="json"))
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await autopilot_routes.execute_autopilot_suite(
+            job_id,
+            AutopilotSuiteRequest(provider="devicefarm", device_name="Pixel"),
+            SimpleNamespace(id="owner"),
+            Settings(),
+            None,
+        )
+
+    assert error.value.status_code == 409
+    assert "Google Play services" in error.value.detail
