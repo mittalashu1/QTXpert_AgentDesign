@@ -2528,4 +2528,3 @@ async def test_suite_phase_transition_initializes_phase_from_approved_plan():
     await _advance_suite_job_to_running(service, "suite-job", "cases_pending_review")
 
     assert service.phases == ["cases_approved", "execution_ready", "running"]
-
