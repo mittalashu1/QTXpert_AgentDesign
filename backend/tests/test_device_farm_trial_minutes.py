@@ -43,26 +43,22 @@ def test_trial_minutes_does_not_echo_provider_secrets(monkeypatch, error_type):
     assert "synthetic" not in str(exc.value)
 
 
-def test_authenticated_provider_status_exposes_timestamped_read_only_balance(monkeypatch):
+def test_provider_status_does_not_check_trial_balance_until_requested(monkeypatch):
     from app.api.routes.autopilot import get_autopilot_providers
-    monkeypatch.setattr(DeviceFarmService, "get_trial_minutes", lambda _: {
-        "remaining": 916.5, "total": 1000, "checked_at": "2026-09-27T15:30:00+00:00",
-    })
+
+    calls = []
+    def forbidden_balance_check(_):
+        calls.append("called")
+        raise AssertionError("Provider status must not read AWS trial minutes.")
+
+    monkeypatch.setattr(DeviceFarmService, "get_trial_minutes", forbidden_balance_check)
     settings = Settings(DEVICE_FARM_ENABLED=True, DEVICE_FARM_PROJECT_ARN="arn:aws:devicefarm:us-west-2:123:project:test")
     result = asyncio.run(get_autopilot_providers(SimpleNamespace(), settings))
-    assert result.device_farm_trial_minutes_remaining == 916.5
-    assert result.device_farm_trial_minutes_checked_at == "2026-09-27T15:30:00+00:00"
 
-
-def test_provider_status_does_not_expose_error_payload_or_assume_zero(monkeypatch):
-    from app.api.routes.autopilot import get_autopilot_providers
-    def fail(_):
-        raise RuntimeError("synthetic-secret")
-    monkeypatch.setattr(DeviceFarmService, "get_trial_minutes", fail)
-    settings = Settings(DEVICE_FARM_ENABLED=True, DEVICE_FARM_PROJECT_ARN="arn:aws:devicefarm:us-west-2:123:project:test")
-    result = asyncio.run(get_autopilot_providers(SimpleNamespace(), settings))
+    assert calls == []
     assert result.device_farm_trial_minutes_remaining is None
-    assert "synthetic-secret" not in result.device_farm_trial_minutes_error
+    assert result.device_farm_trial_minutes_checked_at is None
+    assert result.device_farm_trial_minutes_error is None
 
 
 @pytest.mark.parametrize("sdk_code, expected", [
