@@ -397,8 +397,9 @@ class AutopilotDiscoveryService:
         return requests
 
     @staticmethod
+    @staticmethod
     def _looks_like_loading_screen(screen: DiscoveredScreen) -> bool:
-        """Identify splash/blank states that deserve a bounded settle retry."""
+        """Identify splash/blank or sparse initial surfaces without a safe entry point."""
         marker_text = " ".join(
             [
                 screen.activity_name or "",
@@ -412,24 +413,32 @@ class AutopilotDiscoveryService:
         generic_labels = {
             "view", "imageview", "textview", "unknown", "layout", "framelayout",
             "linearlayout", "relativelayout", "constraintlayout", "scrollview",
+            "viewgroup", "flutterview", "fluttertextureview", "surfaceview",
         }
-        interactive = [
-            control for control in screen.controls
-            if control.enabled
-            and control.locators
-            and (
-                control.input_capable
-                or (
-                    control.clickable
-                    and re.sub(r"[\s_-]+", " ", str(control.semantic_label or "").lower()).strip() not in generic_labels
-                )
-            )
-        ]
-        # Some providers expose an Android splash as a clickable generic View.
-        # It is not a ready product page without a deterministic locator and
-        # a meaningful user-facing label; keep waiting rather than reporting
-        # a false one-screen discovery.
-        return len(interactive) == 0 and len(screen.controls) <= 4
+        generic_root_classes = generic_labels | {"decorview", "fluttercontainer"}
+
+        def has_meaningful_entry(control: DiscoveredControl) -> bool:
+            label = re.sub(r"[\s_-]+", " ", str(control.semantic_label or "").lower()).strip()
+            class_short = str(control.class_name or "").rsplit(".", 1)[-1].casefold()
+            # Flutter/Appium may tag a splash root as an enabled or even
+            # input-capable View. That implementation flag is not evidence
+            # of an end-user field; generic container nodes never open a path.
+            if label in generic_labels or class_short in generic_root_classes:
+                return False
+            if not control.enabled:
+                return False
+            real_input = control.input_capable and class_short not in generic_root_classes
+            safe_action = control.clickable and bool(control.locators) and control.risk == "safe"
+            scroll_surface = control.scrollable and bool(control.locators)
+            return real_input or safe_action or scroll_surface
+
+        # Do not label a sparse, ungrounded splash/landing surface as a
+        # completed crawl just because its root View has a locator or an
+        # Appium interaction flag. Credential fields, safe actions, and
+        # scrollable content remain valid evidence-backed entry points.
+        return len(screen.controls) <= 4 and not any(
+            has_meaningful_entry(control) for control in screen.controls
+        )
 
     @classmethod
     def _risk(cls, label: str, attrs: Dict[str, str]) -> tuple[str, Optional[str]]:
