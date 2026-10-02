@@ -134,12 +134,21 @@ def safe_current_activity(driver: Any) -> str:
 
 
 def _is_google_location_settings_checker(driver: Any, page_source: str) -> bool:
-    """Recognize only Google's explicit location-settings resolution activity."""
+    """Recognize Google's location-settings activity even when its overlay is transparent.
+
+    On Android, this resolution activity can be foreground while the accessibility
+    hierarchy still exposes only the underlying app package. The exact activity
+    name is authoritative in that case; requiring a Google package in the
+    hierarchy would miss the prompt and leave Flutter apps parked on their splash.
+    """
+    activity = safe_current_activity(driver).casefold()
+    if "locationsettingscheckeractivity" in activity:
+        return True
+
     packages = {item.casefold() for item in _hierarchy_packages(page_source)}
     if not packages.intersection({"com.google.android.gms", "com.google.android.location.settings"}):
         return False
-    activity = safe_current_activity(driver).casefold()
-    return "locationsettingscheckeractivity" in activity or "locationsettingscheckeractivity" in page_source.casefold()
+    return "locationsettingscheckeractivity" in page_source.casefold()
 
 
 def validate_target_surface(

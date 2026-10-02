@@ -318,8 +318,8 @@ class _GoogleLocationCheckerDriver:
         "appium:appActivity": "com.qtx.demo.MainActivity",
     }
 
-    def __init__(self, *, back_returns_to_app):
-        self.page_source = '<hierarchy><node package="com.google.android.gms" text="Location settings" /></hierarchy>'
+    def __init__(self, *, back_returns_to_app, hierarchy_package="com.google.android.gms"):
+        self.page_source = f'<hierarchy><node package="{hierarchy_package}" text="Location settings" /></hierarchy>'
         self._current_activity = "com.google.android.location.settings.LocationSettingsCheckerActivity"
         self.back_returns_to_app = back_returns_to_app
         self.calls = []
@@ -344,6 +344,27 @@ class _GoogleLocationCheckerDriver:
 def test_target_launch_safely_returns_from_observed_google_location_prompt(monkeypatch):
     monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
     driver = _GoogleLocationCheckerDriver(back_returns_to_app=True)
+
+    ready, reason, identity = activate_verified_target_surface(
+        driver,
+        "com.qtx.demo",
+        expected_activity="com.qtx.demo.MainActivity",
+        timeout_seconds=1,
+        page_source=driver.page_source,
+    )
+
+    assert ready is True, reason
+    assert identity["package"] == "com.qtx.demo"
+    assert driver.calls == ["back"]
+    assert "location remained unchanged" in reason
+
+
+def test_target_launch_recovers_when_location_checker_has_transparent_app_hierarchy(monkeypatch):
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
+    driver = _GoogleLocationCheckerDriver(
+        back_returns_to_app=True,
+        hierarchy_package="com.qtx.demo",
+    )
 
     ready, reason, identity = activate_verified_target_surface(
         driver,
