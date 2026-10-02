@@ -423,6 +423,34 @@ def test_suite_keeps_wrong_foreground_blocked_after_activation_retry(monkeypatch
     assert driver.activate_calls == ["com.qtx.demo"]
 
 
+def test_suite_retries_package_after_ineffective_activity_start(monkeypatch):
+    class _AcknowledgesActivityWithoutForeground(_SystemUiForegroundDriver):
+        def __init__(self):
+            super().__init__()
+            self.activity_calls = []
+
+        def start_activity(self, package, activity):
+            self.activity_calls.append((package, activity))
+            # Provider acknowledges the command but leaves Google Play services visible.
+
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _AcknowledgesActivityWithoutForeground()
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    ready, reason, identity = service._activate_verified_target(
+        driver,
+        "com.qtx.demo",
+        activity_hint="com.qtx.demo.MainActivity",
+        timeout_seconds=0,
+        poll_interval=0,
+    )
+
+    assert ready is True, reason
+    assert driver.activity_calls == [("com.qtx.demo", "com.qtx.demo.MainActivity")]
+    assert driver.activate_calls == ["com.qtx.demo"]
+    assert identity["package"] == "com.qtx.demo"
+
+
 def test_suite_reset_relaunches_the_observed_activity_without_package_launcher_resolution(monkeypatch):
     driver = _ObservedActivityDriver()
     monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
