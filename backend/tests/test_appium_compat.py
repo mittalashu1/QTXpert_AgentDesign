@@ -312,6 +312,69 @@ class _SystemUiLaunchDriver:
             self.page_source = f'<hierarchy><node package="{package}" text="Sign in" /></hierarchy>'
 
 
+class _GoogleLocationCheckerDriver:
+    capabilities = {
+        "appium:appPackage": "com.qtx.demo",
+        "appium:appActivity": "com.qtx.demo.MainActivity",
+    }
+
+    def __init__(self, *, back_returns_to_app):
+        self.page_source = '<hierarchy><node package="com.google.android.gms" text="Location settings" /></hierarchy>'
+        self._current_activity = "com.google.android.location.settings.LocationSettingsCheckerActivity"
+        self.back_returns_to_app = back_returns_to_app
+        self.calls = []
+
+    @property
+    def current_activity(self):
+        return self._current_activity
+
+    def back(self):
+        self.calls.append("back")
+        if self.back_returns_to_app:
+            self.page_source = '<hierarchy><node package="com.qtx.demo" text="Sign in" /></hierarchy>'
+            self._current_activity = "com.qtx.demo.MainActivity"
+
+    def start_activity(self, package, activity):
+        self.calls.append(("activity", package, activity))
+
+    def activate_app(self, package):
+        self.calls.append(("package", package))
+
+
+def test_target_launch_safely_returns_from_observed_google_location_prompt(monkeypatch):
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
+    driver = _GoogleLocationCheckerDriver(back_returns_to_app=True)
+
+    ready, reason, identity = activate_verified_target_surface(
+        driver,
+        "com.qtx.demo",
+        expected_activity="com.qtx.demo.MainActivity",
+        timeout_seconds=1,
+        page_source=driver.page_source,
+    )
+
+    assert ready is True, reason
+    assert identity["package"] == "com.qtx.demo"
+    assert driver.calls == ["back"]
+    assert "location remained unchanged" in reason
+
+
+def test_target_launch_does_not_enable_location_when_google_prompt_will_not_close():
+    driver = _GoogleLocationCheckerDriver(back_returns_to_app=False)
+
+    ready, reason, _ = activate_verified_target_surface(
+        driver,
+        "com.qtx.demo",
+        expected_activity="com.qtx.demo.MainActivity",
+        timeout_seconds=0,
+        page_source=driver.page_source,
+    )
+
+    assert ready is False
+    assert driver.calls == ["back"]
+    assert "location was not enabled automatically" in reason or "location-settings prompt remained" in reason
+
+
 def test_target_launch_falls_back_to_package_when_activity_command_does_not_foreground_app(monkeypatch):
     monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
     driver = _SystemUiLaunchDriver(package_launches_target=True)
