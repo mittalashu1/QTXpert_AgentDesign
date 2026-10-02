@@ -397,6 +397,41 @@ class AutopilotDiscoveryService:
         return requests
 
     @staticmethod
+    def _startup_surface_diagnostic(driver: Any, expected_package: Optional[str]) -> Optional[str]:
+        """Return a coarse launch diagnosis without persisting raw device logs."""
+        package = str(expected_package or "").strip().casefold()
+        if not package:
+            return None
+        try:
+            entries = driver.get_log("logcat")
+        except Exception:
+            # Device providers may disable log access; splash classification
+            # remains valid without optional diagnostics.
+            return None
+
+        app_messages: list[str] = []
+        for entry in (entries or [])[-400:]:
+            if not isinstance(entry, Mapping):
+                continue
+            message = str(entry.get("message") or "")
+            if package in message.casefold():
+                app_messages.append(message.casefold())
+        joined = " ".join(app_messages)
+        if not joined:
+            return None
+        if re.search(r"(?:fatal exception|fatal signal|uncaught exception|process\s+.+?\s+has died)", joined):
+            return "Startup diagnostics: the target app reported a launch crash."
+        if re.search(
+            r"(?:unknownhostexception|sockettimeoutexception|connection refused|sslhandshakeexception|"
+            r"handshakeexception|connection reset|failed to connect)",
+            joined,
+        ):
+            return "Startup diagnostics: the target app could not reach a required service."
+        if re.search(r"(?:missingpluginexception|fluttererror|flutter initialization)", joined):
+            return "Startup diagnostics: Flutter reported an initialization error."
+        return None
+
+    @staticmethod
     def _looks_like_loading_screen(screen: DiscoveredScreen) -> bool:
         """Identify splash/blank or sparse initial surfaces without a safe entry point."""
         marker_text = " ".join(
@@ -426,9 +461,10 @@ class AutopilotDiscoveryService:
             if not control.enabled:
                 return False
             if is_generic_container:
-                # A generic scroll container is meaningful only when the
-                # runtime exposed a locator that can safely scroll it.
-                return control.scrollable and bool(control.locators)
+                # Flutter/Appium often marks the app's splash root as a
+                # scrollable, located View. That root is not a journey. Only
+                # concrete child controls or actual input widgets count.
+                return False
             real_input = control.input_capable
             safe_action = control.clickable and bool(control.locators) and control.risk == "safe"
             scroll_surface = control.scrollable and bool(control.locators)
@@ -1660,6 +1696,10 @@ class AutopilotDiscoveryService:
             # identical in-memory candidate if the session needed activation.
             current, _ = capture(persist_evidence=True, require_target=True)
             if launch_surface_incomplete:
+                diagnostic = self._startup_surface_diagnostic(driver, package_hint)
+                if diagnostic:
+                    warnings.append(diagnostic)
+                    stop_reason = f"{stop_reason} {diagnostic}"
                 # Keep the launch-state diagnosis authoritative. A verified package with no readable controls is not a completed app crawl.
                 return {
                     "screens": screens,
