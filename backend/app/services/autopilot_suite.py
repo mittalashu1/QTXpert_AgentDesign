@@ -26,6 +26,7 @@ from app.schemas.autopilot import (
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
+    activate_verified_target_surface,
     enter_observed_text,
     ProviderLifecycleUnavailable,
     expected_package_state,
@@ -662,52 +663,36 @@ class AutopilotSuiteService:
         poll_interval: float = 0.5,
         page_source: str | None = None,
     ) -> tuple[bool, str, Dict[str, Any]]:
-        """Activate a known target and wait for verified foreground evidence.
-
-        A newly-created cloud session can expose system UI before the uploaded
-        APK is foreground. Retry only the package/activity already obtained
-        from the uploaded build and observed discovery; never treat requested
-        capabilities alone as proof that the app launched.
-        """
-        source = page_source if page_source is not None else safe_page_source(driver)
-        ready, reason, identity = validate_target_surface(
+        """Open the selected app and verify its actual foreground surface."""
+        return activate_verified_target_surface(
             driver,
-            expected_package=package,
-            page_source=source,
+            package,
+            expected_activity=activity_hint,
+            timeout_seconds=timeout_seconds,
+            poll_interval=poll_interval,
+            page_source=page_source,
         )
-        if ready or not package:
-            return ready, reason, identity
-
-        activation_error: Exception | None = None
-        try:
-            AutopilotSuiteService._activate_application(driver, package, activity_hint)
-        except Exception as exc:
-            activation_error = exc
-
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-        while True:
-            time.sleep(max(0.0, float(poll_interval)))
-            source = safe_page_source(driver)
-            ready, reason, identity = validate_target_surface(
-                driver,
-                expected_package=package,
-                page_source=source,
-            )
-            if ready or time.monotonic() >= deadline:
-                break
-
-        if not ready and activation_error is not None:
-            reason = f"{reason} Reopening the uploaded app was unavailable ({type(activation_error).__name__})."
-        return ready, reason, identity
 
     @staticmethod
-    def _activate_application(driver, package: str, activity: str | None = None) -> None:
-        activity = str(activity or "").strip() or None
-        explicit_starter = getattr(driver, "start_activity", None)
-        if activity and callable(explicit_starter):
-            explicit_starter(package, activity)
-            return
-        driver.activate_app(package)
+    def _activate_application(
+        driver,
+        package: str,
+        activity: str | None = None,
+        *,
+        force_launch: bool = False,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        ready, reason, _ = activate_verified_target_surface(
+            driver,
+            package,
+            expected_activity=activity,
+            timeout_seconds=timeout_seconds,
+            poll_interval=0.5,
+            page_source=safe_page_source(driver),
+            force_launch=force_launch,
+        )
+        if not ready:
+            raise ProviderLifecycleUnavailable(reason)
 
     @staticmethod
     def _reset_to_application(
@@ -720,19 +705,18 @@ class AutopilotSuiteService:
         activity = str(activity or "").strip() or None
         explicit_starter = getattr(driver, "start_activity", None)
         if activity and callable(explicit_starter):
-            # Reopen the exact Android entry activity observed by Runtime
-            # Discovery. Package-only reset/activate can invoke MAIN/LAUNCHER,
-            # which is ambiguous for APKs that expose multiple launchers.
+            # Reopen the observed Android entry activity first, then use the
+            # verified package fallback if the provider did not foreground it.
             terminator = getattr(driver, "terminate_app", None)
             if callable(terminator):
                 terminator(package)
             time.sleep(0.5)
-            explicit_starter(package, activity)
-            time.sleep(2.0)
-            if expected_package_state(driver, package) is False:
-                raise ProviderLifecycleUnavailable(
-                    f"The observed Android entry activity {activity} did not reopen the uploaded app."
-                )
+            AutopilotSuiteService._activate_application(
+                driver,
+                package,
+                activity,
+                force_launch=True,
+            )
             return
         # A hosted device can preserve the app's navigation state even when a
         # new session is created with ``noReset=false``.  Replayable runtime
