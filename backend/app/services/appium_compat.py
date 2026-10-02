@@ -43,6 +43,9 @@ _SYSTEM_SURFACE_MARKERS = (
     "com.android.systemui",
     "permissioncontroller",
     "packageinstaller",
+    "com.google.android.gms",
+    "com.google.android.location.settings",
+    "location settings checker activity",
     "android:id/navigationbar",
     "android:id/statusbar",
     # Android launchers are not in the framework package allow-list above:
@@ -122,6 +125,23 @@ def observed_app_identity(driver: Any, *, page_source: Optional[str] = None) -> 
     }
 
 
+def safe_current_activity(driver: Any) -> str:
+    """Read the active Android activity when available; tolerate providers that omit it."""
+    try:
+        return str(getattr(driver, "current_activity", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _is_google_location_settings_checker(driver: Any, page_source: str) -> bool:
+    """Recognize only Google's explicit location-settings resolution activity."""
+    packages = {item.casefold() for item in _hierarchy_packages(page_source)}
+    if not packages.intersection({"com.google.android.gms", "com.google.android.location.settings"}):
+        return False
+    activity = safe_current_activity(driver).casefold()
+    return "locationsettingscheckeractivity" in activity or "locationsettingscheckeractivity" in page_source.casefold()
+
+
 def validate_target_surface(
     driver: Any,
     *,
@@ -142,6 +162,18 @@ def validate_target_surface(
     identity = observed_app_identity(driver, page_source=hierarchy)
     expected = str(expected_package or "").strip()
     packages = list(identity.get("hierarchy_packages") or [])
+    if _is_google_location_settings_checker(driver, hierarchy):
+        return (
+            False,
+            "Google Play Services' location-settings prompt is foreground; location was not enabled automatically.",
+            identity,
+        )
+    if expected and "com.google.android.gms" in packages and expected not in packages:
+        return (
+            False,
+            f"Runtime session foreground package 'com.google.android.gms' does not match uploaded package {expected!r}; Google Play Services UI is active.",
+            identity,
+        )
     non_system = [item for item in packages if not _is_system_package(item)]
     labels = [str(item or "").strip().casefold() for item in (control_labels or []) if str(item or "").strip()]
     launcher_package = next(
@@ -250,6 +282,44 @@ def activate_verified_target_surface(
     )
     if (ready and not force_launch) or not package:
         return ready, reason, identity
+
+    # Some Flutter apps invoke Google Play Services' location checker during
+    # startup. Treat Back as a safe decline: never switch on device location
+    # or accept a privacy prompt on the user's behalf. If the app returns, the
+    # normal package check below verifies that its own UI is actually visible.
+    if _is_google_location_settings_checker(driver, source):
+        try:
+            driver.back()
+        except Exception:
+            return (
+                False,
+                "A Google Play Services location-settings prompt is blocking the app; provider Back is unavailable, and location was not enabled automatically.",
+                identity,
+            )
+        prompt_deadline = time.monotonic() + min(5.0, max(0.0, float(timeout_seconds)))
+        while True:
+            source = safe_page_source(driver)
+            ready, reason, identity = validate_target_surface(
+                driver,
+                expected_package=package,
+                expected_activity=activity,
+                page_source=source,
+            )
+            if ready:
+                return (
+                    True,
+                    f"{reason} Returned from the Google location prompt using Back; device location remained unchanged.",
+                    identity,
+                )
+            if not _is_google_location_settings_checker(driver, source):
+                break
+            if time.monotonic() >= prompt_deadline:
+                return (
+                    False,
+                    "The Google Play Services location-settings prompt remained after Back; device location was not enabled automatically.",
+                    identity,
+                )
+            time.sleep(min(max(0.05, float(poll_interval)), max(0.0, prompt_deadline - time.monotonic())))
 
     strategies: list[tuple[str, Any]] = []
     start_activity = getattr(driver, "start_activity", None)
