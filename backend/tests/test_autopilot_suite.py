@@ -390,6 +390,46 @@ def test_suite_reset_to_application_cold_relaunches_after_provider_reset():
     assert driver.activate_calls == ["com.qtx.demo"]
 
 
+def service_target_check(driver, package):
+    from app.services.appium_compat import validate_target_surface
+
+    return validate_target_surface(driver, expected_package=package)
+
+
+def test_suite_reset_waits_for_delayed_app_foreground_after_lifecycle_restart(monkeypatch):
+    now = [0.0]
+    package = "com.qtx.demo"
+
+    class _DelayedForegroundDriver(_SystemUiForegroundDriver):
+        def __init__(self):
+            super().__init__(launch_target=False)
+            self.terminate_calls = []
+
+        def terminate_app(self, target_package):
+            self.terminate_calls.append(target_package)
+            self.current_package = "com.google.android.gms"
+            self.page_source = '<hierarchy><node package="com.google.android.gms" text="Google Play services" /></hierarchy>'
+
+    driver = _DelayedForegroundDriver()
+
+    def advance(seconds):
+        now[0] += seconds
+        if now[0] >= 3.0:
+            driver.current_package = package
+            driver.page_source = f'<hierarchy><node package="{package}" text="Sign in" /></hierarchy>'
+
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", advance)
+    monkeypatch.setattr("app.services.autopilot_suite.time.monotonic", lambda: now[0])
+
+    AutopilotSuiteService._reset_to_application(driver, package)
+
+    ready, reason, _ = service_target_check(driver, package)
+    assert ready is True, reason
+    assert driver.terminate_calls == [package]
+    assert driver.activate_calls == [package, package]
+    assert now[0] >= 3.0
+
+
 def test_suite_reactivates_uploaded_app_when_new_session_starts_in_system_ui(monkeypatch):
     service = AutopilotSuiteService(Settings(), prototype=object())
     driver = _SystemUiForegroundDriver()
