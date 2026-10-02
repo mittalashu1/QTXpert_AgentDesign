@@ -535,7 +535,7 @@ class AutopilotSuiteService:
                 package_hint=package_hint,
             )
             package = str(package_hint or target_identity.get("package") or identity["package"] or "").strip() or None
-            for test in tests:
+            for test_index, test in enumerate(tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
                 evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -551,7 +551,11 @@ class AutopilotSuiteService:
                 try:
                     if video_requested:
                         video_started, video_status = self._start_video_recording(driver)
-                    self._reset_to_application(driver, package, activity_hint)
+                    # The newly created session was just launched and its target foreground verified above.
+                    # Do not immediately force-stop that known-good first surface; hosted providers may
+                    # switch to Android system UI when restarting the attached app.
+                    if test_index > 0:
+                        self._reset_to_application(driver, package, activity_hint)
                     case_target_ready, case_target_reason, _ = validate_target_surface(
                         driver,
                         expected_package=package,
