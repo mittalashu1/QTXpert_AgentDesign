@@ -7,7 +7,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Any, Awaitable, Callable, Optional, TypeVar
 from uuid import UUID, uuid4
 from urllib.parse import urlparse
 
@@ -4841,6 +4841,26 @@ async def _persist_suite_evidence(
     return result.model_copy(update={"tests": persisted})
 
 
+SuiteRunT = TypeVar("SuiteRunT")
+
+
+async def _run_suite_without_db_connection(
+    db: AsyncSession,
+    runner: Callable[..., Awaitable[SuiteRunT]],
+    *args: Any,
+    **kwargs: Any,
+) -> SuiteRunT:
+    """Release the request DB transaction before a long remote test run.
+
+    Mobile-device and browser suites can take several minutes. Keeping the
+    request-scoped session's connection checked out for that entire time lets
+    Neon/Render close the idle connection before suite evidence is persisted.
+    The caller re-reads its job row after the runner returns.
+    """
+    await db.rollback()
+    return await runner(*args, **kwargs)
+
+
 @router.get("/{job_id}/discovery", response_model=AutopilotDiscoveryResult | None)
 async def get_autopilot_discovery(
     job_id: str,
@@ -4963,7 +4983,9 @@ async def execute_autopilot_suite(
                 "provider": "playwright",
                 "target_url": payload.target_url or job.get("target_url"),
             })
-            result = await AutopilotWebService(settings, service).safe_suite(
+            result = await _run_suite_without_db_connection(
+                db,
+                AutopilotWebService(settings, service).safe_suite,
                 job_id,
                 web_request,
                 candidates,
@@ -4998,7 +5020,9 @@ async def execute_autopilot_suite(
         discovery = _record_discovery(record)
         setup = await _setup_with_input_metadata(db, record, job_id, analysis_for_setup, discovery)
         input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
-        result = await AutopilotSuiteService(settings, service).run(
+        result = await _run_suite_without_db_connection(
+            db,
+            AutopilotSuiteService(settings, service).run,
             job_id,
             payload,
             discovery,
@@ -5006,6 +5030,9 @@ async def execute_autopilot_suite(
             input_values=input_values,
             sensitive_input_keys=sensitive_input_keys,
         )
+    # A remote run can outlive the database server's idle-connection window.
+    # Rehydrate the durable row on a fresh transaction before saving evidence.
+    record = await _safe_job_record(db, job_id, owner_id)
     # Safe-suite evidence is created per case inside the worker. Persist the
     # bounded screenshots/UI hierarchies before saving the suite snapshot so
     # the Autopilot report can offer durable downloads after a Render restart.
