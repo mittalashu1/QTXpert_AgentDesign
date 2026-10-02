@@ -2512,5 +2512,20 @@ async def test_safe_suite_endpoint_rejects_stale_map_after_latest_attempt_failed
     assert error.value.status_code == 409
     assert "Google Play services" in error.value.detail
 
+@pytest.mark.asyncio
+async def test_suite_phase_transition_initializes_phase_from_approved_plan():
+    from app.api.routes.autopilot import _advance_suite_job_to_running
 
+    class FakeService:
+        def __init__(self):
+            self.phases = []
+
+        async def update_job(self, _job_id, *, phase):
+            self.phases.append(phase)
+
+    service = FakeService()
+
+    await _advance_suite_job_to_running(service, "suite-job", "cases_pending_review")
+
+    assert service.phases == ["cases_approved", "execution_ready", "running"]
 
