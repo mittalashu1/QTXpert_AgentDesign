@@ -461,9 +461,9 @@ class AutopilotDiscoveryService:
             if not control.enabled:
                 return False
             if is_generic_container:
-                # Flutter/Appium often marks the app's splash root as a
-                # scrollable, located View. That root is not a journey. Only
-                # concrete child controls or actual input widgets count.
+                # Flutter/Appium can mark a splash root as scrollable and
+                # provide a locator. A generic root is not a journey; only
+                # concrete child controls or real input widgets count.
                 return False
             real_input = control.input_capable
             safe_action = control.clickable and bool(control.locators) and control.risk == "safe"
@@ -474,7 +474,7 @@ class AutopilotDiscoveryService:
         # completed crawl just because its root View has a locator or an
         # Appium interaction flag. Credential fields, safe actions, and
         # scrollable content remain valid evidence-backed entry points.
-        return len(screen.controls) <= 4 and not any(
+        return not any(
             has_meaningful_entry(control) for control in screen.controls
         )
 
