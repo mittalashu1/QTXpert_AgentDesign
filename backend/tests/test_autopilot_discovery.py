@@ -821,7 +821,7 @@ def test_loading_screen_accepts_a_real_safe_entry_point():
     assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is False
 
 
-def test_loading_screen_accepts_a_scrollable_generic_surface():
+def test_loading_screen_keeps_a_scrollable_generic_flutter_root_incomplete():
     from app.schemas.autopilot import DiscoveredScreen
 
     screen = DiscoveredScreen(
@@ -839,4 +839,68 @@ def test_loading_screen_accepts_a_scrollable_generic_surface():
         )],
     )
 
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True
+
+
+def test_loading_screen_accepts_observed_credential_fields():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="login",
+        package_name="com.qtx.demo",
+        activity_name="com.qtx.demo.MainActivity",
+        controls=[
+            DiscoveredControl(
+                control_id="username",
+                semantic_label="User ID",
+                class_name="android.widget.EditText",
+                enabled=True,
+                input_capable=True,
+                input_kind="credential",
+                locators=[DiscoveryLocator(strategy="id", value="username", confidence=0.99)],
+            ),
+            DiscoveredControl(
+                control_id="password",
+                semantic_label="Password",
+                class_name="android.widget.EditText",
+                enabled=True,
+                input_capable=True,
+                input_kind="credential",
+                locators=[DiscoveryLocator(strategy="id", value="password", confidence=0.99)],
+            ),
+        ],
+    )
+
     assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is False
+
+
+def test_startup_surface_diagnostic_reports_only_a_coarse_target_crash():
+    class Driver:
+        def get_log(self, log_type):
+            assert log_type == "logcat"
+            return [
+                {"message": "FATAL EXCEPTION in com.qtx.demo: private crash detail"},
+                {"message": "system_server FATAL EXCEPTION in unrelated.service"},
+            ]
+
+    diagnostic = AutopilotDiscoveryService._startup_surface_diagnostic(Driver(), "com.qtx.demo")
+
+    assert diagnostic == "Startup diagnostics: the target app reported a launch crash."
+    assert "private crash detail" not in diagnostic
+
+
+def test_startup_surface_diagnostic_ignores_unrelated_system_logs():
+    class Driver:
+        def get_log(self, _log_type):
+            return [{"message": "system_server FATAL EXCEPTION in com.other.package"}]
+
+    assert AutopilotDiscoveryService._startup_surface_diagnostic(Driver(), "com.qtx.demo") is None
+
+
+def test_startup_surface_diagnostic_is_optional_when_provider_disables_logcat():
+    class Driver:
+        def get_log(self, _log_type):
+            raise RuntimeError("provider does not expose device logs")
+
+    assert AutopilotDiscoveryService._startup_surface_diagnostic(Driver(), "com.qtx.demo") is None
