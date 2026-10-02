@@ -4869,7 +4869,6 @@ async def _advance_suite_job_to_running(service, job_id: str, phase: str) -> Non
     except ValueError:
         logger.info("Autopilot suite phase transition skipped for legacy job_id=%s", job_id)
 
-
 @router.post("/{job_id}/suite", response_model=AutopilotSuiteResult)
 async def execute_autopilot_suite(
     job_id: str,
