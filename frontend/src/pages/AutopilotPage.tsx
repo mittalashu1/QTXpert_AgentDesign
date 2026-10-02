@@ -1837,7 +1837,16 @@ export default function AutopilotPage() {
         // those references remain available in the checkpoint dialog.
         if (runtimeAuthPending) return;
       }
-      if (autoRunFirstPass && discoveryMode === "safe" && response.data.screens.length > 0) await runSuite(jobId);
+      const hasSafeDiscoverySurface = response.data.status === "completed"
+        && response.data.target_ready !== false
+        && response.data.safe_control_count > 0;
+      if (autoRunFirstPass && discoveryMode === "safe" && hasSafeDiscoverySurface) {
+        await runSuite(jobId);
+      } else if (autoRunFirstPass && discoveryMode === "safe" && response.data.screens.length > 0) {
+        setContextNotice(
+          "The app opened, but Autopilot could not read any safe, labeled controls. Discovery is incomplete, so no automated batch was started.",
+        );
+      }
     } catch (err) { setError(readableError(err, "Runtime discovery failed")); }
     finally { setDiscoveryBusy(false); }
   };
