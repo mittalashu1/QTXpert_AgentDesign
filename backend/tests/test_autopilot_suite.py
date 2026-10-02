@@ -4,7 +4,7 @@ import base64
 import pytest
 
 from app.config import Settings
-from app.services.appium_compat import ProviderLifecycleUnavailable
+from app.services.appium_compat import ProviderLifecycleUnavailable, validate_target_surface
 from app.schemas.autopilot import (
     AutopilotDiscoveryResult,
     DiscoveredControl,
@@ -390,12 +390,6 @@ def test_suite_reset_to_application_cold_relaunches_after_provider_reset():
     assert driver.activate_calls == ["com.qtx.demo"]
 
 
-def service_target_check(driver, package):
-    from app.services.appium_compat import validate_target_surface
-
-    return validate_target_surface(driver, expected_package=package)
-
-
 def test_suite_reset_waits_for_delayed_app_foreground_after_lifecycle_restart(monkeypatch):
     now = [0.0]
     package = "com.qtx.demo"
@@ -423,7 +417,7 @@ def test_suite_reset_waits_for_delayed_app_foreground_after_lifecycle_restart(mo
 
     AutopilotSuiteService._reset_to_application(driver, package)
 
-    ready, reason, _ = service_target_check(driver, package)
+    ready, reason, _ = validate_target_surface(driver, expected_package=package)
     assert ready is True, reason
     assert driver.terminate_calls == [package]
     assert driver.activate_calls == [package, package]
