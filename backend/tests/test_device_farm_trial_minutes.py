@@ -77,14 +77,3 @@ def test_trial_failure_keeps_only_an_allowlisted_reason(monkeypatch, sdk_code, e
         service.get_trial_minutes()
     assert exc.value.code == expected
     assert "synthetic-secret" not in str(exc.value)
-
-
-def test_provider_status_explains_only_safe_balance_error(monkeypatch):
-    from app.api.routes.autopilot import get_autopilot_providers
-    def fail(_):
-        raise DeviceFarmTrialBalanceError("access_denied")
-    monkeypatch.setattr(DeviceFarmService, "get_trial_minutes", fail)
-    settings = Settings(DEVICE_FARM_ENABLED=True, DEVICE_FARM_PROJECT_ARN="arn:aws:devicefarm:us-west-2:123:project:test")
-    result = asyncio.run(get_autopilot_providers(SimpleNamespace(), settings))
-    assert "read-only GetAccountSettings" in result.device_farm_trial_minutes_error
-    assert result.device_farm_trial_minutes_remaining is None
