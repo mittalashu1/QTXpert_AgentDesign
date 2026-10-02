@@ -1648,6 +1648,20 @@ class AutopilotDiscoveryService:
             # Persist only the now-verified target root. This also upgrades an
             # identical in-memory candidate if the session needed activation.
             current, _ = capture(persist_evidence=True, require_target=True)
+            if launch_surface_incomplete:
+                # Keep the launch-state diagnosis authoritative. A verified package with no readable controls is not a completed app crawl.
+                return {
+                    "screens": screens,
+                    "transitions": [],
+                    "actions_attempted": actions_attempted,
+                    "stop_reason": stop_reason,
+                    "warnings": warnings,
+                    "authentication_blocked": False,
+                    "target_ready": target_ready,
+                    "target_identity": target_identity,
+                    "target_activity": target_activity,
+                    "target_identity_reason": target_identity_reason,
+                }
             if request.observe_only:
                 stop_reason = (
                     "Observe-only discovery captured an incomplete launch screen; no login or workflows were inferred"

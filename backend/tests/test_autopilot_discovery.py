@@ -693,3 +693,86 @@ def test_auth_feedback_detects_temporary_account_lock_without_returning_copy(mes
     assert AutopilotDiscoveryService._auth_feedback_code(source) == "account_locked"
 
 
+
+
+
+def test_loading_screen_treats_unlabelled_root_view_as_incomplete():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="launch-surface",
+        package_name="com.qtx.demo",
+        activity_name="com.qtx.demo.MainActivity",
+        controls=[DiscoveredControl(
+            control_id="root-view",
+            semantic_label="View",
+            class_name="android.view.View",
+            clickable=True,
+            enabled=True,
+        )],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True
+
+
+def test_discovery_preserves_incomplete_launch_status_instead_of_crawling_empty_surface(tmp_path, monkeypatch):
+    import appium
+    from app.config import Settings
+    from app.schemas.autopilot import AutopilotDiscoveryRequest
+
+    class Driver:
+        capabilities = {
+            "appium:appPackage": "com.qtx.demo",
+            "appium:appActivity": "com.qtx.demo.MainActivity",
+        }
+        page_source = (
+            '<hierarchy><node package="com.qtx.demo" '
+            'class="android.view.View" text="" clickable="true" enabled="true" '
+            'bounds="[0,0][1080,1920]" /></hierarchy>'
+        )
+
+        def get_screenshot_as_file(self, path):
+            from pathlib import Path
+            Path(path).write_bytes(b"screen")
+            return True
+
+        def quit(self):
+            return None
+
+    driver = Driver()
+    monkeypatch.setattr(appium.webdriver, "Remote", lambda *args, **kwargs: driver)
+    monkeypatch.setattr("app.services.autopilot_discovery.time.sleep", lambda _seconds: None)
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotDiscoveryService(
+        Settings(AUTOPILOT_DISCOVERY_SETTLE_SECONDS=1, AUTOPILOT_DISCOVERY_SETTLE_RETRIES=1),
+        Prototype(),
+    )
+    request = AutopilotDiscoveryRequest(
+        target_kind="android",
+        provider="devicefarm",
+        device_name="Google Pixel 8",
+    )
+
+    result = service._run_sync(
+        "job-123",
+        "https://devicefarm.invalid/appium",
+        "arn:uploaded-app",
+        request,
+        "com.qtx.demo",
+        "com.qtx.demo.MainActivity",
+        None,
+        1000,
+        1000,
+        1000,
+    )
+
+    assert "non-interactive launch screen" in result["stop_reason"].lower()
+    assert result["actions_attempted"] == 0
+    assert result["transitions"] == []
+    assert result["target_ready"] is True

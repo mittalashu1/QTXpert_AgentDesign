@@ -926,3 +926,48 @@ def test_suite_treats_volatile_duplicate_surface_as_same_replay_page():
 
 
 
+
+
+
+def test_suite_does_not_force_restart_before_first_verified_case(tmp_path, monkeypatch):
+    import appium
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    driver = _ColdRelaunchDriver()
+    driver.quit = lambda: None
+    monkeypatch.setattr(appium.webdriver, "Remote", lambda *args, **kwargs: driver)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotSuiteService(Settings(), prototype=Prototype())
+    request = AutopilotSuiteRequest(
+        target_kind="android",
+        provider="devicefarm",
+        device_name="Google Pixel 8",
+        max_tests=1,
+    )
+    test = _test_ir([
+        QTXIRStep(action="inspect_ui", description="Inspect the verified target screen"),
+    ]).model_copy(update={"bucket": "installation"})
+
+    results = service._run_sync(
+        "job-123",
+        "https://devicefarm.invalid/appium",
+        "arn:uploaded-app",
+        request,
+        [test],
+        "com.qtx.demo",
+        None,
+        None,
+        1000,
+        1000,
+        1000,
+    )
+
+    assert results[0].status == "passed"
+    assert driver.reset_calls == 0
+    assert driver.terminate_calls == []
