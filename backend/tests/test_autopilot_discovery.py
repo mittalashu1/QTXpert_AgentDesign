@@ -820,3 +820,23 @@ def test_loading_screen_accepts_a_real_safe_entry_point():
 
     assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is False
 
+
+def test_loading_screen_accepts_a_scrollable_generic_surface():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="scrollable-landing",
+        package_name="com.qtx.demo",
+        activity_name="com.qtx.demo.MainActivity",
+        controls=[DiscoveredControl(
+            control_id="content",
+            semantic_label="ScrollView",
+            class_name="android.widget.ScrollView",
+            enabled=True,
+            scrollable=True,
+            locators=[DiscoveryLocator(strategy="id", value="content", confidence=0.95)],
+        )],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is False
