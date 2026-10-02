@@ -1,4 +1,5 @@
 from app.services.appium_compat import (
+    activate_verified_target_surface,
     ProviderLifecycleUnavailable,
     expected_package_state,
     observed_app_identity,
@@ -287,3 +288,79 @@ def test_ios_back_does_not_try_android_keycode_fallback():
     else:  # pragma: no cover
         raise AssertionError("unsupported iOS back should be reported")
     assert driver.called is False
+
+class _SystemUiLaunchDriver:
+    capabilities = {
+        "appium:appPackage": "com.qtx.demo",
+        "appium:appActivity": "com.qtx.demo.MainActivity",
+    }
+
+    def __init__(self, *, activity_launches_target=False, package_launches_target=False):
+        self.page_source = '<hierarchy><node package="com.google.android.gms" text="Google Play services" /></hierarchy>'
+        self.activity_launches_target = activity_launches_target
+        self.package_launches_target = package_launches_target
+        self.calls = []
+
+    def start_activity(self, package, activity):
+        self.calls.append(("activity", package, activity))
+        if self.activity_launches_target:
+            self.page_source = f'<hierarchy><node package="{package}" text="Sign in" /></hierarchy>'
+
+    def activate_app(self, package):
+        self.calls.append(("package", package))
+        if self.package_launches_target:
+            self.page_source = f'<hierarchy><node package="{package}" text="Sign in" /></hierarchy>'
+
+
+def test_target_launch_falls_back_to_package_when_activity_command_does_not_foreground_app(monkeypatch):
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
+    driver = _SystemUiLaunchDriver(package_launches_target=True)
+
+    ready, reason, identity = activate_verified_target_surface(
+        driver,
+        "com.qtx.demo",
+        expected_activity="com.qtx.demo.MainActivity",
+        timeout_seconds=0,
+    )
+
+    assert ready is True, reason
+    assert [call[0] for call in driver.calls] == ["activity", "package"]
+    assert identity["package"] == "com.qtx.demo"
+    assert "package activation" in reason
+
+
+def test_target_launch_stops_after_activity_is_visibly_verified(monkeypatch):
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
+    driver = _SystemUiLaunchDriver(activity_launches_target=True, package_launches_target=True)
+
+    ready, reason, identity = activate_verified_target_surface(
+        driver,
+        "com.qtx.demo",
+        expected_activity="com.qtx.demo.MainActivity",
+        timeout_seconds=0,
+    )
+
+    assert ready is True, reason
+    assert [call[0] for call in driver.calls] == ["activity"]
+    assert identity["package"] == "com.qtx.demo"
+    assert "observed activity" in reason
+
+
+def test_target_launch_preserves_wrong_app_blocker_when_all_strategies_fail(monkeypatch):
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
+    driver = _SystemUiLaunchDriver()
+
+    ready, reason, identity = activate_verified_target_surface(
+        driver,
+        "com.qtx.demo",
+        expected_activity="com.qtx.demo.MainActivity",
+        timeout_seconds=0,
+    )
+
+    assert ready is False
+    assert identity["package"] == "com.google.android.gms"
+    assert "com.google.android.gms" in reason
+    assert "observed activity requested" in reason
+    assert "package activation requested" in reason
+    assert "target was not verified in the foreground" in reason
+
