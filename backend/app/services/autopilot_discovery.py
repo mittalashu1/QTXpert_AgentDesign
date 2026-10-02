@@ -29,6 +29,7 @@ from app.schemas.autopilot import (
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
+    activate_verified_target_surface,
     enter_observed_text,
     safe_app_identity,
     safe_page_source,
@@ -1585,32 +1586,44 @@ class AutopilotDiscoveryService:
             target_identity = identity.get("package")
             target_activity = identity.get("activity")
             if not target_ready and package_hint:
-                # Some cloud sessions honour ``app`` but leave the launcher or
-                # system UI foreground until the package is explicitly
-                # activated. Retry that deterministic operation once before
-                # declaring the provider unusable.
+                # A hosted Appium command may report that an activity launch
+                # succeeded while leaving the launcher/system app foreground.
+                # Try the observed activity and package activation in order,
+                # verifying the actual UI package after each attempt.
                 try:
-                    # Discard the unverified launch surface before retrying;
-                    # it is not part of the app's screen graph.
                     screens.clear()
                     seen_fingerprints.clear()
-                    driver.activate_app(package_hint)
-                    time.sleep(2)
-                    candidate, _ = capture(persist_evidence=False)
-                    retry_ready, retry_reason, retry_identity = validate_target_surface(
+                    retry_ready, retry_reason, retry_identity = activate_verified_target_surface(
                         driver,
-                        expected_package=package_hint,
+                        package_hint,
                         expected_activity=activity_hint,
+                        timeout_seconds=15.0,
+                        poll_interval=0.5,
                         page_source=safe_page_source(driver),
-                        control_labels=[control.semantic_label for control in candidate.controls],
                     )
                     if retry_ready:
-                        current = candidate
-                        target_ready = True
+                        candidate, _ = capture(persist_evidence=False)
+                        candidate_ready, candidate_reason, candidate_identity = validate_target_surface(
+                            driver,
+                            expected_package=package_hint,
+                            expected_activity=activity_hint,
+                            page_source=safe_page_source(driver),
+                            control_labels=[control.semantic_label for control in candidate.controls],
+                        )
+                        if candidate_ready:
+                            current = candidate
+                            target_ready = True
+                            target_identity_reason = candidate_reason or retry_reason
+                            target_identity = candidate_identity.get("package") or retry_identity.get("package")
+                            target_activity = candidate_identity.get("activity") or retry_identity.get("activity")
+                        else:
+                            target_identity_reason = candidate_reason
+                            screens.clear()
+                            seen_fingerprints.clear()
+                    else:
                         target_identity_reason = retry_reason
                         target_identity = retry_identity.get("package")
                         target_activity = retry_identity.get("activity")
-                    else:
                         screens.clear()
                         seen_fingerprints.clear()
                 except Exception as exc:
