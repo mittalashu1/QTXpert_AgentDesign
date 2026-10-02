@@ -397,7 +397,6 @@ class AutopilotDiscoveryService:
         return requests
 
     @staticmethod
-    @staticmethod
     def _looks_like_loading_screen(screen: DiscoveredScreen) -> bool:
         """Identify splash/blank or sparse initial surfaces without a safe entry point."""
         marker_text = " ".join(
@@ -423,11 +422,14 @@ class AutopilotDiscoveryService:
             # Flutter/Appium may tag a splash root as an enabled or even
             # input-capable View. That implementation flag is not evidence
             # of an end-user field; generic container nodes never open a path.
-            if label in generic_labels or class_short in generic_root_classes:
-                return False
+            is_generic_container = label in generic_labels or class_short in generic_root_classes
             if not control.enabled:
                 return False
-            real_input = control.input_capable and class_short not in generic_root_classes
+            if is_generic_container:
+                # A generic scroll container is meaningful only when the
+                # runtime exposed a locator that can safely scroll it.
+                return control.scrollable and bool(control.locators)
+            real_input = control.input_capable
             safe_action = control.clickable and bool(control.locators) and control.risk == "safe"
             scroll_surface = control.scrollable and bool(control.locators)
             return real_input or safe_action or scroll_surface
@@ -1568,12 +1570,12 @@ class AutopilotDiscoveryService:
             if self._looks_like_loading_screen(current):
                 launch_surface_incomplete = True
                 warnings.append(
-                    f"Initial app screen remained non-interactive after {retries} bounded settle attempt(s); "
+                    f"Initial app screen remained non-interactive after {retries} bounded settle attempt(s), with no safe entry point; "
                     "the launch state was retained as evidence and no controls were auto-clicked."
                 )
                 stop_reason = (
-                    "App remained on a non-interactive launch screen after bounded settling; "
-                    "login and workflows were not inferred."
+                    "App remained on a non-interactive launch screen or sparse surface after bounded settling; "
+                    "no safe entry point was available, so login and workflows were not inferred."
                 )
             elif current is not screens[0]:
                 # The replay root must be the settled app, not its splash.
