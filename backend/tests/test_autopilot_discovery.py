@@ -421,7 +421,7 @@ async def test_browserstack_upload_quota_is_returned_as_structured_blocker(tmp_p
     assert "testing time expired" in (result.error or "")
     assert "testing time expired" in (result.target_identity_reason or "")
 
-def test_runtime_discovery_stops_at_login_reached_after_safe_navigation(tmp_path, monkeypatch):
+def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp_path, monkeypatch):
     import sys
     import types
 
@@ -445,11 +445,23 @@ def test_runtime_discovery_stops_at_login_reached_after_safe_navigation(tmp_path
         capabilities = {"appium:appPackage": "com.qtx.demo", "appium:appActivity": ".MainActivity"}
 
         def __init__(self):
-            self.state = "landing"
+            self.state = "location_prompt"
             self.quit_called = False
+            self.back_calls = 0
+
+        @property
+        def current_activity(self):
+            if self.state == "location_prompt":
+                return "com.google.android.location.settings.LocationSettingsCheckerActivity"
+            return "com.qtx.demo.MainActivity"
 
         @property
         def page_source(self):
+            if self.state == "location_prompt":
+                return (
+                    '<hierarchy><node package="com.google.android.gms" text="Location settings" '
+                    'class="android.widget.FrameLayout" /></hierarchy>'
+                )
             if self.state == "landing":
                 return (
                     '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">'
@@ -470,6 +482,11 @@ def test_runtime_discovery_stops_at_login_reached_after_safe_navigation(tmp_path
                 'class="android.widget.Button" clickable="true" enabled="true" />'
                 '</node></hierarchy>'
             )
+
+        def back(self):
+            self.back_calls += 1
+            if self.state == "location_prompt":
+                self.state = "landing"
 
         def find_element(self, by, value):
             assert by == AppiumBy.ID
@@ -532,6 +549,8 @@ def test_runtime_discovery_stops_at_login_reached_after_safe_navigation(tmp_path
 
     assert result["stop_reason"].startswith("Authentication checkpoint detected.")
     assert result["actions_attempted"] == 1
+    assert driver.back_calls == 1
+    assert any("startup surface during recovery" in warning for warning in result["warnings"])
     assert len(result["screens"]) == 2
     assert result["screens"][1].screen_id == "screen-002"
     assert {control.semantic_label for control in result["screens"][1].controls if control.input_capable} == {
