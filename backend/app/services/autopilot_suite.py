@@ -709,11 +709,15 @@ class AutopilotSuiteService:
         activity = str(activity or "").strip() or None
         explicit_starter = getattr(driver, "start_activity", None)
         if activity and callable(explicit_starter):
-            # Reopen the observed Android entry activity first, then use the
-            # verified package fallback if the provider did not foreground it.
+            # Reopen the observed Android entry activity, then verify that the
+            # app actually reached the foreground before replaying a case.
             terminator = getattr(driver, "terminate_app", None)
             if callable(terminator):
-                terminator(package)
+                try:
+                    terminator(package)
+                except Exception:
+                    # The verified launch below is still the authoritative check.
+                    pass
             time.sleep(0.5)
             AutopilotSuiteService._activate_application(
                 driver,
@@ -722,33 +726,19 @@ class AutopilotSuiteService:
                 force_launch=True,
             )
             return
-        # A hosted device can preserve the app's navigation state even when a
-        # new session is created with ``noReset=false``.  Replayable runtime
-        # cases must start from the same launch state that Discovery observed,
-        # otherwise a locator from the first screen is searched on a later
-        # screen and is reported as a misleading NoSuchElementException.
+
+        # Provider reset is useful when available, but it is not proof that the
+        # selected app is foreground. Hosted Android devices can briefly expose
+        # Play Services or the launcher while a cold start is still settling.
         resetter = getattr(driver, "reset", None)
-        provider_reset_succeeded = False
         if callable(resetter):
             try:
                 resetter()
-                provider_reset_succeeded = True
                 time.sleep(1.8)
             except Exception:
-                # BrowserStack and some local providers do not expose the
-                # optional reset endpoint. Fall back to the portable lifecycle
-                # sequence below.
+                # Some providers do not expose a session reset endpoint.
                 pass
 
-        # A number of hosted Android drivers implement ``reset`` as a session
-        # reset but keep the last activity/view in the foreground.  That makes
-        # a locator observed on the discovery root disappear on the next case
-        # and is reported as a misleading NoSuchElementException.  Always use
-        # the portable terminate/activate pair when it is available, even
-        # after a provider reset, so every replay starts at a cold app entry
-        # point.  If a provider restricts either lifecycle call, retain the
-        # successful reset and continue rather than turning capability limits
-        # into a suite failure.
         terminator = getattr(driver, "terminate_app", None)
         activator = getattr(driver, "activate_app", None)
         if callable(terminator) and callable(activator):
@@ -757,30 +747,19 @@ class AutopilotSuiteService:
                 time.sleep(0.5)
                 activator(package)
                 time.sleep(2.0)
-                if expected_package_state(driver, package) is not False:
-                    return
             except Exception:
-                if provider_reset_succeeded and expected_package_state(driver, package) is not False:
-                    return
+                # Continue to the bounded verified-launch fallback below.
+                pass
 
-        # A provider reset is still preferable to an unsupported lifecycle
-        # sequence.  Some drivers do not expose package identity immediately;
-        # an unknown state must not trigger a second unsupported call.
-        if provider_reset_succeeded and expected_package_state(driver, package) is not False:
-            return
-        try:
-            if not callable(terminator):
-                driver.terminate_app(package)
-            time.sleep(0.5)
-            if not callable(activator):
-                driver.activate_app(package)
-            time.sleep(2.0)
-        except Exception:
-            # Some remote providers restrict lifecycle APIs; if the target app is
-            # already foreground, continuing is safer than failing the whole suite.
-            if expected_package_state(driver, package) is not True:
-                raise
-
+        ready, reason, _ = AutopilotSuiteService._activate_verified_target(
+            driver,
+            package,
+            activity_hint=activity,
+            timeout_seconds=15.0,
+            poll_interval=0.5,
+        )
+        if not ready:
+            raise ProviderLifecycleUnavailable(reason)
 
     @staticmethod
     def _auth_submit_label(value: str | None) -> bool:
