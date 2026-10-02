@@ -220,6 +220,87 @@ def validate_target_surface(
     )
 
 
+
+def activate_verified_target_surface(
+    driver: Any,
+    expected_package: Optional[str],
+    *,
+    expected_activity: Optional[str] = None,
+    timeout_seconds: float = 15.0,
+    poll_interval: float = 0.5,
+    page_source: Optional[str] = None,
+    force_launch: bool = False,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Reopen a known target using its observed activity, then package fallback.
+
+    Hosted Appium sessions can accept an activity-launch command without
+    actually bringing the target app to the foreground. Always verify the
+    live hierarchy after each launch strategy, and try package activation if
+    the explicit activity was not observed. Cap the total retry window so this
+    recovery cannot hang a discovery or suite run.
+    """
+    package = str(expected_package or "").strip()
+    activity = str(expected_activity or "").strip() or None
+    source = page_source if page_source is not None else safe_page_source(driver)
+    ready, reason, identity = validate_target_surface(
+        driver,
+        expected_package=package,
+        expected_activity=activity,
+        page_source=source,
+    )
+    if (ready and not force_launch) or not package:
+        return ready, reason, identity
+
+    strategies: list[tuple[str, Any]] = []
+    start_activity = getattr(driver, "start_activity", None)
+    if activity and callable(start_activity):
+        strategies.append(("observed activity", lambda: start_activity(package, activity)))
+    activate_app = getattr(driver, "activate_app", None)
+    if callable(activate_app):
+        strategies.append(("package activation", lambda: activate_app(package)))
+    if not strategies:
+        return False, f"{reason} The device provider exposes no supported app-launch command.", identity
+
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    attempts: list[str] = []
+    for index, (strategy_name, launch) in enumerate(strategies):
+        try:
+            launch()
+            attempts.append(f"{strategy_name} requested")
+        except Exception as exc:
+            # Keep provider internals and any command payload out of evidence.
+            attempts.append(f"{strategy_name} unavailable ({type(exc).__name__})")
+
+        source = safe_page_source(driver)
+        ready, reason, identity = validate_target_surface(
+            driver,
+            expected_package=package,
+            expected_activity=activity,
+            page_source=source,
+        )
+        if ready:
+            return True, f"{reason} Reached via {strategy_name}.", identity
+
+        strategies_remaining = len(strategies) - index
+        remaining = max(0.0, deadline - time.monotonic())
+        attempt_deadline = time.monotonic() + remaining / max(1, strategies_remaining)
+        while time.monotonic() < attempt_deadline:
+            interval = max(0.05, float(poll_interval))
+            time.sleep(min(interval, max(0.0, attempt_deadline - time.monotonic())))
+            source = safe_page_source(driver)
+            ready, reason, identity = validate_target_surface(
+                driver,
+                expected_package=package,
+                expected_activity=activity,
+                page_source=source,
+            )
+            if ready:
+                return True, f"{reason} Reached via {strategy_name}.", identity
+        attempts[-1] += "; target was not verified in the foreground"
+
+    detail = "; ".join(attempts)
+    return False, f"{reason} Launch attempts: {detail}.", identity
+
 def safe_page_source(driver: Any) -> str:
     """Return the current hierarchy without allowing evidence lookup to fail a run."""
     try:
