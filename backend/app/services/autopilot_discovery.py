@@ -114,6 +114,9 @@ _SYSTEM_SURFACE_MARKERS = (
     "pixel phone",
     "phone help center",
     "android system",
+    "com.google.android.gms",
+    "com.google.android.location.settings",
+    "location settings checker activity",
     "navigationbarbackground",
     "statusbar",
     "notification shade",
@@ -1663,6 +1666,19 @@ class AutopilotDiscoveryService:
                             target_identity_reason = candidate_reason or retry_reason
                             target_identity = candidate_identity.get("package") or retry_identity.get("package")
                             target_activity = candidate_identity.get("activity") or retry_identity.get("activity")
+                            if launch_surface_incomplete and not self._looks_like_loading_screen(candidate):
+                                # Recovery reached an interactive, verified app
+                                # screen. Do not leave the earlier splash/system
+                                # surface flag gating the entire crawl.
+                                launch_surface_incomplete = False
+                                stop_reason = "Discovery bounds reached"
+                                warnings = [
+                                    warning for warning in warnings
+                                    if not warning.startswith("Initial app screen remained non-interactive")
+                                ]
+                                warnings.append(
+                                    "The verified app moved past its startup surface during recovery; discovery resumed."
+                                )
                         else:
                             target_identity_reason = candidate_reason
                             screens.clear()
