@@ -842,6 +842,23 @@ def test_loading_screen_keeps_a_scrollable_generic_flutter_root_incomplete():
     assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True
 
 
+def test_loading_screen_treats_many_generic_nodes_as_incomplete():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="sparse-flutter-splash",
+        package_name="com.qtx.demo",
+        activity_name="com.qtx.demo.MainActivity",
+        controls=[
+            DiscoveredControl(control_id=f"view-{index}", semantic_label="View", class_name="android.view.View")
+            for index in range(6)
+        ],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True
+
+
 def test_loading_screen_accepts_observed_credential_fields():
     from app.schemas.autopilot import DiscoveredScreen
 
@@ -888,6 +905,18 @@ def test_startup_surface_diagnostic_reports_only_a_coarse_target_crash():
 
     assert diagnostic == "Startup diagnostics: the target app reported a launch crash."
     assert "private crash detail" not in diagnostic
+
+
+@pytest.mark.parametrize(("message", "expected"), [
+    ("com.qtx.demo: java.net.UnknownHostException", "Startup diagnostics: the target app could not reach a required service."),
+    ("com.qtx.demo: MissingPluginException", "Startup diagnostics: Flutter reported an initialization error."),
+])
+def test_startup_surface_diagnostic_classifies_target_network_and_flutter_errors(message, expected):
+    class Driver:
+        def get_log(self, _log_type):
+            return [{"message": message}]
+
+    assert AutopilotDiscoveryService._startup_surface_diagnostic(Driver(), "com.qtx.demo") == expected
 
 
 def test_startup_surface_diagnostic_ignores_unrelated_system_logs():
