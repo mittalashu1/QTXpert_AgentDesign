@@ -776,3 +776,67 @@ def test_discovery_preserves_incomplete_launch_status_instead_of_crawling_empty_
     assert result["actions_attempted"] == 0
     assert result["transitions"] == []
     assert result["target_ready"] is True
+
+def test_loading_screen_ignores_generic_root_marked_as_input_capable():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="flutter-splash",
+        package_name="com.qtx.demo",
+        activity_name="com.qtx.demo.MainActivity",
+        controls=[DiscoveredControl(
+            control_id="root-view",
+            semantic_label="View",
+            class_name="android.view.View",
+            clickable=True,
+            enabled=True,
+            input_capable=True,
+            locators=[DiscoveryLocator(strategy="id", value="root", confidence=0.9)],
+        )],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True
+
+
+def test_loading_screen_accepts_a_real_safe_entry_point():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="real-entry",
+        package_name="com.qtx.demo",
+        activity_name="com.qtx.demo.MainActivity",
+        controls=[DiscoveredControl(
+            control_id="sign-in",
+            semantic_label="Sign in",
+            class_name="android.widget.Button",
+            clickable=True,
+            enabled=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="accessibility_id", value="Sign in", confidence=0.99)],
+        )],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is False
+
+
+def test_loading_screen_accepts_a_scrollable_generic_surface():
+    from app.schemas.autopilot import DiscoveredScreen
+
+    screen = DiscoveredScreen(
+        screen_id="screen-001",
+        fingerprint="scrollable-landing",
+        package_name="com.qtx.demo",
+        activity_name="com.qtx.demo.MainActivity",
+        controls=[DiscoveredControl(
+            control_id="content",
+            semantic_label="ScrollView",
+            class_name="android.widget.ScrollView",
+            enabled=True,
+            scrollable=True,
+            locators=[DiscoveryLocator(strategy="id", value="content", confidence=0.95)],
+        )],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is False

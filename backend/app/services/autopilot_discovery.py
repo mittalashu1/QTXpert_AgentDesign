@@ -398,7 +398,7 @@ class AutopilotDiscoveryService:
 
     @staticmethod
     def _looks_like_loading_screen(screen: DiscoveredScreen) -> bool:
-        """Identify splash/blank states that deserve a bounded settle retry."""
+        """Identify splash/blank or sparse initial surfaces without a safe entry point."""
         marker_text = " ".join(
             [
                 screen.activity_name or "",
@@ -412,24 +412,35 @@ class AutopilotDiscoveryService:
         generic_labels = {
             "view", "imageview", "textview", "unknown", "layout", "framelayout",
             "linearlayout", "relativelayout", "constraintlayout", "scrollview",
+            "viewgroup", "flutterview", "fluttertextureview", "surfaceview",
         }
-        interactive = [
-            control for control in screen.controls
-            if control.enabled
-            and control.locators
-            and (
-                control.input_capable
-                or (
-                    control.clickable
-                    and re.sub(r"[\s_-]+", " ", str(control.semantic_label or "").lower()).strip() not in generic_labels
-                )
-            )
-        ]
-        # Some providers expose an Android splash as a clickable generic View.
-        # It is not a ready product page without a deterministic locator and
-        # a meaningful user-facing label; keep waiting rather than reporting
-        # a false one-screen discovery.
-        return len(interactive) == 0 and len(screen.controls) <= 4
+        generic_root_classes = generic_labels | {"decorview", "fluttercontainer"}
+
+        def has_meaningful_entry(control: DiscoveredControl) -> bool:
+            label = re.sub(r"[\s_-]+", " ", str(control.semantic_label or "").lower()).strip()
+            class_short = str(control.class_name or "").rsplit(".", 1)[-1].casefold()
+            # Flutter/Appium may tag a splash root as an enabled or even
+            # input-capable View. That implementation flag is not evidence
+            # of an end-user field; generic container nodes never open a path.
+            is_generic_container = label in generic_labels or class_short in generic_root_classes
+            if not control.enabled:
+                return False
+            if is_generic_container:
+                # A generic scroll container is meaningful only when the
+                # runtime exposed a locator that can safely scroll it.
+                return control.scrollable and bool(control.locators)
+            real_input = control.input_capable
+            safe_action = control.clickable and bool(control.locators) and control.risk == "safe"
+            scroll_surface = control.scrollable and bool(control.locators)
+            return real_input or safe_action or scroll_surface
+
+        # Do not label a sparse, ungrounded splash/landing surface as a
+        # completed crawl just because its root View has a locator or an
+        # Appium interaction flag. Credential fields, safe actions, and
+        # scrollable content remain valid evidence-backed entry points.
+        return len(screen.controls) <= 4 and not any(
+            has_meaningful_entry(control) for control in screen.controls
+        )
 
     @classmethod
     def _risk(cls, label: str, attrs: Dict[str, str]) -> tuple[str, Optional[str]]:
@@ -1559,12 +1570,12 @@ class AutopilotDiscoveryService:
             if self._looks_like_loading_screen(current):
                 launch_surface_incomplete = True
                 warnings.append(
-                    f"Initial app screen remained non-interactive after {retries} bounded settle attempt(s); "
+                    f"Initial app screen remained non-interactive after {retries} bounded settle attempt(s), with no safe entry point; "
                     "the launch state was retained as evidence and no controls were auto-clicked."
                 )
                 stop_reason = (
-                    "App remained on a non-interactive launch screen after bounded settling; "
-                    "login and workflows were not inferred."
+                    "App remained on a non-interactive launch screen or sparse surface after bounded settling; "
+                    "no safe entry point was available, so login and workflows were not inferred."
                 )
             elif current is not screens[0]:
                 # The replay root must be the settled app, not its splash.
