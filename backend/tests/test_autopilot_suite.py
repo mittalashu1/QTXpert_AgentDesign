@@ -4,7 +4,7 @@ import base64
 import pytest
 
 from app.config import Settings
-from app.services.appium_compat import ProviderLifecycleUnavailable
+from app.services.appium_compat import ProviderLifecycleUnavailable, validate_target_surface
 from app.schemas.autopilot import (
     AutopilotDiscoveryResult,
     DiscoveredControl,
@@ -388,6 +388,40 @@ def test_suite_reset_to_application_cold_relaunches_after_provider_reset():
     assert driver.reset_calls == 1
     assert driver.terminate_calls == ["com.qtx.demo"]
     assert driver.activate_calls == ["com.qtx.demo"]
+
+
+def test_suite_reset_waits_for_delayed_app_foreground_after_lifecycle_restart(monkeypatch):
+    now = [0.0]
+    package = "com.qtx.demo"
+
+    class _DelayedForegroundDriver(_SystemUiForegroundDriver):
+        def __init__(self):
+            super().__init__(launch_target=False)
+            self.terminate_calls = []
+
+        def terminate_app(self, target_package):
+            self.terminate_calls.append(target_package)
+            self.current_package = "com.google.android.gms"
+            self.page_source = '<hierarchy><node package="com.google.android.gms" text="Google Play services" /></hierarchy>'
+
+    driver = _DelayedForegroundDriver()
+
+    def advance(seconds):
+        now[0] += seconds
+        if now[0] >= 3.0:
+            driver.current_package = package
+            driver.page_source = f'<hierarchy><node package="{package}" text="Sign in" /></hierarchy>'
+
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", advance)
+    monkeypatch.setattr("app.services.autopilot_suite.time.monotonic", lambda: now[0])
+
+    AutopilotSuiteService._reset_to_application(driver, package)
+
+    ready, reason, _ = validate_target_surface(driver, expected_package=package)
+    assert ready is True, reason
+    assert driver.terminate_calls == [package]
+    assert driver.activate_calls == [package, package]
+    assert now[0] >= 3.0
 
 
 def test_suite_reactivates_uploaded_app_when_new_session_starts_in_system_ui(monkeypatch):
