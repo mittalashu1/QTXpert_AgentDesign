@@ -4855,6 +4855,20 @@ async def get_autopilot_discovery(
     return await _sanitize_discovery_assets(db, user, record, _record_discovery(record))
 
 
+async def _advance_suite_job_to_running(service, job_id: str, phase: str) -> None:
+    """Move an approved suite job into the running phase without relying on UI state."""
+    current_phase = phase
+    try:
+        if current_phase == "plan_pending_review":
+            await service.update_job(job_id, phase="plan_approved")
+            current_phase = "plan_approved"
+        if current_phase == "cases_pending_review":
+            await service.update_job(job_id, phase="cases_approved")
+        await service.update_job(job_id, phase="execution_ready")
+        await service.update_job(job_id, phase="running")
+    except ValueError:
+        logger.info("Autopilot suite phase transition skipped for legacy job_id=%s", job_id)
+
 @router.post("/{job_id}/suite", response_model=AutopilotSuiteResult)
 async def execute_autopilot_suite(
     job_id: str,
@@ -4900,19 +4914,8 @@ async def execute_autopilot_suite(
         )
 
 
-    # Case execution is the second user approval boundary.  A plan/map can be
-    # generated automatically, but entering the suite endpoint records that
-    # the selected cases are approved for the shared execution control plane.
-    try:
-        if current_phase == "plan_pending_review":
-            await service.update_job(job_id, phase="plan_approved")
-            current_phase = "plan_approved"
-        if current_phase == "cases_pending_review":
-            await service.update_job(job_id, phase="cases_approved")
-        await service.update_job(job_id, phase="execution_ready")
-        await service.update_job(job_id, phase="running")
-    except ValueError:
-        logger.info("Autopilot suite phase transition skipped for legacy job_id=%s", job_id)
+    # Phase transitions use the phase read from the persisted job, not UI state.
+    await _advance_suite_job_to_running(service, job_id, phase)
     if str(job.get("target_kind") or "android") == "web":
         analysis = await service.load_analysis(job_id)
         discovery = _record_discovery(record)
