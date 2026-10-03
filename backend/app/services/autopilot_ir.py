@@ -344,9 +344,11 @@ class AutopilotIRCompiler:
         discovery: Optional[AutopilotDiscoveryResult] = None,
         setup: Optional[AutopilotSetupProfile] = None,
         input_values: Optional[Mapping[str, str]] = None,
+        *,
+        full_uat: bool = False,
     ) -> AutopilotAutomationBundle:
         compiled = [
-            self.compile_test(test, analysis, discovery, setup, input_values=input_values)
+            self.compile_test(test, analysis, discovery, setup, input_values=input_values, full_uat=full_uat)
             for test in analysis.tests
         ]
         bucket_counts: dict[str, int] = {}
@@ -379,13 +381,15 @@ class AutopilotIRCompiler:
         discovery: Optional[AutopilotDiscoveryResult] = None,
         setup: Optional[AutopilotSetupProfile] = None,
         input_values: Optional[Mapping[str, str]] = None,
+        *,
+        full_uat: bool = False,
     ) -> QTXTestIR:
         promoted = False
         readiness_reason: Optional[str] = None
         resolved_steps: Optional[list[QTXIRStep]] = None
 
         missing_setup = self._missing_setup(test, setup)
-        if test.destructive:
+        if test.destructive and not full_uat:
             readiness = "approval_required"
             if setup and test.id in setup.approved_test_ids:
                 readiness_reason = (
@@ -412,6 +416,7 @@ class AutopilotIRCompiler:
                 test,
                 discovery,
                 input_values=input_values,
+                full_uat=full_uat,
             )
             if resolved_steps:
                 readiness = "executable"
@@ -565,6 +570,8 @@ class AutopilotIRCompiler:
         test: AutopilotTest,
         discovery: AutopilotDiscoveryResult,
         input_values: Optional[Mapping[str, str]] = None,
+        *,
+        full_uat: bool = False,
     ) -> tuple[Optional[list[QTXIRStep]], str]:
         if discovery.status not in {"completed", "partial"} or not discovery.screens:
             return None, "Runtime Discovery has no usable screen graph."
@@ -600,6 +607,11 @@ class AutopilotIRCompiler:
                             or not control.clickable
                             or control.input_capable
                             or control.risk != "safe"
+                            and not (
+                                full_uat
+                                and control.risk == "review"
+                                and self._is_transaction_navigation_entry(control.semantic_label)
+                            )
                         ):
                             continue
                     reachable.add(transition.to_screen_id)
@@ -710,7 +722,12 @@ class AutopilotIRCompiler:
 
             tap_match = self._TAP_RE.match(step)
             if tap_match:
-                control = self._best_control(current, tap_match.group(1), interaction=True)
+                control = self._best_control(
+                    current,
+                    tap_match.group(1),
+                    interaction=True,
+                    allow_full_uat=full_uat,
+                )
                 if control is None:
                     return None, f"No high-confidence safe control matched step: {raw_step}"
                 locator = self._best_locator(control, interaction=True)
@@ -1040,7 +1057,36 @@ class AutopilotIRCompiler:
             )
         return None
 
-    def _best_control(self, screen: DiscoveredScreen, phrase: str, interaction: bool) -> Optional[DiscoveredControl]:
+    @staticmethod
+    def _is_transaction_navigation_entry(label: str) -> bool:
+        normalized = re.sub(r"\s+", " ", (label or "").strip().lower())
+        return normalized in {
+            "pay", "payment", "payments", "transfer", "transfers", "send money", "send funds",
+            "deposit", "deposits", "withdraw", "withdrawal", "withdrawals", "invest",
+            "investment", "investments", "trade", "trading", "sell", "buy", "redeem",
+            "beneficiary", "beneficiaries", "bill pay", "bill payments", "top up", "top-up",
+            "card payment", "cash transfer",
+        }
+
+    @staticmethod
+    def _full_uat_control_allowed(control: DiscoveredControl) -> bool:
+        label = " ".join(
+            str(value or "")
+            for value in (control.semantic_label, control.text, control.content_description, control.resource_id)
+        ).lower().replace("_", " ").replace("-", " ")
+        # OTP/MFA and irreversible account actions remain supervised.
+        if re.search(r"\b(?:otp|one time password|mfa|verification code|delete|remove|close account|terminate)\b", label):
+            return False
+        return control.risk in {"review", "blocked"}
+
+    def _best_control(
+        self,
+        screen: DiscoveredScreen,
+        phrase: str,
+        interaction: bool,
+        *,
+        allow_full_uat: bool = False,
+    ) -> Optional[DiscoveredControl]:
         candidates: list[tuple[float, DiscoveredControl]] = []
         for control in screen.controls:
             if not control.enabled or not control.locators:
@@ -1050,6 +1096,7 @@ class AutopilotIRCompiler:
                 or (
                     control.risk != "safe"
                     and not self._is_auth_submit_control(control, screen.controls)
+                    and not (allow_full_uat and self._full_uat_control_allowed(control))
                 )
             ):
                 continue
