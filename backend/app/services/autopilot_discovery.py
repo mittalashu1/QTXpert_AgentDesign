@@ -488,18 +488,16 @@ class AutopilotDiscoveryService:
             has_meaningful_entry(control) for control in screen.controls
         )
 
-        @classmethod
+    @classmethod
     def _risk(cls, label: str, attrs: Dict[str, str]) -> tuple[str, Optional[str]]:
         haystack = " ".join(
             [label, attrs.get("text", ""), attrs.get("label", ""), attrs.get("name", ""), attrs.get("content-desc", ""), attrs.get("resource-id", ""), attrs.get("identifier", "")]
         ).lower().replace("_", " ").replace("-", " ")
         normalized = cls._normalize(label)
-        normalized = re.sub(r"\\s+tab\\s+\\d+\\s+of\\s+\\d+$", "", normalized, flags=re.I).strip()
-        # Section tabs such as Investments are read-only navigation and remain
-        # available in the ordinary discovery pass. Exact transaction entry
-        # labels (for example Send Money, Withdraw, or Deposit) are separately
-        # classified as review-only and traversed only when the user asks to
-        # map transaction journeys. Their in-module controls remain gated.
+        normalized = re.sub(r"\s+tab\s+\d+\s+of\s+\d+$", "", normalized, flags=re.I).strip()
+        # Section tabs such as Investments remain ordinary read-only navigation.
+        # Exact transaction entry labels are review-only and traversed only when
+        # the user asks Autopilot to map transaction journeys.
         if normalized in _SAFE_NAVIGATION_TERMS or any(pattern.search(normalized) for pattern in _SAFE_NAVIGATION_PATTERNS):
             return "safe", None
         if cls._is_transaction_navigation_entry(normalized):
@@ -509,7 +507,7 @@ class AutopilotDiscoveryService:
                 return "blocked", f"Blocked business/destructive action matched: {term}"
         return "review", "Control requires semantic review before autonomous interaction"
 
-@classmethod
+    @classmethod
     def _locators(cls, attrs: Dict[str, str]) -> list[DiscoveryLocator]:
         locators: list[DiscoveryLocator] = []
         content_desc = (attrs.get("content-desc") or "").strip()
@@ -931,7 +929,7 @@ class AutopilotDiscoveryService:
                 pass
         return False
 
-@classmethod
+    @classmethod
     def _credential_hint(cls, control: DiscoveredControl) -> str:
         """Classify a credential control without reading its current value."""
         haystack = " ".join(
