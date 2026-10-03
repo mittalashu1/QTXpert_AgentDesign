@@ -94,6 +94,7 @@ class AutopilotSuiteService:
             discovery,
             setup,
             input_values=input_values,
+            full_uat=request.execution_mode == "full_uat",
         )
 
         requested_ids = set(request.test_ids)
