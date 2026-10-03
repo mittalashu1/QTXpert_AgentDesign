@@ -2776,6 +2776,7 @@ async def get_autopilot_providers(
     )
 
     return AutopilotProviderStatus(
+        full_uat_sandbox_verified=settings.AUTOPILOT_FULL_UAT_SANDBOX_VERIFIED
         browserstack_configured=configured,
         device_farm_configured=device_farm_configured,
         device_farm_region=settings.DEVICE_FARM_REGION if device_farm_configured else None,
@@ -4441,6 +4442,9 @@ async def run_autopilot_discovery(
     # reads remain safe in async SQLAlchemy.
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    target_kind = str(job.get("target_kind") or "android")
+    if payload.include_transaction_journeys and target_kind == "web":
+        raise HTTPException(status_code=409, detail="Transaction-module mapping is currently available for mobile app targets only.")
     # Clicking Run discovery is an explicit approval of the generated plan.
     # Keep the transition visible while preserving the legacy stage strings.
     try:
@@ -4524,6 +4528,7 @@ async def run_autopilot_discovery(
             input_values=discovery_input_values,
         )
     record = await _safe_job_record(db, job_id, owner_id)
+    result = result.model_copy(update={"transaction_journey_mapping_requested": payload.include_transaction_journeys})
     # A transient provider failure (or a session stuck on Android system UI)
     # must not erase a previously successful screen graph. Keep the prior map
     # for reports/execution and expose the failed attempt through the durable
@@ -4903,6 +4908,13 @@ async def execute_autopilot_suite(
     # back the request session and expire the User ORM instance.
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    if payload.execution_mode == "full_uat" and not payload.confirm_isolated_uat:
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm that this target and its downstream services are isolated UAT before requesting full transactions.",
+        )
+    if payload.execution_mode == "full_uat" and str(job.get("target_kind") or "android") not in {"android", "ios"}:
+        raise HTTPException(status_code=409, detail="Full transaction mode is currently restricted to Android/iOS UAT apps.")
     phase = phase_for_job(job)
     runnable_phases = {
         "cases_pending_review", "cases_approved", "execution_ready",
@@ -4933,6 +4945,24 @@ async def execute_autopilot_suite(
             ),
         )
 
+
+    if payload.execution_mode == "full_uat":
+        try:
+            full_uat_analysis = await service.load_analysis(job_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail="Full UAT mode requires the analyzed mobile build identity.") from exc
+        if not settings.full_uat_target_is_allowed(
+            str(job.get("target_kind") or full_uat_analysis.target_kind or "android"),
+            latest_discovery.target_identity,
+            full_uat_analysis.package_name,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Full UAT transactions are not enabled for this exact app. An administrator must verify "
+                    "the isolated sandbox and allowlist its observed Android package or iOS bundle ID."
+                ),
+            )
 
     # Phase transitions use the phase read from the persisted job, not UI state.
     await _advance_suite_job_to_running(service, job_id, phase)
@@ -5030,6 +5060,7 @@ async def execute_autopilot_suite(
             input_values=input_values,
             sensitive_input_keys=sensitive_input_keys,
         )
+    result = result.model_copy(update={"execution_mode": payload.execution_mode})
     # A remote run can outlive the database server's idle-connection window.
     # Rehydrate the durable row on a fresh transaction before saving evidence.
     record = await _safe_job_record(db, job_id, owner_id)
