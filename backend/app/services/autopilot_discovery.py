@@ -1312,6 +1312,7 @@ class AutopilotDiscoveryService:
         browserstack_options: Dict[str, Any] | None = None
         device_farm_service = None
         device_farm_session = None
+        checkpoint_message: Optional[str] = None
         try:
             if request.provider == "browserstack":
                 # Keep the upload/provider handshake inside the guarded
@@ -1363,8 +1364,17 @@ class AutopilotDiscoveryService:
             checkpoint_stop = bool(payload.get("authentication_blocked")) or str(payload.get("stop_reason") or "").lower().startswith(
                 ("authentication", "sign-in", "credentials", "saved credentials", "the observed sign-in")
             )
-            launch_wait_exhausted = "non-interactive launch screen" in str(payload.get("stop_reason") or "").lower()
             target_ready = payload.get("target_ready")
+            interactive_surface_ready = payload.get("interactive_surface_ready")
+            launch_wait_exhausted = interactive_surface_ready is False and target_ready is not False
+            checkpoint_message = payload.get("checkpoint_message")
+            if launch_wait_exhausted and not checkpoint_message:
+                checkpoint_message = (
+                    "The expected app was verified, but only a non-interactive launch or sparse screen appeared after bounded waits. "
+                    "Check whether the UAT build finished starting or is waiting on an app/device setup step. "
+                    "Resolve the startup state, then retry discovery. "
+                    "No functional journeys were inferred."
+                )
             status = (
                 "blocked"
                 if target_ready is False
@@ -1378,6 +1388,7 @@ class AutopilotDiscoveryService:
                 "screens": [], "transitions": [], "actions_attempted": 0,
                 "stop_reason": "Discovery could not start or complete", "warnings": [],
                 "target_ready": False,
+                "interactive_surface_ready": False,
                 "target_identity_reason": f"{type(exc).__name__}: {exc}"[:1200],
             }
             status = "blocked" if self.prototype._looks_like_connector_problem(exc) else "failed"
@@ -1415,6 +1426,8 @@ class AutopilotDiscoveryService:
             actions_attempted=int(payload["actions_attempted"]),
             stop_reason=str(payload["stop_reason"]),
             target_ready=payload.get("target_ready"),
+            interactive_surface_ready=payload.get("interactive_surface_ready"),
+            checkpoint_message=checkpoint_message,
             target_identity=payload.get("target_identity"),
             target_activity=payload.get("target_activity"),
             target_identity_reason=payload.get("target_identity_reason"),
@@ -1744,6 +1757,7 @@ class AutopilotDiscoveryService:
                     "stop_reason": target_identity_reason,
                     "warnings": warnings,
                     "target_ready": False,
+                    "interactive_surface_ready": False,
                     "target_identity": target_identity,
                     "target_activity": target_activity,
                     "target_identity_reason": target_identity_reason,
@@ -1765,6 +1779,13 @@ class AutopilotDiscoveryService:
                     "warnings": warnings,
                     "authentication_blocked": False,
                     "target_ready": target_ready,
+                    "interactive_surface_ready": False,
+                    "checkpoint_message": (
+                        "The expected app was verified, but only a non-interactive launch or sparse screen appeared after bounded waits. "
+                        "Check whether the UAT build finished starting or is waiting on an app/device setup step. "
+                        "Resolve the startup state, then retry discovery. "
+                        "No functional journeys were inferred."
+                    ),
                     "target_identity": target_identity,
                     "target_activity": target_activity,
                     "target_identity_reason": target_identity_reason,
@@ -1782,6 +1803,7 @@ class AutopilotDiscoveryService:
                     "stop_reason": stop_reason,
                     "warnings": warnings,
                     "target_ready": target_ready,
+                    "interactive_surface_ready": not launch_surface_incomplete,
                     "target_identity": target_identity,
                     "target_activity": target_activity,
                     "target_identity_reason": target_identity_reason,
@@ -2247,6 +2269,7 @@ class AutopilotDiscoveryService:
                 "warnings": warnings,
                 "authentication_blocked": authentication_blocked,
                 "target_ready": target_ready,
+                "interactive_surface_ready": not launch_surface_incomplete,
                 "target_identity": target_identity,
                 "target_activity": target_activity,
                 "target_identity_reason": target_identity_reason,

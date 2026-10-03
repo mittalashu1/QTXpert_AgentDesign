@@ -812,6 +812,8 @@ def test_discovery_preserves_incomplete_launch_status_instead_of_crawling_empty_
     assert result["actions_attempted"] == 0
     assert result["transitions"] == []
     assert result["target_ready"] is True
+    assert result["interactive_surface_ready"] is False
+    assert "retry discovery" in result["checkpoint_message"].lower()
 
 def test_loading_screen_ignores_generic_root_marked_as_input_capable():
     from app.schemas.autopilot import DiscoveredScreen
