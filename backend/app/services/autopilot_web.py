@@ -736,6 +736,12 @@ class AutopilotWebService:
             actions_attempted=actions,
             stop_reason=stop_reason,
             target_ready=bool(screens),
+            interactive_surface_ready=bool(screens),
+            checkpoint_message=(
+                "The browser provider did not expose an interactive page. Check the selected website and browser session, then retry discovery."
+                if not screens
+                else None
+            ),
             target_identity=urlparse(target_url).netloc if screens else None,
             target_identity_reason=None if screens else "The browser provider did not expose a readable page for the selected website.",
             screens=screens,

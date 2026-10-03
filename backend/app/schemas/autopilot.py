@@ -1013,6 +1013,11 @@ class AutopilotDiscoveryResult(BaseModel):
     # these fields make that degraded state explicit and prevent it from being
     # reported as app coverage.
     target_ready: Optional[bool] = None
+    # App attachment and interactive readiness are separate facts. A provider
+    # may prove the expected package while leaving the app on its splash or a
+    # sparse launch surface, which is not enough evidence for functional cases.
+    interactive_surface_ready: Optional[bool] = None
+    checkpoint_message: Optional[str] = None
     target_identity: Optional[str] = None
     target_activity: Optional[str] = None
     target_identity_reason: Optional[str] = None
@@ -1023,6 +1028,7 @@ class AutopilotDiscoveryResult(BaseModel):
     last_attempt_status: Optional[Literal["completed", "partial", "blocked", "failed"]] = None
     last_attempt_reason: Optional[str] = None
     last_attempt_at: Optional[str] = None
+    last_attempt_screens: List[DiscoveredScreen] = Field(default_factory=list)
     screens: List[DiscoveredScreen] = Field(default_factory=list)
     transitions: List[DiscoveredTransition] = Field(default_factory=list)
     # Field-specific, non-secret setup references inferred from the live UI.
