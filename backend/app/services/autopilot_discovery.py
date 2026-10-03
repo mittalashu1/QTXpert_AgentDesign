@@ -488,23 +488,28 @@ class AutopilotDiscoveryService:
             has_meaningful_entry(control) for control in screen.controls
         )
 
-    @classmethod
+        @classmethod
     def _risk(cls, label: str, attrs: Dict[str, str]) -> tuple[str, Optional[str]]:
         haystack = " ".join(
             [label, attrs.get("text", ""), attrs.get("label", ""), attrs.get("name", ""), attrs.get("content-desc", ""), attrs.get("resource-id", ""), attrs.get("identifier", "")]
         ).lower().replace("_", " ").replace("-", " ")
         normalized = cls._normalize(label)
-        normalized = re.sub(r"\s+tab\s+\d+\s+of\s+\d+$", "", normalized, flags=re.I).strip()
+        normalized = re.sub(r"\\s+tab\\s+\\d+\\s+of\\s+\\d+$", "", normalized, flags=re.I).strip()
+        # Section tabs such as Investments are read-only navigation and remain
+        # available in the ordinary discovery pass. Exact transaction entry
+        # labels (for example Send Money, Withdraw, or Deposit) are separately
+        # classified as review-only and traversed only when the user asks to
+        # map transaction journeys. Their in-module controls remain gated.
+        if normalized in _SAFE_NAVIGATION_TERMS or any(pattern.search(normalized) for pattern in _SAFE_NAVIGATION_PATTERNS):
+            return "safe", None
         if cls._is_transaction_navigation_entry(normalized):
             return "review", "Transaction module entry; map this screen only, never submit a transaction."
         for term in _BLOCKED_TERMS:
             if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", haystack):
                 return "blocked", f"Blocked business/destructive action matched: {term}"
-        if normalized in _SAFE_NAVIGATION_TERMS or any(pattern.search(normalized) for pattern in _SAFE_NAVIGATION_PATTERNS):
-            return "safe", None
         return "review", "Control requires semantic review before autonomous interaction"
 
-    @classmethod
+@classmethod
     def _locators(cls, attrs: Dict[str, str]) -> list[DiscoveryLocator]:
         locators: list[DiscoveryLocator] = []
         content_desc = (attrs.get("content-desc") or "").strip()
@@ -839,6 +844,94 @@ class AutopilotDiscoveryService:
         return candidates[0]
 
     @classmethod
+    def _safe_locator_confidence(cls, control: DiscoveredControl) -> bool:
+        """Allow explicit login navigation to be reached with a text locator.
+
+        A native login CTA often exposes only visible text, which produces a
+        deliberately lower-confidence XPath locator than an accessibility ID
+        or resource ID.  Requiring the normal ``0.90`` threshold in that case
+        leaves discovery parked on the landing screen and never lets it
+        observe the actual username/password fields.  Lower the threshold only
+        for an explicit authentication entry point; generic ``Continue`` and
+        ordinary product links still require the stronger locator.
+        """
+        confidence = max(locator.confidence for locator in control.locators)
+        if confidence >= 0.90:
+            return True
+        if confidence < 0.80:
+            return False
+        label = cls._normalize(control.semantic_label).replace("-", " ")
+        return bool(re.fullmatch(r"(?:login|log\s+in|sign\s+in|unlock|authenticate|continue\s+to\s+account)", label))
+
+    @staticmethod
+    def _scroll_forward(driver: Any) -> bool:
+        """Scroll the current native surface using provider-safe gestures.
+
+        Appium providers differ on which mobile extension they expose. Try the
+        Android UiAutomator2 scroll gesture first, then the portable swipe
+        extension and finally the legacy client method. An unsupported method
+        is treated as an unavailable exploration capability; it never becomes
+        an ``UnknownMethodException`` in the generated test result.
+        """
+        width, height = 1080, 1920
+        try:
+            size = driver.get_window_size()
+            width = max(320, int(size.get("width") or width))
+            height = max(480, int(size.get("height") or height))
+        except Exception:
+            pass
+        execute_script = getattr(driver, "execute_script", None)
+        if callable(execute_script):
+            for command, arguments in (
+                (
+                    "mobile: scrollGesture",
+                    {
+                        "left": 0,
+                        "top": max(0, int(height * 0.12)),
+                        "width": width,
+                        "height": max(200, int(height * 0.78)),
+                        "direction": "down",
+                        "percent": 0.75,
+                    },
+                ),
+                ("mobile: swipe", {"direction": "up", "percent": 0.75}),
+            ):
+                try:
+                    result = execute_script(command, arguments)
+                    # ``scrollGesture`` returns False when the list is already
+                    # at its end; preserve that signal so the graph walker can
+                    # move to another branch instead of repeating forever.
+                    return result is not False
+                except Exception:
+                    continue
+        swipe = getattr(driver, "swipe", None)
+        if callable(swipe):
+            try:
+                swipe(
+                    int(width * 0.5),
+                    int(height * 0.82),
+                    int(width * 0.5),
+                    int(height * 0.22),
+                    duration=700,
+                )
+                return True
+            except TypeError:
+                try:
+                    swipe(
+                        int(width * 0.5),
+                        int(height * 0.82),
+                        int(width * 0.5),
+                        int(height * 0.22),
+                        700,
+                    )
+                    return True
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        return False
+
+@classmethod
     def _credential_hint(cls, control: DiscoveredControl) -> str:
         """Classify a credential control without reading its current value."""
         haystack = " ".join(
