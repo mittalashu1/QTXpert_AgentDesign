@@ -28,6 +28,7 @@ AutopilotTestBucket = Literal[
 ]
 AutopilotTargetKind = Literal["android", "ios", "web"]
 AutopilotProvider = Literal["browserstack", "devicefarm", "appium", "playwright"]
+AutopilotExecutionMode = Literal["safe_navigation", "full_uat"]
 
 # The phase is intentionally separate from the legacy ``status`` field.  The
 # latter is a transport/storage status used by older clients, while this
@@ -674,6 +675,7 @@ class AutopilotJobStatus(BaseModel):
 
 
 class AutopilotProviderStatus(BaseModel):
+    full_uat_sandbox_verified: bool = False
     browserstack_configured: bool = False
     device_farm_configured: bool = False
     device_farm_region: Optional[str] = None
@@ -931,6 +933,9 @@ class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
     max_screens: int = Field(default=120, ge=1, le=120)
     max_actions: int = Field(default=300, ge=0, le=300)
     observe_only: bool = False
+    # Open exact transaction-module entry points to map screens/forms; the
+    # discovery walker does not submit business actions from this flag.
+    include_transaction_journeys: bool = False
     continuation_token: Optional[str] = Field(default=None, max_length=512)
 
 
@@ -1032,6 +1037,7 @@ class AutopilotDiscoveryResult(BaseModel):
     can_continue: bool = False
     visited_screen_count: int = Field(default=0, ge=0)
     unvisited_edge_count: int = Field(default=0, ge=0)
+    transaction_journey_mapping_requested: bool = False
 
 
 class AutopilotSuiteRequest(AutopilotExecutionRequest):
@@ -1047,6 +1053,9 @@ class AutopilotSuiteRequest(AutopilotExecutionRequest):
     # This is informational for explicitly triggered runs and is also used by
     # the checkpoint-resume worker when it chains discovery into execution.
     auto_run_safe_suite: bool = True
+    execution_mode: AutopilotExecutionMode = "safe_navigation"
+    # Required per run in addition to server-side sandbox and exact allowlist checks.
+    confirm_isolated_uat: bool = False
 
 
 class AutopilotSuiteTestResult(BaseModel):
@@ -1066,6 +1075,7 @@ class AutopilotSuiteTestResult(BaseModel):
 
 class AutopilotSuiteResult(BaseModel):
     job_id: str
+    execution_mode: AutopilotExecutionMode = "safe_navigation"
     status: Literal["passed", "failed", "partial", "blocked"]
     target_kind: AutopilotTargetKind = "android"
     target_url: Optional[str] = None
