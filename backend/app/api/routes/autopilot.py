@@ -2776,7 +2776,7 @@ async def get_autopilot_providers(
     )
 
     return AutopilotProviderStatus(
-        full_uat_sandbox_verified=settings.AUTOPILOT_FULL_UAT_SANDBOX_VERIFIED
+        full_uat_sandbox_verified=settings.AUTOPILOT_FULL_UAT_SANDBOX_VERIFIED,
         browserstack_configured=configured,
         device_farm_configured=device_farm_configured,
         device_farm_region=settings.DEVICE_FARM_REGION if device_farm_configured else None,
