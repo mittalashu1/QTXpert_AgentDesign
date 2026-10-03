@@ -213,6 +213,22 @@ class Settings(BaseSettings):
     # available for runtime execution; a dedicated worker can raise this
     # ceiling later without changing the upload contract.
     AUTOPILOT_MAX_UPLOAD_SIZE_MB: int = Field(default=300, ge=1, le=2048)
+    # State-changing UAT execution is disabled until an administrator verifies
+    # the entire downstream environment is isolated from production.
+    AUTOPILOT_FULL_UAT_SANDBOX_VERIFIED: bool = False
+    # Exact comma-separated identities, e.g. android:com.example.app.uat.
+    AUTOPILOT_FULL_UAT_TARGET_ALLOWLIST: str = ""
+
+    def full_uat_target_is_allowed(self, target_kind: str, observed_identity: Optional[str], expected_identity: Optional[str]) -> bool:
+        if not self.AUTOPILOT_FULL_UAT_SANDBOX_VERIFIED or target_kind not in {"android", "ios"}:
+            return False
+        observed = str(observed_identity or "").strip().casefold()
+        expected = str(expected_identity or "").strip().casefold()
+        if not observed or not expected or observed != expected:
+            return False
+        target_key = f"{target_kind}:{observed}"
+        allowed = {item.strip().casefold() for item in self.AUTOPILOT_FULL_UAT_TARGET_ALLOWLIST.split(",") if item.strip()}
+        return target_key in allowed
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
     AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
     # A short retry absorbs a transient Neon failover without holding the
