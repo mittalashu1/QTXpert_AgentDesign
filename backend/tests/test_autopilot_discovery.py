@@ -599,11 +599,28 @@ def test_native_safe_tab_position_suffix_is_not_treated_as_a_risky_action(label)
     assert reason is None
 
 
-def test_send_money_bottom_tab_remains_blocked_after_suffix_normalization():
+def test_send_money_bottom_tab_is_mapped_only_when_transaction_journey_discovery_is_enabled():
     risk, reason = AutopilotDiscoveryService._risk("Send Money Tab 4 of 4", {})
 
-    assert risk == "blocked"
-    assert "send money" in reason.lower()
+    assert risk == "review"
+    assert "map this screen only" in reason.lower()
+
+    control = DiscoveredControl(
+        control_id="send-money-tab",
+        semantic_label="Send Money Tab 4 of 4",
+        class_name="android.widget.Button",
+        clickable=True,
+        enabled=True,
+        risk=risk,
+        risk_reason=reason,
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Send Money", confidence=0.99)],
+    )
+
+    assert AutopilotDiscoveryService._select_safe_control([control], set()) is None
+    selected = AutopilotDiscoveryService._select_safe_control(
+        [control], set(), include_transaction_journeys=True
+    )
+    assert selected is control
 
 
 def test_flutter_duplicate_login_label_prefers_clickable_action_when_semantics_are_not_clickable():

@@ -1,7 +1,7 @@
 import { ChangeEvent, Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
-  Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Card, CardContent, Chip, CircularProgress, Dialog, DialogActions,
+  Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Card, CardContent, Checkbox, Chip, CircularProgress, Dialog, DialogActions,
   DialogContent, DialogTitle, Divider, FormControl, FormControlLabel, Grid, InputLabel,
   IconButton, MenuItem, Paper, Select, Stack, Switch, Table, TableBody, TableCell, TableContainer,
   TableHead, TableRow, Tab, Tabs, TextField, Tooltip, Typography,
@@ -78,6 +78,7 @@ type ProviderStatus = {
   device_farm_trial_minutes_total?: number | null;
   device_farm_trial_minutes_checked_at?: string | null;
   device_farm_trial_minutes_error?: string | null;
+  full_uat_sandbox_verified?: boolean;
   custom_appium_available: boolean;
   playwright_available?: boolean;
   custom_appium_reason?: string | null;
@@ -147,6 +148,7 @@ type Discovery = {
   started_at?: string; finished_at?: string;
   target_kind?: TargetKind; target_url?: string | null; provider: Provider; duration_seconds: number; device_name: string;
   observe_only: boolean; screen_count: number; control_count: number; safe_control_count: number;
+  transaction_journey_mapping_requested?: boolean;
   blocked_control_count: number; actions_attempted: number; stop_reason: string;
   target_ready?: boolean | null; target_identity?: string | null; target_activity?: string | null; target_identity_reason?: string | null;
   last_attempt_status?: "completed" | "partial" | "blocked" | "failed" | null; last_attempt_reason?: string | null; last_attempt_at?: string | null;
@@ -175,6 +177,7 @@ type SuiteTestResult = {
 };
 type SuiteResult = {
   job_id: string; status: "passed" | "failed" | "partial" | "blocked";
+  execution_mode?: "safe_navigation" | "full_uat";
   target_kind?: TargetKind; target_url?: string | null; provider: Provider; duration_seconds: number; selected_count: number;
   executed_count: number; deferred_count?: number; passed_count: number; failed_count: number; skipped_count: number;
   promoted_count: number; bucket_counts?: Record<string, number>; error?: string | null; tests: SuiteTestResult[];
@@ -786,6 +789,9 @@ export default function AutopilotPage() {
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
   const [suiteBusy, setSuiteBusy] = useState(false);
   const [discoveryMode, setDiscoveryMode] = useState<"safe" | "observe">("safe");
+  const [includeTransactionJourneys, setIncludeTransactionJourneys] = useState(true);
+  const [suiteMode, setSuiteMode] = useState<"safe_navigation" | "full_uat">("safe_navigation");
+  const [fullUatConfirmed, setFullUatConfirmed] = useState(false);
   const [autoRunFirstPass, setAutoRunFirstPass] = useState(true);
   const [error, setError] = useState("");
   const [appiumUrl, setAppiumUrl] = useState("");
@@ -1773,8 +1779,9 @@ export default function AutopilotPage() {
       const response = await apiClient.post<Discovery>(`/autopilot/${jobId}/discover`, {
         ...executionPayload(),
         observe_only: discoveryMode === "observe",
-        // Map a broad end-to-end surface in safe-navigation mode. The backend
-        // still blocks transactional/destructive actions independently.
+        include_transaction_journeys: activeTargetKind !== "web" && includeTransactionJourneys,
+        // Map the selected surface. Transaction entry points are opened only
+        // when requested; no transaction submission happens during discovery.
         max_screens: discoveryMode === "observe" ? 1 : 120,
         max_actions: discoveryMode === "observe" ? 0 : 300,
       }, { timeout: 660000 });
@@ -1840,9 +1847,9 @@ export default function AutopilotPage() {
       const hasSafeDiscoverySurface = response.data.status === "completed"
         && response.data.target_ready !== false
         && response.data.safe_control_count > 0;
-      if (autoRunFirstPass && discoveryMode === "safe" && hasSafeDiscoverySurface) {
+      if (autoRunFirstPass && discoveryMode === "safe" && suiteMode === "safe_navigation" && hasSafeDiscoverySurface) {
         await runSuite(jobId);
-      } else if (autoRunFirstPass && discoveryMode === "safe" && response.data.screens.length > 0) {
+      } else if (autoRunFirstPass && discoveryMode === "safe" && suiteMode === "safe_navigation" && response.data.screens.length > 0) {
         setContextNotice(
           "The app opened, but Autopilot could not read any safe, labeled controls. Discovery is incomplete, so no automated batch was started.",
         );
@@ -1915,6 +1922,11 @@ export default function AutopilotPage() {
   const runSuite = async (requestedJobId?: unknown) => {
     const jobId = typeof requestedJobId === "string" ? requestedJobId : analysis?.job_id;
     if (!jobId) return;
+    if (suiteMode === "full_uat" && !fullUatConfirmed) {
+      setContextNotice("Confirm that this app and its downstream services are isolated UAT before running full transactions.");
+      return;
+    }
+    if (suiteMode === "full_uat") setFullUatConfirmed(false);
     setSuiteBusy(true); setError("");
     try {
       const [jobResponse, discoveryResponse] = await Promise.all([
@@ -1930,7 +1942,7 @@ export default function AutopilotPage() {
           || latestDiscovery?.error
           || latestJob.checkpoint_message
           || "The uploaded app was not verified in the foreground.";
-        setContextNotice(`Safe execution was not started because Runtime Discovery did not verify the selected app. ${reason}`);
+        setContextNotice(`${suiteMode === "full_uat" ? "Full UAT execution" : "Safe execution"} was not started because Runtime Discovery did not verify the selected app. ${reason}`);
         return;
       }
       const phase = latestJob.phase || latestJob.analysis?.phase || "context_ready";
@@ -1938,10 +1950,10 @@ export default function AutopilotPage() {
       if (phase === "cases_pending_review") {
         if (analysis?.job_id !== jobId || !(await approveCases(jobId))) return;
       } else if (phase === "running") {
-        setContextNotice("A safe execution batch is already running for this app. I did not start a duplicate batch.");
+        setContextNotice("An execution batch is already running for this app. I did not start a duplicate batch.");
         return;
       } else if (!runnablePhases.includes(phase)) {
-        setContextNotice(`Safe execution is waiting for Autopilot to reach case review. Current phase: ${workflowPhaseLabel(phase)}.`);
+        setContextNotice(`Execution is waiting for Autopilot to reach case review. Current phase: ${workflowPhaseLabel(phase)}.`);
         return;
       }
       // Approval failures stop here; they never fall through to suite submission.
@@ -1952,12 +1964,14 @@ export default function AutopilotPage() {
         test_ids: [],
         buckets: suiteBucket === "all" ? [] : [suiteBucket],
         include_deferred: true,
+        execution_mode: suiteMode,
+        confirm_isolated_uat: suiteMode === "full_uat" && fullUatConfirmed,
       }, { timeout: 960000 });
       setSuite(response.data);
       await refreshSuiteDefects(jobId);
       await refreshReport(jobId);
       await refreshWorkflow(jobId);
-    } catch (err) { setError(readableError(err, "Autonomous safe-suite execution failed")); }
+    } catch (err) { setError(readableError(err, "Autopilot suite execution failed")); }
     finally { setSuiteBusy(false); }
   };
   const downloadSuiteEvidence = async (asset: SuiteEvidenceAsset) => {
@@ -2813,7 +2827,7 @@ export default function AutopilotPage() {
        </CardContent></Card>
 
        <Card id="autopilot-runtime-discovery" variant="outlined" sx={{ scrollMarginTop: 16 }}><CardContent>
-        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, destructive submits, confirmations and OTP actions remain blocked.</Typography></Box><Stack direction="row" spacing={1}><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable || planAwaitingApproval} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : planAwaitingApproval ? "Approve plan first" : "Run discovery"}</Button></Stack></Stack>
+        <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, destructive submits, confirmations and OTP actions remain blocked.</Typography></Box><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}><FormControlLabel sx={{ mr: 0 }} control={<Switch size="small" checked={includeTransactionJourneys && activeTargetKind !== "web"} disabled={activeTargetKind === "web" || discoveryBusy} onChange={(event) => setIncludeTransactionJourneys(event.target.checked)} />} label={<Typography variant="caption">Map transaction screens (no submit)</Typography>} /><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable || planAwaitingApproval} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : planAwaitingApproval ? "Approve plan first" : "Run discovery"}</Button></Stack></Stack>
         {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
         {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.target_ready === false && <Alert severity="warning" sx={{ mt: 1.25 }}><b>Target not attached.</b> The provider did not expose the uploaded application, so no new coverage was generated. {discovery.target_identity_reason || discovery.error || "Check the app package/activity or the device session and retry."}</Alert>}{discovery.last_attempt_status && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The previous evidence map is retained. Latest attach attempt: {discovery.last_attempt_status}{discovery.last_attempt_reason ? ` · ${discovery.last_attempt_reason}` : ""}</Typography>}{discovery.screens.length > 0 && <Grid container spacing={1.5} sx={{ mt: .5 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Journey / page</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen.screen_id}-${control.control_id}`} hover><TableCell><Typography variant="body2" fontWeight={700}>{screen.page_label || screen.title || screen.journey || "Observed page"}</Typography><Typography variant="caption" color="text.secondary">{screen.journey || "Observed journey"} · {screen.screen_id}</Typography></TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
         {discovery && (discovery.warnings || []).length > 0 && <Box component="details" sx={{ mt: 1 }}><Typography component="summary" variant="caption" sx={{ cursor: "pointer" }}>Discovery details</Typography>{discovery.warnings.map((warning, index) => <Typography key={index} variant="caption" display="block" sx={{ mt: .5 }}>{warning}</Typography>)}</Box>}
@@ -2824,15 +2838,22 @@ export default function AutopilotPage() {
           <Box>
             <Stack direction="row" spacing={1} alignItems="center"><SmartToyOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Semantic automation & safe execution</Typography></Stack>
             <Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>
-              The first pass explores read-only journeys, uses bounded synthetic values for non-sensitive fields, and records screenshots/video when safe. Credentials, OTPs, transactions and business acceptance remain explicitly gated.
+              Discovery maps the app after sign-in. Choose read-only checks or, for an administrator-verified isolated UAT build, state-changing transaction tests. OTP/MFA and irreversible account actions remain supervised.
             </Typography>
           </Box>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}>
+            <FormControl size="small" sx={{ minWidth: 175 }}>
+              <InputLabel id="suite-mode-label">Run mode</InputLabel>
+              <Select labelId="suite-mode-label" label="Run mode" value={suiteMode} onChange={(event) => { setSuiteMode(event.target.value as "safe_navigation" | "full_uat"); setFullUatConfirmed(false); }}>
+                <MenuItem value="safe_navigation">Safe · read-only</MenuItem>
+                <MenuItem value="full_uat">Full UAT transactions</MenuItem>
+              </Select>
+            </FormControl>
             <FormControlLabel sx={{ mr: .5 }} control={<Switch size="small" checked={autoRunFirstPass} onChange={(event) => setAutoRunFirstPass(event.target.checked)} />} label={<Typography variant="caption">Auto-run safe first pass</Typography>} />
             <FormControl size="small" sx={{ minWidth: 170 }}>
               <InputLabel id="suite-bucket-label">Suite bucket</InputLabel>
               <Select labelId="suite-bucket-label" label="Suite bucket" value={suiteBucket} onChange={(event) => setSuiteBucket(event.target.value as "all" | TestBucket)}>
-                <MenuItem value="all">All safe cases</MenuItem>
+                <MenuItem value="all">{suiteMode === "full_uat" ? "All eligible cases" : "All safe cases"}</MenuItem>
                 {TEST_BUCKETS.filter((bucket) => (automation?.bucket_counts?.[bucket] || bucketCounts[bucket])).map((bucket) => <MenuItem key={bucket} value={bucket}>{testBucketLabel[bucket]}</MenuItem>)}
               </Select>
             </FormControl>
@@ -2842,11 +2863,16 @@ export default function AutopilotPage() {
                 {[20, 50, 100, 200, 500, 1000].map((size) => <MenuItem key={size} value={size}>{size} cases</MenuItem>)}
               </Select>
             </FormControl>
-            <Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0} onClick={runSuite}>
-              {suiteBusy ? "Running suite…" : suiteBucket === "all" ? `Run safe batch (${suiteMaxTests})` : `Run ${testBucketLabel[suiteBucket]} (${suiteMaxTests})`}
+            <Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || (suiteMode === "full_uat" ? (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified || !analysis?.tests?.length) : suiteExecutableCount === 0)} onClick={runSuite}>
+              {suiteBusy ? "Running suite…" : suiteMode === "full_uat" ? `Run UAT transactions (${suiteMaxTests})` : suiteBucket === "all" ? `Run safe batch (${suiteMaxTests})` : `Run ${testBucketLabel[suiteBucket]} (${suiteMaxTests})`}
             </Button>
           </Stack>
         </Stack>
+        {suiteMode === "full_uat" && <Stack spacing={1} sx={{ mt: 1.5 }}>
+          {!providerStatus?.full_uat_sandbox_verified && <Alert severity="warning">Full transaction execution is not enabled on this server. An administrator must verify the isolated UAT environment and allowlist this exact app before any state-changing run can start.</Alert>}
+          <FormControlLabel control={<Checkbox size="small" checked={fullUatConfirmed} onChange={(event) => setFullUatConfirmed(event.target.checked)} />} label={<Typography variant="body2">I confirm this app and all downstream services are isolated UAT; allow state-changing transactions for this run.</Typography>} />
+          <Typography variant="caption" color="text.secondary">Full mode does not invent credentials or OTPs. OTP/MFA and account deletion/closure remain blocked for a person to handle.</Typography>
+        </Stack>}
         <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
             <Box><Typography variant="subtitle2" fontWeight={800}>Autopilot checkpoint</Typography><Typography variant="caption" color="text.secondary">One guided input at a time: sign-in fields, test data and references are explained in plain language. Saved values use the encrypted Autopilot checkpoint store and are never shown again.</Typography></Box>
@@ -2863,7 +2889,7 @@ export default function AutopilotPage() {
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · all evidence-scoped cases shown</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.map((test) => { const bucket = normalizedBucket(test); const setupRequest = test.readiness !== "executable" ? requestForTest(test) : null; return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={() => openSetup(setupRequest?.key)}>{setupRequest ? "Resolve input" : "Review setup"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
-      {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>Safe batch: <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The plan includes every evidence-scoped case. This run executes up to {suiteMaxTests} eligible cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+      {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>{suite.execution_mode === "full_uat" ? "Full UAT transaction run:" : "Safe-navigation run:"} <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The plan includes every evidence-scoped case. This run executes up to {suiteMaxTests} eligible cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>
