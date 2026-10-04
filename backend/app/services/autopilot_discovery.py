@@ -33,7 +33,7 @@ from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
     activate_verified_target_surface,
     enter_observed_text,
-    known_android_prompt_kind,
+    known_native_prompt_kind,
     safe_app_identity,
     safe_current_activity,
     safe_page_source,
@@ -164,13 +164,14 @@ class AutopilotDiscoveryService:
         driver: Any,
         page_source: str,
         evidence_dir: Path,
+        target_kind: str = "android",
     ) -> Optional[RuntimePromptObservation]:
         """Capture a supported Android system prompt as a branch artifact.
 
         Prompt controls bypass parse_controls so system UI is never mistaken
         for product navigation. Keep only observed option labels and locators.
         """
-        kind = known_android_prompt_kind(driver, page_source)
+        kind = known_native_prompt_kind(driver, page_source, target_kind)
         if not kind:
             return None
         try:
@@ -186,7 +187,7 @@ class AutopilotDiscoveryService:
                 class_name = attrs.get("class", "")
                 actionable = (
                     attrs.get("clickable", "false").casefold() == "true"
-                    or class_name == "android.widget.Button"
+                    or class_name in {"android.widget.Button", "XCUIElementTypeButton"}
                 )
                 label = cls._semantic_label(attrs)
                 normalized = cls._normalize(label)
@@ -227,10 +228,15 @@ class AutopilotDiscoveryService:
         return RuntimePromptObservation(
             prompt_id=prompt_id,
             kind=kind,
-            surface="android_system",
+            surface=(
+                "ios_system" if target_kind == "ios" and kind == "runtime_permission"
+                else "application" if target_kind == "ios"
+                else "android_system"
+            ),
             title={
                 "location_settings": "Location settings prompt",
-                "runtime_permission": "Android permission prompt",
+                "runtime_permission": f"{'iOS' if target_kind == 'ios' else 'Android'} permission prompt",
+                "app_confirmation": "Application confirmation prompt",
             }.get(kind, "Android system prompt"),
             screenshot_path=str(screenshot_path) if screenshot_path and screenshot_path.exists() else None,
             page_source_path=str(source_path) if source_path else None,
@@ -241,7 +247,7 @@ class AutopilotDiscoveryService:
     @classmethod
     def _prompt_choice_decision(cls, normalized_label: str) -> Optional[str]:
         allow = (
-            "allow", "yes", "turn on", "enable", "while using", "only this time",
+            "allow", "yes", "ok", "turn on", "enable", "while using", "only this time",
             "precise", "always allow",
         )
         deny = (
@@ -1673,7 +1679,7 @@ class AutopilotDiscoveryService:
             index = len(screens) + 1
             page_source = safe_page_source(driver)
             for _prompt_index in range(8):
-                prompt = self._runtime_prompt_observation(driver, page_source, evidence_dir)
+                prompt = self._runtime_prompt_observation(driver, page_source, evidence_dir, request.target_kind)
                 if prompt is None:
                     break
                 if not any(item.prompt_id == prompt.prompt_id for item in runtime_prompts):
@@ -1700,7 +1706,7 @@ class AutopilotDiscoveryService:
                 returned_to_app = False
                 while time.monotonic() < prompt_deadline:
                     page_source = safe_page_source(driver)
-                    if known_android_prompt_kind(driver, page_source) is None:
+                    if known_native_prompt_kind(driver, page_source, request.target_kind) is None:
                         returned_to_app, _, _ = validate_target_surface(
                             driver,
                             expected_package=package_hint,
