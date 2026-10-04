@@ -822,6 +822,8 @@ class QTXIRStep(BaseModel):
     observation_ref: Optional[str] = None
     value_source: Optional[Literal["literal_non_secret", "encrypted_input", "generated_fixture", "environment", "observed"]] = None
     assertion: Optional[str] = None
+    expected_resulting_prompt_id: Optional[str] = None
+    expected_resulting_screen_id: Optional[str] = None
     on_error: Optional[Literal["stop", "continue", "capture_and_stop", "request_input"]] = "capture_and_stop"
 
 
@@ -1006,6 +1008,7 @@ class RuntimePromptChoice(BaseModel):
     locators: List[DiscoveryLocator] = Field(default_factory=list)
     outcome_status: Literal["observed", "planned", "unavailable"] = "planned"
     resulting_screen_id: Optional[str] = None
+    resulting_prompt_id: Optional[str] = None
 
 
 class RuntimePromptObservation(BaseModel):

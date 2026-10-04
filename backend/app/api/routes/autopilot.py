@@ -2055,11 +2055,72 @@ async def _resolve_suite_input_values(
     return values, sensitive_keys
 
 
+
+def _saved_authentication_was_rejected(
+    discovery: Optional[AutopilotDiscoveryResult],
+    setup: Optional[AutopilotSetupProfile],
+) -> bool:
+    """Avoid replaying the same saved sign-in values after an observed rejection.
+
+    A newly saved complete credential bundle or newly updated values for every
+    observed credential field are an explicit correction and may be tried.
+    """
+    if discovery is None or setup is None:
+        return False
+    diagnostics = " ".join(
+        str(value or "")
+        for value in (
+            discovery.checkpoint_message,
+            discovery.stop_reason,
+            discovery.last_attempt_reason,
+            discovery.error,
+            *(discovery.warnings or []),
+        )
+    ).casefold()
+    if "rejected the saved uat sign-in details" not in diagnostics:
+        return False
+
+    try:
+        rejected_at = datetime.fromisoformat(
+            str(discovery.last_attempt_at or discovery.finished_at).replace("Z", "+00:00")
+        )
+        if rejected_at.tzinfo is None:
+            rejected_at = rejected_at.replace(tzinfo=timezone.utc)
+        rejected_at = rejected_at.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return True
+
+    saved_times: dict[str, datetime] = {}
+    for item in setup.saved_inputs or []:
+        try:
+            stamp = datetime.fromisoformat(str(item.updated_at).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            saved_times[item.key] = stamp.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            continue
+
+    if saved_times.get("credential_reference", datetime.min.replace(tzinfo=timezone.utc)) > rejected_at:
+        return False
+    credential_keys = [
+        item.key
+        for item in setup.runtime_input_requests or []
+        if item.category == "credential" and str(item.input_hint or "").casefold() != "otp"
+    ]
+    if credential_keys and all(
+        saved_times.get(key, datetime.min.replace(tzinfo=timezone.utc)) > rejected_at
+        for key in credential_keys
+    ):
+        return False
+    return True
+
+
 async def _resolve_discovery_input_values(
     db: AsyncSession,
     settings: Settings,
     record: Optional[AutopilotJob],
     setup: Optional[AutopilotSetupProfile],
+    discovery: Optional[AutopilotDiscoveryResult] = None,
 ) -> tuple[dict[str, str], set[str]]:
     """Resolve approved checkpoint values for a live discovery session.
 
@@ -2070,6 +2131,19 @@ async def _resolve_discovery_input_values(
     explicit safe-authentication approval is present.
     """
     values, sensitive_keys = await _resolve_suite_input_values(db, settings, record, setup)
+    if _saved_authentication_was_rejected(discovery, setup):
+        credential_keys = {
+            item.key
+            for item in setup.runtime_input_requests or []
+            if item.category == "credential"
+        }
+        values = {
+            key: value
+            for key, value in values.items()
+            if key not in credential_keys and key not in {"__username", "__password", "__otp", "__auth_approved"}
+        }
+        sensitive_keys.difference_update(credential_keys)
+        setup = setup.model_copy(update={"safe_authentication_approved": False})
     if record is None or setup is None or not setup.safe_authentication_approved:
         return values, sensitive_keys
 
@@ -2279,6 +2353,7 @@ async def _resume_and_discover_background(
                 settings,
                 record,
                 setup_for_discovery,
+                existing_discovery,
             )
             provider = resume_payload.discovery_provider
             if target_kind == "web":
@@ -4681,6 +4756,7 @@ async def run_autopilot_discovery(
         settings,
         record,
         setup_for_discovery,
+        existing_discovery,
     )
     if target_kind == "web":
         web_request = payload.model_copy(update={
@@ -4721,6 +4797,7 @@ async def run_autopilot_discovery(
             settings,
             record,
             setup_for_discovery,
+            existing_discovery,
         )
         if target_kind == "ios" and payload.provider == "appium" and not payload.appium_app:
             # A hosted Appium endpoint cannot see a Render-local IPA path. The

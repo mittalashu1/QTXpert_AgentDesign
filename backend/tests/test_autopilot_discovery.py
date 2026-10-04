@@ -54,6 +54,42 @@ def test_runtime_prompt_parser_captures_observed_location_choices(tmp_path):
     assert prompt.page_source_path
 
 
+
+def test_runtime_prompt_id_distinguishes_same_kind_with_different_prompt_copy(tmp_path):
+    class Driver:
+        current_activity = "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+
+        def get_screenshot_as_file(self, path):
+            Path(path).write_bytes(b"png")
+            return True
+
+    def prompt_source(permission_label):
+        return (
+            '<hierarchy><node package="com.android.permissioncontroller" '
+            'class="android.widget.FrameLayout">'
+            f'<node package="com.android.permissioncontroller" text="{permission_label}" '
+            'class="android.widget.TextView" />'
+            '<node package="com.android.permissioncontroller" text="Don\'t allow" '
+            'resource-id="com.android.permissioncontroller:id/deny_button" '
+            'class="android.widget.Button" clickable="true" enabled="true" />'
+            '<node package="com.android.permissioncontroller" text="Allow while using the app" '
+            'resource-id="com.android.permissioncontroller:id/allow_button" '
+            'class="android.widget.Button" clickable="true" enabled="true" />'
+            '</node></hierarchy>'
+        )
+
+    location = AutopilotDiscoveryService._runtime_prompt_observation(
+        Driver(), prompt_source("Location permission"), tmp_path, "android"
+    )
+    camera = AutopilotDiscoveryService._runtime_prompt_observation(
+        Driver(), prompt_source("Camera permission"), tmp_path, "android"
+    )
+
+    assert location is not None and camera is not None
+    assert location.kind == camera.kind == "runtime_permission"
+    assert location.prompt_id != camera.prompt_id
+
+
 LABELLED_LOGIN_XML = '''
 <hierarchy rotation="0">
   <node index="0" class="android.widget.FrameLayout" clickable="false" enabled="true">
@@ -459,7 +495,7 @@ async def test_browserstack_upload_quota_is_returned_as_structured_blocker(tmp_p
     assert "testing time expired" in (result.target_identity_reason or "")
 
 @pytest.mark.parametrize("deny_click_returns", [True, False])
-def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp_path, monkeypatch, deny_click_returns):
+def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(tmp_path, monkeypatch, deny_click_returns):
     import sys
     import types
 
@@ -484,7 +520,9 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
             return True
 
         def click(self):
-            if self.value == "com.google.android.gms:id/negative_button":
+            if self.value == "com.android.permissioncontroller:id/deny_button":
+                self.driver.state = "location_prompt"
+            elif self.value == "com.google.android.gms:id/negative_button":
                 if self.driver.deny_click_returns:
                     self.driver.state = "landing"
             elif self.value == "com.qtx.demo:id/login":
@@ -494,19 +532,35 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
         capabilities = {"appium:appPackage": "com.qtx.demo", "appium:appActivity": ".MainActivity"}
 
         def __init__(self, deny_click_returns):
-            self.state = "location_prompt"
+            self.state = "runtime_permission_prompt"
             self.quit_called = False
             self.back_calls = 0
             self.deny_click_returns = deny_click_returns
 
         @property
         def current_activity(self):
+            if self.state == "runtime_permission_prompt":
+                return "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
             if self.state == "location_prompt":
                 return "com.google.android.location.settings.LocationSettingsCheckerActivity"
             return "com.qtx.demo.MainActivity"
 
         @property
         def page_source(self):
+            if self.state == "runtime_permission_prompt":
+                return (
+                    '<hierarchy><node package="com.android.permissioncontroller" '
+                    'class="android.widget.FrameLayout">'
+                    '<node package="com.android.permissioncontroller" text="Location permission" '
+                    'class="android.widget.TextView" />'
+                    '<node package="com.android.permissioncontroller" text="Don\'t allow" '
+                    'resource-id="com.android.permissioncontroller:id/deny_button" '
+                    'class="android.widget.Button" clickable="true" enabled="true" />'
+                    '<node package="com.android.permissioncontroller" text="Allow while using the app" '
+                    'resource-id="com.android.permissioncontroller:id/allow_button" '
+                    'class="android.widget.Button" clickable="true" enabled="true" />'
+                    '</node></hierarchy>'
+                )
             if self.state == "location_prompt":
                 return (
                     '<hierarchy><node package="com.google.android.gms" text="Location settings" '
@@ -542,13 +596,16 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
 
         def back(self):
             self.back_calls += 1
-            if self.state == "location_prompt":
+            if self.state in {"runtime_permission_prompt", "location_prompt"}:
                 self.state = "landing"
 
         def find_element(self, by, value):
             assert by == AppiumBy.ID
             assert value in {
+                "com.android.permissioncontroller:id/deny_button",
+                "com.android.permissioncontroller:id/allow_button",
                 "com.google.android.gms:id/negative_button",
+                "com.google.android.gms:id/positive_button",
                 "com.qtx.demo:id/login",
             }
             return Element(self, value)
@@ -618,15 +675,19 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
     )
 
     assert result["stop_reason"].startswith("Authentication checkpoint detected.")
-    assert result["actions_attempted"] == 2
+    assert result["actions_attempted"] == 3
     assert driver.back_calls == (0 if deny_click_returns else 1)
-    prompt = result["runtime_prompts"][0]
-    denial = next(choice for choice in prompt.choices if choice.decision == "deny")
-    allowance = next(choice for choice in prompt.choices if choice.decision == "allow")
-    assert denial.outcome_status == ("observed" if deny_click_returns else "unavailable")
-    assert denial.resulting_screen_id == ("screen-001" if deny_click_returns else None)
-    assert allowance.outcome_status == "planned"
-    assert result["runtime_prompts"][0].kind == "location_settings"
+    permission_prompt = next(item for item in result["runtime_prompts"] if item.kind == "runtime_permission")
+    location_prompt = next(item for item in result["runtime_prompts"] if item.kind == "location_settings")
+    permission_denial = next(choice for choice in permission_prompt.choices if choice.decision == "deny")
+    permission_allowance = next(choice for choice in permission_prompt.choices if choice.decision == "allow")
+    location_denial = next(choice for choice in location_prompt.choices if choice.decision == "deny")
+    assert permission_denial.outcome_status == "observed"
+    assert permission_denial.resulting_prompt_id == location_prompt.prompt_id
+    assert permission_denial.resulting_screen_id is None
+    assert permission_allowance.outcome_status == "planned"
+    assert location_denial.outcome_status == ("observed" if deny_click_returns else "unavailable")
+    assert location_denial.resulting_screen_id == ("screen-001" if deny_click_returns else None)
     assert len(result["screens"]) == 2
     assert result["screens"][1].screen_id == "screen-002"
     assert {control.semantic_label for control in result["screens"][1].controls if control.input_capable} == {

@@ -29,6 +29,7 @@ from app.services.appium_compat import (
     activate_verified_target_surface,
     enter_observed_text,
     known_native_prompt_kind,
+    native_prompt_fingerprint,
     ProviderLifecycleUnavailable,
     expected_package_state,
     safe_app_identity,
@@ -515,9 +516,10 @@ class AutopilotSuiteService:
                     "appium:appWaitDuration": adb_exec_timeout_ms,
                 }
             )
-        if has_prompt_cases and not is_device_farm:
-            # A fresh installation is needed to replay independently remembered
-            # runtime permission branches in the same batch.
+        if has_prompt_cases:
+            # Each prompt branch needs a fresh install to re-arm remembered
+            # platform permissions. Device Farm injects the session app into
+            # every new Appium session, so fullReset also works there.
             capabilities["appium:fullReset"] = True
         if request.platform_version and not is_device_farm:
             capabilities["appium:platformVersion"] = request.platform_version
@@ -526,15 +528,18 @@ class AutopilotSuiteService:
 
         evidence_root = self.prototype._job_dir(job_id) / "evidence" / "suite"
         evidence_root.mkdir(parents=True, exist_ok=True)
-        if is_ios:
-            from appium.options.ios import XCUITestOptions
+        def create_driver():
+            if is_ios:
+                from appium.options.ios import XCUITestOptions
 
-            options = XCUITestOptions().load_capabilities(capabilities)
-        else:
-            from appium.options.android import UiAutomator2Options
+                options = XCUITestOptions().load_capabilities(capabilities)
+            else:
+                from appium.options.android import UiAutomator2Options
 
-            options = UiAutomator2Options().load_capabilities(capabilities)
-        driver = webdriver.Remote(appium_url, options=options)
+                options = UiAutomator2Options().load_capabilities(capabilities)
+            return webdriver.Remote(appium_url, options=options)
+
+        driver = create_driver()
         results: list[AutopilotSuiteTestResult] = []
         try:
             time.sleep(2)
@@ -573,8 +578,6 @@ class AutopilotSuiteService:
                     sensitive_input_keys,
                 )
                 try:
-                    if video_requested:
-                        video_started, video_status = self._start_video_recording(driver)
                     # The newly created session was just launched and its target foreground verified above.
                     # Do not immediately force-stop that known-good first surface; hosted providers may
                     # switch to Android system UI when restarting the attached app.
@@ -589,14 +592,35 @@ class AutopilotSuiteService:
                     if has_prompt_step and (
                         prompt_case_count > 0 or current_prompt_kind != expected_prompt_kind
                     ):
-                        self._reset_prompt_case_state(driver, package, request.target_kind)
-                        self._activate_application(
-                            driver,
-                            package,
-                            activity_hint,
-                            force_launch=True,
-                            preserve_known_system_prompt=True,
-                        )
+                        if is_device_farm:
+                            # Device Farm excludes mobile: clearApp and
+                            # mobile: resetPermission. Its Appium endpoint
+                            # supports multiple sessions per remote-access
+                            # device, and fullReset reinstalls the uploaded app.
+                            safe_quit(driver)
+                            driver = create_driver()
+                            time.sleep(2)
+                            reset_source = safe_page_source(driver)
+                            reset_ready, reset_reason, _ = self._activate_verified_target(
+                                driver,
+                                package,
+                                activity_hint=activity_hint,
+                                timeout_seconds=15.0,
+                                poll_interval=0.5,
+                                page_source=reset_source,
+                                preserve_known_system_prompt=True,
+                            )
+                            if not reset_ready:
+                                raise ProviderLifecycleUnavailable(reset_reason)
+                        else:
+                            self._reset_prompt_case_state(driver, package, request.target_kind)
+                            self._activate_application(
+                                driver,
+                                package,
+                                activity_hint,
+                                force_launch=True,
+                                preserve_known_system_prompt=True,
+                            )
                     elif test_index > 0:
                         self._reset_to_application(
                             driver,
@@ -606,6 +630,10 @@ class AutopilotSuiteService:
                         )
                     if has_prompt_step:
                         prompt_case_count += 1
+                    if video_requested:
+                        # Prompt replay can replace the Appium session above;
+                        # begin recording only on the session that runs the case.
+                        video_started, video_status = self._start_video_recording(driver)
                     case_source = safe_page_source(driver)
                     if expected_prompt_kind and known_native_prompt_kind(driver, case_source, request.target_kind) == expected_prompt_kind:
                         case_target_ready, case_target_reason = True, "The observed system prompt is active for its recorded branch."
@@ -639,6 +667,7 @@ class AutopilotSuiteService:
                         input_values=input_values,
                         sensitive_input_keys=sensitive_input_keys,
                         launch_activity=activity_hint,
+                        discovery=discovery,
                     )
                     if setup_navigation:
                         evidence["setup_navigation"] = setup_navigation
@@ -1366,12 +1395,11 @@ class AutopilotSuiteService:
                         "No test action was taken."
                     )
                 return live_navigation
-            # If the provider relaunches directly onto a credential form, an
-            # earlier observed public entry screen may still be safely
-            # reachable by one native Back action. Permit that one reverse
-            # only when it exactly undoes an observed, safe tap from a public
-            # screen to an empty credential form. Never backtrack through an
-            # authenticated screen or a form containing user-entered values.
+            # A single native Back action may reverse an observed safe tap
+            # between public screens, from an empty credential form to a
+            # public screen, or from a public screen to an empty credential
+            # form. Never backtrack through populated credentials or an
+            # authenticated screen.
             back_edge = next(
                 (
                     transition
@@ -1384,14 +1412,28 @@ class AutopilotSuiteService:
                 None,
             )
             screen_by_id = {screen.screen_id: screen for screen in discovery.screens}
-            public_parent = screen_by_id.get(target.screen_id)
+            reverse_origin = screen_by_id.get(target.screen_id)
+            current_has_credentials = self._screen_has_credential_fields(current)
+            target_has_credentials = self._screen_has_credential_fields(target)
+            can_reverse_public_route = not current_has_credentials and not target_has_credentials
+            can_reverse_from_empty_current_form = (
+                current_has_credentials
+                and not target_has_credentials
+                and self._credential_fields_are_empty(driver, current, locator_map)
+            )
+            can_reverse_to_auth_form = (
+                target_has_credentials
+                and not current_has_credentials
+            )
             if (
                 back_edge is not None
-                and public_parent is not None
-                and self._screen_has_credential_fields(current)
-                and not self._screen_has_credential_fields(public_parent)
-                and self._observed_route_control_is_safe(public_parent, back_edge.control_id)
-                and self._credential_fields_are_empty(driver, current, locator_map)
+                and reverse_origin is not None
+                and self._observed_route_control_is_safe(reverse_origin, back_edge.control_id)
+                and (
+                    can_reverse_public_route
+                    or can_reverse_from_empty_current_form
+                    or can_reverse_to_auth_form
+                )
             ):
                 back_method = safe_navigate_back(driver, target_kind=target_kind)
                 time.sleep(0.6)
@@ -1407,6 +1449,11 @@ class AutopilotSuiteService:
                         )
                 reached = self._identify_discovered_screen(driver, discovery, package)
                 if reached is not None and reached.screen_id == target.screen_id:
+                    if target_has_credentials and not self._credential_fields_are_empty(driver, target, locator_map):
+                        raise ProviderLifecycleUnavailable(
+                            "Stopped at the authentication screen because its credential fields already contain values. "
+                            "No sign-in action was taken."
+                        )
                     if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
                         raise ProviderLifecycleUnavailable(
                             f"Back navigation returned to {self._screen_reference(target)}, but the case's "
@@ -1416,12 +1463,12 @@ class AutopilotSuiteService:
                         {
                             "from_screen": current.screen_id,
                             "to_screen": target.screen_id,
-                            "control": f"Back to observed public screen ({back_method})",
+                            "control": f"Back to observed screen ({back_method})",
                         }
                     ]
                 raise ProviderLifecycleUnavailable(
                     f"Back navigation did not return from {self._screen_reference(current)} to the observed "
-                    f"public screen {self._screen_reference(target)}. The case was not attempted."
+                    f"screen {self._screen_reference(target)}. The case was not attempted."
                 )
             raise ProviderLifecycleUnavailable(
                 f"No safe, observed navigation path leads from {self._screen_reference(current)} "
@@ -1564,6 +1611,7 @@ class AutopilotSuiteService:
         input_values: Dict[str, str] | None = None,
         sensitive_input_keys: set[str] | None = None,
         launch_activity: str | None = None,
+        discovery: AutopilotDiscoveryResult | None = None,
     ) -> Dict[str, Any]:
         from appium.webdriver.common.appiumby import AppiumBy
 
@@ -1578,6 +1626,9 @@ class AutopilotSuiteService:
         sensitive_input_touched = False
         for index, step in enumerate(test.steps, start=1):
             mechanism: str | None = None
+            resulting_prompt_kind: str | None = None
+            resulting_prompt_id: str | None = None
+            resulting_screen_id: str | None = None
             if step.action == "launch_app":
                 expected_prompt_kind = next(
                     (item.target for item in test.steps if item.action == "prompt_choice"),
@@ -1600,6 +1651,7 @@ class AutopilotSuiteService:
                     )
                 if not step.locator_strategy or not step.locator_value:
                     raise AssertionError("Observed prompt choice has no deterministic locator")
+                initial_prompt_id = native_prompt_fingerprint(driver, current_source, target_kind)
                 element = driver.find_element(locator_map[step.locator_strategy], step.locator_value)
                 if not element.is_enabled():
                     raise AssertionError("Observed prompt choice is disabled")
@@ -1608,7 +1660,17 @@ class AutopilotSuiteService:
                 returned_to_app = False
                 while time.monotonic() < deadline:
                     current_source = safe_page_source(driver)
-                    if known_native_prompt_kind(driver, current_source, target_kind) is None:
+                    next_prompt_kind = known_native_prompt_kind(driver, current_source, target_kind)
+                    if next_prompt_kind:
+                        next_prompt_id = native_prompt_fingerprint(driver, current_source, target_kind)
+                        if next_prompt_kind != actual_kind or (
+                            next_prompt_id and initial_prompt_id and next_prompt_id != initial_prompt_id
+                        ):
+                            resulting_prompt_kind = next_prompt_kind
+                            resulting_prompt_id = next_prompt_id
+                            returned_to_app = True
+                            break
+                    else:
                         returned_to_app, _, _ = validate_target_surface(
                             driver,
                             expected_package=package,
@@ -1618,7 +1680,30 @@ class AutopilotSuiteService:
                             break
                     time.sleep(0.25)
                 if not returned_to_app:
-                    raise AssertionError("The selected prompt choice did not return to the uploaded app")
+                    raise AssertionError("The selected prompt choice did not reach the app or a new observed system prompt")
+                if step.expected_resulting_prompt_id:
+                    if resulting_prompt_id != step.expected_resulting_prompt_id:
+                        raise AssertionError(
+                            "The selected prompt choice did not reach its observed follow-up system prompt."
+                        )
+                elif step.expected_resulting_screen_id:
+                    if resulting_prompt_kind:
+                        raise AssertionError(
+                            "The selected prompt choice reached a system prompt instead of its observed app screen."
+                        )
+                    reached_screen = (
+                        self._identify_discovered_screen(driver, discovery, package)
+                        if discovery is not None
+                        else None
+                    )
+                    if reached_screen is None or reached_screen.screen_id != step.expected_resulting_screen_id:
+                        raise AssertionError(
+                            "The selected prompt choice did not reach its observed app screen."
+                        )
+                    resulting_screen_id = reached_screen.screen_id
+                elif not resulting_prompt_kind and discovery is not None:
+                    reached_screen = self._identify_discovered_screen(driver, discovery, package)
+                    resulting_screen_id = reached_screen.screen_id if reached_screen is not None else None
                 mechanism = f"observed_prompt_choice:{step.assertion or step.value or 'selected'}"
             elif step.action == "inspect_ui":
                 source = driver.page_source or ""
@@ -1867,6 +1952,11 @@ class AutopilotSuiteService:
                 "screen_id": step.screen_id,
                 "locator_confidence": step.locator_confidence,
             }
+            if resulting_prompt_kind:
+                action_evidence["resulting_prompt_kind"] = resulting_prompt_kind
+                action_evidence["resulting_prompt_id"] = resulting_prompt_id
+            if resulting_screen_id:
+                action_evidence["resulting_screen_id"] = resulting_screen_id
             if mechanism:
                 action_evidence["mechanism"] = mechanism
             actions.append(action_evidence)

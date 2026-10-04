@@ -34,6 +34,7 @@ from app.services.appium_compat import (
     activate_verified_target_surface,
     enter_observed_text,
     known_native_prompt_kind,
+    native_prompt_fingerprint,
     safe_app_identity,
     safe_current_activity,
     safe_page_source,
@@ -210,7 +211,7 @@ class AutopilotDiscoveryService:
                     )
                 )
 
-        prompt_id = hashlib.sha1(
+        prompt_id = native_prompt_fingerprint(driver, page_source, target_kind) or hashlib.sha1(
             f"{kind}|{safe_current_activity(driver)}|{'|'.join(choice.key for choice in choices)}".encode(
                 "utf-8", errors="ignore"
             )
@@ -1668,6 +1669,7 @@ class AutopilotDiscoveryService:
         seen_fingerprints: dict[str, str] = {}
         runtime_prompts: list[RuntimePromptObservation] = []
         pending_prompt_outcomes: list[tuple[RuntimePromptObservation, str]] = []
+        pending_prompt_links: list[tuple[RuntimePromptObservation, str]] = []
         visited_edges: set[tuple[str, str]] = set()
         transaction_screen_ids: set[str] = set()
         scroll_rounds: dict[str, int] = {}
@@ -1692,8 +1694,18 @@ class AutopilotDiscoveryService:
                 prompt = self._runtime_prompt_observation(driver, page_source, evidence_dir, request.target_kind)
                 if prompt is None:
                     break
+                initial_prompt_id = native_prompt_fingerprint(driver, page_source, request.target_kind)
                 if not any(item.prompt_id == prompt.prompt_id for item in runtime_prompts):
                     runtime_prompts.append(prompt)
+                if pending_prompt_links:
+                    for source_prompt, choice_key in pending_prompt_links:
+                        source_prompt.choices = [
+                            choice.model_copy(update={"resulting_prompt_id": prompt.prompt_id})
+                            if choice.key == choice_key and choice.outcome_status == "observed"
+                            else choice
+                            for choice in source_prompt.choices
+                        ]
+                    pending_prompt_links.clear()
                 if request.observe_only:
                     break
                 selected_key, clicked = self._choose_system_prompt_branch(driver, prompt.choices, AppiumBy)
@@ -1714,9 +1726,18 @@ class AutopilotDiscoveryService:
                     pass
                 prompt_deadline = time.monotonic() + 8.0
                 decline_returned_to_app = False
+                followup_prompt_kind: Optional[str] = None
                 while time.monotonic() < prompt_deadline:
                     page_source = safe_page_source(driver)
-                    if known_native_prompt_kind(driver, page_source, request.target_kind) is None:
+                    active_prompt_kind = known_native_prompt_kind(driver, page_source, request.target_kind)
+                    if active_prompt_kind:
+                        active_prompt_id = native_prompt_fingerprint(driver, page_source, request.target_kind)
+                        if active_prompt_kind != prompt.kind or (
+                            active_prompt_id and initial_prompt_id and active_prompt_id != initial_prompt_id
+                        ):
+                            followup_prompt_kind = active_prompt_kind
+                            break
+                    else:
                         decline_returned_to_app, _, _ = validate_target_surface(
                             driver,
                             expected_package=package_hint,
@@ -1730,7 +1751,9 @@ class AutopilotDiscoveryService:
                     prompt.choices = [
                         choice.model_copy(
                             update={
-                                "outcome_status": "observed" if clicked and decline_returned_to_app else "unavailable"
+                                "outcome_status": "observed"
+                                if clicked and (decline_returned_to_app or followup_prompt_kind)
+                                else "unavailable"
                             }
                         )
                         if choice.key == selected_key
@@ -1739,6 +1762,14 @@ class AutopilotDiscoveryService:
                     ]
                     if clicked and decline_returned_to_app:
                         pending_prompt_outcomes.append((prompt, selected_key))
+                    elif clicked and followup_prompt_kind:
+                        pending_prompt_links.append((prompt, selected_key))
+                if followup_prompt_kind:
+                    # A different observed native prompt is a valid outcome of
+                    # this branch. Capture it on the next loop iteration and
+                    # continue through its own safe decline branch.
+                    page_source = safe_page_source(driver)
+                    continue
                 returned_to_app = decline_returned_to_app
                 if not returned_to_app:
                     # A native prompt can remain foreground after its decline

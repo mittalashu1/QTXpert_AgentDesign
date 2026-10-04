@@ -374,6 +374,56 @@ class AutopilotIRCompiler:
             tests=compiled,
         )
 
+    @staticmethod
+    def _runtime_prompt_choice_step(prompt, choice, *, description: str | None = None) -> QTXIRStep:
+        locators = sorted(choice.locators, key=lambda item: -item.confidence)
+        locator = locators[0]
+        return QTXIRStep(
+            action="prompt_choice",
+            description=description
+            or f"Choose the observed {choice.label} option on the {prompt.title or prompt.kind} prompt.",
+            target=prompt.kind,
+            value=choice.key,
+            locator_strategy=locator.strategy,
+            locator_value=locator.value,
+            locator_confidence=locator.confidence,
+            locator_fallbacks=locators[1:],
+            assertion=choice.decision,
+            observation_ref=prompt.observation_ref or f"runtime-prompt:{prompt.prompt_id}",
+            expected_resulting_prompt_id=choice.resulting_prompt_id,
+            expected_resulting_screen_id=choice.resulting_screen_id,
+        )
+
+    @staticmethod
+    def _observed_prompt_prefix(discovery, prompt_id: str):
+        """Find a bounded observed denial path from app launch to a follow-up prompt."""
+        if discovery is None:
+            return [], None
+        chain = []
+        visited = {prompt_id}
+        cursor = prompt_id
+        for _ in range(8):
+            candidates = [
+                (source_prompt, choice)
+                for source_prompt in discovery.runtime_prompts
+                for choice in source_prompt.choices
+                if choice.resulting_prompt_id == cursor
+                and choice.outcome_status == "observed"
+                and choice.decision == "deny"
+            ]
+            if not candidates:
+                return list(reversed(chain)), None
+            candidates.sort(key=lambda item: (item[0].prompt_id, item[1].key))
+            source_prompt, choice = candidates[0]
+            if not choice.locators:
+                return [], "The observed prompt path contains a denial without a deterministic locator."
+            if source_prompt.prompt_id in visited:
+                return [], "The observed prompt path contains a cycle and cannot be replayed safely."
+            chain.append((source_prompt, choice))
+            visited.add(source_prompt.prompt_id)
+            cursor = source_prompt.prompt_id
+        return [], "The observed prompt path exceeds the safe replay limit."
+
     def compile_test(
         self,
         test: AutopilotTest,
@@ -415,44 +465,51 @@ class AutopilotIRCompiler:
                 ),
                 None,
             )
-            if prompt is not None and choice is not None and choice.locators:
-                locators = sorted(choice.locators, key=lambda item: -item.confidence)
-                locator = locators[0]
+            prompt_prefix, prompt_path_error = self._observed_prompt_prefix(
+                discovery,
+                prompt.prompt_id if prompt is not None else test.runtime_prompt_id,
+            )
+            if prompt is not None and choice is not None and choice.locators and not prompt_path_error:
                 resolved_steps = [
                     QTXIRStep(
                         action="launch_app",
-                        description=f"Launch the app to show the observed {prompt.title or prompt.kind} prompt.",
+                        description=f"Launch the app to replay the observed path to the {prompt.title or prompt.kind} prompt.",
                         observation_ref=prompt.observation_ref,
                     ),
-                    QTXIRStep(
-                        action="prompt_choice",
-                        description=f"Choose the observed {choice.label} option on the {prompt.title or prompt.kind} prompt.",
-                        target=prompt.kind,
-                        value=choice.key,
-                        locator_strategy=locator.strategy,
-                        locator_value=locator.value,
-                        locator_confidence=locator.confidence,
-                        locator_fallbacks=locators[1:],
-                        assertion=choice.decision,
-                        observation_ref=prompt.observation_ref or f"runtime-prompt:{prompt.prompt_id}",
-                    ),
+                ]
+                for prefix_prompt, prefix_choice in prompt_prefix:
+                    resolved_steps.append(
+                        self._runtime_prompt_choice_step(
+                            prefix_prompt,
+                            prefix_choice,
+                            description=(
+                                f"Choose the observed {prefix_choice.label} option on the "
+                                f"{prefix_prompt.title or prefix_prompt.kind} prompt to reach the follow-up checkpoint."
+                            ),
+                        )
+                    )
+                resolved_steps.append(self._runtime_prompt_choice_step(prompt, choice))
+                resolved_steps.extend([
                     QTXIRStep(
                         action="inspect_ui",
-                        description="Verify the app returns to a readable foreground screen after the prompt choice.",
+                        description="Verify the app or a new native prompt appears after the observed choice.",
                         observation_ref=prompt.observation_ref,
                     ),
                     QTXIRStep(
                         action="capture_evidence",
-                        description="Capture the app screen after applying the prompt choice.",
+                        description="Capture the app or native prompt state after applying the choice.",
                         observation_ref=prompt.observation_ref,
                     ),
-                ]
+                ])
                 readiness = "executable"
                 promoted = True
-                readiness_reason = "The prompt option has an observed deterministic locator."
+                readiness_reason = "The prompt option and its observed replay path have deterministic locators."
             else:
                 readiness = "discovery_required"
-                readiness_reason = "The observed prompt choice is missing a deterministic locator."
+                readiness_reason = (
+                    prompt_path_error
+                    or "The observed prompt choice is missing a deterministic locator."
+                )
         elif test.id.startswith("QT-RUNTIME-FUNC-POS-") and test.dependency and not test.autonomous_candidate:
             # A control seen on screen is a legitimate case candidate, but a
             # missing destination is not evidence that the action is replayable.
