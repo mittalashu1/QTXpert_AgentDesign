@@ -137,7 +137,7 @@ def _service(settings: Settings) -> AutopilotPrototypeService:
 def _apply_durable_suite_phase(result: AutopilotJobStatus, job: dict[str, Any], record: Optional[AutopilotJob]) -> AutopilotJobStatus:
     """Use the durable database suite snapshot when a manifest still says running."""
     suite = record.suite_execution if record is not None else None
-    if result.phase != "running" or not isinstance(suite, dict):
+    if str(job.get("phase") or "") != "running" or not isinstance(suite, dict):
         return result
     recovered_phase = status_phase_for_job(job, durable_suite_execution=suite)
     if recovered_phase == result.phase:
