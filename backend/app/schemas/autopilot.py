@@ -391,6 +391,10 @@ class AutopilotTest(BaseModel):
     page_url: Optional[str] = None
     # Stable Runtime Discovery screen association, used only as replay metadata.
     runtime_screen_id: Optional[str] = None
+    # Prompt branches are grounded in a separately observed dialog; system UI
+    # remains outside the product screen graph.
+    runtime_prompt_id: Optional[str] = None
+    runtime_prompt_choice: Optional[str] = None
     data_probes: List[AutopilotDataProbe] = Field(default_factory=list)
     provenance: List[AutopilotTestProvenance] = Field(default_factory=list)
     requirement_refs: List[str] = Field(default_factory=list)
@@ -779,6 +783,7 @@ class QTXIRStep(BaseModel):
         "wait_for_state",
         "tap",
         "click",
+        "prompt_choice",
         "fill",
         "clear",
         "select",
@@ -991,6 +996,28 @@ class DiscoveredTransition(BaseModel):
     observation_ref: Optional[str] = None
 
 
+class RuntimePromptChoice(BaseModel):
+    key: str
+    label: str
+    decision: Literal["allow", "deny", "other"]
+    locators: List[DiscoveryLocator] = Field(default_factory=list)
+    outcome_status: Literal["observed", "planned", "unavailable"] = "planned"
+    resulting_screen_id: Optional[str] = None
+
+
+class RuntimePromptObservation(BaseModel):
+    prompt_id: str
+    kind: Literal["location_settings", "runtime_permission", "app_confirmation", "other"]
+    surface: Literal["android_system", "ios_system", "application"] = "android_system"
+    title: Optional[str] = None
+    screenshot_path: Optional[str] = Field(default=None, exclude=True)
+    page_source_path: Optional[str] = Field(default=None, exclude=True)
+    screenshot_asset_id: Optional[UUID] = None
+    page_source_asset_id: Optional[UUID] = None
+    choices: List[RuntimePromptChoice] = Field(default_factory=list)
+    observation_ref: Optional[str] = None
+
+
 class AutopilotDiscoveryResult(BaseModel):
     job_id: str
     status: Literal["completed", "partial", "blocked", "failed"]
@@ -1031,6 +1058,9 @@ class AutopilotDiscoveryResult(BaseModel):
     last_attempt_screens: List[DiscoveredScreen] = Field(default_factory=list)
     screens: List[DiscoveredScreen] = Field(default_factory=list)
     transitions: List[DiscoveredTransition] = Field(default_factory=list)
+    # System prompts are first-class branch points, but remain outside the
+    # product screen graph so their controls are not misrepresented as app UI.
+    runtime_prompts: List[RuntimePromptObservation] = Field(default_factory=list)
     # Field-specific, non-secret setup references inferred from the live UI.
     # These are informational until the generic credential/data checkpoint is
     # satisfied; values are never captured from the device.
