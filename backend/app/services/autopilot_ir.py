@@ -363,7 +363,7 @@ class AutopilotIRCompiler:
             job_id=analysis.job_id,
             generated_at=datetime.now(timezone.utc).isoformat(),
             framework="QTX Test IR + Playwright Python" if analysis.target_kind == "web" else "QTX Test IR + Appium Python",
-            discovery_used=bool(discovery and discovery.screens),
+            discovery_used=bool(discovery and (discovery.screens or discovery.runtime_prompts)),
             promoted_count=sum(test.promoted_by_discovery for test in compiled),
             executable_count=sum(test.readiness == "executable" for test in compiled),
             discovery_required_count=sum(test.readiness == "discovery_required" for test in compiled),
@@ -1376,7 +1376,7 @@ class AutopilotIRCompiler:
                         "    assert element.is_enabled(), 'Observed prompt choice is disabled'",
                         "    element.click()",
                         "    time.sleep(1)",
-                        f"    assert known_native_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) is None, 'Prompt did not close after choosing {step.assertion or 'the observed option'}'
+                        f"    assert known_native_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) is None, 'Prompt did not close after choosing {step.assertion or 'the observed option'}'"
                     ])
                 elif step.action in {"tap", "assert_visible"}:
                     lines.extend([
