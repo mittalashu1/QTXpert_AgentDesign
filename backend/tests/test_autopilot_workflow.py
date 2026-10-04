@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotScope,
@@ -15,6 +17,7 @@ from app.services.autopilot_workflow import (
     build_execution_control_payload,
     build_generation_plan,
     find_duplicate_cases,
+    status_phase_for_job,
     transition_phase,
 )
 
@@ -86,6 +89,7 @@ def test_phase_transitions_are_explicit_and_idempotent():
     assert transition_phase("partial", "cases_approved") == "cases_approved"
     assert transition_phase("cases_pending_review", "cases_approved") == "cases_approved"
     assert transition_phase("cases_approved", "cases_approved") == "cases_approved"
+    assert transition_phase("failed", "execution_ready") == "execution_ready"
     # Discovery/setup retries can overlap an already running safe suite; the
     # continuation must remain idempotent rather than failing the job.
     assert transition_phase("running", "exploring") == "exploring"
@@ -97,6 +101,43 @@ def test_phase_transitions_are_explicit_and_idempotent():
         assert "draft -> running" in str(exc)
     else:
         raise AssertionError("an approval-gated phase jump must be rejected")
+
+
+def test_stale_running_suite_phase_recovers_from_a_terminal_result():
+    now = datetime(2026, 10, 4, 14, 0, tzinfo=timezone.utc)
+    job = {
+        "phase": "running",
+        "phase_updated_at": "2026-10-04T13:59:00Z",
+        "suite_execution": {
+            "status": "partial",
+            "started_at": "2026-10-04T13:58:00Z",
+            "finished_at": "2026-10-04T13:59:30Z",
+        },
+    }
+
+    assert status_phase_for_job(job, now=now) == "partial"
+
+
+def test_fresh_running_suite_is_not_reopened_for_a_duplicate_batch():
+    now = datetime(2026, 10, 4, 14, 0, tzinfo=timezone.utc)
+    job = {
+        "phase": "running",
+        "phase_updated_at": "2026-10-04T13:59:00Z",
+        "suite_execution": {
+            "status": "partial",
+            "started_at": "2026-10-04T13:40:00Z",
+            "finished_at": "2026-10-04T13:45:00Z",
+        },
+    }
+
+    assert status_phase_for_job(job, now=now) == "running"
+
+
+def test_expired_running_suite_without_result_can_be_retried():
+    now = datetime(2026, 10, 4, 14, 30, tzinfo=timezone.utc)
+    job = {"phase": "running", "phase_updated_at": "2026-10-04T14:00:00Z"}
+
+    assert status_phase_for_job(job, now=now) == "failed"
 
 
 def test_generation_plan_groups_cases_and_preserves_provenance():

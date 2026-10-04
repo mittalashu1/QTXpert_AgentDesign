@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping
 
 from app.schemas.autopilot import (
@@ -81,7 +81,7 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # Discovery may recover useful evidence from a blocked attempt; return it to
     # case review so the user can inspect it before continuing the run.
     "blocked": frozenset({"exploring", "execution_ready", "plan_pending_review", "cases_pending_review"}),
-    "failed": frozenset({"preflight", "context_ready", "plan_pending_review", "exploring"}),
+    "failed": frozenset({"preflight", "context_ready", "plan_pending_review", "exploring", "execution_ready"}),
 }
 
 
@@ -126,6 +126,60 @@ def phase_for_job(job: Mapping[str, Any]) -> str:
     if status == "analyzing":
         return "preflight"
     return "draft"
+
+
+
+def _parse_workflow_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def status_phase_for_job(
+    job: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+    stale_after: timedelta = timedelta(minutes=20),
+) -> str:
+    """Recover a crashed suite phase from durable results or a stale run lease.
+
+    A worker can exit after writing the running phase but before writing its
+    terminal phase. Keep a fresh run protected from duplicate submission, then
+    expose its durable terminal result once it is recorded or the run expires.
+    """
+    phase = phase_for_job(job)
+    if phase != "running":
+        return phase
+
+    started_at = _parse_workflow_timestamp(job.get("phase_updated_at"))
+    if started_at is None:
+        return phase
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    else:
+        current_time = current_time.astimezone(timezone.utc)
+
+    suite = job.get("suite_execution")
+    suite_phase = None
+    if isinstance(suite, Mapping):
+        suite_phase = {
+            "passed": "completed",
+            "partial": "partial",
+            "blocked": "blocked",
+            "failed": "failed",
+        }.get(str(suite.get("status") or "").strip().lower())
+        finished_at = _parse_workflow_timestamp(suite.get("finished_at"))
+        if suite_phase and finished_at is not None and finished_at >= started_at:
+            return suite_phase
+
+    if current_time - started_at >= stale_after:
+        return suite_phase or "failed"
+    return phase
 
 
 def _now() -> str:

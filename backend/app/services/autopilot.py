@@ -83,6 +83,7 @@ from app.services.autopilot_workflow import (
     build_application_map,
     build_generation_plan,
     phase_for_job,
+    status_phase_for_job,
     transition_phase,
 )
 from app.services.device_farm import DeviceFarmService, DeviceFarmSession
@@ -1242,6 +1243,10 @@ class AutopilotPrototypeService:
                     ),
                 )
                 job = await self.load_job(job_id)
+        persisted_phase = phase_for_job(job)
+        status_phase = status_phase_for_job(job)
+        if analysis is not None and status_phase != persisted_phase:
+            analysis = analysis.model_copy(update={"phase": status_phase})
         artifact_path = job.get("apk_path")
         document_asset_ids: list[uuid.UUID] = []
         for value in job.get("document_asset_ids", []) or []:
@@ -1306,7 +1311,7 @@ class AutopilotPrototypeService:
             checkpoint_stage=str(job.get("checkpoint_stage") or (analysis.checkpoint_stage if analysis else "queued")),
             checkpoint_message=job.get("checkpoint_message"),
             input_requests=input_requests,
-            phase=str(job.get("phase") or phase_for_job(job)),
+            phase=status_phase,
             phase_updated_at=job.get("phase_updated_at") or job.get("updated_at"),
             generation_plan=(
                 AutopilotGenerationPlan.model_validate(job["plan"])
