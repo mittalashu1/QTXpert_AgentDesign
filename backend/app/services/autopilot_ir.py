@@ -363,7 +363,7 @@ class AutopilotIRCompiler:
             job_id=analysis.job_id,
             generated_at=datetime.now(timezone.utc).isoformat(),
             framework="QTX Test IR + Playwright Python" if analysis.target_kind == "web" else "QTX Test IR + Appium Python",
-            discovery_used=bool(discovery and discovery.screens),
+            discovery_used=bool(discovery and (discovery.screens or discovery.runtime_prompts)),
             promoted_count=sum(test.promoted_by_discovery for test in compiled),
             executable_count=sum(test.readiness == "executable" for test in compiled),
             discovery_required_count=sum(test.readiness == "discovery_required" for test in compiled),
@@ -400,6 +400,59 @@ class AutopilotIRCompiler:
         elif missing_setup:
             readiness = "discovery_required"
             readiness_reason = "Provide setup: " + "; ".join(missing_setup) + "."
+        elif test.runtime_prompt_id:
+            prompt = next(
+                (
+                    item for item in (discovery.runtime_prompts if discovery is not None else [])
+                    if item.prompt_id == test.runtime_prompt_id
+                ),
+                None,
+            )
+            choice = next(
+                (
+                    item for item in (prompt.choices if prompt is not None else [])
+                    if item.key == test.runtime_prompt_choice
+                ),
+                None,
+            )
+            if prompt is not None and choice is not None and choice.locators:
+                locators = sorted(choice.locators, key=lambda item: -item.confidence)
+                locator = locators[0]
+                resolved_steps = [
+                    QTXIRStep(
+                        action="launch_app",
+                        description=f"Launch the app to show the observed {prompt.title or prompt.kind} prompt.",
+                        observation_ref=prompt.observation_ref,
+                    ),
+                    QTXIRStep(
+                        action="prompt_choice",
+                        description=f"Choose the observed {choice.label} option on the {prompt.title or prompt.kind} prompt.",
+                        target=prompt.kind,
+                        value=choice.key,
+                        locator_strategy=locator.strategy,
+                        locator_value=locator.value,
+                        locator_confidence=locator.confidence,
+                        locator_fallbacks=locators[1:],
+                        assertion=choice.decision,
+                        observation_ref=prompt.observation_ref or f"runtime-prompt:{prompt.prompt_id}",
+                    ),
+                    QTXIRStep(
+                        action="inspect_ui",
+                        description="Verify the app returns to a readable foreground screen after the prompt choice.",
+                        observation_ref=prompt.observation_ref,
+                    ),
+                    QTXIRStep(
+                        action="capture_evidence",
+                        description="Capture the app screen after applying the prompt choice.",
+                        observation_ref=prompt.observation_ref,
+                    ),
+                ]
+                readiness = "executable"
+                promoted = True
+                readiness_reason = "The prompt option has an observed deterministic locator."
+            else:
+                readiness = "discovery_required"
+                readiness_reason = "The observed prompt choice is missing a deterministic locator."
         elif test.id.startswith("QT-RUNTIME-FUNC-POS-") and test.dependency and not test.autonomous_candidate:
             # A control seen on screen is a legitimate case candidate, but a
             # missing destination is not evidence that the action is replayable.
@@ -1285,6 +1338,7 @@ class AutopilotIRCompiler:
                 "    from pathlib import Path",
                 "    import time",
                 "    from appium.webdriver.common.appiumby import AppiumBy",
+                "    from app.services.appium_compat import known_native_prompt_kind",
                 "    from app.services.appium_compat import safe_app_identity, safe_page_source",
                 "    from app.services.autopilot_discovery import AutopilotDiscoveryService",
                 "",
@@ -1313,6 +1367,16 @@ class AutopilotIRCompiler:
                         "            try: swipe(int(width * .5), int(height * .82), int(width * .5), int(height * .22), duration=700)",
                         "            except TypeError: swipe(int(width * .5), int(height * .82), int(width * .5), int(height * .22), 700)",
                         "    time.sleep(0.8)",
+                    ])
+                elif step.action == "prompt_choice":
+                    lines.extend([
+                        f"    # {index}. {step.description}",
+                        f"    assert known_native_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) == {step.target!r}, 'Observed prompt is not active'",
+                        f"    element = driver.find_element(locator_map[{step.locator_strategy!r}], {step.locator_value!r})",
+                        "    assert element.is_enabled(), 'Observed prompt choice is disabled'",
+                        "    element.click()",
+                        "    time.sleep(1)",
+                        f"    assert known_native_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) is None, 'Prompt did not close after choosing {step.assertion or 'the observed option'}'"
                     ])
                 elif step.action in {"tap", "assert_visible"}:
                     lines.extend([

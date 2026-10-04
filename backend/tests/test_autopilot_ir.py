@@ -9,6 +9,8 @@ from app.schemas.autopilot import (
     DiscoveredScreen,
     DiscoveredTransition,
     DiscoveryLocator,
+    RuntimePromptChoice,
+    RuntimePromptObservation,
 )
 from app.services.autopilot_ir import AutopilotIRCompiler, build_input_requests, credential_value_available
 
@@ -817,3 +819,56 @@ def test_short_assertion_does_not_match_a_longer_unrelated_control():
 
 
 
+
+
+def test_observed_prompt_choice_compiles_to_executable_ir():
+    prompt = RuntimePromptObservation(
+        prompt_id="location-prompt-01",
+        kind="location_settings",
+        title="Location settings prompt",
+        observation_ref="runtime-prompt:location-prompt-01",
+        choices=[
+            RuntimePromptChoice(
+                key="turn-on",
+                label="Turn on",
+                decision="allow",
+                locators=[
+                    DiscoveryLocator(
+                        strategy="xpath",
+                        value='//*[@text="Turn on"]',
+                        confidence=0.88,
+                    )
+                ],
+            )
+        ],
+    )
+    discovery = _discovery().model_copy(update={"runtime_prompts": [prompt]})
+    test_case = AutopilotTest(
+        id="QT-RUNTIME-PROMPT-ALLOW-01",
+        suite="Permissions",
+        bucket="permissions",
+        title="Location settings prompt — choose Turn on",
+        objective="Exercise the observed allow choice and verify app recovery.",
+        steps=["Launch application", "Choose Turn on"],
+        expected=["The app returns to its own UI"],
+        autonomous_candidate=True,
+        runtime_prompt_id=prompt.prompt_id,
+        runtime_prompt_choice="turn-on",
+    )
+    analysis = _analysis([test_case])
+
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+
+    assert generated.readiness == "executable"
+    assert generated.promoted_by_discovery is True
+    assert [step.action for step in generated.steps] == [
+        "launch_app",
+        "prompt_choice",
+        "inspect_ui",
+        "capture_evidence",
+    ]
+    assert generated.steps[1].target == "location_settings"
+    assert generated.steps[1].value == "turn-on"
+    assert generated.steps[1].locator_value == '//*[@text="Turn on"]'
+    assert "known_native_prompt_kind" in generated.appium_python
+    compile(generated.appium_python, "<qtx-generated-prompt>", "exec")

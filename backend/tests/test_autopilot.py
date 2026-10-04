@@ -26,6 +26,10 @@ from app.schemas.autopilot import (
     DiscoveredScreen,
     DiscoveredTransition,
     DiscoveryLocator,
+    RuntimePromptChoice,
+    RuntimePromptObservation,
+    QTXIRStep,
+    QTXTestIR,
 )
 from app.api.routes.autopilot import (
     _autopilot_safe_case_metadata,
@@ -53,6 +57,7 @@ from app.services.autopilot import (
     normalize_surface_identity,
 )
 from app.services.autopilot_ir import AutopilotIRCompiler, credential_value_available
+from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.autopilot_context import (
     DEFAULT_AUTOPILOT_CONTEXT,
     DEFAULT_AUTOPILOT_PROFILE_ID,
@@ -2789,3 +2794,220 @@ async def test_suite_phase_transition_initializes_phase_from_approved_plan():
     await _advance_suite_job_to_running(service, "suite-job", "cases_pending_review")
 
     assert service.phases == ["cases_approved", "execution_ready", "running"]
+
+
+def test_runtime_prompt_expansion_creates_allow_and_deny_cases_without_screens(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="abababab-abab-abab-abab-abababababab",
+        filename="location.apk",
+        sha256="a" * 64,
+        tests=[],
+    )
+    prompt = RuntimePromptObservation(
+        prompt_id="location-prompt-01",
+        kind="location_settings",
+        title="Location settings prompt",
+        observation_ref="runtime-prompt:location-prompt-01",
+        choices=[
+            RuntimePromptChoice(
+                key="no-thanks",
+                label="No thanks",
+                decision="deny",
+                locators=[
+                    DiscoveryLocator(
+                        strategy="xpath",
+                        value='//*[@text="No thanks"]',
+                        confidence=0.88,
+                    )
+                ],
+                outcome_status="observed",
+                resulting_screen_id="screen-001",
+            ),
+            RuntimePromptChoice(
+                key="turn-on",
+                label="Turn on",
+                decision="allow",
+                locators=[
+                    DiscoveryLocator(
+                        strategy="xpath",
+                        value='//*[@text="Turn on"]',
+                        confidence=0.88,
+                    )
+                ],
+            ),
+        ],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="devicefarm",
+        started_at="2026-10-03T00:00:00+00:00",
+        finished_at="2026-10-03T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        runtime_prompts=[prompt],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    cases = [test for test in expanded.tests if test.runtime_prompt_id == prompt.prompt_id]
+
+    assert len(cases) == 2
+    assert {test.runtime_prompt_choice for test in cases} == {"no-thanks", "turn-on"}
+    assert all(test.autonomous_candidate for test in cases)
+    assert all("Reset the app/device prompt state" in test.preconditions[0] for test in cases)
+
+
+def test_suite_executes_recorded_location_prompt_choice(tmp_path):
+    class Driver:
+        capabilities = {
+            "platformName": "Android",
+            "appium:appPackage": "com.qtx.demo",
+            "appium:appActivity": ".MainActivity",
+        }
+
+        def __init__(self):
+            self.state = "prompt"
+
+        @property
+        def current_activity(self):
+            return (
+                "com.google.android.location.settings.LocationSettingsCheckerActivity"
+                if self.state == "prompt"
+                else "com.qtx.demo.MainActivity"
+            )
+
+        @property
+        def page_source(self):
+            if self.state == "prompt":
+                return (
+                    '<hierarchy><node package="com.google.android.gms" text="Location settings" '
+                    'class="android.widget.FrameLayout" /></hierarchy>'
+                )
+            return '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout" /></hierarchy>'
+
+        def find_element(self, by, value):
+            assert value == "com.google.android.gms:id/negative_button"
+            return Element(self)
+
+    class Element:
+        def __init__(self, driver):
+            self.driver = driver
+
+        def is_enabled(self):
+            return True
+
+        def click(self):
+            self.driver.state = "app"
+
+    driver = Driver()
+    ir_test = QTXTestIR(
+        test_id="QT-RUNTIME-PROMPT-DENY-01",
+        title="Location prompt — No thanks",
+        source="deterministic",
+        suite="Permissions",
+        priority="high",
+        readiness="executable",
+        bucket="permissions",
+        steps=[
+            QTXIRStep(
+                action="prompt_choice",
+                description="Choose No thanks",
+                target="location_settings",
+                value="no-thanks",
+                locator_strategy="id",
+                locator_value="com.google.android.gms:id/negative_button",
+                assertion="deny",
+            )
+        ],
+    )
+
+    result = AutopilotSuiteService.__new__(AutopilotSuiteService)._execute_test(
+        driver,
+        ir_test,
+        tmp_path,
+        "com.qtx.demo",
+    )
+
+    assert result["actions"][0]["mechanism"] == "observed_prompt_choice:deny"
+    assert driver.state == "app"
+
+
+def test_suite_resets_android_prompt_state_between_branches():
+    calls = []
+
+    class Driver:
+        def terminate_app(self, package):
+            calls.append(("terminate_app", package))
+
+        def execute_script(self, command, arguments):
+            calls.append((command, arguments))
+
+    AutopilotSuiteService._reset_prompt_case_state(Driver(), "com.qtx.demo", "android")
+
+    assert calls == [
+        ("terminate_app", "com.qtx.demo"),
+        ("mobile: clearApp", {"appId": "com.qtx.demo"}),
+    ]
+
+
+def test_suite_resets_ios_permission_state_between_branches():
+    calls = []
+
+    class Driver:
+        def execute_script(self, command, arguments):
+            calls.append((command, arguments))
+            if arguments["service"] != "location":
+                raise RuntimeError("unsupported permission")
+
+    AutopilotSuiteService._reset_prompt_case_state(Driver(), "com.qtx.demo", "ios")
+
+    assert calls[0] == ("mobile: resetPermission", {"service": "location"})
+    assert all(command == "mobile: resetPermission" for command, _ in calls)
+
+
+def test_prompt_only_retry_preserves_prior_screen_graph_and_new_prompt():
+    previous = AutopilotDiscoveryResult(
+        job_id="job-prompt-merge",
+        status="completed",
+        provider="appium",
+        started_at="2026-10-03T00:00:00+00:00",
+        finished_at="2026-10-03T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        target_ready=True,
+        interactive_surface_ready=True,
+        screen_count=1,
+        screens=[DiscoveredScreen(screen_id="screen-001", fingerprint="root")],
+    )
+    prompt = RuntimePromptObservation(
+        prompt_id="permission-01",
+        kind="runtime_permission",
+        title="Android permission prompt",
+        choices=[
+            RuntimePromptChoice(
+                key="deny",
+                label="Don't allow",
+                decision="deny",
+            )
+        ],
+    )
+    latest = AutopilotDiscoveryResult(
+        job_id="job-prompt-merge",
+        status="blocked",
+        provider="appium",
+        started_at="2026-10-03T00:01:00+00:00",
+        finished_at="2026-10-03T00:01:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        target_ready=False,
+        interactive_surface_ready=False,
+        target_identity_reason="The prompt prevented the provider from validating app focus.",
+        runtime_prompts=[prompt],
+    )
+
+    merged = _merge_discovery_snapshot(previous, latest)
+
+    assert [screen.screen_id for screen in merged.screens] == ["screen-001"]
+    assert [item.prompt_id for item in merged.runtime_prompts] == ["permission-01"]
+    assert merged.last_attempt_status == "blocked"

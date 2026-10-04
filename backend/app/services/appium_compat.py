@@ -151,6 +151,59 @@ def _is_google_location_settings_checker(driver: Any, page_source: str) -> bool:
     return "locationsettingscheckeractivity" in page_source.casefold()
 
 
+def known_android_prompt_kind(driver: Any, page_source: str) -> Optional[str]:
+    """Classify supported Android system prompts without treating them as app UI."""
+    if _is_google_location_settings_checker(driver, page_source):
+        return "location_settings"
+    activity = safe_current_activity(driver).casefold()
+    packages = {item.casefold() for item in _hierarchy_packages(page_source)}
+    permission_packages = {
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+        "com.android.packageinstaller",
+    }
+    source = str(page_source or "").casefold()
+    permission_copy = any(
+        marker in source
+        for marker in (
+            "allow while using the app",
+            "only this time",
+            "don’t allow",
+            "don't allow",
+            "deny permission",
+        )
+    )
+    if packages.intersection(permission_packages) and (permission_copy or "permission" in activity):
+        return "runtime_permission"
+    return None
+
+
+def known_ios_prompt_kind(page_source: str) -> Optional[str]:
+    """Recognize native iOS permission and confirmation alerts by their observed hierarchy."""
+    source = str(page_source or "").casefold()
+    if "xcuielementtypealert" not in source:
+        return None
+    permission_copy = any(
+        marker in source
+        for marker in (
+            "would like to access",
+            "would like to use",
+            "access your location",
+            "access your photos",
+            "access your camera",
+            "permission",
+        )
+    )
+    return "runtime_permission" if permission_copy else "app_confirmation"
+
+
+def known_native_prompt_kind(driver: Any, page_source: str, target_kind: str) -> Optional[str]:
+    """Recognize supported prompt surfaces for a native target platform."""
+    if str(target_kind or "").casefold() == "ios":
+        return known_ios_prompt_kind(page_source)
+    return known_android_prompt_kind(driver, page_source)
+
+
 def validate_target_surface(
     driver: Any,
     *,
@@ -271,6 +324,7 @@ def activate_verified_target_surface(
     poll_interval: float = 0.5,
     page_source: Optional[str] = None,
     force_launch: bool = False,
+    preserve_known_system_prompt: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Reopen a known target using its observed activity, then package fallback.
 
@@ -291,6 +345,19 @@ def activate_verified_target_surface(
     )
     if (ready and not force_launch) or not package:
         return ready, reason, identity
+
+    platform = str(safe_capabilities(driver).get("platformName") or safe_capabilities(driver).get("appium:platformName") or "Android")
+    prompt_kind = (
+        known_ios_prompt_kind(source)
+        if platform.casefold() == "ios"
+        else known_android_prompt_kind(driver, source)
+    )
+    if preserve_known_system_prompt and prompt_kind:
+        return (
+            True,
+            f"Recognized native {prompt_kind.replace('_', ' ')} prompt is ready for its observed choice branch.",
+            {**identity, "package": identity.get("package") or package},
+        )
 
     # Some Flutter apps invoke Google Play Services' location checker during
     # startup. Treat Back as a safe decline: never switch on device location
@@ -351,6 +418,13 @@ def activate_verified_target_surface(
             attempts.append(f"{strategy_name} unavailable ({type(exc).__name__})")
 
         source = safe_page_source(driver)
+        prompt_kind = known_android_prompt_kind(driver, source)
+        if preserve_known_system_prompt and prompt_kind:
+            return (
+                True,
+                f"Recognized Android {prompt_kind.replace('_', ' ')} prompt is ready for its observed choice branch.",
+                {**observed_app_identity(driver, page_source=source), "package": package},
+            )
         ready, reason, identity = validate_target_surface(
             driver,
             expected_package=package,
