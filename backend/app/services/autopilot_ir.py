@@ -501,6 +501,8 @@ class AutopilotIRCompiler:
             journey=test.journey,
             page_label=test.page_label,
             page_url=test.page_url,
+            runtime_prompt_id=test.runtime_prompt_id,
+            runtime_prompt_choice=test.runtime_prompt_choice,
             data_probes=list(test.data_probes),
         )
         generated.appium_python = self._appium_script(test, analysis, generated)
