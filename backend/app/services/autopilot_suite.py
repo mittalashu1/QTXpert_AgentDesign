@@ -28,6 +28,7 @@ from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
     activate_verified_target_surface,
     enter_observed_text,
+    known_android_prompt_kind,
     ProviderLifecycleUnavailable,
     expected_package_state,
     safe_app_identity,
@@ -50,6 +51,7 @@ class AutopilotSuiteService:
         "scroll",
         "capture_evidence",
         "inspect_ui",
+        "prompt_choice",
         "wait_for_state",
         "tap",
         "click",
@@ -105,7 +107,18 @@ class AutopilotSuiteService:
             if (not requested_ids or test.test_id in requested_ids)
             and (not requested_buckets or test.bucket in requested_buckets)
         ]
-        selected.sort(key=lambda test: not (test.readiness == "executable" and self._supported(test)))
+        def selection_priority(test):
+            prompt_decision = None
+            if test.runtime_prompt_id and discovery is not None:
+                prompt = next((item for item in discovery.runtime_prompts if item.prompt_id == test.runtime_prompt_id), None)
+                choice = next((item for item in prompt.choices if item.key == test.runtime_prompt_choice), None) if prompt else None
+                prompt_decision = choice.decision if choice else None
+            return (
+                not (test.readiness == "executable" and self._supported(test)),
+                test.runtime_prompt_id is None,
+                0 if prompt_decision == "deny" else 1,
+            )
+        selected.sort(key=selection_priority)
         selected = selected[: request.max_tests]
         candidates = [
             test
@@ -446,11 +459,15 @@ class AutopilotSuiteService:
 
         is_ios = request.target_kind == "ios"
         is_device_farm = request.provider == "devicefarm"
+        has_prompt_cases = any(
+            any(step.action == "prompt_choice" for step in test.steps)
+            for test in tests
+        )
         capabilities: Dict[str, Any] = {
             "platformName": "iOS" if is_ios else "Android",
             "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
             "appium:deviceName": request.device_name,
-            "appium:noReset": request.no_reset,
+            "appium:noReset": False if has_prompt_cases else request.no_reset,
             "appium:newCommandTimeout": 240,
         }
         # AWS installs the APK when opening its remote-access session. Its
@@ -486,11 +503,11 @@ class AutopilotSuiteService:
                 }
             )
         elif is_device_farm:
-            capabilities["appium:autoGrantPermissions"] = request.auto_grant_permissions
+            capabilities["appium:autoGrantPermissions"] = False if has_prompt_cases else request.auto_grant_permissions
         else:
             capabilities.update(
                 {
-                    "appium:autoGrantPermissions": request.auto_grant_permissions,
+                    "appium:autoGrantPermissions": False if has_prompt_cases else request.auto_grant_permissions,
                     "appium:androidInstallTimeout": install_timeout_ms,
                     "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
                     "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
@@ -498,6 +515,10 @@ class AutopilotSuiteService:
                     "appium:appWaitDuration": adb_exec_timeout_ms,
                 }
             )
+        if has_prompt_cases and not is_ios and not is_device_farm:
+            # A fresh installation is needed to replay independently remembered
+            # runtime permission branches in the same batch.
+            capabilities["appium:fullReset"] = True
         if request.platform_version and not is_device_farm:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
@@ -525,6 +546,7 @@ class AutopilotSuiteService:
                 timeout_seconds=15.0,
                 poll_interval=0.5,
                 page_source=initial_source,
+                preserve_known_system_prompt=has_prompt_cases,
             )
             if not target_ready:
                 raise ProviderLifecycleUnavailable(target_reason)
@@ -555,13 +577,27 @@ class AutopilotSuiteService:
                     # The newly created session was just launched and its target foreground verified above.
                     # Do not immediately force-stop that known-good first surface; hosted providers may
                     # switch to Android system UI when restarting the attached app.
+                    has_prompt_step = any(step.action == "prompt_choice" for step in test.steps)
                     if test_index > 0:
-                        self._reset_to_application(driver, package, activity_hint)
-                    case_target_ready, case_target_reason, _ = validate_target_surface(
-                        driver,
-                        expected_package=package,
-                        page_source=safe_page_source(driver),
+                        self._reset_to_application(
+                            driver,
+                            package,
+                            activity_hint,
+                            preserve_known_system_prompt=has_prompt_step,
+                        )
+                    case_source = safe_page_source(driver)
+                    expected_prompt_kind = next(
+                        (step.target for step in test.steps if step.action == "prompt_choice"),
+                        None,
                     )
+                    if expected_prompt_kind and known_android_prompt_kind(driver, case_source) == expected_prompt_kind:
+                        case_target_ready, case_target_reason = True, "The observed system prompt is active for its recorded branch."
+                    else:
+                        case_target_ready, case_target_reason, _ = validate_target_surface(
+                            driver,
+                            expected_package=package,
+                            page_source=case_source,
+                        )
                     if not case_target_ready:
                         raise ProviderLifecycleUnavailable(case_target_reason)
                     if self._would_repeat_failed_auth_submission(test, discovery):
@@ -667,6 +703,7 @@ class AutopilotSuiteService:
         timeout_seconds: float = 15.0,
         poll_interval: float = 0.5,
         page_source: str | None = None,
+        preserve_known_system_prompt: bool = False,
     ) -> tuple[bool, str, Dict[str, Any]]:
         """Open the selected app and verify its actual foreground surface."""
         return activate_verified_target_surface(
@@ -676,6 +713,7 @@ class AutopilotSuiteService:
             timeout_seconds=timeout_seconds,
             poll_interval=poll_interval,
             page_source=page_source,
+            preserve_known_system_prompt=preserve_known_system_prompt,
         )
 
     @staticmethod
@@ -686,6 +724,7 @@ class AutopilotSuiteService:
         *,
         force_launch: bool = False,
         timeout_seconds: float = 15.0,
+        preserve_known_system_prompt: bool = False,
     ) -> None:
         ready, reason, _ = activate_verified_target_surface(
             driver,
@@ -695,6 +734,7 @@ class AutopilotSuiteService:
             poll_interval=0.5,
             page_source=safe_page_source(driver),
             force_launch=force_launch,
+            preserve_known_system_prompt=preserve_known_system_prompt,
         )
         if not ready:
             raise ProviderLifecycleUnavailable(reason)
@@ -704,6 +744,7 @@ class AutopilotSuiteService:
         driver,
         package: str | None,
         activity: str | None = None,
+        preserve_known_system_prompt: bool = False,
     ) -> None:
         if not package:
             return
@@ -725,6 +766,7 @@ class AutopilotSuiteService:
                 package,
                 activity,
                 force_launch=True,
+                preserve_known_system_prompt=preserve_known_system_prompt,
             )
             return
 
@@ -1460,9 +1502,49 @@ class AutopilotSuiteService:
         for index, step in enumerate(test.steps, start=1):
             mechanism: str | None = None
             if step.action == "launch_app":
-                if package and expected_package_state(driver, package) is not True:
+                expected_prompt_kind = next(
+                    (item.target for item in test.steps if item.action == "prompt_choice"),
+                    None,
+                )
+                current_prompt_kind = known_android_prompt_kind(driver, safe_page_source(driver))
+                if (
+                    current_prompt_kind != expected_prompt_kind
+                    and package
+                    and expected_package_state(driver, package) is not True
+                ):
                     self._activate_application(driver, package, launch_activity)
                     time.sleep(1)
+            elif step.action == "prompt_choice":
+                if target_kind != "android":
+                    raise ProviderLifecycleUnavailable("Observed system prompt replay is currently supported on Android only.")
+                current_source = safe_page_source(driver)
+                actual_kind = known_android_prompt_kind(driver, current_source)
+                if actual_kind != step.target:
+                    raise AssertionError(
+                        f"Expected the observed {step.target or 'system'} prompt, but it was not active."
+                    )
+                if not step.locator_strategy or not step.locator_value:
+                    raise AssertionError("Observed prompt choice has no deterministic locator")
+                element = driver.find_element(locator_map[step.locator_strategy], step.locator_value)
+                if not element.is_enabled():
+                    raise AssertionError("Observed prompt choice is disabled")
+                element.click()
+                deadline = time.monotonic() + 12.0
+                returned_to_app = False
+                while time.monotonic() < deadline:
+                    current_source = safe_page_source(driver)
+                    if known_android_prompt_kind(driver, current_source) is None:
+                        returned_to_app, _, _ = validate_target_surface(
+                            driver,
+                            expected_package=package,
+                            page_source=current_source,
+                        )
+                        if returned_to_app:
+                            break
+                    time.sleep(0.25)
+                if not returned_to_app:
+                    raise AssertionError("The selected prompt choice did not return to the uploaded app")
+                mechanism = f"observed_prompt_choice:{step.assertion or step.value or 'selected'}"
             elif step.action == "inspect_ui":
                 source = driver.page_source or ""
                 if not source.strip():
