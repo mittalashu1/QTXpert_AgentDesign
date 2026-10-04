@@ -2930,3 +2930,50 @@ def test_suite_executes_recorded_location_prompt_choice(tmp_path):
 
     assert result["actions"][0]["mechanism"] == "observed_prompt_choice:deny"
     assert driver.state == "app"
+
+
+def test_prompt_only_retry_preserves_prior_screen_graph_and_new_prompt():
+    previous = AutopilotDiscoveryResult(
+        job_id="job-prompt-merge",
+        status="completed",
+        provider="appium",
+        started_at="2026-10-03T00:00:00+00:00",
+        finished_at="2026-10-03T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        target_ready=True,
+        interactive_surface_ready=True,
+        screen_count=1,
+        screens=[DiscoveredScreen(screen_id="screen-001", fingerprint="root")],
+    )
+    prompt = RuntimePromptObservation(
+        prompt_id="permission-01",
+        kind="runtime_permission",
+        title="Android permission prompt",
+        choices=[
+            RuntimePromptChoice(
+                key="deny",
+                label="Don't allow",
+                decision="deny",
+            )
+        ],
+    )
+    latest = AutopilotDiscoveryResult(
+        job_id="job-prompt-merge",
+        status="blocked",
+        provider="appium",
+        started_at="2026-10-03T00:01:00+00:00",
+        finished_at="2026-10-03T00:01:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        target_ready=False,
+        interactive_surface_ready=False,
+        target_identity_reason="The prompt prevented the provider from validating app focus.",
+        runtime_prompts=[prompt],
+    )
+
+    merged = _merge_discovery_snapshot(previous, latest)
+
+    assert [screen.screen_id for screen in merged.screens] == ["screen-001"]
+    assert [item.prompt_id for item in merged.runtime_prompts] == ["permission-01"]
+    assert merged.last_attempt_status == "blocked"
