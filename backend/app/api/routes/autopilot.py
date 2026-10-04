@@ -136,7 +136,7 @@ def _service(settings: Settings) -> AutopilotPrototypeService:
 
 
 def _resolved_autopilot_phase(job: dict[str, Any], record: Optional[AutopilotJob]) -> str:
-    suite = record.suite_execution if record is not None else None
+    suite = getattr(record, "suite_execution", None) if record is not None else None
     return status_phase_for_job(job, durable_suite_execution=suite)
 
 
