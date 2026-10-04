@@ -2477,6 +2477,7 @@ class AutopilotDiscoveryService:
             return {
                 "screens": screens,
                 "transitions": transitions,
+                "runtime_prompts": runtime_prompts,
                 "actions_attempted": actions_attempted,
                 "stop_reason": stop_reason,
                 "warnings": warnings,
