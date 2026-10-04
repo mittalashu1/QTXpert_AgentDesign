@@ -28,6 +28,8 @@ from app.schemas.autopilot import (
     DiscoveryLocator,
     RuntimePromptChoice,
     RuntimePromptObservation,
+    QTXIRStep,
+    QTXTestIR,
 )
 from app.api.routes.autopilot import (
     _autopilot_safe_case_metadata,
@@ -55,6 +57,7 @@ from app.services.autopilot import (
     normalize_surface_identity,
 )
 from app.services.autopilot_ir import AutopilotIRCompiler, credential_value_available
+from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.autopilot_context import (
     DEFAULT_AUTOPILOT_CONTEXT,
     DEFAULT_AUTOPILOT_PROFILE_ID,
@@ -2853,3 +2856,77 @@ def test_runtime_prompt_expansion_creates_allow_and_deny_cases_without_screens(t
     assert {test.runtime_prompt_choice for test in cases} == {"no-thanks", "turn-on"}
     assert all(test.autonomous_candidate for test in cases)
     assert all("Reset the app/device prompt state" in test.preconditions[0] for test in cases)
+
+
+def test_suite_executes_recorded_location_prompt_choice(tmp_path):
+    class Driver:
+        capabilities = {
+            "platformName": "Android",
+            "appium:appPackage": "com.qtx.demo",
+            "appium:appActivity": ".MainActivity",
+        }
+
+        def __init__(self):
+            self.state = "prompt"
+
+        @property
+        def current_activity(self):
+            return (
+                "com.google.android.location.settings.LocationSettingsCheckerActivity"
+                if self.state == "prompt"
+                else "com.qtx.demo.MainActivity"
+            )
+
+        @property
+        def page_source(self):
+            if self.state == "prompt":
+                return (
+                    '<hierarchy><node package="com.google.android.gms" text="Location settings" '
+                    'class="android.widget.FrameLayout" /></hierarchy>'
+                )
+            return '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout" /></hierarchy>'
+
+        def find_element(self, by, value):
+            assert value == "com.google.android.gms:id/negative_button"
+            return Element(self)
+
+    class Element:
+        def __init__(self, driver):
+            self.driver = driver
+
+        def is_enabled(self):
+            return True
+
+        def click(self):
+            self.driver.state = "app"
+
+    driver = Driver()
+    ir_test = QTXTestIR(
+        test_id="QT-RUNTIME-PROMPT-DENY-01",
+        title="Location prompt — No thanks",
+        suite="Permissions",
+        priority="high",
+        readiness="executable",
+        bucket="permissions",
+        steps=[
+            QTXIRStep(
+                action="prompt_choice",
+                description="Choose No thanks",
+                target="location_settings",
+                value="no-thanks",
+                locator_strategy="id",
+                locator_value="com.google.android.gms:id/negative_button",
+                assertion="deny",
+            )
+        ],
+    )
+
+    result = AutopilotSuiteService.__new__(AutopilotSuiteService)._execute_test(
+        driver,
+        ir_test,
+        tmp_path,
+        "com.qtx.demo",
+    )
+
+    assert result["actions"][0]["mechanism"] == "observed_prompt_choice:deny"
+    assert driver.state == "app"
