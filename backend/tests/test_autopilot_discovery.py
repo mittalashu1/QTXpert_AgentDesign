@@ -1051,3 +1051,4 @@ def test_startup_surface_diagnostic_is_optional_when_provider_disables_logcat():
 )
 def test_prompt_choice_decision_prioritizes_explicit_declines(label, decision):
     assert AutopilotDiscoveryService._prompt_choice_decision(label.lower()) == decision
+
