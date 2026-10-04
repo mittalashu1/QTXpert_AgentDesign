@@ -46,6 +46,10 @@ WORKFLOW_PHASES = (
 
 TERMINAL_PHASES = frozenset({"completed", "partial", "blocked", "failed"})
 
+SUITE_RUNNABLE_PHASES = frozenset(
+    {"cases_pending_review", "cases_approved", "execution_ready", "completed", "partial", "failed"}
+)
+
 # Same-phase updates are idempotent.  A worker may retry a transition after a
 # timeout, so the table deliberately allows the normal resumable paths while
 # rejecting accidental jumps that would skip a user approval or runtime gate.

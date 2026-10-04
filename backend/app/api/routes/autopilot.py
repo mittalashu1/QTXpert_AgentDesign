@@ -95,6 +95,7 @@ from app.services.autopilot_workflow import (
     find_duplicate_cases,
     phase_for_job,
     status_phase_for_job,
+    SUITE_RUNNABLE_PHASES,
     transition_phase,
 )
 from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata, resolve_value
@@ -134,12 +135,16 @@ def _service(settings: Settings) -> AutopilotPrototypeService:
     return AutopilotPrototypeService(settings)
 
 
+def _resolved_autopilot_phase(job: dict[str, Any], record: Optional[AutopilotJob]) -> str:
+    suite = getattr(record, "suite_execution", None) if record is not None else None
+    return status_phase_for_job(job, durable_suite_execution=suite)
+
+
 def _apply_durable_suite_phase(result: AutopilotJobStatus, job: dict[str, Any], record: Optional[AutopilotJob]) -> AutopilotJobStatus:
     """Use the durable database suite snapshot when a manifest still says running."""
-    suite = record.suite_execution if record is not None else None
-    if str(job.get("phase") or "") != "running" or not isinstance(suite, dict):
+    if str(job.get("phase") or "") != "running":
         return result
-    recovered_phase = status_phase_for_job(job, durable_suite_execution=suite)
+    recovered_phase = _resolved_autopilot_phase(job, record)
     if recovered_phase == result.phase:
         return result
     analysis = result.analysis
@@ -5115,8 +5120,20 @@ async def get_autopilot_discovery(
     return await _sanitize_discovery_assets(db, user, record, _record_discovery(record, job))
 
 
-async def _advance_suite_job_to_running(service, job_id: str, phase: str) -> None:
+async def _advance_suite_job_to_running(
+    service,
+    job_id: str,
+    phase: str,
+    *,
+    persisted_phase: str | None = None,
+) -> None:
     """Move an approved suite job into the running phase without relying on UI state."""
+    if persisted_phase == "running" and phase != "running":
+        # A completed legacy run can leave its manifest marked running. The
+        # caller recovered the terminal phase from durable results, so refresh
+        # the running timestamp before retrying to keep duplicate guards sound.
+        await service.update_job(job_id, phase="running")
+        return
     current_phase = phase
     try:
         if current_phase == "plan_pending_review":
@@ -5150,17 +5167,13 @@ async def execute_autopilot_suite(
         )
     if payload.execution_mode == "full_uat" and str(job.get("target_kind") or "android") not in {"android", "ios"}:
         raise HTTPException(status_code=409, detail="Full transaction mode is currently restricted to Android/iOS UAT apps.")
-    phase = phase_for_job(job)
-    runnable_phases = {
-        "cases_pending_review", "cases_approved", "execution_ready",
-        "completed", "partial",
-    }
-    if phase not in runnable_phases:
+    record = await _safe_job_record(db, job_id, owner_id)
+    phase = _resolved_autopilot_phase(job, record)
+    if phase not in SUITE_RUNNABLE_PHASES:
         raise HTTPException(
             status_code=409,
             detail=f"Safe execution cannot start while Autopilot is in the {phase} phase.",
         )
-    record = await _safe_job_record(db, job_id, owner_id)
     latest_discovery = _record_discovery(record, job)
     if not _discovery_is_ready_for_cases(latest_discovery):
         reason = (
@@ -5201,7 +5214,12 @@ async def execute_autopilot_suite(
             )
 
     # Phase transitions use the phase read from the persisted job, not UI state.
-    await _advance_suite_job_to_running(service, job_id, phase)
+    await _advance_suite_job_to_running(
+        service,
+        job_id,
+        phase,
+        persisted_phase=str(job.get("phase") or ""),
+    )
     if str(job.get("target_kind") or "android") == "web":
         analysis = await service.load_analysis(job_id)
         discovery = _record_discovery(record, job)

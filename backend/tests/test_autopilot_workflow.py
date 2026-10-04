@@ -18,6 +18,7 @@ from app.services.autopilot_workflow import (
     build_generation_plan,
     find_duplicate_cases,
     status_phase_for_job,
+    SUITE_RUNNABLE_PHASES,
     transition_phase,
 )
 
@@ -261,3 +262,9 @@ def test_stale_running_phase_does_not_reuse_a_suite_result_from_an_older_batch()
     }
 
     assert status_phase_for_job(job, now=now, durable_suite_execution=older_suite) == "failed"
+
+
+
+def test_suite_retry_phases_allow_failed_jobs_but_reject_active_runs():
+    assert "failed" in SUITE_RUNNABLE_PHASES
+    assert "running" not in SUITE_RUNNABLE_PHASES
