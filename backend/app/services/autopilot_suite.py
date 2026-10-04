@@ -518,9 +518,10 @@ class AutopilotSuiteService:
             )
         if has_prompt_cases:
             # Each prompt branch needs a fresh install to re-arm remembered
-            # platform permissions. Device Farm injects the session app into
-            # every new Appium session, so fullReset also works there.
-            capabilities["appium:fullReset"] = True
+            # platform permissions. Device Farm installs the selected app
+            # outside Appium's app capability, so use fastReset there; Appium
+            # requires an app capability before it accepts fullReset.
+            capabilities["appium:fastReset" if is_device_farm else "appium:fullReset"] = True
         if request.platform_version and not is_device_farm:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
@@ -596,7 +597,8 @@ class AutopilotSuiteService:
                             # Device Farm excludes mobile: clearApp and
                             # mobile: resetPermission. Its Appium endpoint
                             # supports multiple sessions per remote-access
-                            # device, and fullReset reinstalls the uploaded app.
+                            # device, and fastReset clears the app state without
+                            # requiring an Appium app capability.
                             safe_quit(driver)
                             driver = create_driver()
                             time.sleep(2)
