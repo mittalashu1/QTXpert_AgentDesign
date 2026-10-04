@@ -1160,7 +1160,7 @@ def test_suite_prompt_choice_accepts_a_new_observed_system_prompt(tmp_path):
     assert evidence["actions"][0]["resulting_prompt_kind"] == "location_settings"
     assert evidence["actions"][0]["resulting_prompt_id"]
     assert evidence["actions"][0]["mechanism"] == "observed_prompt_choice:deny"
-strict_test = test.model_copy(update={
+    strict_test = test.model_copy(update={
         "steps": [
             test.steps[0].model_copy(update={"expected_resulting_prompt_id": "unexpected-prompt"}),
             *test.steps[1:],
