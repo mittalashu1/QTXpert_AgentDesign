@@ -1573,6 +1573,10 @@ export default function AutopilotPage() {
     }
     setSetupBusy(true); setError("");
     try {
+      // Submit only inputs the checkpoint currently exposes. Hidden saved
+      // inputs can carry stale "reuse" drafts and otherwise make a valid
+      // approval save fail before the live journey resumes.
+      const visibleSubmissionKeys = new Set(checkpointRequests.map((request) => request.key));
       const payload = {
         credential_reference: setupDraft.credential_reference,
         account_role: setupDraft.account_role,
@@ -1587,6 +1591,7 @@ export default function AutopilotPage() {
         approved_test_ids: setupDraft.approved_test_ids,
         runtime_input_references: setupDraft.runtime_input_references || {},
         input_submissions: Object.entries(inputDrafts).filter(([key, draft]) => {
+          if (!visibleSubmissionKeys.has(key)) return false;
           const request = checkpointRequestMap.get(key);
           // Approval is a boolean checkpoint.  It deliberately has no value
           // field, so keep its decision in the encrypted-input boundary only
