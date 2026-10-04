@@ -579,8 +579,8 @@ class AutopilotDiscoveryService:
             return "Startup diagnostics: Flutter reported an initialization error."
         return None
 
-    @staticmethod
-    def _looks_like_loading_screen(screen: DiscoveredScreen) -> bool:
+    @classmethod
+    def _looks_like_loading_screen(cls, screen: DiscoveredScreen) -> bool:
         """Identify splash/blank or sparse initial surfaces without a safe entry point."""
         marker_text = " ".join(
             [
@@ -602,10 +602,13 @@ class AutopilotDiscoveryService:
         def has_meaningful_entry(control: DiscoveredControl) -> bool:
             label = re.sub(r"[\s_-]+", " ", str(control.semantic_label or "").lower()).strip()
             class_short = str(control.class_name or "").rsplit(".", 1)[-1].casefold()
+            safe_auth_entry = cls._is_auth_entry_control(label) and control.risk == "safe"
             # Flutter/Appium may tag a splash root as an enabled or even
             # input-capable View. That implementation flag is not evidence
             # of an end-user field; generic container nodes never open a path.
-            is_generic_container = label in generic_labels or class_short in generic_root_classes
+            is_generic_container = (
+                label in generic_labels or class_short in generic_root_classes
+            ) and not safe_auth_entry
             if not control.enabled:
                 return False
             if is_generic_container:
@@ -614,7 +617,10 @@ class AutopilotDiscoveryService:
                 # concrete child controls or real input widgets count.
                 return False
             real_input = control.input_capable
-            safe_action = control.clickable and bool(control.locators) and control.risk == "safe"
+            # A clearly labeled Flutter login entry can be actionable even when
+            # Appium omits clickable=true on its text node. Its observed,
+            # deterministic locator keeps this exception narrowly scoped.
+            safe_action = (control.clickable or safe_auth_entry) and bool(control.locators) and control.risk == "safe"
             scroll_surface = control.scrollable and bool(control.locators)
             return real_input or safe_action or scroll_surface
 
@@ -957,7 +963,9 @@ class AutopilotDiscoveryService:
     ) -> Optional[DiscoveredControl]:
         candidates = [
             control for control in controls
-            if control.enabled and control.clickable and not control.input_capable
+            if control.enabled
+            and (control.clickable or cls._is_auth_entry_control(control.semantic_label))
+            and not control.input_capable
             and (
                 control.risk == "safe"
                 or include_transaction_journeys
