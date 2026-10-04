@@ -144,6 +144,7 @@ def status_phase_for_job(
     *,
     now: datetime | None = None,
     stale_after: timedelta = timedelta(minutes=20),
+    durable_suite_execution: Mapping[str, Any] | None = None,
 ) -> str:
     """Recover a crashed suite phase from durable results or a stale run lease.
 
@@ -155,7 +156,9 @@ def status_phase_for_job(
     if phase != "running":
         return phase
 
-    started_at = _parse_workflow_timestamp(job.get("phase_updated_at"))
+    started_at = _parse_workflow_timestamp(
+        job.get("phase_updated_at") or job.get("updated_at") or job.get("created_at")
+    )
     if started_at is None:
         return phase
     current_time = now or datetime.now(timezone.utc)
@@ -164,8 +167,9 @@ def status_phase_for_job(
     else:
         current_time = current_time.astimezone(timezone.utc)
 
-    suite = job.get("suite_execution")
+    suite = durable_suite_execution if isinstance(durable_suite_execution, Mapping) else job.get("suite_execution")
     suite_phase = None
+    suite_finished_at = None
     if isinstance(suite, Mapping):
         suite_phase = {
             "passed": "completed",
@@ -173,12 +177,14 @@ def status_phase_for_job(
             "blocked": "blocked",
             "failed": "failed",
         }.get(str(suite.get("status") or "").strip().lower())
-        finished_at = _parse_workflow_timestamp(suite.get("finished_at"))
-        if suite_phase and finished_at is not None and finished_at >= started_at:
+        suite_finished_at = _parse_workflow_timestamp(suite.get("finished_at"))
+        if suite_phase and suite_finished_at is not None and suite_finished_at >= started_at:
             return suite_phase
 
     if current_time - started_at >= stale_after:
-        return suite_phase or "failed"
+        # A terminal result from an earlier batch must not mask a later batch
+        # that timed out before it could persist its own result.
+        return suite_phase if suite_finished_at is not None and suite_finished_at >= started_at else "failed"
     return phase
 
 

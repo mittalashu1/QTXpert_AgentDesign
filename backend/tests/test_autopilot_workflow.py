@@ -225,3 +225,39 @@ def test_duplicate_detection_and_execution_handoff_are_safe():
     assert handoff["tests"][0]["provenance"][0]["source_id"] == "runtime:screen-home"
     assert all("password" not in str(row).casefold() for row in handoff["tests"])
 
+
+
+
+def test_running_phase_recovers_from_durable_database_suite_result():
+    now = datetime(2026, 10, 4, 14, 0, tzinfo=timezone.utc)
+    job = {
+        "phase": "running",
+        "phase_updated_at": "2026-10-04T13:59:00Z",
+    }
+    durable_suite = {
+        "status": "partial",
+        "finished_at": "2026-10-04T13:59:30Z",
+    }
+
+    assert status_phase_for_job(job, now=now, durable_suite_execution=durable_suite) == "partial"
+
+
+def test_legacy_running_phase_uses_updated_at_when_phase_timestamp_is_missing():
+    now = datetime(2026, 10, 4, 14, 0, tzinfo=timezone.utc)
+    job = {"phase": "running", "updated_at": "2026-10-04T13:30:00Z"}
+
+    assert status_phase_for_job(job, now=now) == "failed"
+
+
+def test_stale_running_phase_does_not_reuse_a_suite_result_from_an_older_batch():
+    now = datetime(2026, 10, 4, 14, 30, tzinfo=timezone.utc)
+    job = {
+        "phase": "running",
+        "phase_updated_at": "2026-10-04T14:00:00Z",
+    }
+    older_suite = {
+        "status": "partial",
+        "finished_at": "2026-10-04T13:45:00Z",
+    }
+
+    assert status_phase_for_job(job, now=now, durable_suite_execution=older_suite) == "failed"
