@@ -819,7 +819,7 @@ def test_suite_retraces_one_observed_safe_edge_from_empty_sign_in_form():
     assert navigation == [{
         "from_screen": "screen-auth",
         "to_screen": "screen-root",
-        "control": "Back to observed public screen (webdriver_back)",
+        "control": "Back to observed screen (webdriver_back)",
     }]
     assert driver.back_calls == 1
     assert driver.auth_submit_clicks == 0
@@ -1005,3 +1005,240 @@ def test_suite_does_not_force_restart_before_first_verified_case(tmp_path, monke
     assert results[0].status == "passed"
     assert driver.reset_calls == 0
     assert driver.terminate_calls == []
+
+
+class _GuestReturnDriver(_RouteDriver):
+    def back(self):
+        self.back_calls += 1
+        if self.page_source != self.root_source:
+            raise RuntimeError("No safe observed guest-page back route")
+        self.page_source = self.auth_source
+
+
+def _guest_to_auth_discovery():
+    discovery = _navigation_discovery()
+    discovery.screens[0].page_label = "Guest home"
+    discovery.screens[1].page_label = "Authentication"
+    discovery.screens[1].controls.append(
+        DiscoveredControl(
+            control_id="guest-entry",
+            semantic_label="Explore as a Guest",
+            class_name="android.widget.Button",
+            text="Explore as a Guest",
+            resource_id="com.qtx.demo:id/explore_guest",
+            clickable=True,
+            enabled=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/explore_guest", confidence=0.98)],
+        )
+    )
+    discovery.transitions = [
+        DiscoveredTransition(
+            from_screen_id="screen-auth",
+            to_screen_id="screen-root",
+            control_id="guest-entry",
+            control_label="Explore as a Guest",
+            action="tap",
+        )
+    ]
+    return discovery
+
+
+def test_suite_returns_from_guest_screen_to_observed_empty_authentication_form():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _guest_to_auth_discovery()
+    driver = _GuestReturnDriver()
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify the User ID field on the observed authentication screen",
+            target="User ID",
+            screen_id="screen-auth",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/user_id",
+            locator_confidence=0.98,
+        )
+    ])
+    service._repair_live_route = lambda *_args: None
+
+    navigation = service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert navigation == [{
+        "from_screen": "screen-root",
+        "to_screen": "screen-auth",
+        "control": "Back to observed screen (webdriver_back)",
+    }]
+    assert driver.back_calls == 1
+    assert driver.auth_submit_clicks == 0
+    assert driver.page_source == driver.auth_source
+
+
+def test_suite_will_not_use_reverse_guest_route_when_authentication_fields_are_populated():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _guest_to_auth_discovery()
+    driver = _GuestReturnDriver()
+    driver.credential_values["com.qtx.demo:id/user_id"] = "user@example.test"
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify the User ID field on the observed authentication screen",
+            target="User ID",
+            screen_id="screen-auth",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/user_id",
+            locator_confidence=0.98,
+        )
+    ])
+    service._repair_live_route = lambda *_args: None
+
+    with pytest.raises(ProviderLifecycleUnavailable, match="credential fields already contain values"):
+        service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert driver.back_calls == 1
+    assert driver.auth_submit_clicks == 0
+
+
+def test_suite_prompt_choice_accepts_a_new_observed_system_prompt(tmp_path):
+    class PromptFollowupDriver(_Driver):
+        def __init__(self):
+            super().__init__()
+            self.current_activity = (
+                "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+            )
+            self.page_source = (
+                '<hierarchy><node package="com.android.permissioncontroller" '
+                'class="android.widget.FrameLayout">'
+                '<node package="com.android.permissioncontroller" text="Location permission" '
+                'class="android.widget.TextView" />'
+                '<node package="com.android.permissioncontroller" text="Don\'t allow" '
+                'resource-id="com.android.permissioncontroller:id/deny_button" '
+                'class="android.widget.Button" clickable="true" enabled="true" />'
+                '</node></hierarchy>'
+            )
+
+        def find_element(self, by, value):
+            self.locators.append((by, value))
+            driver = self
+
+            class PromptChoice(_Element):
+                def click(inner_self):
+                    super(PromptChoice, inner_self).click()
+                    driver.current_activity = (
+                        "com.google.android.location.settings.LocationSettingsCheckerActivity"
+                    )
+                    driver.page_source = (
+                        '<hierarchy><node package="com.google.android.gms" '
+                        'text="Location settings checker activity" '
+                        'class="android.widget.FrameLayout">'
+                        '<node package="com.google.android.gms" text="No thanks" '
+                        'resource-id="com.google.android.gms:id/negative_button" '
+                        'class="android.widget.Button" clickable="true" enabled="true" />'
+                        '</node></hierarchy>'
+                    )
+
+            return PromptChoice()
+
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = PromptFollowupDriver()
+    test = _test_ir([
+        QTXIRStep(
+            action="prompt_choice",
+            description="Choose Don’t allow on the observed location permission prompt",
+            target="runtime_permission",
+            value="dont-allow",
+            assertion="deny",
+            locator_strategy="id",
+            locator_value="com.android.permissioncontroller:id/deny_button",
+            locator_confidence=0.98,
+        ),
+        QTXIRStep(action="inspect_ui", description="Inspect the next checkpoint"),
+        QTXIRStep(action="capture_evidence", description="Capture the resulting checkpoint"),
+    ])
+
+    evidence = service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    assert evidence["actions"][0]["resulting_prompt_kind"] == "location_settings"
+    assert evidence["actions"][0]["resulting_prompt_id"]
+    assert evidence["actions"][0]["mechanism"] == "observed_prompt_choice:deny"
+
+
+def test_suite_device_farm_reopens_prompt_cases_with_full_reset(tmp_path, monkeypatch):
+    import appium
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    class PromptDriver(_ColdRelaunchDriver):
+        def __init__(self):
+            super().__init__()
+            self.current_package = "com.qtx.demo"
+            self.page_source = '<hierarchy><node package="com.qtx.demo" text="Welcome" /></hierarchy>'
+            self.prompt_active = True
+            self.quit_calls = 0
+
+        def quit(self):
+            self.quit_calls += 1
+
+    drivers = [PromptDriver(), PromptDriver()]
+    calls = []
+
+    def remote(url, options):
+        calls.append((url, options.to_capabilities()))
+        return drivers[len(calls) - 1]
+
+    monkeypatch.setattr(appium.webdriver, "Remote", remote)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "app.services.autopilot_suite.known_native_prompt_kind",
+        lambda driver, _source, _target: "runtime_permission" if driver.prompt_active else None,
+    )
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotSuiteService(Settings(), prototype=Prototype())
+    service._activate_verified_target = lambda driver, package, **_kwargs: (
+        True,
+        "ready",
+        {"package": package},
+    )
+    service._execute_test = lambda *_args, **_kwargs: {}
+    request = AutopilotSuiteRequest(
+        target_kind="android",
+        provider="devicefarm",
+        device_name="Google Pixel 8",
+        max_tests=2,
+    )
+    prompt_tests = [
+        _test_ir([
+            QTXIRStep(
+                action="prompt_choice",
+                description="Choose an observed permission prompt option",
+                target="runtime_permission",
+                locator_strategy="id",
+                locator_value="com.android.permissioncontroller:id/deny_button",
+                locator_confidence=0.98,
+            )
+        ]).model_copy(update={"test_id": f"prompt-{index}", "bucket": "installation"})
+        for index in range(2)
+    ]
+
+    results = service._run_sync(
+        "job-prompts",
+        "https://devicefarm.invalid/appium",
+        "arn:uploaded-app",
+        request,
+        prompt_tests,
+        "com.qtx.demo",
+        None,
+        None,
+        1000,
+        1000,
+        1000,
+    )
+
+    assert [result.status for result in results] == ["passed", "passed"]
+    assert len(calls) == 2
+    assert all(capabilities["appium:fullReset"] is True for _, capabilities in calls)
+    assert drivers[0].quit_calls == 1
+    assert drivers[1].quit_calls == 1

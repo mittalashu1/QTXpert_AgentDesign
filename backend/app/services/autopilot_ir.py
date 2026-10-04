@@ -438,12 +438,12 @@ class AutopilotIRCompiler:
                     ),
                     QTXIRStep(
                         action="inspect_ui",
-                        description="Verify the app returns to a readable foreground screen after the prompt choice.",
+                        description="Verify the app or a new native prompt appears after the observed choice.",
                         observation_ref=prompt.observation_ref,
                     ),
                     QTXIRStep(
                         action="capture_evidence",
-                        description="Capture the app screen after applying the prompt choice.",
+                        description="Capture the app or native prompt state after applying the choice.",
                         observation_ref=prompt.observation_ref,
                     ),
                 ]

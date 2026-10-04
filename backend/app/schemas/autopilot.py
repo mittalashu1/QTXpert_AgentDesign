@@ -1006,6 +1006,7 @@ class RuntimePromptChoice(BaseModel):
     locators: List[DiscoveryLocator] = Field(default_factory=list)
     outcome_status: Literal["observed", "planned", "unavailable"] = "planned"
     resulting_screen_id: Optional[str] = None
+    resulting_prompt_id: Optional[str] = None
 
 
 class RuntimePromptObservation(BaseModel):

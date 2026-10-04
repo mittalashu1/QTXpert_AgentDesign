@@ -7,8 +7,10 @@ helpers derive identity from negotiated capabilities and the UI hierarchy only.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import time
+import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Optional
 
 
@@ -202,6 +204,36 @@ def known_native_prompt_kind(driver: Any, page_source: str, target_kind: str) ->
     if str(target_kind or "").casefold() == "ios":
         return known_ios_prompt_kind(page_source)
     return known_android_prompt_kind(driver, page_source)
+
+
+def native_prompt_fingerprint(driver: Any, page_source: str, target_kind: str) -> Optional[str]:
+    """Return a stable opaque identity for an observed native prompt.
+
+    The visible copy distinguishes sequential prompts of the same broad kind
+    (for example location followed by camera permission) without persisting
+    prompt text or treating system controls as product screens.
+    """
+    kind = known_native_prompt_kind(driver, page_source, target_kind)
+    if not kind:
+        return None
+    visible_copy: set[str] = set()
+    try:
+        root = ET.fromstring(page_source or "")
+        for node in root.iter():
+            for key in ("text", "content-desc", "hint", "label", "name"):
+                value = re.sub(r"\s+", " ", str(node.attrib.get(key) or "").strip()).casefold()
+                if value and len(value) <= 240:
+                    visible_copy.add(value)
+    except ET.ParseError:
+        pass
+    identity = "|".join(
+        (
+            kind,
+            safe_current_activity(driver).casefold(),
+            "|".join(sorted(visible_copy)),
+        )
+    )
+    return hashlib.sha1(identity.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
 def validate_target_surface(
