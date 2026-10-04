@@ -2864,12 +2864,8 @@ class AutopilotPrototypeService:
 
         for prompt in discovery.runtime_prompts:
             for choice in prompt.choices:
-                normalized_choice = re.sub(r"\\s+", " ", str(choice.label or "")).strip().lower()
-                terminal_decision = (
-                    AutopilotDiscoveryService._prompt_choice_decision(normalized_choice)
-                    if discovery.runtime_prompts
-                    else None
-                )
+                normalized_choice = re.sub(r"\s+", " ", str(choice.label or "")).strip().lower()
+                terminal_decision = AutopilotDiscoveryService._prompt_choice_decision(normalized_choice)
                 if (
                     choice.decision not in {"allow", "deny"}
                     or terminal_decision != choice.decision
