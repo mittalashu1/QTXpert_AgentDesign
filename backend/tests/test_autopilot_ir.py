@@ -872,3 +872,48 @@ def test_observed_prompt_choice_compiles_to_executable_ir():
     assert generated.steps[1].locator_value == '//*[@text="Turn on"]'
     assert "known_native_prompt_kind" in generated.appium_python
     compile(generated.appium_python, "<qtx-generated-prompt>", "exec")
+
+def test_runtime_prompt_branch_metadata_survives_ir_compilation():
+    prompt = RuntimePromptObservation(
+        prompt_id="location-permission",
+        kind="runtime_permission",
+        title="Location permission",
+        choices=[
+            RuntimePromptChoice(
+                key="deny",
+                label="Don’t allow",
+                decision="deny",
+                locators=[DiscoveryLocator(strategy="accessibility_id", value="Don’t allow", confidence=0.99)],
+                outcome_status="observed",
+            )
+        ],
+    )
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-RUNTIME-PROMPT-DENY",
+            suite="Permissions",
+            title="Location permission denial behavior",
+            priority="high",
+            objective="Verify the observed denial branch.",
+            steps=["Choose Don’t allow"],
+            expected=["The app returns to a readable screen."],
+            bucket="permissions",
+            runtime_prompt_id="location-permission",
+            runtime_prompt_choice="deny",
+        )
+    ])
+
+    generated = AutopilotIRCompiler().compile_bundle(
+        analysis,
+        _discovery().model_copy(update={"runtime_prompts": [prompt]}),
+    ).tests[0]
+
+    assert generated.readiness == "executable"
+    assert generated.runtime_prompt_id == "location-permission"
+    assert generated.runtime_prompt_choice == "deny"
+    assert [step.action for step in generated.steps] == [
+        "launch_app",
+        "prompt_choice",
+        "inspect_ui",
+        "capture_evidence",
+    ]
