@@ -26,12 +26,16 @@ from app.schemas.autopilot import (
     DiscoveredScreen,
     DiscoveredTransition,
     DiscoveryLocator,
+    RuntimePromptChoice,
+    RuntimePromptObservation,
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
     activate_verified_target_surface,
     enter_observed_text,
+    known_android_prompt_kind,
     safe_app_identity,
+    safe_current_activity,
     safe_page_source,
     safe_navigate_back,
     safe_quit,
@@ -153,6 +157,132 @@ class AutopilotDiscoveryService:
     @staticmethod
     def _normalize(value: str) -> str:
         return re.sub(r"\s+", " ", (value or "").strip()).lower()
+
+    @classmethod
+    def _runtime_prompt_observation(
+        cls,
+        driver: Any,
+        page_source: str,
+        evidence_dir: Path,
+    ) -> Optional[RuntimePromptObservation]:
+        """Capture a supported Android system prompt as a branch artifact.
+
+        Prompt controls bypass parse_controls so system UI is never mistaken
+        for product navigation. Keep only observed option labels and locators.
+        """
+        kind = known_android_prompt_kind(driver, page_source)
+        if not kind:
+            return None
+        try:
+            root = ET.fromstring(page_source)
+        except ET.ParseError:
+            root = None
+
+        choices: list[RuntimePromptChoice] = []
+        seen: set[str] = set()
+        if root is not None:
+            for node in root.iter():
+                attrs = {str(key): str(value) for key, value in node.attrib.items()}
+                class_name = attrs.get("class", "")
+                actionable = (
+                    attrs.get("clickable", "false").casefold() == "true"
+                    or class_name == "android.widget.Button"
+                )
+                label = cls._semantic_label(attrs)
+                normalized = cls._normalize(label)
+                if not actionable or not normalized or normalized in seen:
+                    continue
+                decision = cls._prompt_choice_decision(normalized)
+                if decision is None:
+                    continue
+                locators = cls._locators(attrs)
+                if not locators:
+                    continue
+                seen.add(normalized)
+                key = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")[:48] or "choice"
+                choices.append(
+                    RuntimePromptChoice(
+                        key=key,
+                        label=label[:120],
+                        decision=decision,
+                        locators=locators,
+                    )
+                )
+
+        prompt_id = hashlib.sha1(
+            f"{kind}|{safe_current_activity(driver)}|{'|'.join(choice.key for choice in choices)}".encode(
+                "utf-8", errors="ignore"
+            )
+        ).hexdigest()[:16]
+        screenshot_path = evidence_dir / f"prompt-{prompt_id}.png"
+        source_path = evidence_dir / f"prompt-{prompt_id}.xml"
+        try:
+            driver.get_screenshot_as_file(str(screenshot_path))
+        except Exception:
+            screenshot_path = None
+        try:
+            source_path.write_text(cls._redact_page_source(page_source), encoding="utf-8")
+        except Exception:
+            source_path = None
+        return RuntimePromptObservation(
+            prompt_id=prompt_id,
+            kind=kind,
+            surface="android_system",
+            title={
+                "location_settings": "Location settings prompt",
+                "runtime_permission": "Android permission prompt",
+            }.get(kind, "Android system prompt"),
+            screenshot_path=str(screenshot_path) if screenshot_path and screenshot_path.exists() else None,
+            page_source_path=str(source_path) if source_path else None,
+            choices=choices,
+            observation_ref=f"runtime-prompt:{prompt_id}",
+        )
+
+    @classmethod
+    def _prompt_choice_decision(cls, normalized_label: str) -> Optional[str]:
+        allow = (
+            "allow", "yes", "turn on", "enable", "while using", "only this time",
+            "precise", "always allow",
+        )
+        deny = (
+            "deny", "no", "not now", "no thanks", "don't allow", "don’t allow",
+            "never allow", "cancel", "decline",
+        )
+        if any(token in normalized_label for token in allow):
+            return "allow"
+        if any(token in normalized_label for token in deny):
+            return "deny"
+        return None
+
+    @classmethod
+    def _choose_system_prompt_branch(
+        cls,
+        driver: Any,
+        choices: list[RuntimePromptChoice],
+        appium_by: Any,
+    ) -> tuple[Optional[str], bool]:
+        """Select an observed decline control so safe discovery can continue."""
+        choice = next((item for item in choices if item.decision == "deny"), None)
+        if choice is None:
+            return None, False
+        locator_map = {
+            "accessibility_id": appium_by.ACCESSIBILITY_ID,
+            "id": appium_by.ID,
+            "xpath": appium_by.XPATH,
+        }
+        for locator in sorted(choice.locators, key=lambda item: -item.confidence):
+            by = locator_map.get(locator.strategy)
+            if by is None:
+                continue
+            try:
+                element = driver.find_element(by, locator.value)
+                if not element.is_enabled():
+                    continue
+                element.click()
+                return choice.key, True
+            except Exception:
+                continue
+        return choice.key, False
 
     @classmethod
     def _semantic_label(cls, attrs: Dict[str, str]) -> str:
@@ -1433,6 +1563,7 @@ class AutopilotDiscoveryService:
             target_identity_reason=payload.get("target_identity_reason"),
             screens=screens,
             transitions=payload["transitions"],
+            runtime_prompts=payload.get("runtime_prompts") or [],
             input_requests=self.runtime_input_requests(screens),
             warnings=payload["warnings"],
             error=error,
@@ -1487,11 +1618,12 @@ class AutopilotDiscoveryService:
                 }
             )
         elif is_device_farm:
-            capabilities["appium:autoGrantPermissions"] = request.auto_grant_permissions
+            # Discovery must observe permission dialogs as branch points.
+            capabilities["appium:autoGrantPermissions"] = False
         else:
             capabilities.update(
                 {
-                    "appium:autoGrantPermissions": request.auto_grant_permissions,
+                    "appium:autoGrantPermissions": False,
                     "appium:androidInstallTimeout": install_timeout_ms,
                     "appium:uiautomator2ServerInstallTimeout": install_timeout_ms,
                     "appium:uiautomator2ServerLaunchTimeout": server_launch_timeout_ms,
@@ -1518,6 +1650,8 @@ class AutopilotDiscoveryService:
         screens: list[DiscoveredScreen] = []
         transitions: list[DiscoveredTransition] = []
         seen_fingerprints: dict[str, str] = {}
+        runtime_prompts: list[RuntimePromptObservation] = []
+        pending_prompt_outcomes: list[tuple[RuntimePromptObservation, str]] = []
         visited_edges: set[tuple[str, str]] = set()
         transaction_screen_ids: set[str] = set()
         scroll_rounds: dict[str, int] = {}
@@ -1537,6 +1671,63 @@ class AutopilotDiscoveryService:
         ) -> tuple[DiscoveredScreen, bool]:
             index = len(screens) + 1
             page_source = safe_page_source(driver)
+            for _prompt_index in range(8):
+                prompt = self._runtime_prompt_observation(driver, page_source, evidence_dir)
+                if prompt is None:
+                    break
+                if not any(item.prompt_id == prompt.prompt_id for item in runtime_prompts):
+                    runtime_prompts.append(prompt)
+                if request.observe_only:
+                    break
+                selected_key, clicked = self._choose_system_prompt_branch(driver, prompt.choices, AppiumBy)
+                if selected_key and clicked:
+                    actions_attempted += 1
+                elif prompt.choices:
+                    warnings.append(
+                        f"Could not activate an observed decline option for the {prompt.kind.replace('_', ' ')} prompt; "
+                        "the prompt was retained for branch execution."
+                    )
+                try:
+                    # Use Back only to dismiss a recognized Android prompt when
+                    # no observed decline action was available; never report it
+                    # as an observed deny branch.
+                    if not (selected_key and clicked):
+                        driver.back()
+                except Exception:
+                    pass
+                prompt_deadline = time.monotonic() + 8.0
+                returned_to_app = False
+                while time.monotonic() < prompt_deadline:
+                    page_source = safe_page_source(driver)
+                    if known_android_prompt_kind(driver, page_source) is None:
+                        returned_to_app, _, _ = validate_target_surface(
+                            driver,
+                            expected_package=package_hint,
+                            expected_activity=activity_hint,
+                            page_source=page_source,
+                        )
+                        if returned_to_app:
+                            break
+                    time.sleep(0.25)
+                if selected_key:
+                    prompt.choices = [
+                        choice.model_copy(
+                            update={
+                                "outcome_status": "observed" if clicked and returned_to_app else "unavailable"
+                            }
+                        )
+                        if choice.key == selected_key
+                        else choice
+                        for choice in prompt.choices
+                    ]
+                    if clicked and returned_to_app:
+                        pending_prompt_outcomes.append((prompt, selected_key))
+                if not returned_to_app:
+                    warnings.append(
+                        f"The {prompt.kind.replace('_', ' ')} prompt did not return to the uploaded app after the decline attempt."
+                    )
+                    break
+                page_source = safe_page_source(driver)
             controls = self._ensure_auth_input_semantics(self.parse_controls(page_source))
             if require_target:
                 target_ok, reason, _ = validate_target_surface(
@@ -1586,6 +1777,15 @@ class AutopilotDiscoveryService:
                 # credentials have been submitted, persist the resulting
                 # authenticated screen (and any later duplicate) with the
                 # same redaction policy so journey cases have usable proof.
+                if pending_prompt_outcomes:
+                    for prompt, choice_key in pending_prompt_outcomes:
+                        prompt.choices = [
+                            choice.model_copy(update={"resulting_screen_id": screen_id})
+                            if choice.key == choice_key and choice.outcome_status == "observed"
+                            else choice
+                            for choice in prompt.choices
+                        ]
+                    pending_prompt_outcomes.clear()
                 if persist_evidence and not existing.screenshot_path and not existing.page_source_path:
                     screenshot_path = evidence_dir / f"{screen_id}.png"
                     source_path = evidence_dir / f"{screen_id}.xml"
@@ -1636,6 +1836,15 @@ class AutopilotDiscoveryService:
             )
             screens.append(screen)
             seen_fingerprints[fp] = screen_id
+            if pending_prompt_outcomes:
+                for prompt, choice_key in pending_prompt_outcomes:
+                    prompt.choices = [
+                        choice.model_copy(update={"resulting_screen_id": screen_id})
+                        if choice.key == choice_key and choice.outcome_status == "observed"
+                        else choice
+                        for choice in prompt.choices
+                    ]
+                pending_prompt_outcomes.clear()
             return screen, False
 
         try:
@@ -1753,6 +1962,7 @@ class AutopilotDiscoveryService:
                 return {
                     "screens": [],
                     "transitions": [],
+                    "runtime_prompts": runtime_prompts,
                     "actions_attempted": actions_attempted,
                     "stop_reason": target_identity_reason,
                     "warnings": warnings,
@@ -1774,6 +1984,7 @@ class AutopilotDiscoveryService:
                 return {
                     "screens": screens,
                     "transitions": [],
+                    "runtime_prompts": runtime_prompts,
                     "actions_attempted": actions_attempted,
                     "stop_reason": stop_reason,
                     "warnings": warnings,
@@ -1799,6 +2010,7 @@ class AutopilotDiscoveryService:
                 return {
                     "screens": screens,
                     "transitions": transitions,
+                    "runtime_prompts": runtime_prompts,
                     "actions_attempted": actions_attempted,
                     "stop_reason": stop_reason,
                     "warnings": warnings,
