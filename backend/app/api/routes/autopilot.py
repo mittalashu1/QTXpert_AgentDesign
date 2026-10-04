@@ -1229,7 +1229,10 @@ def _merge_discovery_snapshot(
         and latest.target_ready is not False
         and latest.interactive_surface_ready is not False
     ):
-        return latest.model_copy(update={"runtime_prompts": merged_prompts})
+        # A successful crawl is a complete observation of the current target.
+        # Its prompt branches are authoritative; carrying prompt records from
+        # an older crawl can resurrect choices the current app no longer shows.
+        return latest
     if previous.screen_count <= 0 or previous.interactive_surface_ready is False:
         return latest.model_copy(update={"runtime_prompts": merged_prompts})
     reason = (

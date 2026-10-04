@@ -2993,6 +2993,70 @@ def test_suite_resets_ios_permission_state_between_branches():
     assert all(command == "mobile: resetPermission" for command, _ in calls)
 
 
+def test_successful_discovery_replaces_stale_prompt_branches(tmp_path):
+    old_prompt = RuntimePromptObservation(
+        prompt_id="location-permission",
+        kind="runtime_permission",
+        title="Location permission",
+        choices=[
+            RuntimePromptChoice(key="precise", label="Precise", decision="allow"),
+            RuntimePromptChoice(key="while-using", label="While using the app", decision="allow"),
+        ],
+    )
+    stale_prompt = RuntimePromptObservation(
+        prompt_id="old-location-prompt",
+        kind="runtime_permission",
+        title="Location permission",
+        choices=[
+            RuntimePromptChoice(key="precise", label="Precise", decision="allow"),
+        ],
+    )
+    current_prompt = RuntimePromptObservation(
+        prompt_id="location-permission",
+        kind="runtime_permission",
+        title="Location permission",
+        choices=[
+            RuntimePromptChoice(key="while-using", label="While using the app", decision="allow"),
+            RuntimePromptChoice(key="deny", label="Don't allow", decision="deny"),
+        ],
+    )
+    previous = AutopilotDiscoveryResult(
+        job_id="job-refresh-prompts",
+        status="completed",
+        provider="devicefarm",
+        started_at="2026-10-03T00:00:00+00:00",
+        finished_at="2026-10-03T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        target_ready=True,
+        interactive_surface_ready=True,
+        screen_count=1,
+        screens=[DiscoveredScreen(screen_id="home", fingerprint="home")],
+        runtime_prompts=[old_prompt, stale_prompt],
+    )
+    latest = previous.model_copy(update={
+        "finished_at": "2026-10-03T00:01:05+00:00",
+        "runtime_prompts": [current_prompt],
+        "last_attempt_status": None,
+        "last_attempt_reason": None,
+        "last_attempt_screens": [],
+    })
+
+    refreshed = _merge_discovery_snapshot(previous, latest)
+    analysis = AutopilotAnalysis(
+        job_id="job-refresh-prompts",
+        filename="location.apk",
+        sha256="a" * 64,
+        tests=[],
+    )
+    expanded = AutopilotPrototypeService.expand_discovered_coverage(analysis, refreshed)
+    prompt_cases = [test for test in expanded.tests if test.runtime_prompt_id]
+
+    assert [prompt.prompt_id for prompt in refreshed.runtime_prompts] == ["location-permission"]
+    assert {test.runtime_prompt_choice for test in prompt_cases} == {"while-using", "deny"}
+    assert all("Precise" not in test.title for test in prompt_cases)
+
+
 def test_prompt_only_retry_preserves_prior_screen_graph_and_new_prompt():
     previous = AutopilotDiscoveryResult(
         job_id="job-prompt-merge",
