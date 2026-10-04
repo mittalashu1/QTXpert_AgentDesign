@@ -1064,19 +1064,51 @@ class AutopilotSuiteService:
             pass
 
         haystack = cls._normalize_screen_text(source)
-        ranked: list[tuple[float, int, object]] = []
-        for screen in discovery.screens:
+        current_package = cls._normalize_screen_text(identity.get("package") or package)
+        eligible_screens = [
+            screen
+            for screen in discovery.screens
+            if not (
+                current_package
+                and screen.package_name
+                and cls._normalize_screen_text(screen.package_name) != current_package
+            )
+        ]
+        token_owners: dict[str, set[str]] = {}
+        for screen in eligible_screens:
+            for token in cls._screen_tokens(screen):
+                token_owners.setdefault(token, set()).add(screen.screen_id)
+
+        ranked: list[tuple[int, float, int, object]] = []
+        for screen in eligible_screens:
             tokens = cls._screen_tokens(screen)
             if not tokens:
                 continue
             matches = sum(token in haystack for token in tokens)
-            ranked.append((matches / len(tokens), matches, screen))
-        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            unique_matches = sum(
+                token in haystack and token_owners.get(token) == {screen.screen_id}
+                for token in tokens
+            )
+            ranked.append((unique_matches, matches / len(tokens), matches, screen))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
         if not ranked:
             return None
-        score, matches, best = ranked[0]
-        runner_up = ranked[1][0] if len(ranked) > 1 else 0.0
-        if matches >= 2 and score >= 0.40 and score - runner_up >= 0.10:
+
+        unique_matches, score, matches, best = ranked[0]
+        runner_up_unique_matches = ranked[1][0] if len(ranked) > 1 else 0
+        package_matches = bool(
+            current_package
+            and best.package_name
+            and cls._normalize_screen_text(best.package_name) == current_package
+        )
+        # A single distinctive, observed app control can identify a sparse
+        # hosted hierarchy. Require an exact app-package match and a token
+        # unique to this screen so generic/loading surfaces remain unknown.
+        if unique_matches >= 1 and package_matches and unique_matches > runner_up_unique_matches:
+            return best
+
+        runner_up_score = ranked[1][1] if len(ranked) > 1 else 0.0
+        if matches >= 2 and score >= 0.40 and score - runner_up_score >= 0.10:
             return best
         return None
 
@@ -1654,9 +1686,36 @@ class AutopilotSuiteService:
                 if not step.locator_strategy or not step.locator_value:
                     raise AssertionError("Observed prompt choice has no deterministic locator")
                 initial_prompt_id = native_prompt_fingerprint(driver, current_source, target_kind)
-                element = driver.find_element(locator_map[step.locator_strategy], step.locator_value)
-                if not element.is_enabled():
-                    raise AssertionError("Observed prompt choice is disabled")
+                candidates = [(step.locator_strategy, step.locator_value)]
+                candidates.extend(
+                    (locator.strategy, locator.value)
+                    for locator in step.locator_fallbacks
+                    if locator.strategy in locator_map
+                    and (locator.strategy, locator.value) not in candidates
+                )
+                element = None
+                lookup_error = None
+                disabled_choice = False
+                for strategy, value in candidates:
+                    if strategy not in locator_map:
+                        continue
+                    try:
+                        candidate = driver.find_element(locator_map[strategy], value)
+                        if hasattr(candidate, "is_displayed") and not candidate.is_displayed():
+                            continue
+                        if hasattr(candidate, "is_enabled") and not candidate.is_enabled():
+                            disabled_choice = True
+                            continue
+                        element = candidate
+                        break
+                    except Exception as exc:
+                        lookup_error = exc
+                if element is None:
+                    if disabled_choice:
+                        raise AssertionError("Observed prompt choice is disabled")
+                    if lookup_error is not None:
+                        raise lookup_error
+                    raise AssertionError("Observed prompt choice has no usable observed locator")
                 element.click()
                 deadline = time.monotonic() + 12.0
                 returned_to_app = False
