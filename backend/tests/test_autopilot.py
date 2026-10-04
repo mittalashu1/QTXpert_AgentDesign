@@ -2904,6 +2904,7 @@ def test_suite_executes_recorded_location_prompt_choice(tmp_path):
     ir_test = QTXTestIR(
         test_id="QT-RUNTIME-PROMPT-DENY-01",
         title="Location prompt — No thanks",
+        source="deterministic",
         suite="Permissions",
         priority="high",
         readiness="executable",
