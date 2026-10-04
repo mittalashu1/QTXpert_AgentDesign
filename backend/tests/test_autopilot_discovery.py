@@ -1129,3 +1129,8 @@ def test_startup_surface_diagnostic_is_optional_when_provider_disables_logcat():
 def test_prompt_choice_decision_prioritizes_explicit_declines(label, decision):
     assert AutopilotDiscoveryService._prompt_choice_decision(label.lower()) == decision
 
+
+
+@pytest.mark.parametrize("label", ["Precise", "Approximate"])
+def test_location_accuracy_options_are_not_terminal_permission_decisions(label):
+    assert AutopilotDiscoveryService._prompt_choice_decision(label.lower()) is None
