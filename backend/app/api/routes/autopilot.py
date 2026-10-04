@@ -1199,19 +1199,19 @@ def _merge_discovery_snapshot(
     surface. Do not overwrite a usable map with that attempt; retain its latest
     evidence and non-secret checkpoint separately.
     """
-    if (
-        not previous
-        or previous is latest
-        or previous.screen_count <= 0
-        or previous.interactive_surface_ready is False
-    ):
+    if not previous or previous is latest:
         return latest
+    prompt_map = {item.prompt_id: item for item in previous.runtime_prompts}
+    prompt_map.update({item.prompt_id: item for item in latest.runtime_prompts})
+    merged_prompts = list(prompt_map.values())
     if (
         latest.screens
         and latest.target_ready is not False
         and latest.interactive_surface_ready is not False
     ):
-        return latest
+        return latest.model_copy(update={"runtime_prompts": merged_prompts})
+    if previous.screen_count <= 0 or previous.interactive_surface_ready is False:
+        return latest.model_copy(update={"runtime_prompts": merged_prompts})
     reason = (
         latest.checkpoint_message
         or latest.target_identity_reason
@@ -1238,6 +1238,7 @@ def _merge_discovery_snapshot(
             ),
             "checkpoint_message": checkpoint_message,
             "warnings": warnings[-20:],
+            "runtime_prompts": merged_prompts,
             "last_attempt_status": latest.status,
             "last_attempt_reason": str(reason)[:1200],
             "last_attempt_at": latest.finished_at,
@@ -1373,6 +1374,12 @@ async def _sanitize_discovery_assets(
         for asset_id in (screen.screenshot_asset_id, screen.page_source_asset_id)
         if asset_id is not None
     }
+    asset_ids.update(
+        asset_id
+        for prompt in discovery.runtime_prompts
+        for asset_id in (prompt.screenshot_asset_id, prompt.page_source_asset_id)
+        if asset_id is not None
+    )
     available = await _available_evidence_asset_ids(db, user, record, asset_ids)
     changed = False
     def sanitize_screen(screen):
@@ -1392,8 +1399,32 @@ async def _sanitize_discovery_assets(
 
     screens = [sanitize_screen(screen) for screen in discovery.screens]
     last_attempt_screens = [sanitize_screen(screen) for screen in discovery.last_attempt_screens]
+    prompts = []
+    for prompt in discovery.runtime_prompts:
+        screenshot_asset_id = prompt.screenshot_asset_id
+        page_source_asset_id = prompt.page_source_asset_id
+        if screenshot_asset_id is not None and screenshot_asset_id not in available:
+            screenshot_asset_id = None
+            changed = True
+        if page_source_asset_id is not None and page_source_asset_id not in available:
+            page_source_asset_id = None
+            changed = True
+        prompts.append(
+            prompt.model_copy(
+                update={
+                    "screenshot_asset_id": screenshot_asset_id,
+                    "page_source_asset_id": page_source_asset_id,
+                }
+            )
+        )
     return (
-        discovery.model_copy(update={"screens": screens, "last_attempt_screens": last_attempt_screens})
+        discovery.model_copy(
+            update={
+                "screens": screens,
+                "last_attempt_screens": last_attempt_screens,
+                "runtime_prompts": prompts,
+            }
+        )
         if changed
         else discovery
     )
@@ -2273,7 +2304,7 @@ async def _resume_and_discover_background(
             )
             # Expand coverage from the same graph the report and runner will use.
             expanded_analysis = None
-            if _discovery_is_ready_for_cases(result):
+            if _discovery_is_ready_for_cases(result) or result.runtime_prompts:
                 try:
                     discovered_analysis = await service.load_analysis(job_id)
                     expanded_analysis = service.expand_discovered_coverage(discovered_analysis, persisted_discovery)
@@ -2324,6 +2355,29 @@ async def _resume_and_discover_background(
                         screen.page_source_path,
                         filename=f"discovery-{job_id[:8]}-{screen.screen_id}.{'html' if result.target_kind == 'web' else 'xml'}",
                         content_type="text/html" if result.target_kind == "web" else "application/xml",
+                        repository_asset_id=repository_asset_id,
+                        owner_id=owner_id,
+                    )
+                for prompt in result.runtime_prompts:
+                    prompt.screenshot_asset_id = await _persist_evidence_asset(
+                        db,
+                        user,
+                        record,
+                        settings,
+                        prompt.screenshot_path,
+                        filename=f"discovery-{job_id[:8]}-prompt-{prompt.prompt_id}.png",
+                        content_type="image/png",
+                        repository_asset_id=repository_asset_id,
+                        owner_id=owner_id,
+                    )
+                    prompt.page_source_asset_id = await _persist_evidence_asset(
+                        db,
+                        user,
+                        record,
+                        settings,
+                        prompt.page_source_path,
+                        filename=f"discovery-{job_id[:8]}-prompt-{prompt.prompt_id}.xml",
+                        content_type="application/xml",
                         repository_asset_id=repository_asset_id,
                         owner_id=owner_id,
                     )
@@ -4670,7 +4724,7 @@ async def run_autopilot_discovery(
     )
     # Expand coverage from the same graph the report and runner will use.
     expanded_analysis = None
-    if _discovery_is_ready_for_cases(result):
+    if _discovery_is_ready_for_cases(result) or result.runtime_prompts:
         try:
             discovered_analysis = await service.load_analysis(job_id)
             expanded_analysis = service.expand_discovered_coverage(discovered_analysis, persisted_discovery)
@@ -4692,7 +4746,7 @@ async def run_autopilot_discovery(
         login_observed=bool(any(item.category == "credential" for item in persisted_discovery.input_requests)),
         version=map_version,
     )
-    if record is not None and result.screens:
+    if record is not None and (result.screens or result.runtime_prompts):
         repository_asset_id = record.repository_asset_id
         for screen in result.screens:
             screen.screenshot_asset_id = await _persist_evidence_asset(
@@ -4717,6 +4771,29 @@ async def run_autopilot_discovery(
                 repository_asset_id=repository_asset_id,
                 owner_id=owner_id,
             )
+            for prompt in result.runtime_prompts:
+                prompt.screenshot_asset_id = await _persist_evidence_asset(
+                    db,
+                    user,
+                    record,
+                    settings,
+                    prompt.screenshot_path,
+                    filename=f"discovery-{job_id[:8]}-prompt-{prompt.prompt_id}.png",
+                    content_type="image/png",
+                    repository_asset_id=repository_asset_id,
+                    owner_id=owner_id,
+                )
+                prompt.page_source_asset_id = await _persist_evidence_asset(
+                    db,
+                    user,
+                    record,
+                    settings,
+                    prompt.page_source_path,
+                    filename=f"discovery-{job_id[:8]}-prompt-{prompt.prompt_id}.xml",
+                    content_type="application/xml",
+                    repository_asset_id=repository_asset_id,
+                    owner_id=owner_id,
+                )
         if persisted_discovery is not result and result.interactive_surface_ready is False:
             persisted_discovery.last_attempt_screens = list(result.screens)
         # The evidence links are attached during persistence. Re-project the
