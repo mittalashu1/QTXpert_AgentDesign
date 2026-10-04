@@ -3062,3 +3062,4 @@ def test_smoke_safely_recovers_from_google_location_prompt(monkeypatch):
     assert prompt_evidence["target_returned"] is True
     assert prompt_evidence["device_settings_modified"] is False
     assert driver.calls == ["back"]
+
