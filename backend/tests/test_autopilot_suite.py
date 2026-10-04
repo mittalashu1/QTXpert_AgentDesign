@@ -1170,7 +1170,7 @@ def test_suite_prompt_choice_accepts_a_new_observed_system_prompt(tmp_path):
         service._execute_test(PromptFollowupDriver(), strict_test, tmp_path, "com.qtx.demo")
 
 
-def test_suite_device_farm_reopens_prompt_cases_with_full_reset(tmp_path, monkeypatch):
+def test_suite_device_farm_reopens_prompt_cases_with_fast_reset(tmp_path, monkeypatch):
     import appium
     from app.schemas.autopilot import AutopilotSuiteRequest
 
@@ -1247,6 +1247,7 @@ def test_suite_device_farm_reopens_prompt_cases_with_full_reset(tmp_path, monkey
 
     assert [result.status for result in results] == ["passed", "passed"]
     assert len(calls) == 2
-    assert all(capabilities["appium:fullReset"] is True for _, capabilities in calls)
+    assert all(capabilities["appium:fastReset"] is True for _, capabilities in calls)
+    assert all("appium:fullReset" not in capabilities for _, capabilities in calls)
     assert drivers[0].quit_calls == 1
     assert drivers[1].quit_calls == 1
