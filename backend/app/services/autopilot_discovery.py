@@ -1669,6 +1669,7 @@ class AutopilotDiscoveryService:
             persist_evidence: bool = True,
             require_target: bool = False,
         ) -> tuple[DiscoveredScreen, bool]:
+            nonlocal actions_attempted
             index = len(screens) + 1
             page_source = safe_page_source(driver)
             for _prompt_index in range(8):
