@@ -800,6 +800,7 @@ class AutopilotSuiteService:
             activity_hint=activity,
             timeout_seconds=15.0,
             poll_interval=0.5,
+            preserve_known_system_prompt=preserve_known_system_prompt,
         )
         if not ready:
             raise ProviderLifecycleUnavailable(reason)
