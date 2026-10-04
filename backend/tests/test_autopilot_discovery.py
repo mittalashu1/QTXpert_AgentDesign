@@ -1034,3 +1034,21 @@ def test_startup_surface_diagnostic_is_optional_when_provider_disables_logcat():
             raise RuntimeError("provider does not expose device logs")
 
     assert AutopilotDiscoveryService._startup_surface_diagnostic(Driver(), "com.qtx.demo") is None
+
+
+
+@pytest.mark.parametrize(
+    ("label", "decision"),
+    [
+        ("Don't allow", "deny"),
+        ("Don’t allow", "deny"),
+        ("Do not allow", "deny"),
+        ("No thanks", "deny"),
+        ("Cancel", "deny"),
+        ("Allow while using the app", "allow"),
+        ("Turn on", "allow"),
+    ],
+)
+def test_prompt_choice_decision_prioritizes_explicit_declines(label, decision):
+    assert AutopilotDiscoveryService._prompt_choice_decision(label.lower()) == decision
+

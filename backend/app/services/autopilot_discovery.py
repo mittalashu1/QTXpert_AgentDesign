@@ -254,10 +254,12 @@ class AutopilotDiscoveryService:
             "deny", "no", "not now", "no thanks", "don't allow", "don’t allow",
             "never allow", "cancel", "decline",
         )
-        if any(token in normalized_label for token in allow):
-            return "allow"
+        # Decline labels can contain an allow token ("Don't allow"). Test
+        # them first so a denial is never generated as a grant branch.
         if any(token in normalized_label for token in deny):
             return "deny"
+        if any(token in normalized_label for token in allow):
+            return "allow"
         return None
 
     @classmethod
