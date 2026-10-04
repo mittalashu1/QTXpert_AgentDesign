@@ -36,6 +36,7 @@ from app.api.routes.autopilot import (
     _discovery_target_is_verified,
     _merge_discovery_snapshot,
     _pending_runtime_auth_requests,
+    _record_discovery,
     _runtime_discovery_checkpoint_message,
     _refresh_mobile_analysis_identity,
     _remove_local_report_data,
@@ -1794,6 +1795,83 @@ def test_discovery_must_be_verified_and_successful_before_suite_gate():
     assert _discovery_is_ready_for_cases(launch_checkpoint) is False
 
 
+
+def test_discovery_restore_uses_newest_valid_database_or_manifest_snapshot():
+    stored = AutopilotDiscoveryResult(
+        job_id="legacy-job",
+        status="completed",
+        provider="devicefarm",
+        started_at="2026-10-01T00:00:00Z",
+        finished_at="2026-10-01T00:00:01Z",
+        duration_seconds=1,
+        device_name="Pixel",
+        target_ready=True,
+        interactive_surface_ready=True,
+    )
+    latest = stored.model_copy(update={
+        "status": "partial",
+        "started_at": "2026-10-01T00:01:00Z",
+        "finished_at": "2026-10-01T00:01:10Z",
+        "interactive_surface_ready": False,
+        "checkpoint_message": "Resolve the device location prompt, then retry discovery.",
+    })
+    record = SimpleNamespace(discovery=stored.model_dump(mode="json"))
+
+    restored = _record_discovery(record, {"discovery": latest.model_dump(mode="json")})
+    manifest_only = _record_discovery(None, {"discovery": latest.model_dump(mode="json")})
+
+    assert restored == latest
+    assert manifest_only == latest
+    assert _discovery_is_ready_for_cases(restored) is False
+
+
+@pytest.mark.asyncio
+async def test_get_discovery_restores_manifest_when_legacy_database_row_is_missing(monkeypatch):
+    from app.api.routes import autopilot as autopilot_routes
+
+    discovery = AutopilotDiscoveryResult(
+        job_id="legacy-job",
+        status="partial",
+        provider="devicefarm",
+        started_at="2026-10-01T00:01:00Z",
+        finished_at="2026-10-01T00:01:10Z",
+        duration_seconds=10,
+        device_name="Pixel",
+        target_ready=True,
+        interactive_surface_ready=False,
+        checkpoint_message="Resolve the device location prompt, then retry discovery.",
+    )
+    job = {"job_id": discovery.job_id, "discovery": discovery.model_dump(mode="json")}
+
+    class FakeService:
+        pass
+
+    async def require_owned_job(_service, _job_id, _user):
+        return job
+
+    async def safe_job_record(_db, _job_id, _owner_id):
+        return None
+
+    async def sanitize_discovery(_db, _user, _record, value):
+        return value
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: FakeService())
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+    monkeypatch.setattr(autopilot_routes, "_safe_job_record", safe_job_record)
+    monkeypatch.setattr(autopilot_routes, "_sanitize_discovery_assets", sanitize_discovery)
+
+    restored = await autopilot_routes.get_autopilot_discovery(
+        discovery.job_id,
+        SimpleNamespace(id="owner"),
+        object(),
+        object(),
+    )
+
+    assert restored is not None
+    assert restored.interactive_surface_ready is False
+    assert restored.checkpoint_message == discovery.checkpoint_message
+
+
 def test_noninteractive_retry_keeps_previous_map_and_latest_screen_evidence():
     previous = AutopilotDiscoveryResult(
         job_id="verified-job",
@@ -1894,6 +1972,59 @@ async def test_safe_suite_endpoint_rejects_blocked_phase_before_provider(monkeyp
 
     assert error.value.status_code == 409
     assert "blocked phase" in error.value.detail
+
+
+
+@pytest.mark.asyncio
+async def test_safe_suite_endpoint_uses_manifest_checkpoint_when_database_row_is_missing(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.routes import autopilot as autopilot_routes
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    job_id = "66666666-6666-4666-8666-666666666667"
+    discovery = AutopilotDiscoveryResult(
+        job_id=job_id,
+        status="partial",
+        provider="devicefarm",
+        started_at="2026-10-01T00:01:00Z",
+        finished_at="2026-10-01T00:01:10Z",
+        duration_seconds=10,
+        device_name="Pixel",
+        target_ready=True,
+        interactive_surface_ready=False,
+        checkpoint_message="Resolve the device location prompt, then retry discovery.",
+    )
+    partial_job = {
+        "job_id": job_id,
+        "phase": "partial",
+        "target_kind": "android",
+        "discovery": discovery.model_dump(mode="json"),
+    }
+
+    class FakeService:
+        pass
+
+    async def require_owned_job(_service, _job_id, _user, **_kwargs):
+        return partial_job
+
+    async def safe_job_record(_db, _job_id, _owner_id):
+        return None
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: FakeService())
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+    monkeypatch.setattr(autopilot_routes, "_safe_job_record", safe_job_record)
+
+    with pytest.raises(HTTPException) as error:
+        await autopilot_routes.execute_autopilot_suite(
+            job_id,
+            AutopilotSuiteRequest(provider="devicefarm", device_name="Pixel"),
+            SimpleNamespace(id="owner"),
+            object(),
+            object(),
+        )
+
+    assert error.value.status_code == 409
+    assert "device location prompt" in error.value.detail
 
 
 @pytest.mark.asyncio

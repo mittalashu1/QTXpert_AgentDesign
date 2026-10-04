@@ -1148,14 +1148,45 @@ async def _mark_repository_available(
     return result
 
 
-def _record_discovery(record: Optional[AutopilotJob]):
-    """Validate a stored Runtime Discovery result before using it for IR."""
-    if record is None or record.discovery is None:
+def _record_discovery(
+    record: Optional[AutopilotJob],
+    job_manifest: Optional[dict] = None,
+) -> Optional[AutopilotDiscoveryResult]:
+    """Return the newest valid discovery snapshot from durable job stores.
+
+    New jobs keep a database row, while older/local jobs may only have the
+    file-backed job manifest. Discovery writes update both stores when
+    available, so use the timestamp to avoid restoring a stale database copy
+    after a manifest-only write.
+    """
+    candidates = [getattr(record, "discovery", None)]
+    if isinstance(job_manifest, dict):
+        candidates.append(job_manifest.get("discovery"))
+
+    valid: list[AutopilotDiscoveryResult] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            valid.append(AutopilotDiscoveryResult.model_validate(candidate))
+        except Exception:
+            continue
+    if not valid:
         return None
-    try:
-        return AutopilotDiscoveryResult.model_validate(record.discovery)
-    except Exception:
-        return None
+
+    def finished_timestamp(discovery: AutopilotDiscoveryResult) -> float:
+        raw = discovery.finished_at or discovery.started_at
+        if not raw:
+            return 0.0
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+
+    return max(valid, key=finished_timestamp)
 
 
 def _merge_discovery_snapshot(
@@ -2184,7 +2215,7 @@ async def _resume_and_discover_background(
                     analysis_for_discovery,
                     artifact_path,
                 )
-            existing_discovery = _record_discovery(record)
+            existing_discovery = _record_discovery(record, job)
             setup_for_discovery = await _setup_with_input_metadata(
                 db,
                 record,
@@ -2237,7 +2268,7 @@ async def _resume_and_discover_background(
             # caller through its job diagnostic, while the durable report
             # keeps the last usable evidence and records the attempt metadata.
             persisted_discovery = _merge_discovery_snapshot(
-                _record_discovery(record),
+                _record_discovery(record, job),
                 result,
             )
             # Expand coverage from the same graph the report and runner will use.
@@ -3233,7 +3264,7 @@ async def get_autopilot_application_map(
     if isinstance(raw_map, dict):
         return AutopilotApplicationMapSchema.model_validate(raw_map)
     record = await _safe_job_record(db, job_id, user.id)
-    discovery = _record_discovery(record)
+    discovery = _record_discovery(record, job)
     if discovery is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runtime Discovery has not produced an application map yet.")
     result = build_application_map(
@@ -4220,13 +4251,13 @@ async def get_autopilot_automation(
 ):
     """Compile QTX Test IR, consuming durable Runtime Discovery when available."""
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
+    job = await _require_owned_job(service, job_id, user)
     try:
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
     record = await _safe_job_record(db, job_id, user.id)
-    discovery = _record_discovery(record)
+    discovery = _record_discovery(record, job)
     setup = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
     input_values, _ = await _resolve_suite_input_values(db, settings, record, setup)
     return AutopilotIRCompiler().compile_bundle(
@@ -4246,13 +4277,13 @@ async def get_autopilot_setup(
 ):
     """Return only non-secret references used to resolve deferred tests."""
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
+    job = await _require_owned_job(service, job_id, user)
     record = await _safe_job_record(db, job_id, user.id)
     try:
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError:
         analysis = None
-    discovery = _record_discovery(record)
+    discovery = _record_discovery(record, job)
     return await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
 
 
@@ -4266,7 +4297,7 @@ async def update_autopilot_setup(
 ):
     """Persist dependency references without accepting passwords, tokens or OTPs."""
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
+    job = await _require_owned_job(service, job_id, user)
     reference_fields = (
         "credential_reference",
         "environment_url",
@@ -4315,7 +4346,7 @@ async def update_autopilot_setup(
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError:
         analysis = None
-    discovery = _record_discovery(record)
+    discovery = _record_discovery(record, job)
     current_profile = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
     request_map = {
         item.key: item
@@ -4415,7 +4446,7 @@ async def resume_autopilot_checkpoint(
     # rehydrating a repository-backed APK expires the request-scoped User ORM
     # instance; reading ``user.id`` afterwards raises MissingGreenlet.
     owner_id = user.id
-    await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
     record = await _safe_job_record(db, job_id, owner_id)
     try:
         analysis = await service.load_analysis(job_id)
@@ -4441,7 +4472,7 @@ async def resume_autopilot_checkpoint(
                 checkpoint_message="Rehydrating the stored mobile build before validating checkpoint inputs.",
                 error=None,
             )
-            recovered_discovery = _record_discovery(record)
+            recovered_discovery = _record_discovery(record, recovered_job)
             recovered_setup = await _setup_with_input_metadata(
                 db,
                 record,
@@ -4471,7 +4502,7 @@ async def resume_autopilot_checkpoint(
             status_code=status.HTTP_409_CONFLICT,
             detail="Autopilot analysis is not ready for input validation yet. Re-run analysis from the stored target.",
         ) from exc
-    current_discovery = _record_discovery(record)
+    current_discovery = _record_discovery(record, job)
     setup = await _setup_with_input_metadata(db, record, job_id, analysis, current_discovery)
     if not payload.confirm_saved_inputs:
         return await service.get_job_status(job_id)
@@ -4561,7 +4592,7 @@ async def run_autopilot_discovery(
         analysis_for_discovery = await service.load_analysis(job_id)
     except FileNotFoundError:
         analysis_for_discovery = None
-    existing_discovery = _record_discovery(record)
+    existing_discovery = _record_discovery(record, job)
     setup_for_discovery = await _setup_with_input_metadata(
         db,
         record,
@@ -4601,7 +4632,7 @@ async def run_autopilot_discovery(
             analysis_for_discovery,
             artifact_path,
         )
-        existing_discovery = _record_discovery(record)
+        existing_discovery = _record_discovery(record, job)
         setup_for_discovery = await _setup_with_input_metadata(
             db,
             record,
@@ -4634,7 +4665,7 @@ async def run_autopilot_discovery(
     # for reports/execution and expose the failed attempt through the durable
     # discovery diagnostic fields.
     persisted_discovery = _merge_discovery_snapshot(
-        _record_discovery(record),
+        _record_discovery(record, job),
         result,
     )
     # Expand coverage from the same graph the report and runner will use.
@@ -4985,9 +5016,9 @@ async def get_autopilot_discovery(
 ):
     """Restore the latest durable runtime discovery result for this job."""
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
+    job = await _require_owned_job(service, job_id, user)
     record = await _safe_job_record(db, job_id, user.id)
-    return await _sanitize_discovery_assets(db, user, record, _record_discovery(record))
+    return await _sanitize_discovery_assets(db, user, record, _record_discovery(record, job))
 
 
 async def _advance_suite_job_to_running(service, job_id: str, phase: str) -> None:
@@ -5036,7 +5067,7 @@ async def execute_autopilot_suite(
             detail=f"Safe execution cannot start while Autopilot is in the {phase} phase.",
         )
     record = await _safe_job_record(db, job_id, owner_id)
-    latest_discovery = _record_discovery(record)
+    latest_discovery = _record_discovery(record, job)
     if not _discovery_is_ready_for_cases(latest_discovery):
         reason = (
             (
@@ -5079,7 +5110,7 @@ async def execute_autopilot_suite(
     await _advance_suite_job_to_running(service, job_id, phase)
     if str(job.get("target_kind") or "android") == "web":
         analysis = await service.load_analysis(job_id)
-        discovery = _record_discovery(record)
+        discovery = _record_discovery(record, job)
         setup = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
         input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
         bundle = AutopilotIRCompiler().compile_bundle(
@@ -5158,7 +5189,7 @@ async def execute_autopilot_suite(
             analysis_for_setup,
             artifact_path,
         )
-        discovery = _record_discovery(record)
+        discovery = _record_discovery(record, job)
         setup = await _setup_with_input_metadata(db, record, job_id, analysis_for_setup, discovery)
         input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
         result = await _run_suite_without_db_connection(
@@ -5589,7 +5620,7 @@ async def get_autopilot_report(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
 
     record = await _safe_job_record(db, job_id, user.id)
-    discovery = await _sanitize_discovery_assets(db, user, record, _record_discovery(record))
+    discovery = await _sanitize_discovery_assets(db, user, record, _record_discovery(record, job))
     suite = None
     if record is not None and record.suite_execution is not None:
         try:
