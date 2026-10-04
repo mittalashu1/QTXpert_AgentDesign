@@ -72,6 +72,33 @@ def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
     return AutopilotPrototypeService(settings)
 
 
+@pytest.mark.asyncio
+async def test_concurrent_job_updates_merge_without_shared_temp_file(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    job_id = "11111111-1111-1111-1111-111111111111"
+    job_dir = service._job_dir(job_id)
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(json.dumps({
+        "job_id": job_id,
+        "owner_id": "22222222-2222-2222-2222-222222222222",
+        "created_at": "2026-10-04T00:00:00+00:00",
+        "status": "analyzed",
+    }), encoding="utf-8")
+
+    async def skip_database_persistence(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(service, "_persist_job", skip_database_persistence)
+    await asyncio.gather(*(
+        service.update_job(job_id, **{f"concurrent_marker_{index}": index})
+        for index in range(12)
+    ))
+
+    final_job = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+    assert all(final_job[f"concurrent_marker_{index}"] == index for index in range(12))
+    assert not list(job_dir.glob("job.json.*.tmp"))
+
+
 def test_autopilot_case_metadata_and_execution_gate_keep_one_surface():
     test = AutopilotTest(
         id="QT-AUTO-FUNCTIONAL-001",
