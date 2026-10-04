@@ -917,3 +917,65 @@ def test_runtime_prompt_branch_metadata_survives_ir_compilation():
         "inspect_ui",
         "capture_evidence",
     ]
+
+
+def test_followup_prompt_case_replays_observed_parent_denial():
+    parent = RuntimePromptObservation(
+        prompt_id="runtime-location-permission",
+        kind="runtime_permission",
+        title="Location permission",
+        choices=[
+            RuntimePromptChoice(
+                key="deny",
+                label="Don’t allow",
+                decision="deny",
+                locators=[DiscoveryLocator(strategy="id", value="deny-button", confidence=0.99)],
+                outcome_status="observed",
+                resulting_prompt_id="location-settings-checkpoint",
+            )
+        ],
+    )
+    followup = RuntimePromptObservation(
+        prompt_id="location-settings-checkpoint",
+        kind="location_settings",
+        title="Location settings",
+        choices=[
+            RuntimePromptChoice(
+                key="no-thanks",
+                label="No thanks",
+                decision="deny",
+                locators=[DiscoveryLocator(strategy="id", value="no-thanks", confidence=0.99)],
+            )
+        ],
+    )
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-RUNTIME-PROMPT-FOLLOWUP-DENY",
+            suite="Permissions",
+            title="Location settings denial behavior",
+            priority="high",
+            objective="Verify the follow-up location settings denial branch.",
+            steps=["Choose No thanks"],
+            expected=["The app returns to a readable screen."],
+            bucket="permissions",
+            runtime_prompt_id=followup.prompt_id,
+            runtime_prompt_choice="no-thanks",
+        )
+    ])
+    discovery = _discovery().model_copy(update={"runtime_prompts": [parent, followup]})
+
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+
+    assert generated.readiness == "executable"
+    assert [step.action for step in generated.steps] == [
+        "launch_app",
+        "prompt_choice",
+        "prompt_choice",
+        "inspect_ui",
+        "capture_evidence",
+    ]
+    assert generated.steps[1].target == "runtime_permission"
+    assert generated.steps[1].value == "deny"
+    assert generated.steps[1].expected_resulting_prompt_id == followup.prompt_id
+    assert generated.steps[2].target == "location_settings"
+    assert generated.steps[2].value == "no-thanks"

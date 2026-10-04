@@ -667,6 +667,7 @@ class AutopilotSuiteService:
                         input_values=input_values,
                         sensitive_input_keys=sensitive_input_keys,
                         launch_activity=activity_hint,
+                        discovery=discovery,
                     )
                     if setup_navigation:
                         evidence["setup_navigation"] = setup_navigation
@@ -1610,6 +1611,7 @@ class AutopilotSuiteService:
         input_values: Dict[str, str] | None = None,
         sensitive_input_keys: set[str] | None = None,
         launch_activity: str | None = None,
+        discovery: AutopilotDiscoveryResult | None = None,
     ) -> Dict[str, Any]:
         from appium.webdriver.common.appiumby import AppiumBy
 
@@ -1626,6 +1628,7 @@ class AutopilotSuiteService:
             mechanism: str | None = None
             resulting_prompt_kind: str | None = None
             resulting_prompt_id: str | None = None
+            resulting_screen_id: str | None = None
             if step.action == "launch_app":
                 expected_prompt_kind = next(
                     (item.target for item in test.steps if item.action == "prompt_choice"),
@@ -1678,6 +1681,29 @@ class AutopilotSuiteService:
                     time.sleep(0.25)
                 if not returned_to_app:
                     raise AssertionError("The selected prompt choice did not reach the app or a new observed system prompt")
+                if step.expected_resulting_prompt_id:
+                    if resulting_prompt_id != step.expected_resulting_prompt_id:
+                        raise AssertionError(
+                            "The selected prompt choice did not reach its observed follow-up system prompt."
+                        )
+                elif step.expected_resulting_screen_id:
+                    if resulting_prompt_kind:
+                        raise AssertionError(
+                            "The selected prompt choice reached a system prompt instead of its observed app screen."
+                        )
+                    reached_screen = (
+                        self._identify_discovered_screen(driver, discovery, package)
+                        if discovery is not None
+                        else None
+                    )
+                    if reached_screen is None or reached_screen.screen_id != step.expected_resulting_screen_id:
+                        raise AssertionError(
+                            "The selected prompt choice did not reach its observed app screen."
+                        )
+                    resulting_screen_id = reached_screen.screen_id
+                elif not resulting_prompt_kind and discovery is not None:
+                    reached_screen = self._identify_discovered_screen(driver, discovery, package)
+                    resulting_screen_id = reached_screen.screen_id if reached_screen is not None else None
                 mechanism = f"observed_prompt_choice:{step.assertion or step.value or 'selected'}"
             elif step.action == "inspect_ui":
                 source = driver.page_source or ""
@@ -1929,6 +1955,8 @@ class AutopilotSuiteService:
             if resulting_prompt_kind:
                 action_evidence["resulting_prompt_kind"] = resulting_prompt_kind
                 action_evidence["resulting_prompt_id"] = resulting_prompt_id
+            if resulting_screen_id:
+                action_evidence["resulting_screen_id"] = resulting_screen_id
             if mechanism:
                 action_evidence["mechanism"] = mechanism
             actions.append(action_evidence)
