@@ -28,7 +28,7 @@ from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
     activate_verified_target_surface,
     enter_observed_text,
-    known_android_prompt_kind,
+    known_native_prompt_kind,
     ProviderLifecycleUnavailable,
     expected_package_state,
     safe_app_identity,
@@ -515,7 +515,7 @@ class AutopilotSuiteService:
                     "appium:appWaitDuration": adb_exec_timeout_ms,
                 }
             )
-        if has_prompt_cases and not is_ios and not is_device_farm:
+        if has_prompt_cases and not is_device_farm:
             # A fresh installation is needed to replay independently remembered
             # runtime permission branches in the same batch.
             capabilities["appium:fullReset"] = True
@@ -590,7 +590,7 @@ class AutopilotSuiteService:
                         (step.target for step in test.steps if step.action == "prompt_choice"),
                         None,
                     )
-                    if expected_prompt_kind and known_android_prompt_kind(driver, case_source) == expected_prompt_kind:
+                    if expected_prompt_kind and known_native_prompt_kind(driver, case_source, request.target_kind) == expected_prompt_kind:
                         case_target_ready, case_target_reason = True, "The observed system prompt is active for its recorded branch."
                     else:
                         case_target_ready, case_target_reason, _ = validate_target_surface(
@@ -1507,7 +1507,7 @@ class AutopilotSuiteService:
                     (item.target for item in test.steps if item.action == "prompt_choice"),
                     None,
                 )
-                current_prompt_kind = known_android_prompt_kind(driver, safe_page_source(driver))
+                current_prompt_kind = known_native_prompt_kind(driver, safe_page_source(driver), target_kind)
                 if (
                     current_prompt_kind != expected_prompt_kind
                     and package
@@ -1516,10 +1516,8 @@ class AutopilotSuiteService:
                     self._activate_application(driver, package, launch_activity)
                     time.sleep(1)
             elif step.action == "prompt_choice":
-                if target_kind != "android":
-                    raise ProviderLifecycleUnavailable("Observed system prompt replay is currently supported on Android only.")
                 current_source = safe_page_source(driver)
-                actual_kind = known_android_prompt_kind(driver, current_source)
+                actual_kind = known_native_prompt_kind(driver, current_source, target_kind)
                 if actual_kind != step.target:
                     raise AssertionError(
                         f"Expected the observed {step.target or 'system'} prompt, but it was not active."
@@ -1534,7 +1532,7 @@ class AutopilotSuiteService:
                 returned_to_app = False
                 while time.monotonic() < deadline:
                     current_source = safe_page_source(driver)
-                    if known_android_prompt_kind(driver, current_source) is None:
+                    if known_native_prompt_kind(driver, current_source, target_kind) is None:
                         returned_to_app, _, _ = validate_target_surface(
                             driver,
                             expected_package=package,
