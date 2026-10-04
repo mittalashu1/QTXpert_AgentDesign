@@ -58,6 +58,8 @@ from app.schemas.autopilot import (
 )
 from app.services.appium_compat import (
     ProviderLifecycleUnavailable,
+    activate_verified_target_surface,
+    known_native_prompt_kind,
     safe_app_identity,
     safe_page_source,
     safe_quit,
@@ -4177,6 +4179,39 @@ class AutopilotPrototypeService:
         return execution
 
     @staticmethod
+    def _recover_location_settings_prompt(
+        driver: Any,
+        page_source: str,
+        expected_package: str | None,
+    ) -> tuple[str, Optional[Dict[str, Any]]]:
+        """Dismiss Google's location checker safely and verify the app returned.
+
+        A Back action declines this system-level request. It never enables or
+        changes the device-wide Location setting.
+        """
+        if known_native_prompt_kind(driver, page_source, "android") != "location_settings":
+            return page_source, None
+
+        target_ready, reason, identity = activate_verified_target_surface(
+            driver,
+            expected_package,
+            timeout_seconds=8.0,
+            poll_interval=0.25,
+            page_source=page_source,
+        )
+        if not target_ready:
+            raise ProviderLifecycleUnavailable(reason)
+
+        return safe_page_source(driver), {
+            "kind": "location_settings",
+            "resolution": "back",
+            "target_returned": True,
+            "target_package": identity.get("package") or expected_package,
+            "device_settings_modified": False,
+            "reason": reason,
+        }
+
+    @staticmethod
     def _execute_appium_sync(
         appium_url: str,
         app_reference: str,
@@ -4248,9 +4283,47 @@ class AutopilotPrototypeService:
         driver = webdriver.Remote(appium_url, options=options)
         try:
             time.sleep(3)
-            driver.get_screenshot_as_file(str(screenshot_path))
             page_source = safe_page_source(driver)
+            startup_prompt = None
+            prompt_kind = known_native_prompt_kind(
+                driver,
+                page_source,
+                "ios" if is_ios else "android",
+            )
+            if prompt_kind == "location_settings":
+                prompt_screenshot_path = screenshot_path.with_name("native-prompt.png")
+                prompt_source_path = source_path.with_name("native-prompt.xml")
+                try:
+                    driver.get_screenshot_as_file(str(prompt_screenshot_path))
+                except Exception:
+                    prompt_screenshot_path = None
+                try:
+                    prompt_source_path.write_text(page_source, encoding="utf-8")
+                except OSError:
+                    prompt_source_path = None
+
+                page_source, startup_prompt = AutopilotPrototypeService._recover_location_settings_prompt(
+                    driver,
+                    page_source,
+                    expected_package,
+                )
+                # The primary smoke evidence should show the verified app after
+                # recovery; the separate native-prompt files retain the dialog.
+                driver.get_screenshot_as_file(str(screenshot_path))
+            else:
+                driver.get_screenshot_as_file(str(screenshot_path))
             source_path.write_text(page_source, encoding="utf-8")
+            if startup_prompt is not None:
+                startup_prompt["screenshot_path"] = (
+                    str(prompt_screenshot_path)
+                    if prompt_screenshot_path is not None and prompt_screenshot_path.exists()
+                    else None
+                )
+                startup_prompt["page_source_path"] = (
+                    str(prompt_source_path)
+                    if prompt_source_path is not None and prompt_source_path.exists()
+                    else None
+                )
             identity = safe_app_identity(
                 driver,
                 page_source=page_source,
@@ -4281,6 +4354,7 @@ class AutopilotPrototypeService:
                 "orientation": getattr(driver, "orientation", None),
                 "page_source_chars": source_path.stat().st_size if source_path.exists() else 0,
                 "expected_package": expected_package,
+                "startup_prompt": startup_prompt,
             }
         finally:
             safe_quit(driver)
