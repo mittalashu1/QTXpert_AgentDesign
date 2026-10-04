@@ -3011,3 +3011,54 @@ def test_prompt_only_retry_preserves_prior_screen_graph_and_new_prompt():
     assert [screen.screen_id for screen in merged.screens] == ["screen-001"]
     assert [item.prompt_id for item in merged.runtime_prompts] == ["permission-01"]
     assert merged.last_attempt_status == "blocked"
+
+
+
+def test_smoke_safely_recovers_from_google_location_prompt(monkeypatch):
+    from app.services.autopilot import AutopilotPrototypeService
+
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
+
+    class Driver:
+        capabilities = {
+            "platformName": "Android",
+            "appium:appPackage": "com.qtx.demo",
+            "appium:appActivity": "com.qtx.demo.MainActivity",
+        }
+
+        def __init__(self):
+            self.state = "prompt"
+            self.calls = []
+
+        @property
+        def current_activity(self):
+            return (
+                "com.google.android.location.settings.LocationSettingsCheckerActivity"
+                if self.state == "prompt"
+                else "com.qtx.demo.MainActivity"
+            )
+
+        @property
+        def page_source(self):
+            if self.state == "prompt":
+                return '<hierarchy><node package="com.google.android.gms" text="Location settings" /></hierarchy>'
+            return '<hierarchy><node package="com.qtx.demo" text="InvestNation" /></hierarchy>'
+
+        def back(self):
+            self.calls.append("back")
+            self.state = "app"
+
+    driver = Driver()
+    recovered_source, prompt_evidence = AutopilotPrototypeService._recover_location_settings_prompt(
+        driver,
+        driver.page_source,
+        "com.qtx.demo",
+    )
+
+    assert 'package="com.qtx.demo"' in recovered_source
+    assert prompt_evidence is not None
+    assert prompt_evidence["kind"] == "location_settings"
+    assert prompt_evidence["resolution"] == "back"
+    assert prompt_evidence["target_returned"] is True
+    assert prompt_evidence["device_settings_modified"] is False
+    assert driver.calls == ["back"]
