@@ -613,7 +613,7 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
     assert denial.outcome_status == "observed"
     assert denial.resulting_screen_id == "screen-001"
     assert allowance.outcome_status == "planned"
-    assert any("startup surface during recovery" in warning for warning in result["warnings"])
+    assert result["runtime_prompts"][0].kind == "location_settings"
     assert len(result["screens"]) == 2
     assert result["screens"][1].screen_id == "screen-002"
     assert {control.semantic_label for control in result["screens"][1].controls if control.input_capable} == {
