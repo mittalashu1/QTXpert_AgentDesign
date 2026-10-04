@@ -3644,20 +3644,20 @@ async def approve_autopilot_cases(
         persisted_ids.append(row.id)
 
     await db.commit()
-    analysis_with_reviews = analysis.model_copy(update={"case_reviews": reviews})
+    analysis_with_reviews = analysis.model_copy(update={"case_reviews": reviews, "phase": "cases_approved"})
+    # Persist the Test Design hand-off independently of the workflow transition.
+    # If an already-running suite owns the phase, a rejected transition must not
+    # discard the shared run ID or make a later approval create duplicate rows.
+    await service.update_job(
+        job_id,
+        shared_generation_run_id=str(shared_run.id),
+        case_reviews=reviews,
+        analysis=analysis_with_reviews.model_dump(mode="json"),
+        checkpoint_message="Approved cases are now available in the shared Test Design library.",
+    )
     try:
-        await service.update_job(
-            job_id,
-            shared_generation_run_id=str(shared_run.id),
-            case_reviews=reviews,
-            analysis=analysis_with_reviews.model_dump(mode="json"),
-            phase="cases_approved",
-            checkpoint_message="Approved cases are now available in the shared Test Design library.",
-        )
+        await service.update_job(job_id, phase="cases_approved")
     except ValueError as exc:
-        # The database hand-off is already committed and safe to retry. A
-        # concurrent worker may have advanced the phase; surface that clearly
-        # without losing the generated rows.
         logger.info("Autopilot case approval phase update deferred job_id=%s: %s", job_id, exc)
 
     return AutopilotCaseLibraryResult(

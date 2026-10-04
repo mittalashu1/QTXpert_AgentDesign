@@ -1966,7 +1966,7 @@ export default function AutopilotPage() {
         return;
       }
       const phase = latestJob.phase || latestJob.analysis?.phase || "context_ready";
-      const runnablePhases: WorkflowPhase[] = ["cases_approved", "execution_ready", "completed", "partial"];
+      const runnablePhases: WorkflowPhase[] = ["cases_approved", "execution_ready", "completed", "partial", "failed"];
       if (phase === "cases_pending_review") {
         if (analysis?.job_id !== jobId || !(await approveCases(jobId))) return;
       } else if (phase === "running") {
