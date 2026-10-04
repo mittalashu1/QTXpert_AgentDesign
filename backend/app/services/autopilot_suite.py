@@ -558,6 +558,7 @@ class AutopilotSuiteService:
                 package_hint=package_hint,
             )
             package = str(package_hint or target_identity.get("package") or identity["package"] or "").strip() or None
+            prompt_case_count = 0
             for test_index, test in enumerate(tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -578,18 +579,34 @@ class AutopilotSuiteService:
                     # Do not immediately force-stop that known-good first surface; hosted providers may
                     # switch to Android system UI when restarting the attached app.
                     has_prompt_step = any(step.action == "prompt_choice" for step in test.steps)
-                    if test_index > 0:
+                    expected_prompt_kind = next(
+                        (step.target for step in test.steps if step.action == "prompt_choice"),
+                        None,
+                    )
+                    current_prompt_kind = known_native_prompt_kind(
+                        driver, safe_page_source(driver), request.target_kind
+                    )
+                    if has_prompt_step and (
+                        prompt_case_count > 0 or current_prompt_kind != expected_prompt_kind
+                    ):
+                        self._reset_prompt_case_state(driver, package, request.target_kind)
+                        self._activate_application(
+                            driver,
+                            package,
+                            activity_hint,
+                            force_launch=True,
+                            preserve_known_system_prompt=True,
+                        )
+                    elif test_index > 0:
                         self._reset_to_application(
                             driver,
                             package,
                             activity_hint,
                             preserve_known_system_prompt=has_prompt_step,
                         )
+                    if has_prompt_step:
+                        prompt_case_count += 1
                     case_source = safe_page_source(driver)
-                    expected_prompt_kind = next(
-                        (step.target for step in test.steps if step.action == "prompt_choice"),
-                        None,
-                    )
                     if expected_prompt_kind and known_native_prompt_kind(driver, case_source, request.target_kind) == expected_prompt_kind:
                         case_target_ready, case_target_reason = True, "The observed system prompt is active for its recorded branch."
                     else:
@@ -738,6 +755,65 @@ class AutopilotSuiteService:
         )
         if not ready:
             raise ProviderLifecycleUnavailable(reason)
+
+    @staticmethod
+    def _reset_prompt_case_state(driver, package: str | None, target_kind: str) -> None:
+        """Re-arm native prompt state before replaying another prompt branch.
+
+        Permission dialogs are stateful: dismissing/granting one branch usually
+        prevents the next case in the same Appium session from seeing the same
+        prompt. Reset only the AUT's state, never device-wide Location settings.
+        """
+        if not package:
+            raise ProviderLifecycleUnavailable(
+                "The application identity is unavailable, so its prompt state cannot be reset safely."
+            )
+        execute_script = getattr(driver, "execute_script", None)
+        if not callable(execute_script):
+            raise ProviderLifecycleUnavailable(
+                "The provider cannot reset native prompt state in this session; run this branch on a resettable device."
+            )
+        if str(target_kind or "").casefold() == "ios":
+            # XCUITest exposes permission reset by service for Simulator and
+            # supported real-device versions. Try the known permission services
+            # because the app's prompt type is intentionally not inferred from
+            # a guessed control or a user-entered value.
+            services = (
+                "location", "camera", "photos", "microphone", "contacts",
+                "calendar", "reminders", "bluetooth", "motion", "health",
+                "homekit", "medialibrary", "siri", "speech",
+            )
+            reset_count = 0
+            for service in services:
+                try:
+                    execute_script("mobile: resetPermission", {"service": service})
+                    reset_count += 1
+                except Exception:
+                    continue
+            if not reset_count:
+                raise ProviderLifecycleUnavailable(
+                    "The iOS provider could not reset app permission state. Use a simulator or a device provider that supports XCUITest mobile: resetPermission."
+                )
+            return
+
+        terminator = getattr(driver, "terminate_app", None)
+        if callable(terminator):
+            try:
+                terminator(package)
+            except Exception as exc:
+                raise ProviderLifecycleUnavailable(
+                    f"The provider could not stop the app before resetting its prompt state ({type(exc).__name__})."
+                ) from exc
+        else:
+            raise ProviderLifecycleUnavailable(
+                "The provider cannot stop the app before resetting Android permission state."
+            )
+        try:
+            execute_script("mobile: clearApp", {"appId": package})
+        except Exception as exc:
+            raise ProviderLifecycleUnavailable(
+                f"The provider could not clear app data to replay this Android prompt ({type(exc).__name__})."
+            ) from exc
 
     @staticmethod
     def _reset_to_application(
