@@ -2371,7 +2371,7 @@ export default function AutopilotPage() {
             <Stack spacing={.55} sx={{ mt: .8 }}>
               <Button size="small" variant="outlined" onClick={openScopeSetup} startIcon={<AutoAwesomeIcon />}>{analysis ? "Refine scope" : "Choose target"}</Button>
               {analysis && planAwaitingApproval && <Button size="small" variant="contained" onClick={() => { void approvePlanAndDiscover(); }} disabled={workflowBusy || discoveryBusy || executionUnavailable} startIcon={<TravelExploreOutlinedIcon />}>Approve &amp; discover</Button>}
-              {analysis && !planAwaitingApproval && <Button size="small" variant="contained" onClick={() => void runSuite()} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>}
+              {analysis && !planAwaitingApproval && <Button size="small" variant="contained" onClick={() => void runSuite()} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryVerifiedForExecution(discovery)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>}
             </Stack>
           </CardContent>
         </Card>
