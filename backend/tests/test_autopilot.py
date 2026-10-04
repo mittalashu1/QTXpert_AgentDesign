@@ -30,11 +30,13 @@ from app.schemas.autopilot import (
 from app.api.routes.autopilot import (
     _autopilot_safe_case_metadata,
     _blocking_checkpoint_requests,
+    _discovery_is_ready_for_cases,
     _discovery_target_is_verified,
     _effective_context,
     _discovery_target_is_verified,
     _merge_discovery_snapshot,
     _pending_runtime_auth_requests,
+    _runtime_discovery_checkpoint_message,
     _refresh_mobile_analysis_identity,
     _remove_local_report_data,
     _sanitize_discovery_assets,
@@ -1778,10 +1780,89 @@ def test_discovery_must_be_verified_and_successful_before_suite_gate():
     )
     blocked = valid.model_copy(update={"status": "blocked", "target_ready": False})
     unknown = valid.model_copy(update={"target_ready": None})
+    launch_checkpoint = valid.model_copy(update={
+        "status": "partial",
+        "interactive_surface_ready": False,
+        "checkpoint_message": "Bring the app to a usable page, then retry.",
+    })
 
     assert _discovery_target_is_verified(valid) is True
     assert _discovery_target_is_verified(blocked) is False
     assert _discovery_target_is_verified(unknown) is False
+    assert _discovery_is_ready_for_cases(valid) is True
+    assert _discovery_target_is_verified(launch_checkpoint) is True
+    assert _discovery_is_ready_for_cases(launch_checkpoint) is False
+
+
+def test_noninteractive_retry_keeps_previous_map_and_latest_screen_evidence():
+    previous = AutopilotDiscoveryResult(
+        job_id="verified-job",
+        status="completed",
+        target_kind="android",
+        provider="devicefarm",
+        started_at="2026-10-01T00:00:00+00:00",
+        finished_at="2026-10-01T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Pixel",
+        target_ready=True,
+        interactive_surface_ready=True,
+        screen_count=1,
+        screens=[DiscoveredScreen(screen_id="home", fingerprint="home")],
+    )
+    latest = AutopilotDiscoveryResult(
+        job_id=previous.job_id,
+        status="partial",
+        target_kind="android",
+        provider="devicefarm",
+        started_at="2026-10-01T00:01:00+00:00",
+        finished_at="2026-10-01T00:01:10+00:00",
+        duration_seconds=10,
+        device_name="Pixel",
+        target_ready=True,
+        interactive_surface_ready=False,
+        checkpoint_message="Bring the app to a usable page, then retry.",
+        screen_count=1,
+        screens=[DiscoveredScreen(screen_id="splash", fingerprint="splash")],
+    )
+
+    merged = _merge_discovery_snapshot(previous, latest)
+
+    assert [screen.screen_id for screen in merged.screens] == ["home"]
+    assert [screen.screen_id for screen in merged.last_attempt_screens] == ["splash"]
+    assert merged.status == "partial"
+    assert merged.interactive_surface_ready is False
+    assert merged.checkpoint_message == latest.checkpoint_message
+    assert _discovery_is_ready_for_cases(merged) is False
+
+
+def test_location_settings_blocker_gets_an_actionable_runtime_checkpoint():
+    discovery = AutopilotDiscoveryResult(
+        job_id="location-blocked-job",
+        status="partial",
+        provider="devicefarm",
+        started_at="2026-10-03T00:00:00Z",
+        finished_at="2026-10-03T00:02:00Z",
+        duration_seconds=120,
+        device_name="Google Pixel 8",
+        target_ready=True,
+        interactive_surface_ready=False,
+        stop_reason="Google Play Services' location-settings prompt is foreground; location was not enabled automatically.",
+        checkpoint_message="The app is on a sparse launch screen; retry discovery.",
+    )
+
+    message = _runtime_discovery_checkpoint_message(
+        discovery,
+        target_blocked=False,
+        surface_blocked=True,
+        pending_auth=False,
+        pending_inputs=False,
+        completed_message="Discovery completed.",
+    )
+
+    assert "did not enable device-wide location" in message
+    assert "remote Appium session has ended" in message
+    assert "Prepare the approved UAT device/session" in message
+    assert "Functional journeys remain blocked" in message
 
 
 @pytest.mark.asyncio
@@ -1861,6 +1942,55 @@ async def test_safe_suite_endpoint_rejects_stale_map_after_failed_latest_attempt
 
     assert error.value.status_code == 409
     assert "Google Play services" in error.value.detail
+
+
+@pytest.mark.asyncio
+async def test_safe_suite_endpoint_rejects_verified_app_without_interactive_surface(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.routes import autopilot as autopilot_routes
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    job_id = "88888888-8888-4888-8888-888888888888"
+    stalled_discovery = AutopilotDiscoveryResult(
+        job_id=job_id,
+        status="partial",
+        provider="devicefarm",
+        started_at="2026-10-01T00:00:00+00:00",
+        finished_at="2026-10-01T00:00:10+00:00",
+        duration_seconds=10,
+        device_name="Pixel",
+        target_ready=True,
+        interactive_surface_ready=False,
+        checkpoint_message="Bring the app to a usable page, then retry discovery.",
+    )
+    job = {"job_id": job_id, "phase": "partial", "target_kind": "android"}
+
+    class FakeService:
+        pass
+
+    async def require_owned_job(_service, _job_id, _user, **_kwargs):
+        return job
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: FakeService())
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+    monkeypatch.setattr(
+        autopilot_routes,
+        "_safe_job_record",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=SimpleNamespace(discovery=stalled_discovery.model_dump(mode="json"))),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await autopilot_routes.execute_autopilot_suite(
+            job_id,
+            AutopilotSuiteRequest(provider="devicefarm", device_name="Pixel"),
+            SimpleNamespace(id="owner"),
+            Settings(),
+            None,
+        )
+
+    assert error.value.status_code == 409
+    assert "interactive screen" in error.value.detail
+    assert stalled_discovery.checkpoint_message in error.value.detail
 
 
 def test_successful_retry_replaces_old_discovery_snapshot():

@@ -1164,19 +1164,26 @@ def _merge_discovery_snapshot(
 ) -> AutopilotDiscoveryResult:
     """Keep a usable map when a later provider attempt cannot attach.
 
-    Appium/BrowserStack can accept a session and then expose only the launcher
-    or system navigation surface.  Persisting that empty/blocked response over
-    a real map would make a transient provider outage look like lost coverage
-    and would force the user through the login checkpoint again.  Return the
-    latest map when it contains evidence; otherwise retain the previous map and
-    attach a small, non-secret diagnostic about the failed attempt.
+    A provider can accept a session and expose only a launcher or sparse app
+    surface. Do not overwrite a usable map with that attempt; retain its latest
+    evidence and non-secret checkpoint separately.
     """
-    if not previous or previous is latest or previous.screen_count <= 0:
+    if (
+        not previous
+        or previous is latest
+        or previous.screen_count <= 0
+        or previous.interactive_surface_ready is False
+    ):
         return latest
-    if latest.screens and latest.target_ready is not False:
+    if (
+        latest.screens
+        and latest.target_ready is not False
+        and latest.interactive_surface_ready is not False
+    ):
         return latest
     reason = (
-        latest.target_identity_reason
+        latest.checkpoint_message
+        or latest.target_identity_reason
         or latest.error
         or latest.stop_reason
         or "The latest Runtime Discovery attempt did not expose a usable target."
@@ -1185,22 +1192,36 @@ def _merge_discovery_snapshot(
     warnings = list(previous.warnings or [])
     if diagnostic not in warnings:
         warnings.append(diagnostic)
+    interactive_checkpoint = latest.target_ready is True and latest.interactive_surface_ready is False
+    checkpoint_message = (
+        latest.checkpoint_message or latest.target_identity_reason or latest.error
+        if latest.target_ready is False
+        else latest.checkpoint_message or previous.checkpoint_message
+    )
     return previous.model_copy(
         update={
+            "status": latest.status if interactive_checkpoint else previous.status,
+            "stop_reason": latest.stop_reason if interactive_checkpoint else previous.stop_reason,
+            "interactive_surface_ready": (
+                latest.interactive_surface_ready if latest.target_ready is True else previous.interactive_surface_ready
+            ),
+            "checkpoint_message": checkpoint_message,
             "warnings": warnings[-20:],
             "last_attempt_status": latest.status,
             "last_attempt_reason": str(reason)[:1200],
             "last_attempt_at": latest.finished_at,
+            "last_attempt_screens": latest.screens,
         }
     )
 
 
 def _discovery_target_is_verified(discovery: Optional[AutopilotDiscoveryResult]) -> bool:
-    """Require the latest attempt to prove the real target is usable.
+    """Require the latest attempt to verify the expected target attachment.
 
-    A retained prior map remains useful report evidence, but must not make a
-    failed/latest device attachment look executable. The merge helper records
-    that condition in ``last_attempt_status`` while preserving the old graph.
+    Interactive readiness is checked separately by
+    ``_discovery_is_ready_for_cases``. A retained prior map remains useful
+    report evidence, but must not make a failed/latest device attachment look
+    executable. The merge helper records the latest attachment result.
     """
 
     return bool(
@@ -1209,6 +1230,68 @@ def _discovery_target_is_verified(discovery: Optional[AutopilotDiscoveryResult])
         and discovery.status in {"completed", "partial"}
         and discovery.last_attempt_status not in {"blocked", "failed"}
     )
+
+
+def _discovery_is_ready_for_cases(discovery: Optional[AutopilotDiscoveryResult]) -> bool:
+    """Require both a verified app and an interactive observed surface.
+
+    Missing readiness in older stored snapshots remains backward compatible;
+    new discovery runs always set it explicitly.
+    """
+    return bool(
+        _discovery_target_is_verified(discovery)
+        and discovery is not None
+        and discovery.interactive_surface_ready is not False
+    )
+
+
+def _runtime_discovery_checkpoint_message(
+    discovery: AutopilotDiscoveryResult,
+    *,
+    target_blocked: bool,
+    surface_blocked: bool,
+    pending_auth: bool,
+    pending_inputs: bool,
+    completed_message: str,
+) -> str:
+    if target_blocked:
+        reason = discovery.target_identity_reason or discovery.error or "Retry the configured device session."
+        return f"The latest Runtime Discovery attempt did not attach to the uploaded application. {reason}"
+    if surface_blocked:
+        diagnostic = " ".join(
+            [
+                discovery.stop_reason or "",
+                discovery.target_identity_reason or "",
+                discovery.last_attempt_reason or "",
+                *(discovery.warnings or []),
+            ]
+        ).casefold()
+        if discovery.target_kind == "android" and any(
+            marker in diagnostic
+            for marker in (
+                "location-settings prompt",
+                "location settings checker activity",
+                "com.google.android.location.settings",
+                "location was not enabled automatically",
+            )
+        ):
+            return (
+                "Android startup is blocked by Google Play Services' location-settings prompt. "
+                "QTXpert did not enable device-wide location, and the remote Appium session has ended. "
+                "Prepare the approved UAT device/session with its required location state or change the app's startup behavior, "
+                "then retry Runtime Discovery. Functional journeys remain blocked until an interactive app screen is observed."
+            )
+        return discovery.checkpoint_message or (
+            "Runtime Discovery reached the app but no interactive screen is available yet; "
+            "resolve the startup state and retry."
+        )
+    if pending_auth:
+        return "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
+    if pending_inputs:
+        return "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
+    if discovery.screens:
+        return completed_message
+    return "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
 
 
 async def _available_evidence_asset_ids(
@@ -1255,14 +1338,14 @@ async def _sanitize_discovery_assets(
         return None
     asset_ids = {
         asset_id
-        for screen in discovery.screens
+        for screen in [*discovery.screens, *discovery.last_attempt_screens]
         for asset_id in (screen.screenshot_asset_id, screen.page_source_asset_id)
         if asset_id is not None
     }
     available = await _available_evidence_asset_ids(db, user, record, asset_ids)
     changed = False
-    screens = []
-    for screen in discovery.screens:
+    def sanitize_screen(screen):
+        nonlocal changed
         screenshot_asset_id = screen.screenshot_asset_id
         page_source_asset_id = screen.page_source_asset_id
         if screenshot_asset_id is not None and screenshot_asset_id not in available:
@@ -1271,11 +1354,18 @@ async def _sanitize_discovery_assets(
         if page_source_asset_id is not None and page_source_asset_id not in available:
             page_source_asset_id = None
             changed = True
-        screens.append(screen.model_copy(update={
+        return screen.model_copy(update={
             "screenshot_asset_id": screenshot_asset_id,
             "page_source_asset_id": page_source_asset_id,
-        }))
-    return discovery.model_copy(update={"screens": screens}) if changed else discovery
+        })
+
+    screens = [sanitize_screen(screen) for screen in discovery.screens]
+    last_attempt_screens = [sanitize_screen(screen) for screen in discovery.last_attempt_screens]
+    return (
+        discovery.model_copy(update={"screens": screens, "last_attempt_screens": last_attempt_screens})
+        if changed
+        else discovery
+    )
 
 
 def _setup_profile(
@@ -2152,14 +2242,20 @@ async def _resume_and_discover_background(
             )
             # Expand coverage from the same graph the report and runner will use.
             expanded_analysis = None
-            try:
-                discovered_analysis = await service.load_analysis(job_id)
-                expanded_analysis = service.expand_discovered_coverage(discovered_analysis, persisted_discovery)
-            except Exception:
-                logger.warning(
-                    "Autopilot runtime coverage expansion skipped job_id=%s",
+            if _discovery_is_ready_for_cases(result):
+                try:
+                    discovered_analysis = await service.load_analysis(job_id)
+                    expanded_analysis = service.expand_discovered_coverage(discovered_analysis, persisted_discovery)
+                except Exception:
+                    logger.warning(
+                        "Autopilot runtime coverage expansion skipped job_id=%s",
+                        job_id,
+                        exc_info=True,
+                    )
+            else:
+                logger.info(
+                    "Autopilot coverage expansion skipped: no verified interactive target surface job_id=%s",
                     job_id,
-                    exc_info=True,
                 )
             previous_map = job.get("application_map")
             map_version = int(previous_map.get("version") or 0) + 1 if isinstance(previous_map, dict) else 1
@@ -2200,6 +2296,8 @@ async def _resume_and_discover_background(
                         repository_asset_id=repository_asset_id,
                         owner_id=owner_id,
                     )
+                if persisted_discovery is not result and result.interactive_surface_ready is False:
+                    persisted_discovery.last_attempt_screens = list(result.screens)
                 # Evidence asset ids are assigned while the snapshot is being
                 # persisted. Re-project the map afterwards so its durable
                 # screen records link to the same redacted screenshot/source
@@ -2236,7 +2334,14 @@ async def _resume_and_discover_background(
                 "discovery": persisted_discovery.model_dump(mode="json"),
                 "application_map": application_map.model_dump(mode="json"),
             }
-            latest_target_ready = _discovery_target_is_verified(result)
+            latest_discovery_ready = _discovery_is_ready_for_cases(result)
+            latest_target_blocked = not _discovery_target_is_verified(result)
+            latest_surface_blocked = _discovery_target_is_verified(result) and not latest_discovery_ready
+            discovery_phase = (
+                "cases_pending_review" if latest_discovery_ready
+                else "partial" if latest_surface_blocked
+                else "blocked"
+            )
             persisted_analysis = expanded_analysis
             persisted_setup = None
             pending_checkpoints: list = []
@@ -2254,19 +2359,19 @@ async def _resume_and_discover_background(
                     if pending_checkpoints:
                         persisted_analysis = persisted_analysis.model_copy(
                             update={
-                                "checkpoint_stage": "input_collection" if latest_target_ready else "runtime_discovery",
-                                "input_requests": pending_checkpoints if latest_target_ready else [],
+                                "checkpoint_stage": "input_collection" if latest_discovery_ready else "runtime_discovery",
+                                "input_requests": pending_checkpoints if latest_discovery_ready else [],
                                 "application_map": application_map,
-                                "phase": "cases_pending_review" if latest_target_ready else "blocked",
+                                "phase": discovery_phase,
                             }
                         )
                     else:
                         persisted_analysis = persisted_analysis.model_copy(
                             update={
-                                "checkpoint_stage": "ready_for_execution" if latest_target_ready else "runtime_discovery",
+                                "checkpoint_stage": "ready_for_execution" if latest_discovery_ready else "runtime_discovery",
                                 "input_requests": [],
                                 "application_map": application_map,
-                                "phase": "cases_pending_review" if latest_target_ready else "blocked",
+                                "phase": discovery_phase,
                             }
                         )
                     record.setup_profile = persisted_setup.model_dump(mode="json")
@@ -2278,43 +2383,38 @@ async def _resume_and_discover_background(
             if persisted_analysis is not None:
                 persisted_analysis = persisted_analysis.model_copy(
                     update={
-                        "phase": "cases_pending_review" if latest_target_ready else "blocked",
+                        "phase": discovery_phase,
                         "checkpoint_stage": (
-                            "input_collection" if pending_checkpoints and latest_target_ready
-                            else "ready_for_execution" if latest_target_ready
+                            "input_collection" if pending_checkpoints and latest_discovery_ready
+                            else "ready_for_execution" if latest_discovery_ready
                             else "runtime_discovery"
                         ),
-                        "input_requests": pending_checkpoints if pending_checkpoints and latest_target_ready else [],
+                        "input_requests": pending_checkpoints if pending_checkpoints and latest_discovery_ready else [],
                         "application_map": application_map,
                     }
                 )
                 job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
             pending_auth = _pending_runtime_auth_requests(persisted_setup)
-            latest_target_blocked = not latest_target_ready
             await service.update_job(
                 job_id,
                 **job_changes,
-                status="waiting_for_input" if pending_checkpoints and latest_target_ready else "analyzed",
-                stage="input_collection" if pending_checkpoints and latest_target_ready else "ready_for_execution" if latest_target_ready else "runtime_discovery",
-                progress=85 if pending_checkpoints and latest_target_ready else 100,
-                phase="cases_pending_review" if latest_target_ready else "blocked",
-                checkpoint_stage="input_collection" if pending_checkpoints and latest_target_ready else "ready" if latest_target_ready else "runtime_discovery",
+                status="waiting_for_input" if pending_checkpoints and latest_discovery_ready else "analyzed",
+                stage="input_collection" if pending_checkpoints and latest_discovery_ready else "ready_for_execution" if latest_discovery_ready else "runtime_discovery",
+                progress=85 if (pending_checkpoints and latest_discovery_ready) or latest_surface_blocked else 100,
+                phase=discovery_phase,
+                checkpoint_stage="input_collection" if pending_checkpoints and latest_discovery_ready else "ready" if latest_discovery_ready else "runtime_discovery",
 
-                checkpoint_message=(
-                    "The latest Runtime Discovery attempt did not attach to the uploaded application. "
-                    f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
-                    if latest_target_blocked
-                    else "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
-                    if pending_auth
-                    else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
-                    if pending_checkpoints
-                    else "Runtime Discovery completed. Review the discovered map and run safe execution."
-                    if persisted_discovery.screens
-                    else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+                checkpoint_message=_runtime_discovery_checkpoint_message(
+                    result,
+                    target_blocked=latest_target_blocked,
+                    surface_blocked=latest_surface_blocked,
+                    pending_auth=pending_auth,
+                    pending_inputs=bool(pending_checkpoints),
+                    completed_message="Runtime Discovery completed. Review the discovered map and run safe execution.",
                 ),
                 input_requests=(
                     [item.model_dump(mode="json") for item in pending_checkpoints]
-                    if pending_checkpoints and latest_target_ready
+                    if pending_checkpoints and latest_discovery_ready
                     else []
                 ),
             )
@@ -2331,7 +2431,7 @@ async def _resume_and_discover_background(
             # Runtime Discovery has completed and no live credential field is
             # still unresolved. The suite compiler keeps those dependent
             # cases deferred and reports their exact dependencies.
-            if resume_payload.auto_run_safe_suite and latest_target_ready and result.screens and not pending_auth:
+            if resume_payload.auto_run_safe_suite and latest_discovery_ready and result.screens and not pending_auth:
                 await execute_autopilot_suite(
                     job_id,
                     AutopilotSuiteRequest(**request.model_dump(exclude={"observe_only", "max_screens", "max_actions"})),
@@ -4539,11 +4639,17 @@ async def run_autopilot_discovery(
     )
     # Expand coverage from the same graph the report and runner will use.
     expanded_analysis = None
-    try:
-        discovered_analysis = await service.load_analysis(job_id)
-        expanded_analysis = service.expand_discovered_coverage(discovered_analysis, persisted_discovery)
-    except Exception:
-        logger.warning("Autopilot runtime coverage expansion skipped job_id=%s", job_id, exc_info=True)
+    if _discovery_is_ready_for_cases(result):
+        try:
+            discovered_analysis = await service.load_analysis(job_id)
+            expanded_analysis = service.expand_discovered_coverage(discovered_analysis, persisted_discovery)
+        except Exception:
+            logger.warning("Autopilot runtime coverage expansion skipped job_id=%s", job_id, exc_info=True)
+    else:
+        logger.info(
+            "Autopilot coverage expansion skipped: no verified interactive target surface job_id=%s",
+            job_id,
+        )
     previous_map = job.get("application_map")
     map_version = int(previous_map.get("version") or 0) + 1 if isinstance(previous_map, dict) else 1
     application_map = build_application_map(
@@ -4580,6 +4686,8 @@ async def run_autopilot_discovery(
                 repository_asset_id=repository_asset_id,
                 owner_id=owner_id,
             )
+        if persisted_discovery is not result and result.interactive_surface_ready is False:
+            persisted_discovery.last_attempt_screens = list(result.screens)
         # The evidence links are attached during persistence. Re-project the
         # map after that step so callers can navigate from an observed screen
         # directly to its redacted screenshot and UI/source artifact.
@@ -4616,7 +4724,14 @@ async def run_autopilot_discovery(
             "discovery": persisted_discovery.model_dump(mode="json"),
             "application_map": application_map.model_dump(mode="json"),
         }
-        latest_target_ready = _discovery_target_is_verified(result)
+        latest_discovery_ready = _discovery_is_ready_for_cases(result)
+        latest_target_blocked = not _discovery_target_is_verified(result)
+        latest_surface_blocked = _discovery_target_is_verified(result) and not latest_discovery_ready
+        discovery_phase = (
+            "cases_pending_review" if latest_discovery_ready
+            else "partial" if latest_surface_blocked
+            else "blocked"
+        )
         persisted_analysis = expanded_analysis
         persisted_setup = None
         pending_checkpoints: list = []
@@ -4634,19 +4749,19 @@ async def run_autopilot_discovery(
                 if pending_checkpoints:
                     persisted_analysis = persisted_analysis.model_copy(
                         update={
-                            "checkpoint_stage": "input_collection" if latest_target_ready else "runtime_discovery",
-                            "input_requests": pending_checkpoints if latest_target_ready else [],
+                            "checkpoint_stage": "input_collection" if latest_discovery_ready else "runtime_discovery",
+                            "input_requests": pending_checkpoints if latest_discovery_ready else [],
                             "application_map": application_map,
-                            "phase": "cases_pending_review" if latest_target_ready else "blocked",
+                            "phase": discovery_phase,
                         }
                     )
                 else:
                     persisted_analysis = persisted_analysis.model_copy(
                         update={
-                            "checkpoint_stage": "ready_for_execution" if latest_target_ready else "runtime_discovery",
+                            "checkpoint_stage": "ready_for_execution" if latest_discovery_ready else "runtime_discovery",
                             "input_requests": [],
                             "application_map": application_map,
-                            "phase": "cases_pending_review" if latest_target_ready else "blocked",
+                            "phase": discovery_phase,
                         }
                     )
                 record.setup_profile = persisted_setup.model_dump(mode="json")
@@ -4658,41 +4773,36 @@ async def run_autopilot_discovery(
         if persisted_analysis is not None:
             persisted_analysis = persisted_analysis.model_copy(
                 update={
-                    "phase": "cases_pending_review" if latest_target_ready else "blocked",
+                    "phase": discovery_phase,
                     "checkpoint_stage": (
-                        "input_collection" if pending_checkpoints and latest_target_ready
-                        else "ready_for_execution" if latest_target_ready
+                        "input_collection" if pending_checkpoints and latest_discovery_ready
+                        else "ready_for_execution" if latest_discovery_ready
                         else "runtime_discovery"
                     ),
-                    "input_requests": pending_checkpoints if pending_checkpoints and latest_target_ready else [],
+                    "input_requests": pending_checkpoints if pending_checkpoints and latest_discovery_ready else [],
                     "application_map": application_map,
                 }
             )
             job_changes["analysis"] = persisted_analysis.model_dump(mode="json")
         pending_auth = _pending_runtime_auth_requests(persisted_setup)
-        latest_target_blocked = not latest_target_ready
         await service.update_job(
             job_id,
             **job_changes,
-            status="waiting_for_input" if pending_checkpoints and latest_target_ready else "analyzed",
-            stage="input_collection" if pending_checkpoints and latest_target_ready else "ready_for_execution" if latest_target_ready else "runtime_discovery",
-            progress=85 if pending_checkpoints and latest_target_ready else 100,
-            phase="cases_pending_review" if latest_target_ready else "blocked",
-            checkpoint_stage="input_collection" if pending_checkpoints and latest_target_ready else "ready" if latest_target_ready else "runtime_discovery",
+            status="waiting_for_input" if pending_checkpoints and latest_discovery_ready else "analyzed",
+            stage="input_collection" if pending_checkpoints and latest_discovery_ready else "ready_for_execution" if latest_discovery_ready else "runtime_discovery",
+            progress=85 if (pending_checkpoints and latest_discovery_ready) or latest_surface_blocked else 100,
+            phase=discovery_phase,
+            checkpoint_stage="input_collection" if pending_checkpoints and latest_discovery_ready else "ready" if latest_discovery_ready else "runtime_discovery",
 
-            checkpoint_message=(
-                "The latest Runtime Discovery attempt did not attach to the uploaded application. "
-                f"{result.target_identity_reason or result.error or 'Retry the configured device session.'}"
-                if latest_target_blocked
-                else "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
-                if pending_auth
-                else "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
-                if pending_checkpoints
-                else "Runtime Discovery completed. Generated an evidence-scoped coverage plan; review it and run safe execution."
-                if persisted_discovery.screens
-                else "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
+            checkpoint_message=_runtime_discovery_checkpoint_message(
+                result,
+                target_blocked=latest_target_blocked,
+                surface_blocked=latest_surface_blocked,
+                pending_auth=pending_auth,
+                pending_inputs=bool(pending_checkpoints),
+                completed_message="Runtime Discovery completed. Generated an evidence-scoped coverage plan; review it and run safe execution.",
             ),
-            input_requests=[item.model_dump(mode="json") for item in pending_checkpoints] if pending_checkpoints and latest_target_ready else [],
+            input_requests=[item.model_dump(mode="json") for item in pending_checkpoints] if pending_checkpoints and latest_discovery_ready else [],
         )
     except Exception:
         logger.warning("Autopilot discovery manifest update skipped job_id=%s", job_id, exc_info=True)
@@ -4927,10 +5037,11 @@ async def execute_autopilot_suite(
         )
     record = await _safe_job_record(db, job_id, owner_id)
     latest_discovery = _record_discovery(record)
-    if not _discovery_target_is_verified(latest_discovery):
+    if not _discovery_is_ready_for_cases(latest_discovery):
         reason = (
             (
-                latest_discovery.last_attempt_reason
+                latest_discovery.checkpoint_message
+                or latest_discovery.last_attempt_reason
                 or latest_discovery.target_identity_reason
                 or latest_discovery.error
             )
@@ -4940,7 +5051,7 @@ async def execute_autopilot_suite(
         raise HTTPException(
             status_code=409,
             detail=(
-                "Safe execution is waiting for a successful Runtime Discovery of the selected app. "
+                "Safe execution is waiting for Runtime Discovery to expose an interactive screen in the selected app. "
                 f"{reason or 'Retry discovery after the app is attached in the foreground.'}"
             ),
         )
