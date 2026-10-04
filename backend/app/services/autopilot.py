@@ -2795,7 +2795,7 @@ class AutopilotPrototypeService:
         business and integration cases retain their setup gates and are never
         silently promoted to pass.
         """
-        if discovery is None or not discovery.screens:
+        if discovery is None or (not discovery.screens and not discovery.runtime_prompts):
             return analysis
 
         # Runtime Discovery already bounds the screen/action graph at the
@@ -2806,8 +2806,8 @@ class AutopilotPrototypeService:
         screen_map = {screen.screen_id: screen for screen in screens}
         # Replay observed navigation from the launch screen for every case.
         # A label on a later screen is not reachable merely by launching again.
-        paths: dict[str, list[str]] = {screens[0].screen_id: []}
-        pending = [screens[0].screen_id]
+        paths: dict[str, list[str]] = {screens[0].screen_id: []} if screens else {}
+        pending = [screens[0].screen_id] if screens else []
         while pending:
             source_id = pending.pop(0)
             for transition in discovery.transitions:
@@ -2821,6 +2821,51 @@ class AutopilotPrototypeService:
                 if control and control.semantic_label:
                     paths[transition.to_screen_id] = [*paths[source_id], f"Tap {control.semantic_label}"]
                     pending.append(transition.to_screen_id)
+        prompt_tests: list[AutopilotTest] = []
+        for prompt in discovery.runtime_prompts:
+            for choice in prompt.choices:
+                if choice.decision not in {"allow", "deny"}:
+                    continue
+                decision_label = "allow" if choice.decision == "allow" else "deny"
+                prompt_label = prompt.title or f"{prompt.kind.replace('_', ' ')} prompt"
+                has_locator = bool(choice.locators)
+                prompt_tests.append(
+                    AutopilotTest(
+                        id=cls._runtime_case_id("PROMPT", prompt.prompt_id, choice.key),
+                        suite="Permissions",
+                        bucket="permissions",
+                        title=f"{prompt_label} — choose {choice.label}",
+                        priority="high",
+                        objective=(
+                            f"Verify the application behavior when the user chooses the observed "
+                            f"{decision_label} option {choice.label!r} on the {prompt_label.lower()}."
+                        ),
+                        steps=["Launch application", f"Choose observed prompt option {choice.label}"],
+                        expected=[
+                            f"The {choice.label} choice is applied to the observed {prompt_label.lower()}",
+                            (
+                                f"The application returns to observed screen {choice.resulting_screen_id}"
+                                if choice.resulting_screen_id
+                                else "The application remains usable after the prompt choice"
+                            ),
+                        ],
+                        preconditions=[
+                            "Reset the app/device prompt state so this branch is visible before execution.",
+                            "Android may remember a permission or location choice between runs.",
+                        ],
+                        evidence_required=["prompt screenshot", "selected choice", "resulting app screen"],
+                        autonomous_candidate=has_locator,
+                        dependency=(
+                            None
+                            if has_locator
+                            else "The prompt option was observed but has no deterministic locator for replay."
+                        ),
+                        runtime_prompt_id=prompt.prompt_id,
+                        runtime_prompt_choice=choice.key,
+                        observation_refs=[prompt.observation_ref] if prompt.observation_ref else [],
+                    )
+                )
+
         queues: dict[str, list[AutopilotTest]] = {
             "page": [],
             "functional_positive": [],
@@ -3242,6 +3287,8 @@ class AutopilotPrototypeService:
                     merged.append(test)
                     seen_titles.add(key)
         merged = cls._filter_tests_for_requested_scope(merged, analysis.scope.requested_test_types)
+        existing_prompt_keys = {test.id for test in merged}
+        merged.extend(test for test in prompt_tests if test.id not in existing_prompt_keys)
         refreshed_runtime_count = sum(1 for test in merged if str(test.id).startswith("QT-RUNTIME-"))
         # Re-discovery is idempotent. Replace the previous expansion note
         # instead of accumulating a new "N to N" line on every refresh.
@@ -3255,8 +3302,8 @@ class AutopilotPrototypeService:
             )
         ]
         expansion_note = (
-            f"Runtime Discovery refreshed {refreshed_runtime_count} observed-surface case(s); the plan now has "
-            f"{len(merged)} evidence-scoped case(s) across {len(screens)} observed screen(s); no artificial case-count cap is applied."
+            f"Runtime Discovery refreshed {refreshed_runtime_count} evidence-scoped case(s); the plan now has "
+            f"{len(merged)} case(s) across {len(screens)} observed screen(s) and {len(prompt_tests)} prompt branch(es); no artificial case-count cap is applied."
         )
         basis.append(expansion_note)
         observed_journeys: list[str] = []
