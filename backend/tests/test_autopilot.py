@@ -26,6 +26,8 @@ from app.schemas.autopilot import (
     DiscoveredScreen,
     DiscoveredTransition,
     DiscoveryLocator,
+    RuntimePromptChoice,
+    RuntimePromptObservation,
 )
 from app.api.routes.autopilot import (
     _autopilot_safe_case_metadata,
@@ -2789,3 +2791,65 @@ async def test_suite_phase_transition_initializes_phase_from_approved_plan():
     await _advance_suite_job_to_running(service, "suite-job", "cases_pending_review")
 
     assert service.phases == ["cases_approved", "execution_ready", "running"]
+
+
+def test_runtime_prompt_expansion_creates_allow_and_deny_cases_without_screens(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="abababab-abab-abab-abab-abababababab",
+        filename="location.apk",
+        sha256="a" * 64,
+        tests=[],
+    )
+    prompt = RuntimePromptObservation(
+        prompt_id="location-prompt-01",
+        kind="location_settings",
+        title="Location settings prompt",
+        observation_ref="runtime-prompt:location-prompt-01",
+        choices=[
+            RuntimePromptChoice(
+                key="no-thanks",
+                label="No thanks",
+                decision="deny",
+                locators=[
+                    DiscoveryLocator(
+                        strategy="xpath",
+                        value='//*[@text="No thanks"]',
+                        confidence=0.88,
+                    )
+                ],
+                outcome_status="observed",
+                resulting_screen_id="screen-001",
+            ),
+            RuntimePromptChoice(
+                key="turn-on",
+                label="Turn on",
+                decision="allow",
+                locators=[
+                    DiscoveryLocator(
+                        strategy="xpath",
+                        value='//*[@text="Turn on"]',
+                        confidence=0.88,
+                    )
+                ],
+            ),
+        ],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="devicefarm",
+        started_at="2026-10-03T00:00:00+00:00",
+        finished_at="2026-10-03T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        runtime_prompts=[prompt],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    cases = [test for test in expanded.tests if test.runtime_prompt_id == prompt.prompt_id]
+
+    assert len(cases) == 2
+    assert {test.runtime_prompt_choice for test in cases} == {"no-thanks", "turn-on"}
+    assert all(test.autonomous_candidate for test in cases)
+    assert all("Reset the app/device prompt state" in test.preconditions[0] for test in cases)
