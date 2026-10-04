@@ -847,6 +847,9 @@ class QTXTestIR(BaseModel):
     journey: Optional[str] = None
     page_label: Optional[str] = None
     page_url: Optional[str] = None
+    # Prompt-branch identity lets the safe suite prioritize observed OS-dialog outcomes.
+    runtime_prompt_id: Optional[str] = None
+    runtime_prompt_choice: Optional[str] = None
     data_probes: List[AutopilotDataProbe] = Field(default_factory=list)
 
 
