@@ -1338,7 +1338,7 @@ class AutopilotIRCompiler:
                 "    from pathlib import Path",
                 "    import time",
                 "    from appium.webdriver.common.appiumby import AppiumBy",
-                "    from app.services.appium_compat import known_android_prompt_kind",
+                "    from app.services.appium_compat import known_native_prompt_kind",
                 "    from app.services.appium_compat import safe_app_identity, safe_page_source",
                 "    from app.services.autopilot_discovery import AutopilotDiscoveryService",
                 "",
@@ -1371,12 +1371,12 @@ class AutopilotIRCompiler:
                 elif step.action == "prompt_choice":
                     lines.extend([
                         f"    # {index}. {step.description}",
-                        f"    assert known_android_prompt_kind(driver, safe_page_source(driver)) == {step.target!r}, 'Observed prompt is not active'",
+                        f"    assert known_native_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) == {step.target!r}, 'Observed prompt is not active'",
                         f"    element = driver.find_element(locator_map[{step.locator_strategy!r}], {step.locator_value!r})",
                         "    assert element.is_enabled(), 'Observed prompt choice is disabled'",
                         "    element.click()",
                         "    time.sleep(1)",
-                        f"    assert known_android_prompt_kind(driver, safe_page_source(driver)) is None, 'Prompt did not close after choosing {step.assertion or 'the observed option'}'",
+                        f"    assert known_native_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) is None, 'Prompt did not close after choosing {step.assertion or 'the observed option'}'
                     ])
                 elif step.action in {"tap", "assert_visible"}:
                     lines.extend([
