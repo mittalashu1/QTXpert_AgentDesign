@@ -17,6 +17,43 @@ SAMPLE_XML = '''
 </hierarchy>
 '''
 
+def test_runtime_prompt_parser_captures_observed_location_choices(tmp_path):
+    class Driver:
+        current_activity = "com.google.android.location.settings.LocationSettingsCheckerActivity"
+
+        def get_screenshot_as_file(self, path):
+            from pathlib import Path
+
+            Path(path).write_bytes(b"png")
+            return True
+
+    source = (
+        '<hierarchy><node package="com.google.android.gms" text="Location settings" '
+        'class="android.widget.FrameLayout">'
+        '<node package="com.google.android.gms" text="Turn on" '
+        'resource-id="com.google.android.gms:id/positive_button" '
+        'class="android.widget.Button" clickable="true" enabled="true" />'
+        '<node package="com.google.android.gms" text="No thanks" '
+        'resource-id="com.google.android.gms:id/negative_button" '
+        'class="android.widget.Button" clickable="true" enabled="true" />'
+        '</node></hierarchy>'
+    )
+
+    prompt = AutopilotDiscoveryService._runtime_prompt_observation(
+        Driver(), source, tmp_path, "android"
+    )
+
+    assert prompt is not None
+    assert prompt.kind == "location_settings"
+    assert [(choice.label, choice.decision) for choice in prompt.choices] == [
+        ("Turn on", "allow"),
+        ("No thanks", "deny"),
+    ]
+    assert all(choice.locators for choice in prompt.choices)
+    assert prompt.screenshot_path
+    assert prompt.page_source_path
+
+
 LABELLED_LOGIN_XML = '''
 <hierarchy rotation="0">
   <node index="0" class="android.widget.FrameLayout" clickable="false" enabled="true">
@@ -438,8 +475,18 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
         def __init__(self, driver):
             self.driver = driver
 
+        def __init__(self, driver, value):
+            self.driver = driver
+            self.value = value
+
+        def is_enabled(self):
+            return True
+
         def click(self):
-            self.driver.state = "login"
+            if self.value == "com.google.android.gms:id/negative_button":
+                self.driver.state = "landing"
+            elif self.value == "com.qtx.demo:id/login":
+                self.driver.state = "login"
 
     class Driver:
         capabilities = {"appium:appPackage": "com.qtx.demo", "appium:appActivity": ".MainActivity"}
@@ -460,7 +507,14 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
             if self.state == "location_prompt":
                 return (
                     '<hierarchy><node package="com.google.android.gms" text="Location settings" '
-                    'class="android.widget.FrameLayout" /></hierarchy>'
+                    'class="android.widget.FrameLayout">'
+                    '<node package="com.google.android.gms" text="Turn on" '
+                    'resource-id="com.google.android.gms:id/positive_button" '
+                    'class="android.widget.Button" clickable="true" enabled="true" />'
+                    '<node package="com.google.android.gms" text="No thanks" '
+                    'resource-id="com.google.android.gms:id/negative_button" '
+                    'class="android.widget.Button" clickable="true" enabled="true" />'
+                    '</node></hierarchy>'
                 )
             if self.state == "landing":
                 return (
@@ -490,8 +544,11 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
 
         def find_element(self, by, value):
             assert by == AppiumBy.ID
-            assert value == "com.qtx.demo:id/login"
-            return Element(self)
+            assert value in {
+                "com.google.android.gms:id/negative_button",
+                "com.qtx.demo:id/login",
+            }
+            return Element(self, value)
 
         def get_screenshot_as_file(self, path):
             Path(path).write_bytes(b"png")
@@ -548,8 +605,14 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
     )
 
     assert result["stop_reason"].startswith("Authentication checkpoint detected.")
-    assert result["actions_attempted"] == 1
-    assert driver.back_calls == 1
+    assert result["actions_attempted"] == 2
+    assert driver.back_calls == 0
+    prompt = result["runtime_prompts"][0]
+    denial = next(choice for choice in prompt.choices if choice.decision == "deny")
+    allowance = next(choice for choice in prompt.choices if choice.decision == "allow")
+    assert denial.outcome_status == "observed"
+    assert denial.resulting_screen_id == "screen-001"
+    assert allowance.outcome_status == "planned"
     assert any("startup surface during recovery" in warning for warning in result["warnings"])
     assert len(result["screens"]) == 2
     assert result["screens"][1].screen_id == "screen-002"
