@@ -249,7 +249,7 @@ class AutopilotDiscoveryService:
     def _prompt_choice_decision(cls, normalized_label: str) -> Optional[str]:
         allow = (
             "allow", "yes", "ok", "turn on", "enable", "while using", "only this time",
-            "precise", "always allow",
+            "always allow",
         )
         deny = (
             "deny", "no", "not now", "no thanks", "don't allow", "don’t allow",

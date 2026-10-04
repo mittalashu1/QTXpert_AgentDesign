@@ -1251,3 +1251,93 @@ def test_suite_device_farm_reopens_prompt_cases_with_fast_reset(tmp_path, monkey
     assert all("appium:fullReset" not in capabilities for _, capabilities in calls)
     assert drivers[0].quit_calls == 1
     assert drivers[1].quit_calls == 1
+
+
+def test_identify_discovered_screen_uses_unique_observed_token_for_sparse_hierarchy():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    driver = _RouteDriver()
+    driver.page_source = (
+        '<hierarchy><node package="com.qtx.demo" '
+        'content-desc="Get started" /></hierarchy>'
+    )
+
+    screen = service._identify_discovered_screen(driver, discovery, "com.qtx.demo")
+
+    assert screen is not None
+    assert screen.screen_id == "screen-root"
+
+
+def test_suite_prompt_choice_uses_observed_locator_fallback(tmp_path):
+    class PromptFallbackDriver(_Driver):
+        def __init__(self):
+            super().__init__()
+            self.current_activity = (
+                "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+            )
+            self.page_source = (
+                '<hierarchy><node package="com.android.permissioncontroller" '
+                'class="android.widget.FrameLayout">'
+                '<node package="com.android.permissioncontroller" text="Location permission" '
+                'class="android.widget.TextView" />'
+                '<node package="com.android.permissioncontroller" text="Don\'t allow" '
+                'resource-id="com.android.permissioncontroller:id/deny_button" '
+                'class="android.widget.Button" clickable="true" enabled="true" />'
+                '</node></hierarchy>'
+            )
+            self.fallback_element = self._choice_element()
+
+        def _choice_element(self):
+            driver = self
+
+            class PromptChoice(_Element):
+                def click(inner_self):
+                    super(PromptChoice, inner_self).click()
+                    driver.current_activity = ".MainActivity"
+                    driver.current_package = "com.qtx.demo"
+                    driver.page_source = (
+                        '<hierarchy><node package="com.qtx.demo" text="Home" /></hierarchy>'
+                    )
+
+            return PromptChoice()
+
+        def find_element(self, by, value):
+            self.locators.append((by, value))
+            if value == "missing-primary-locator":
+                raise RuntimeError("NoSuchElementException")
+            if value == "Don\'t allow":
+                return self.fallback_element
+            raise RuntimeError("NoSuchElementException")
+
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = PromptFallbackDriver()
+    test = _test_ir([
+        QTXIRStep(
+            action="prompt_choice",
+            description="Choose Don’t allow using its observed fallback locator",
+            target="runtime_permission",
+            value="dont-allow",
+            assertion="deny",
+            locator_strategy="id",
+            locator_value="missing-primary-locator",
+            locator_confidence=0.98,
+            locator_fallbacks=[
+                DiscoveryLocator(
+                    strategy="accessibility_id",
+                    value="Don\'t allow",
+                    confidence=0.97,
+                ),
+            ],
+        ),
+        QTXIRStep(action="inspect_ui", description="Inspect the resulting app screen"),
+        QTXIRStep(action="capture_evidence", description="Capture the resulting app screen"),
+    ])
+
+    evidence = service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    assert [value for _, value in driver.locators] == [
+        "missing-primary-locator",
+        "Don\'t allow",
+    ]
+    assert driver.fallback_element.clicked is True
+    assert evidence["actions"][0]["mechanism"] == "observed_prompt_choice:deny"
