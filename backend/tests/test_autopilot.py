@@ -2933,6 +2933,39 @@ def test_suite_executes_recorded_location_prompt_choice(tmp_path):
     assert driver.state == "app"
 
 
+def test_suite_resets_android_prompt_state_between_branches():
+    calls = []
+
+    class Driver:
+        def terminate_app(self, package):
+            calls.append(("terminate_app", package))
+
+        def execute_script(self, command, arguments):
+            calls.append((command, arguments))
+
+    AutopilotSuiteService._reset_prompt_case_state(Driver(), "com.qtx.demo", "android")
+
+    assert calls == [
+        ("terminate_app", "com.qtx.demo"),
+        ("mobile: clearApp", {"appId": "com.qtx.demo"}),
+    ]
+
+
+def test_suite_resets_ios_permission_state_between_branches():
+    calls = []
+
+    class Driver:
+        def execute_script(self, command, arguments):
+            calls.append((command, arguments))
+            if arguments["service"] != "location":
+                raise RuntimeError("unsupported permission")
+
+    AutopilotSuiteService._reset_prompt_case_state(Driver(), "com.qtx.demo", "ios")
+
+    assert calls[0] == ("mobile: resetPermission", {"service": "location"})
+    assert all(command == "mobile: resetPermission" for command, _ in calls)
+
+
 def test_prompt_only_retry_preserves_prior_screen_graph_and_new_prompt():
     previous = AutopilotDiscoveryResult(
         job_id="job-prompt-merge",
