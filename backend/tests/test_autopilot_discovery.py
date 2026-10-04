@@ -458,7 +458,8 @@ async def test_browserstack_upload_quota_is_returned_as_structured_blocker(tmp_p
     assert "testing time expired" in (result.error or "")
     assert "testing time expired" in (result.target_identity_reason or "")
 
-def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp_path, monkeypatch):
+@pytest.mark.parametrize("deny_click_returns", [True, False])
+def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp_path, monkeypatch, deny_click_returns):
     import sys
     import types
 
@@ -484,17 +485,19 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
 
         def click(self):
             if self.value == "com.google.android.gms:id/negative_button":
-                self.driver.state = "landing"
+                if self.driver.deny_click_returns:
+                    self.driver.state = "landing"
             elif self.value == "com.qtx.demo:id/login":
                 self.driver.state = "login"
 
     class Driver:
         capabilities = {"appium:appPackage": "com.qtx.demo", "appium:appActivity": ".MainActivity"}
 
-        def __init__(self):
+        def __init__(self, deny_click_returns):
             self.state = "location_prompt"
             self.quit_called = False
             self.back_calls = 0
+            self.deny_click_returns = deny_click_returns
 
         @property
         def current_activity(self):
@@ -557,7 +560,7 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
         def quit(self):
             self.quit_called = True
 
-    driver = Driver()
+    driver = Driver(deny_click_returns)
     appium = types.ModuleType("appium")
     webdriver = types.ModuleType("appium.webdriver")
     webdriver.Remote = lambda *_args, **_kwargs: driver
@@ -578,7 +581,17 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
         "appium.options.ios": ios_options,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
-    monkeypatch.setattr("app.services.autopilot_discovery.time.sleep", lambda _seconds: None)
+    fake_clock = {"now": 0.0}
+
+    def advance_clock(seconds=0.25):
+        fake_clock["now"] += max(0.01, float(seconds))
+
+    def fake_monotonic():
+        fake_clock["now"] += 0.01
+        return fake_clock["now"]
+
+    monkeypatch.setattr("app.services.autopilot_discovery.time.sleep", advance_clock)
+    monkeypatch.setattr("app.services.autopilot_discovery.time.monotonic", fake_monotonic)
 
     class Prototype:
         @staticmethod
@@ -606,12 +619,12 @@ def test_runtime_discovery_recovers_from_location_prompt_then_stops_at_login(tmp
 
     assert result["stop_reason"].startswith("Authentication checkpoint detected.")
     assert result["actions_attempted"] == 2
-    assert driver.back_calls == 0
+    assert driver.back_calls == (0 if deny_click_returns else 1)
     prompt = result["runtime_prompts"][0]
     denial = next(choice for choice in prompt.choices if choice.decision == "deny")
     allowance = next(choice for choice in prompt.choices if choice.decision == "allow")
-    assert denial.outcome_status == "observed"
-    assert denial.resulting_screen_id == "screen-001"
+    assert denial.outcome_status == ("observed" if deny_click_returns else "unavailable")
+    assert denial.resulting_screen_id == ("screen-001" if deny_click_returns else None)
     assert allowance.outcome_status == "planned"
     assert result["runtime_prompts"][0].kind == "location_settings"
     assert len(result["screens"]) == 2

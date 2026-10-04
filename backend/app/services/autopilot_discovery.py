@@ -1705,37 +1705,83 @@ class AutopilotDiscoveryService:
                 except Exception:
                     pass
                 prompt_deadline = time.monotonic() + 8.0
-                returned_to_app = False
+                decline_returned_to_app = False
                 while time.monotonic() < prompt_deadline:
                     page_source = safe_page_source(driver)
                     if known_native_prompt_kind(driver, page_source, request.target_kind) is None:
-                        returned_to_app, _, _ = validate_target_surface(
+                        decline_returned_to_app, _, _ = validate_target_surface(
                             driver,
                             expected_package=package_hint,
                             expected_activity=activity_hint,
                             page_source=page_source,
                         )
-                        if returned_to_app:
+                        if decline_returned_to_app:
                             break
                     time.sleep(0.25)
                 if selected_key:
                     prompt.choices = [
                         choice.model_copy(
                             update={
-                                "outcome_status": "observed" if clicked and returned_to_app else "unavailable"
+                                "outcome_status": "observed" if clicked and decline_returned_to_app else "unavailable"
                             }
                         )
                         if choice.key == selected_key
                         else choice
                         for choice in prompt.choices
                     ]
-                    if clicked and returned_to_app:
+                    if clicked and decline_returned_to_app:
                         pending_prompt_outcomes.append((prompt, selected_key))
+                returned_to_app = decline_returned_to_app
                 if not returned_to_app:
-                    warnings.append(
-                        f"The {prompt.kind.replace('_', ' ')} prompt did not return to the uploaded app after the decline attempt."
+                    # A native prompt can remain foreground after its decline
+                    # button was clicked. Dismiss only a recognized Android
+                    # system prompt, then verify the uploaded app before
+                    # resuming; this recovery is not evidence of a deny result.
+                    prompt_kind = known_native_prompt_kind(
+                        driver,
+                        safe_page_source(driver),
+                        request.target_kind,
                     )
-                    break
+                    if prompt_kind and str(request.target_kind or "").casefold() == "android":
+                        try:
+                            safe_navigate_back(driver, target_kind="android")
+                        except Exception:
+                            pass
+                        else:
+                            recovery_deadline = time.monotonic() + 5.0
+                            while time.monotonic() < recovery_deadline:
+                                recovery_source = safe_page_source(driver)
+                                if known_native_prompt_kind(
+                                    driver,
+                                    recovery_source,
+                                    request.target_kind,
+                                ) is None:
+                                    returned_to_app, _, _ = validate_target_surface(
+                                        driver,
+                                        expected_package=package_hint,
+                                        expected_activity=activity_hint,
+                                        page_source=recovery_source,
+                                    )
+                                    if returned_to_app:
+                                        break
+                                time.sleep(0.25)
+                    if not returned_to_app:
+                        try:
+                            returned_to_app, _, _ = activate_verified_target_surface(
+                                driver,
+                                package_hint,
+                                expected_activity=activity_hint,
+                                timeout_seconds=10.0,
+                                poll_interval=0.5,
+                                page_source=safe_page_source(driver),
+                            )
+                        except Exception:
+                            returned_to_app = False
+                    if not returned_to_app:
+                        warnings.append(
+                            f"The {prompt.kind.replace('_', ' ')} prompt did not return to the uploaded app after safe recovery."
+                        )
+                        break
                 page_source = safe_page_source(driver)
             controls = self._ensure_auth_input_semantics(self.parse_controls(page_source))
             if require_target:
