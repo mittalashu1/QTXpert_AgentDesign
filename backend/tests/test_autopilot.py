@@ -2838,6 +2838,11 @@ def test_runtime_prompt_expansion_creates_allow_and_deny_cases_without_screens(t
         observation_ref="runtime-prompt:location-prompt-01",
         choices=[
             RuntimePromptChoice(
+                key="precise",
+                label="Precise",
+                decision="allow",
+            ),
+            RuntimePromptChoice(
                 key="no-thanks",
                 label="No thanks",
                 decision="deny",
