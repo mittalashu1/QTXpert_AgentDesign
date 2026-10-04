@@ -94,6 +94,7 @@ from app.services.autopilot_workflow import (
     build_generation_plan,
     find_duplicate_cases,
     phase_for_job,
+    status_phase_for_job,
     transition_phase,
 )
 from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata, resolve_value
@@ -131,6 +132,20 @@ _REPOSITORY_MATERIALIZATION_TASKS: set[str] = set()
 
 def _service(settings: Settings) -> AutopilotPrototypeService:
     return AutopilotPrototypeService(settings)
+
+
+def _apply_durable_suite_phase(result: AutopilotJobStatus, job: dict[str, Any], record: Optional[AutopilotJob]) -> AutopilotJobStatus:
+    """Use the durable database suite snapshot when a manifest still says running."""
+    suite = record.suite_execution if record is not None else None
+    if result.phase != "running" or not isinstance(suite, dict):
+        return result
+    recovered_phase = status_phase_for_job(job, durable_suite_execution=suite)
+    if recovered_phase == result.phase:
+        return result
+    analysis = result.analysis
+    if analysis is not None:
+        analysis = analysis.model_copy(update={"phase": recovered_phase})
+    return result.model_copy(update={"phase": recovered_phase, "analysis": analysis})
 
 
 async def _materialize_repository_asset_and_analyze(
@@ -4248,6 +4263,7 @@ async def get_latest_autopilot_job(
         )
 
     result = await service.get_job_status(record.job_id)
+    result = _apply_durable_suite_phase(result, job, record)
     return await _mark_repository_available(db, result, user.id)
 
 
@@ -4279,6 +4295,7 @@ async def get_autopilot_job_status(
         )
 
     result = await service.get_job_status(job_id)
+    result = _apply_durable_suite_phase(result, job, record)
     return await _mark_repository_available(db, result, user.id)
 
 
@@ -5324,11 +5341,11 @@ async def execute_autopilot_suite(
             if result.status == "blocked"
             else "failed"
         )
-        await service.update_job(
-            job_id,
-            phase=result_phase,
-            suite_execution=result.model_dump(mode="json"),
-        )
+        await service.update_job(job_id, suite_execution=result.model_dump(mode="json"))
+    except Exception:
+        logger.warning("Autopilot suite manifest result mirror skipped job_id=%s", job_id, exc_info=True)
+    try:
+        await service.update_job(job_id, phase=result_phase)
     except ValueError:
         logger.info("Autopilot suite terminal phase update skipped for legacy job_id=%s", job_id)
     return result
