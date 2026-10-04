@@ -650,7 +650,7 @@ def test_auth_entry_login_is_prioritized_over_higher_confidence_guest_route():
             control_id="login",
             semantic_label="Login",
             class_name="android.widget.TextView",
-            clickable=True,
+            clickable=False,
             risk="safe",
             locators=[DiscoveryLocator(strategy="id", value="Login", confidence=0.82)],
         ),
@@ -660,6 +660,9 @@ def test_auth_entry_login_is_prioritized_over_higher_confidence_guest_route():
 
     assert selected is not None
     assert selected.semantic_label == "Login"
+    assert not AutopilotDiscoveryService._looks_like_loading_screen(
+        SimpleNamespace(activity_name=".MainActivity", title="", controls=[controls[1]])
+    )
 
 
 @pytest.mark.parametrize("label", [
