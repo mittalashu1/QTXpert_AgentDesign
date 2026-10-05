@@ -476,6 +476,7 @@ def test_legacy_signin_bundle_label_satisfies_runtime_credentials():
         input_decisions={"credential_reference": "provide"},
         saved_inputs=[AutopilotSavedInput(
             key="credential_reference",
+            job_id="22222222-2222-2222-2222-222222222222",
             label="Sign-in · User ID / email + Password",
             category="credential",
             decision="provide",
@@ -574,6 +575,7 @@ def test_saved_bundle_clears_pending_runtime_credential_bundle_with_generic_hint
             },
             "saved_inputs": [AutopilotSavedInput(
                 key="credential_reference",
+                job_id=analysis.job_id,
                 label="UAT sign-in credentials",
                 category="credential",
                 decision="provide",
