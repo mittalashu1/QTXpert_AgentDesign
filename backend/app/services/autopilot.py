@@ -2855,6 +2855,7 @@ class AutopilotPrototypeService:
                     paths[transition.to_screen_id] = [*paths[source_id], f"Tap {control.semantic_label}"]
                     pending.append(transition.to_screen_id)
         prompt_tests: list[AutopilotTest] = []
+        checkpoint_tests: list[AutopilotTest] = []
         if discovery.runtime_prompts:
             # Older persisted maps can contain non-terminal options such as
             # location accuracy toggles, even though new captures filter them.
@@ -2977,6 +2978,20 @@ class AutopilotPrototypeService:
             return True
 
         auth_observed = any(screen_has_auth_checkpoint(screen) for screen in screens)
+        affirmative_checkpoint_labels = {
+            "proceed", "continue", "confirm", "yes", "accept", "allow", "enable", "verify", "submit",
+        }
+        negative_checkpoint_labels = {
+            "cancel", "no", "not now", "no thanks", "decline", "reject", "back", "stay",
+        }
+        confirmation_copy = re.compile(
+            r"\\b(?:are you sure|by proceeding|do you want|confirmation|this action will|"
+            r"will be logged out|logged out from|cannot be undone|discard|remove|delete|sign out|log out)\\b",
+            re.I,
+        )
+
+        def normalized_checkpoint_label(value: str | None) -> str:
+            return re.sub(r"\\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold())).strip()
 
         for screen_index, screen in enumerate(screens, start=1):
             screen_label = cls._runtime_screen_label(screen, screen_index)
@@ -2985,6 +3000,131 @@ class AutopilotPrototypeService:
             anchor = next((control for control in controls if control.semantic_label), None)
             anchor_label = anchor.semantic_label if anchor else None
             navigation = ["Launch application", *paths.get(screen.screen_id, [])]
+
+            # App-level confirmations are ordinary discovered screens, not
+            # native OS prompts. Generate both observed branches only when the
+            # hierarchy contains explanatory confirmation copy and a paired
+            # affirmative/cancel control with deterministic locators.
+            visible_confirmation_copy = " ".join(
+                value
+                for control in screen.controls
+                if not control.clickable and not control.input_capable
+                for value in (
+                    control.semantic_label,
+                    control.text,
+                    control.content_description,
+                )
+                if value
+            )
+            if confirmation_copy.search(visible_confirmation_copy):
+                branch_controls = [
+                    control
+                    for control in screen.controls
+                    if control.enabled
+                    and control.clickable
+                    and not control.input_capable
+                    and control.locators
+                    and control.risk == "review"
+                ]
+                affirmative = {}
+                negative = {}
+                for control in branch_controls:
+                    label = normalized_checkpoint_label(control.semantic_label)
+                    confidence = max((item.confidence for item in control.locators), default=0.0)
+                    if label in affirmative_checkpoint_labels:
+                        previous = affirmative.get(label)
+                        if previous is None or confidence > max(
+                            (item.confidence for item in previous.locators), default=0.0
+                        ):
+                            affirmative[label] = control
+                    if label in negative_checkpoint_labels:
+                        previous = negative.get(label)
+                        if previous is None or confidence > max(
+                            (item.confidence for item in previous.locators), default=0.0
+                        ):
+                            negative[label] = control
+
+                if affirmative and negative:
+                    for decision, choices in (("confirm", affirmative), ("cancel", negative)):
+                        for label, control in choices.items():
+                            reachable = screen.screen_id in paths
+                            checkpoint_tests.append(
+                                AutopilotTest(
+                                    id=cls._runtime_case_id(
+                                        "CHECKPOINT", screen.screen_id, control.control_id
+                                    ),
+                                    suite="Functional · Confirmation",
+                                    bucket=(
+                                        "functional_positive"
+                                        if decision == "confirm"
+                                        else "functional_negative"
+                                    ),
+                                    title=(
+                                        f"{journey_label} — choose {control.semantic_label} "
+                                        f"on {screen_label}"
+                                    ),
+                                    priority="high",
+                                    risk_level="high" if decision == "confirm" else "medium",
+                                    objective=(
+                                        "Verify the observed application confirmation branch and "
+                                        "the resulting screen state."
+                                    ),
+                                    steps=[
+                                        *navigation,
+                                        f"Tap {control.semantic_label}",
+                                        "Verify the application leaves or changes the observed confirmation state",
+                                    ],
+                                    expected=[
+                                        (
+                                            f"The observed {control.semantic_label} confirmation choice "
+                                            "changes the application screen."
+                                            if decision == "confirm"
+                                            else "The observed cancel choice closes the confirmation "
+                                            "without taking its affirmative action."
+                                        ),
+                                        "The application remains responsive after the choice.",
+                                    ],
+                                    preconditions=[
+                                        "Use the observed prompt copy and controls from Runtime Discovery.",
+                                        (
+                                            "Run affirmative branches only with an isolated non-production "
+                                            "test account."
+                                            if decision == "confirm"
+                                            else "The cancel branch must leave the affirmative action unapplied."
+                                        ),
+                                    ],
+                                    cleanup_requirements=(
+                                        [
+                                            "Restore or re-authenticate the isolated test account if "
+                                            "the observed action invalidates other sessions."
+                                        ]
+                                        if decision == "confirm"
+                                        else []
+                                    ),
+                                    destructive=decision == "confirm",
+                                    requires_auth=auth_observed,
+                                    autonomous_candidate=reachable,
+                                    dependency=(
+                                        None
+                                        if reachable
+                                        else "A safe observed route from application launch to this confirmation screen is required."
+                                    ),
+                                    evidence_required=[
+                                        "confirmation screenshot",
+                                        "selected option",
+                                        "before-and-after UI hierarchy",
+                                    ],
+                                    journey=journey_label,
+                                    page_label=screen_label,
+                                    page_url=screen.url,
+                                    runtime_screen_id=screen.screen_id,
+                                    source_refs=(
+                                        [screen.observation_ref]
+                                        if screen.observation_ref
+                                        else []
+                                    ),
+                                )
+                            )
 
             if anchor_label:
                 queues["page"].append(
@@ -3334,6 +3474,10 @@ class AutopilotPrototypeService:
         merged = cls._filter_tests_for_requested_scope(merged, analysis.scope.requested_test_types)
         existing_prompt_keys = {test.id for test in merged}
         merged.extend(test for test in prompt_tests if test.id not in existing_prompt_keys)
+        existing_checkpoint_keys = {test.id for test in merged}
+        merged.extend(
+            test for test in checkpoint_tests if test.id not in existing_checkpoint_keys
+        )
         refreshed_runtime_count = sum(1 for test in merged if str(test.id).startswith("QT-RUNTIME-"))
         # Re-discovery is idempotent. Replace the previous expansion note
         # instead of accumulating a new "N to N" line on every refresh.
@@ -3348,7 +3492,9 @@ class AutopilotPrototypeService:
         ]
         expansion_note = (
             f"Runtime Discovery refreshed {refreshed_runtime_count} evidence-scoped case(s); the plan now has "
-            f"{len(merged)} case(s) across {len(screens)} observed screen(s) and {len(prompt_tests)} prompt branch(es); no artificial case-count cap is applied."
+            f"{len(merged)} case(s) across {len(screens)} observed screen(s) and "
+            f"{len(prompt_tests) + len(checkpoint_tests)} prompt/confirmation branch(es); "
+            "no artificial case-count cap is applied."
         )
         basis.append(expansion_note)
         observed_journeys: list[str] = []
