@@ -2986,7 +2986,7 @@ class AutopilotPrototypeService:
         }
         confirmation_copy = re.compile(
             r"\b(?:are you sure|by proceeding|do you want|confirmation|this action will|"
-            r"will be logged out|logged out from|cannot be undone|discard|remove|delete|sign out|log out)\\b",
+            r"will be logged out|logged out from|cannot be undone|discard|remove|delete|sign out|log out)\b",
             re.I,
         )
 
