@@ -241,6 +241,7 @@ def _metadata(record: AutopilotInputRecord) -> AutopilotSavedInput:
     spec = record.generator_spec or {}
     return AutopilotSavedInput(
         key=record.input_key,
+        job_id=record.job_id,
         label=record.label,
         category=record.category,  # type: ignore[arg-type]
         decision=record.decision,  # type: ignore[arg-type]
@@ -448,8 +449,14 @@ async def resolve_value(
     project_id: Optional[UUID],
     surface_key: str,
     input_key: str,
+    job_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Resolve one value inside a runner without ever returning it to HTTP."""
+    """Resolve one value inside a runner without ever returning it to HTTP.
+
+    A job id limits resolution to inputs explicitly supplied or reused for the
+    current run. Omitting it preserves the legacy lookup behavior for callers
+    that intentionally manage surface-level access themselves.
+    """
     query = select(AutopilotInputRecord).where(
         AutopilotInputRecord.owner_id == owner_id,
         AutopilotInputRecord.surface_key == surface_key,
@@ -461,7 +468,56 @@ async def resolve_value(
         query = query.where(AutopilotInputRecord.project_id.is_(None))
     else:
         query = query.where(AutopilotInputRecord.project_id == project_id)
+    if job_id is not None:
+        query = query.where(AutopilotInputRecord.job_id == job_id)
     row = await db.scalar(query.order_by(AutopilotInputRecord.updated_at.desc()))
+    if row is None or not row.encrypted_value:
+        return None
+    try:
+        value = _fernet(settings).decrypt(row.encrypted_value.encode("ascii")).decode("utf-8")
+    except (InvalidToken, UnicodeError, ValueError):
+        return None
+    row.last_used_at = _now()
+    return value
+
+
+async def resolve_value_by_label(
+    db: AsyncSession,
+    settings: Settings,
+    owner_id: UUID,
+    project_id: Optional[UUID],
+    surface_key: str,
+    job_id: str,
+    label: str,
+    category: str,
+) -> Optional[str]:
+    """Resolve a current-run value when a discovered control key changes.
+
+    Matching is limited to encrypted rows already bound to this job. Reuse
+    across runs must first be explicitly selected and rebound by the start or
+    checkpoint submission path.
+    """
+    query = select(AutopilotInputRecord).where(
+        AutopilotInputRecord.owner_id == owner_id,
+        AutopilotInputRecord.surface_key == surface_key,
+        AutopilotInputRecord.job_id == job_id,
+        AutopilotInputRecord.category == category,
+        AutopilotInputRecord.encrypted_value.is_not(None),
+        or_(AutopilotInputRecord.expires_at.is_(None), AutopilotInputRecord.expires_at > _now()),
+    )
+    if project_id is None:
+        query = query.where(AutopilotInputRecord.project_id.is_(None))
+    else:
+        query = query.where(AutopilotInputRecord.project_id == project_id)
+    rows = await db.scalars(query.order_by(AutopilotInputRecord.updated_at.desc()))
+    normalized_label = " ".join(str(label or "").split()).casefold()
+    row = next(
+        (
+            item for item in rows.all()
+            if " ".join(str(item.label or "").split()).casefold() == normalized_label
+        ),
+        None,
+    )
     if row is None or not row.encrypted_value:
         return None
     try:

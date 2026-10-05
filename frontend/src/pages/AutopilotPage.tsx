@@ -260,17 +260,19 @@ type SetupProfile = {
   environment_url: string; test_data_reference: string; reset_hook_reference: string;
   acceptance_criteria_reference: string; api_oracle_reference: string; navigation_notes: string;
   safe_authentication_approved: boolean; approved_test_ids: string[]; runtime_input_references: Record<string, string>; updated_at?: string | null;
+  preferred_execution_mode: "safe_navigation" | "full_uat"; reuse_existing_test_data: boolean;
   provided_fields: string[]; missing_fields: string[]; input_requests: AutopilotInputRequest[]; runtime_input_requests?: AutopilotInputRequest[];
   input_decisions?: Record<string, InputDecision>; saved_inputs?: SavedInput[]; skipped_input_keys?: string[]; random_input_keys?: string[];
   checkpoint_stage: string; checkpoint_message?: string | null; last_validated_at?: string | null;
 };
+type InitialDataEntry = { id: string; label: string; value: string };
 
 function emptySetup(jobId = ""): SetupProfile {
   return {
     job_id: jobId, credential_reference: "", account_role: "", environment_name: "",
     environment_url: "", test_data_reference: "", reset_hook_reference: "",
     acceptance_criteria_reference: "", api_oracle_reference: "", navigation_notes: "",
-    safe_authentication_approved: false, approved_test_ids: [], runtime_input_references: {}, input_decisions: {}, saved_inputs: [], skipped_input_keys: [], random_input_keys: [], provided_fields: [], missing_fields: [], input_requests: [], runtime_input_requests: [],
+    safe_authentication_approved: false, approved_test_ids: [], runtime_input_references: {}, preferred_execution_mode: "safe_navigation", reuse_existing_test_data: false, input_decisions: {}, saved_inputs: [], skipped_input_keys: [], random_input_keys: [], provided_fields: [], missing_fields: [], input_requests: [], runtime_input_requests: [],
     checkpoint_stage: "input_collection", checkpoint_message: null, last_validated_at: null,
   };
 }
@@ -295,7 +297,7 @@ function buildInputDrafts(profile: SetupProfile | null | undefined): Record<stri
         ? "random"
         : request.status === "random"
           ? "random"
-        : (prior === "reuse" || savedRecord?.save_for_reuse ? "reuse" : "provide");
+        : (prior === "reuse" ? "reuse" : "provide");
     return [request.key, {
       decision,
       value: "",
@@ -771,6 +773,11 @@ export default function AutopilotPage() {
   const [defectBusy, setDefectBusy] = useState(false);
   const [setup, setSetup] = useState<SetupProfile | null>(null);
   const [setupDraft, setSetupDraft] = useState<SetupProfile>(emptySetup());
+  const [initialUserId, setInitialUserId] = useState("");
+  const [initialPassword, setInitialPassword] = useState("");
+  const [initialDataEntries, setInitialDataEntries] = useState<InitialDataEntry[]>([]);
+  const [saveInitialInputsForReuse, setSaveInitialInputsForReuse] = useState(false);
+  const [reuseExistingTestData, setReuseExistingTestData] = useState(false);
   const [inputDrafts, setInputDrafts] = useState<Record<string, InputDraft>>({});
   const [setupOpen, setSetupOpen] = useState(false);
   const [scopeExpanded, setScopeExpanded] = useState(true);
@@ -819,6 +826,12 @@ export default function AutopilotPage() {
     // so returning users land on the evidence overview instead of a long form.
     setScopeExpanded(!analysis?.job_id);
   }, [analysis?.job_id]);
+
+  useEffect(() => {
+    if (!setup || setup.job_id !== analysis?.job_id) return;
+    setSuiteMode(setup.preferred_execution_mode || "safe_navigation");
+    setReuseExistingTestData(Boolean(setup.reuse_existing_test_data));
+  }, [analysis?.job_id, setup?.job_id, setup?.preferred_execution_mode, setup?.reuse_existing_test_data]);
 
   const clearRunState = useCallback((options: { clearSurface?: boolean } = {}) => {
     // A refresh or project/surface change must not keep rendering an analysis
@@ -1406,6 +1419,25 @@ export default function AutopilotPage() {
       setError(isWebsite ? "Enter a website URL before starting Autopilot." : "Select a project and APK/IPA before starting Autopilot.");
       return;
     }
+    if ((initialUserId.trim() && !initialPassword) || (!initialUserId.trim() && initialPassword)) {
+      setError("Enter both the UAT user ID/email and password, or leave both blank.");
+      return;
+    }
+    if (initialDataEntries.some((item) => Boolean(item.label.trim()) !== Boolean(item.value))) {
+      setError("Complete both the label and value for each starting test-data input, or remove the empty row.");
+      return;
+    }
+    const initialInputs = [
+      ...(initialUserId.trim() || initialPassword ? [{
+        label: "UAT sign-in credentials",
+        category: "credential" as const,
+        value: JSON.stringify({ username: initialUserId.trim(), password: initialPassword }),
+      }] : []),
+      ...initialDataEntries.filter((item) => item.label.trim() && item.value).map((item) => ({
+        label: item.label.trim(), category: "test_data" as const, value: item.value,
+      })),
+    ];
+    const safeAuthenticationApproved = initialInputs.some((item) => item.category === "credential") || reuseExistingTestData;
     // Do not carry the previous completed progress into a new run. The old
     // value made a fresh analysis render as “complete · 100%” while the
     // background job was still being queued/read.
@@ -1414,7 +1446,13 @@ export default function AutopilotPage() {
     try {
       let response;
       if (selectedUploadId && !isWebsite) {
-        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", { upload_id: selectedUploadId, context, profile_id: profileId, surface_action: surfaceAction, document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined }, { timeout: 300000 });
+        response = await apiClient.post<AnalysisJob>("/autopilot/analyze-existing", {
+          upload_id: selectedUploadId, context, profile_id: profileId, surface_action: surfaceAction,
+          document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined,
+          initial_inputs: initialInputs, save_initial_inputs_for_reuse: saveInitialInputsForReuse,
+          reuse_existing_test_data: reuseExistingTestData, safe_authentication_approved: safeAuthenticationApproved,
+          execution_mode: suiteMode,
+        }, { timeout: 300000 });
       } else {
         const form = new FormData();
         if (isWebsite) form.append("target_url", targetUrl.trim());
@@ -1422,6 +1460,11 @@ export default function AutopilotPage() {
         form.append("context", context); form.append("profile_id", profileId);
         form.append("surface_action", surfaceAction);
         form.append("document_asset_ids", JSON.stringify(selectedDocumentAssetIds));
+        form.append("initial_inputs", JSON.stringify(initialInputs));
+        form.append("save_initial_inputs_for_reuse", String(saveInitialInputsForReuse));
+        form.append("reuse_existing_test_data", String(reuseExistingTestData));
+        form.append("safe_authentication_approved", String(safeAuthenticationApproved));
+        form.append("execution_mode", suiteMode);
         if (documentAnalysisRunId) form.append("document_analysis_run_id", documentAnalysisRunId);
         response = await apiClient.post<AnalysisJob>("/autopilot/analyze", form, { headers: { "Content-Type": "multipart/form-data" }, timeout: 300000 });
         if (!isWebsite) {
@@ -1431,11 +1474,15 @@ export default function AutopilotPage() {
         }
       }
       applyJob(response.data);
+      // Drop write-only values from component memory once the API has accepted
+      // and encrypted them. They never enter the report context or model prompt.
+      setInitialUserId(""); setInitialPassword(""); setInitialDataEntries([]);
       const completed = await pollAnalysis(response.data.job_id);
       await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshWorkflow(response.data.job_id); await refreshReportTabs(selectedProjectId);
       if (completed.checkpoint_stage === "ready_for_discovery") {
         const planPending = completed.phase === "plan_pending_review" || completed.generation_plan?.status === "pending_review";
-        if (autoRunFirstPass && planPending) {
+        const startDiscoveryAutomatically = suiteMode === "full_uat" || autoRunFirstPass;
+        if (startDiscoveryAutomatically && planPending) {
           // The autonomous toggle is an explicit user preference: approving
           // the generated plan here keeps the default first pass seamless,
           // while the same plan remains reviewable when the toggle is off.
@@ -1444,7 +1491,7 @@ export default function AutopilotPage() {
           await runDiscovery(response.data.job_id);
         } else if (planPending) {
           setContextNotice("Your evidence-backed generation plan is ready. Review and approve it below to start Runtime Discovery.");
-        } else if (autoRunFirstPass) {
+        } else if (startDiscoveryAutomatically) {
           await runDiscovery(response.data.job_id);
         }
       }
@@ -1587,6 +1634,8 @@ export default function AutopilotPage() {
         acceptance_criteria_reference: setupDraft.acceptance_criteria_reference,
         api_oracle_reference: setupDraft.api_oracle_reference,
         navigation_notes: setupDraft.navigation_notes,
+        preferred_execution_mode: suiteMode,
+        reuse_existing_test_data: reuseExistingTestData,
         safe_authentication_approved: setupDraft.safe_authentication_approved,
         approved_test_ids: setupDraft.approved_test_ids,
         runtime_input_references: setupDraft.runtime_input_references || {},
@@ -1867,7 +1916,18 @@ export default function AutopilotPage() {
       const hasSafeDiscoverySurface = response.data.status === "completed"
         && response.data.target_ready !== false
         && response.data.safe_control_count > 0;
-      if (autoRunFirstPass && discoveryMode === "safe" && suiteMode === "safe_navigation" && hasSafeDiscoverySurface) {
+      const hasInteractiveDiscoverySurface = response.data.status === "completed"
+        && response.data.target_ready !== false
+        && response.data.screens.length > 0;
+      if (suiteMode === "full_uat" && hasInteractiveDiscoverySurface) {
+        if (!fullUatConfirmed) {
+          setContextNotice("Discovery is complete. Confirm the isolated-UAT transaction consent at the start of Autopilot before the full case batch can run.");
+        } else if (!providerStatus?.full_uat_sandbox_verified) {
+          setContextNotice("Discovery is complete, but this server has not verified and allowlisted the isolated UAT environment. No state-changing cases were run.");
+        } else {
+          await runSuite(jobId);
+        }
+      } else if (autoRunFirstPass && discoveryMode === "safe" && suiteMode === "safe_navigation" && hasSafeDiscoverySurface) {
         await runSuite(jobId);
       } else if (autoRunFirstPass && discoveryMode === "safe" && suiteMode === "safe_navigation" && response.data.screens.length > 0) {
         setContextNotice(
@@ -1982,9 +2042,10 @@ export default function AutopilotPage() {
         ...executionPayload(),
         max_tests: suiteMaxTests,
         test_ids: [],
-        buckets: suiteBucket === "all" ? [] : [suiteBucket],
+        buckets: suiteMode === "full_uat" || suiteBucket === "all" ? [] : [suiteBucket],
         include_deferred: true,
         execution_mode: suiteMode,
+        run_all_eligible: suiteMode === "full_uat",
         confirm_isolated_uat: suiteMode === "full_uat" && fullUatConfirmed,
       }, { timeout: 960000 });
       setSuite(response.data);
@@ -2430,6 +2491,7 @@ export default function AutopilotPage() {
             <Select labelId="autopilot-target-label" label="Target type" value={targetKind} onChange={(event) => {
                const next = event.target.value as TargetKind;
                setTargetKind(next);
+               if (next === "web") { setSuiteMode("safe_navigation"); setFullUatConfirmed(false); }
                setFile(null); setSelectedUploadId(""); resetResult();
                // Switching target starts a new surface. Always replace the
                // old target identity in the brief instead of carrying a
@@ -2495,6 +2557,43 @@ export default function AutopilotPage() {
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>Requested: {contextScope.requested_test_types.join(" · ") || "Core journeys"} · Documents: {contextScope.document_sections.length} · Public signals: {contextScope.sources.filter((item) => item.kind === "internet").length}</Typography>
           </CardContent></Card>}
            <Tooltip title="The target and brief guide coverage. Claims stay separate from observed evidence; missing metrics remain pending." placement="bottom-start"><Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1, cursor: "help", textDecoration: "underline", textDecorationStyle: "dotted" }}>How this run is scoped</Typography></Tooltip>
+          <Paper variant="outlined" sx={{ mt: 1.75, p: 1.5, borderRadius: 2, bgcolor: "background.paper" }}>
+            <Stack spacing={1.25}>
+              <Box>
+                <Typography variant="overline" color="primary" fontWeight={800} letterSpacing={1}>2 · Inputs &amp; execution</Typography>
+                <Typography variant="body2" color="text.secondary">Add optional UAT values before analysis. Autopilot keeps them out of context and model prompts, and encrypts each value in the project’s Test Data repository.</Typography>
+              </Box>
+              <Grid container spacing={1.25}>
+                <Grid item xs={12} md={6}><TextField fullWidth size="small" label="UAT user ID / email (optional)" value={initialUserId} autoComplete="off" disabled={busy} onChange={(event) => setInitialUserId(event.target.value)} helperText="Used only if a live sign-in screen is found." /></Grid>
+                <Grid item xs={12} md={6}><TextField fullWidth size="small" type="password" label="UAT password (optional)" value={initialPassword} autoComplete="new-password" disabled={busy} onChange={(event) => setInitialPassword(event.target.value)} helperText="Paired with the user ID and encrypted before analysis begins." /></Grid>
+                {initialDataEntries.map((item) => <Fragment key={item.id}>
+                  <Grid item xs={12} sm={5}><TextField fullWidth size="small" label="Test-data label" placeholder="Account nickname, amount, search term…" value={item.label} disabled={busy} onChange={(event) => setInitialDataEntries((current) => current.map((entry) => entry.id === item.id ? { ...entry, label: event.target.value } : entry))} /></Grid>
+                  <Grid item xs={10} sm={6}><TextField fullWidth size="small" label="Test-data value" type="password" value={item.value} autoComplete="off" disabled={busy} onChange={(event) => setInitialDataEntries((current) => current.map((entry) => entry.id === item.id ? { ...entry, value: event.target.value } : entry))} /></Grid>
+                  <Grid item xs={2} sm={1} sx={{ display: "flex", alignItems: "center" }}><IconButton aria-label="Remove test-data input" size="small" disabled={busy} onClick={() => setInitialDataEntries((current) => current.filter((entry) => entry.id !== item.id))}><CloseRoundedIcon fontSize="small" /></IconButton></Grid>
+                </Fragment>)}
+                <Grid item xs={12} sm={6}>
+                  <Button size="small" variant="outlined" disabled={busy} onClick={() => setInitialDataEntries((current) => [...current, { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, label: "", value: "" }])}>Add test-data input</Button>
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <FormControl fullWidth size="small" disabled={busy}>
+                    <InputLabel id="autopilot-start-mode-label">Execution preference</InputLabel>
+                    <Select labelId="autopilot-start-mode-label" label="Execution preference" value={suiteMode} onChange={(event) => { setSuiteMode(event.target.value as "safe_navigation" | "full_uat"); setFullUatConfirmed(false); }}>
+                      <MenuItem value="safe_navigation">Checkpointed · safe navigation</MenuItem>
+                      <MenuItem value="full_uat" disabled={targetKind === "web"}>Full autonomous UAT{targetKind === "web" ? " · mobile only" : ""}</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+                <Grid item xs={12}>
+                  <FormControlLabel control={<Checkbox size="small" checked={reuseExistingTestData} disabled={busy} onChange={(event) => setReuseExistingTestData(event.target.checked)} />} label="Use existing saved test data for this app on this run" />
+                  <FormControlLabel sx={{ ml: { sm: 2 } }} control={<Checkbox size="small" checked={saveInitialInputsForReuse} disabled={busy} onChange={(event) => setSaveInitialInputsForReuse(event.target.checked)} />} label="Save my inputs encrypted in Test Data for later reuse" />
+                </Grid>
+                {suiteMode === "full_uat" && targetKind !== "web" && <Grid item xs={12}>
+                  <Alert severity="info" sx={{ mb: 1 }}>Full UAT is your selected preference. State-changing execution still requires the server’s isolated-UAT allowlist.</Alert>
+                  <FormControlLabel control={<Checkbox size="small" checked={fullUatConfirmed} onChange={(event) => setFullUatConfirmed(event.target.checked)} />} label={<Typography variant="body2">I confirm this app and downstream services are isolated UAT; allow state-changing transactions for this run.</Typography>} />
+                </Grid>}
+              </Grid>
+            </Stack>
+          </Paper>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
             <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || busy || resumeBusy || !selectedProjectId} onClick={checkpointWaiting ? () => openSetup() : () => void analyze()} variant="contained" size="large" startIcon={busy || resumeBusy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{analysisButtonLabel}</Button>
             {analysis && <Button disabled={busy || resumeBusy || !selectedProjectId} onClick={startRerun} variant="outlined" size="large">Rerun this analysis</Button>}
@@ -2867,36 +2966,31 @@ export default function AutopilotPage() {
             </Typography>
           </Box>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}>
-            <FormControl size="small" sx={{ minWidth: 175 }}>
-              <InputLabel id="suite-mode-label">Run mode</InputLabel>
-              <Select labelId="suite-mode-label" label="Run mode" value={suiteMode} onChange={(event) => { setSuiteMode(event.target.value as "safe_navigation" | "full_uat"); setFullUatConfirmed(false); }}>
-                <MenuItem value="safe_navigation">Safe · read-only</MenuItem>
-                <MenuItem value="full_uat">Full UAT transactions</MenuItem>
-              </Select>
-            </FormControl>
+            <Chip size="small" color={suiteMode === "full_uat" ? "warning" : "primary"} variant="outlined" label={suiteMode === "full_uat" ? "Full autonomous UAT selected" : "Checkpointed safe mode selected"} />
             <FormControlLabel sx={{ mr: .5 }} control={<Switch size="small" checked={autoRunFirstPass} onChange={(event) => setAutoRunFirstPass(event.target.checked)} />} label={<Typography variant="caption">Auto-run safe first pass</Typography>} />
-            <FormControl size="small" sx={{ minWidth: 170 }}>
-              <InputLabel id="suite-bucket-label">Suite bucket</InputLabel>
-              <Select labelId="suite-bucket-label" label="Suite bucket" value={suiteBucket} onChange={(event) => setSuiteBucket(event.target.value as "all" | TestBucket)}>
-                <MenuItem value="all">{suiteMode === "full_uat" ? "All eligible cases" : "All safe cases"}</MenuItem>
-                {TEST_BUCKETS.filter((bucket) => (automation?.bucket_counts?.[bucket] || bucketCounts[bucket])).map((bucket) => <MenuItem key={bucket} value={bucket}>{testBucketLabel[bucket]}</MenuItem>)}
-              </Select>
-            </FormControl>
-            <FormControl size="small" sx={{ minWidth: 125 }}>
-              <InputLabel id="suite-size-label">Batch size</InputLabel>
-              <Select labelId="suite-size-label" label="Batch size" value={suiteMaxTests} onChange={(event) => setSuiteMaxTests(Number(event.target.value))}>
-                {[20, 50, 100, 200, 500, 1000].map((size) => <MenuItem key={size} value={size}>{size} cases</MenuItem>)}
-              </Select>
-            </FormControl>
+            {suiteMode !== "full_uat" && <>
+              <FormControl size="small" sx={{ minWidth: 170 }}>
+                <InputLabel id="suite-bucket-label">Suite bucket</InputLabel>
+                <Select labelId="suite-bucket-label" label="Suite bucket" value={suiteBucket} onChange={(event) => setSuiteBucket(event.target.value as "all" | TestBucket)}>
+                  <MenuItem value="all">All safe cases</MenuItem>
+                  {TEST_BUCKETS.filter((bucket) => (automation?.bucket_counts?.[bucket] || bucketCounts[bucket])).map((bucket) => <MenuItem key={bucket} value={bucket}>{testBucketLabel[bucket]}</MenuItem>)}
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={{ minWidth: 125 }}>
+                <InputLabel id="suite-size-label">Batch size</InputLabel>
+                <Select labelId="suite-size-label" label="Batch size" value={suiteMaxTests} onChange={(event) => setSuiteMaxTests(Number(event.target.value))}>
+                  {[20, 50, 100, 200, 500, 1000].map((size) => <MenuItem key={size} value={size}>{size} cases</MenuItem>)}
+                </Select>
+              </FormControl>
+            </>}
             <Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || !discoveryVerifiedForExecution(discovery) || (suiteMode === "full_uat" ? (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified || !analysis?.tests?.length) : suiteExecutableCount === 0)} onClick={runSuite}>
-              {suiteBusy ? "Running suite…" : suiteMode === "full_uat" ? `Run UAT transactions (${suiteMaxTests})` : suiteBucket === "all" ? `Run safe batch (${suiteMaxTests})` : `Run ${testBucketLabel[suiteBucket]} (${suiteMaxTests})`}
+              {suiteBusy ? "Running suite…" : suiteMode === "full_uat" ? "Run all eligible UAT cases" : suiteBucket === "all" ? `Run safe batch (${suiteMaxTests})` : `Run ${testBucketLabel[suiteBucket]} (${suiteMaxTests})`}
             </Button>
           </Stack>
         </Stack>
         {suiteMode === "full_uat" && <Stack spacing={1} sx={{ mt: 1.5 }}>
           {!providerStatus?.full_uat_sandbox_verified && <Alert severity="warning">Full transaction execution is not enabled on this server. An administrator must verify the isolated UAT environment and allowlist this exact app before any state-changing run can start.</Alert>}
-          <FormControlLabel control={<Checkbox size="small" checked={fullUatConfirmed} onChange={(event) => setFullUatConfirmed(event.target.checked)} />} label={<Typography variant="body2">I confirm this app and all downstream services are isolated UAT; allow state-changing transactions for this run.</Typography>} />
-          <Typography variant="caption" color="text.secondary">Full mode does not invent credentials or OTPs. OTP/MFA and account deletion/closure remain blocked for a person to handle.</Typography>
+          <Typography variant="caption" color="text.secondary">Full mode runs every eligible generated case. OTP/MFA, account deletion/closure and other unsupported cases remain supervised or reported as blocked; they are never counted as passed.</Typography>
         </Stack>}
         <Box sx={{ mt: 2, p: 1.5, border: "1px solid", borderColor: "divider", borderRadius: 2 }}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} justifyContent="space-between">
@@ -2914,7 +3008,7 @@ export default function AutopilotPage() {
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
         {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · all evidence-scoped cases shown</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.map((test) => { const bucket = normalizedBucket(test); const setupRequest = test.readiness !== "executable" ? requestForTest(test) : null; return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={() => openSetup(setupRequest?.key)}>{setupRequest ? "Resolve input" : "Review setup"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
-      {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>{suite.execution_mode === "full_uat" ? "Full UAT transaction run:" : "Safe-navigation run:"} <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The plan includes every evidence-scoped case. This run executes up to {suiteMaxTests} eligible cases; setup-gated or unsupported cases remain visible and never count as passed. Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+      {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>{suite.execution_mode === "full_uat" ? "Full UAT transaction run:" : "Safe-navigation run:"} <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{suite.execution_mode === "full_uat" ? "The full UAT run selected every generated case and attempted each case eligible for this environment; setup-gated or unsupported cases remain visible and never count as passed." : `The plan includes every evidence-scoped case. This safe batch runs up to ${suiteMaxTests} eligible cases; setup-gated or unsupported cases remain visible and never count as passed.`} Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>

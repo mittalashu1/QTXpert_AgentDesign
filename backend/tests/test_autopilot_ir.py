@@ -760,15 +760,15 @@ def test_runtime_sign_in_requires_encrypted_value_for_each_field():
     )
     incomplete = AutopilotSetupProfile(
         **base,
-        saved_inputs=[AutopilotSavedInput(key="runtime_user", label=username.label, category="credential", decision="provide", has_value=True)],
+        saved_inputs=[AutopilotSavedInput(key="runtime_user", job_id="11111111-1111-1111-1111-111111111111", label=username.label, category="credential", decision="provide", has_value=True)],
     )
     assert credential_value_available(incomplete) is False
 
     complete = incomplete.model_copy(
         update={
             "saved_inputs": [
-                AutopilotSavedInput(key="runtime_user", label=username.label, category="credential", decision="provide", has_value=True),
-                AutopilotSavedInput(key="runtime_password", label=password.label, category="credential", decision="provide", has_value=True),
+                AutopilotSavedInput(key="runtime_user", job_id="11111111-1111-1111-1111-111111111111", label=username.label, category="credential", decision="provide", has_value=True),
+                AutopilotSavedInput(key="runtime_password", job_id="11111111-1111-1111-1111-111111111111", label=password.label, category="credential", decision="provide", has_value=True),
             ]
         }
     )

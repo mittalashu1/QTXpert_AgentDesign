@@ -4,7 +4,13 @@ from uuid import UUID
 
 from app.config import Settings
 from app.database.models.autopilot_input import AutopilotInputRecord
-from app.schemas.autopilot import AutopilotInputRequest, AutopilotInputSubmission, AutopilotRandomSpec
+from app.schemas.autopilot import (
+    AutopilotInputRequest,
+    AutopilotInputSubmission,
+    AutopilotRandomSpec,
+    AutopilotSavedInput,
+    AutopilotSetupProfile,
+)
 from app.services.autopilot_input_store import (
     AutopilotInputStoreError,
     _current_submissions,
@@ -13,6 +19,7 @@ from app.services.autopilot_input_store import (
     _metadata,
     generate_synthetic_value,
 )
+from app.services.autopilot_ir import credential_value_available
 
 
 def test_sensitive_values_are_fernet_encrypted_and_not_recoverable_from_metadata():
@@ -81,8 +88,43 @@ def test_checkpoint_metadata_never_exposes_the_encrypted_value():
 
     metadata = _metadata(record)
     assert metadata.has_value is True
+    assert metadata.job_id == record.job_id
     assert plaintext not in metadata.model_dump_json()
     assert record.encrypted_value not in metadata.model_dump_json()
+
+
+def test_saved_credentials_do_not_satisfy_a_different_run_without_opt_in():
+    saved = AutopilotSavedInput(
+        key="credential_reference",
+        job_id="previous-run",
+        label="UAT sign-in credentials",
+        category="credential",
+        decision="provide",
+        save_for_reuse=True,
+        has_value=True,
+    )
+    setup = AutopilotSetupProfile(job_id="current-run", saved_inputs=[saved])
+
+    assert credential_value_available(setup) is False
+
+
+def test_saved_credentials_satisfy_the_run_after_explicit_reuse():
+    saved = AutopilotSavedInput(
+        key="credential_reference",
+        job_id="current-run",
+        label="UAT sign-in credentials",
+        category="credential",
+        decision="reuse",
+        save_for_reuse=True,
+        has_value=True,
+    )
+    setup = AutopilotSetupProfile(
+        job_id="current-run",
+        input_decisions={"credential_reference": "reuse"},
+        saved_inputs=[saved],
+    )
+
+    assert credential_value_available(setup) is True
 
 
 def _saved_runtime_username(*, input_key="runtime_old_username", label="Sign-in · Username · User ID / email", source="runtime"):
