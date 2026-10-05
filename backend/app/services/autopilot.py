@@ -3008,7 +3008,11 @@ class AutopilotPrototypeService:
             visible_confirmation_copy = " ".join(
                 value
                 for control in screen.controls
-                if not control.clickable and not control.input_capable
+                if (
+                    not control.input_capable
+                    and normalized_checkpoint_label(control.semantic_label)
+                    not in affirmative_checkpoint_labels | negative_checkpoint_labels
+                )
                 for value in (
                     control.semantic_label,
                     control.text,
