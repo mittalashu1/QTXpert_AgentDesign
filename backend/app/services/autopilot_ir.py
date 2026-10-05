@@ -220,6 +220,7 @@ def credential_value_available(setup: Optional[AutopilotSetupProfile]) -> bool:
             for item in saved_inputs
             if item.key == "credential_reference"
             and item.has_value
+            and item.job_id == setup.job_id
             and is_credential_bundle_label(item.label)
         ),
         None,
@@ -247,7 +248,14 @@ def credential_value_available(setup: Optional[AutopilotSetupProfile]) -> bool:
             if hint == "otp":
                 return False
             decision = decisions.get(request.key)
-            metadata = next((item for item in saved_inputs if item.key == request.key), None)
+            metadata = next(
+                (
+                    item
+                    for item in saved_inputs
+                    if item.key == request.key and item.job_id == setup.job_id
+                ),
+                None,
+            )
             if decision not in {"provide", "reuse"} or metadata is None or not metadata.has_value:
                 return False
         return True
@@ -1491,7 +1499,6 @@ class AutopilotIRCompiler:
         safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in test_id)
         safe = "_".join(part for part in safe.split("_") if part)
         return f"test_{safe}"
-
 
 
 

@@ -120,7 +120,8 @@ class AutopilotSuiteService:
                 0 if prompt_decision == "deny" else 1,
             )
         selected.sort(key=selection_priority)
-        selected = selected[: request.max_tests]
+        if not request.run_all_eligible:
+            selected = selected[: request.max_tests]
         candidates = [
             test
             for test in selected
@@ -2090,7 +2091,6 @@ class AutopilotSuiteService:
     @staticmethod
     def _safe_name(value: str) -> str:
         return "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")[:100]
-
 
 
 

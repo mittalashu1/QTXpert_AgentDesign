@@ -34,6 +34,9 @@ from app.database.repositories.requirement_repository import ProjectRepository
 from app.database.session import AsyncSessionLocal, get_db_session
 from app.schemas.autopilot import (
     AutopilotAnalysis,
+    AutopilotExecutionMode,
+    AutopilotInitialInput,
+    AutopilotInputSubmission,
     AutopilotApplicationMap as AutopilotApplicationMapSchema,
     AutopilotAnalysisRerunRequest,
     AutopilotAutomationBundle,
@@ -98,7 +101,13 @@ from app.services.autopilot_workflow import (
     SUITE_RUNNABLE_PHASES,
     transition_phase,
 )
-from app.services.autopilot_input_store import AutopilotInputStoreError, apply_submissions, list_metadata, resolve_value
+from app.services.autopilot_input_store import (
+    AutopilotInputStoreError,
+    apply_submissions,
+    list_metadata,
+    resolve_value,
+    resolve_value_by_label,
+)
 from app.services.defect_logging import safe_target_reference, secret_safe_text
 from app.services.document_processor import UnsupportedDocumentTypeError, extract_text
 from app.services.document_intelligence import DocumentIntelligenceService
@@ -1168,6 +1177,183 @@ async def _mark_repository_available(
     return result
 
 
+def _parse_initial_inputs(raw_value: str) -> list[AutopilotInitialInput]:
+    """Validate write-only start inputs without reflecting their contents."""
+    try:
+        values = json.loads(raw_value or "[]")
+        if not isinstance(values, list) or len(values) > 50:
+            raise ValueError("invalid list")
+        inputs = [AutopilotInitialInput.model_validate(value) for value in values]
+        seen: set[tuple[str, str]] = set()
+        credential_count = 0
+        for item in inputs:
+            label = " ".join(item.label.split()).casefold()
+            identity = (item.category, label)
+            if not label or identity in seen:
+                raise ValueError("duplicate or empty label")
+            seen.add(identity)
+            if item.category == "credential":
+                credential_count += 1
+        if credential_count > 1:
+            raise ValueError("multiple credential bundles")
+        return inputs
+    except Exception as exc:
+        # Pydantic's detailed exception can include the submitted value. Keep
+        # the response intentionally generic for this write-only boundary.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="One or more starting inputs are invalid. Check labels and values, then try again.",
+        ) from exc
+
+
+def _initial_input_identity(label: str) -> str:
+    return " ".join(str(label or "").split()).casefold()
+
+
+def _initial_input_key(item: AutopilotInitialInput) -> str:
+    if item.category == "credential":
+        return "credential_reference"
+    digest = hashlib.sha256(_initial_input_identity(item.label).encode("utf-8")).hexdigest()[:24]
+    return f"initial_data_{digest}"
+
+
+async def _save_initial_autopilot_inputs(
+    *,
+    db: AsyncSession,
+    settings: Settings,
+    service: AutopilotPrototypeService,
+    job_id: str,
+    owner_id: UUID,
+    initial_inputs: list[AutopilotInitialInput],
+    save_for_reuse: bool,
+    reuse_existing_test_data: bool,
+    safe_authentication_approved: bool,
+    execution_mode: AutopilotExecutionMode,
+) -> None:
+    """Encrypt supplied values before queueing analysis; persist safe metadata only."""
+    record = await _safe_job_record(db, job_id, owner_id)
+    if record is None:
+        if initial_inputs or reuse_existing_test_data:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Secure Test Data storage is unavailable. No analysis was started; restore storage and retry.",
+            )
+        await service.update_job(job_id, setup_profile={
+            "preferred_execution_mode": execution_mode,
+            "reuse_existing_test_data": False,
+            "safe_authentication_approved": False,
+            "saved_inputs": [],
+            "input_decisions": {},
+        })
+        return
+
+    requests: dict[str, AutopilotInputRequest] = {}
+    submissions: list[AutopilotInputSubmission] = []
+    direct_identities: set[tuple[str, str]] = set()
+    credential_available = False
+    for item in initial_inputs:
+        key = _initial_input_key(item)
+        label = "UAT sign-in credentials" if item.category == "credential" else " ".join(item.label.split())
+        category = item.category
+        requests[key] = AutopilotInputRequest(
+            key=key,
+            label=label,
+            category=category,
+            reason="Provided before analysis so Autopilot can use it only when the observed app flow requires it.",
+            sensitive=category == "credential",
+            source="runtime",
+            question=(
+                "Use this non-production account only when a live sign-in screen is observed."
+                if category == "credential"
+                else "Use this provided value only for a matching observed test-data field."
+            ),
+            format_hint="Encrypted at rest; excluded from analysis context, model prompts, logs and API responses.",
+            credential_bundle=category == "credential",
+        )
+        submissions.append(AutopilotInputSubmission(
+            key=key,
+            decision="provide",
+            value=item.value,
+            save_for_reuse=save_for_reuse,
+        ))
+        credential_available = credential_available or category == "credential"
+        direct_identities.add((category, _initial_input_identity(label)))
+
+    if reuse_existing_test_data:
+        try:
+            saved = await list_metadata(db, record.owner_id, record.project_id, (record.surface_key or job_id)[:128])
+        except Exception as exc:
+            await db.rollback()
+            logger.warning("Autopilot saved-input lookup failed job_id=%s", job_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Saved Test Data could not be loaded. No analysis was started; retry when storage is available.",
+            ) from exc
+        for item in saved:
+            if (
+                not item.save_for_reuse
+                or not item.has_value
+                or item.category == "approval"
+                or (item.category, _initial_input_identity(item.label)) in direct_identities
+            ):
+                continue
+            requests[item.key] = AutopilotInputRequest(
+                key=item.key,
+                label=item.label,
+                category=item.category,
+                reason="Previously saved encrypted Test Data selected for reuse on this app.",
+                sensitive=item.category == "credential",
+                status="saved",
+                reference_present=True,
+                source="runtime",
+                credential_bundle=item.category == "credential" and item.key == "credential_reference",
+            )
+            submissions.append(AutopilotInputSubmission(
+                key=item.key,
+                decision="reuse",
+                save_for_reuse=True,
+            ))
+            credential_available = credential_available or item.category == "credential"
+
+    try:
+        decisions, saved_metadata = await apply_submissions(db, settings, record, submissions, requests)
+        profile = dict(record.setup_profile or {})
+        profile.pop("input_submissions", None)
+        prior_decisions = dict(profile.get("input_decisions") or {})
+        prior_decisions.update(decisions)
+        profile.update({
+            "preferred_execution_mode": execution_mode,
+            "reuse_existing_test_data": reuse_existing_test_data,
+            "safe_authentication_approved": bool(safe_authentication_approved and credential_available),
+            "input_decisions": prior_decisions,
+            "saved_inputs": [item.model_dump(mode="json") for item in saved_metadata],
+            "skipped_input_keys": sorted(key for key, value in prior_decisions.items() if value == "skip"),
+            "random_input_keys": sorted(key for key, value in prior_decisions.items() if value == "random"),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        safe_profile = _setup_profile(job_id, profile).model_dump(mode="json")
+        safe_profile.pop("input_submissions", None)
+        record.setup_profile = safe_profile
+        await db.commit()
+    except AutopilotInputStoreError as exc:
+        await db.rollback()
+        _log_checkpoint_submission_rejection(job_id=job_id, submitted_count=len(submissions), error=exc)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("Autopilot starting-input persistence failed job_id=%s", job_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Starting inputs could not be saved securely. No analysis was started; retry when storage is available.",
+        ) from exc
+
+    # The local job manifest is a fallback for reads after a restart. It gets
+    # safe metadata and decisions only; values stay exclusively in ciphertext.
+    await service.update_job(job_id, setup_profile=safe_profile)
+
+
 def _record_discovery(
     record: Optional[AutopilotJob],
     job_manifest: Optional[dict] = None,
@@ -1527,6 +1713,12 @@ def _setup_profile(
         saved_by_key = {
             item.key: item
             for item in (normalized_setup.saved_inputs or [])
+            if item.job_id == job_id
+        }
+        saved_by_identity = {
+            (item.category, _initial_input_identity(item.label)): item
+            for item in saved_by_key.values()
+            if item.label
         }
         normalized_requests = []
         for item in requests:
@@ -1582,7 +1774,9 @@ def _setup_profile(
                         if any(term in item_label for term in ("user id", "username", "email"))
                         else "text"
                     )
-                saved_runtime_value = saved_by_key.get(item.key)
+                saved_runtime_value = saved_by_key.get(item.key) or saved_by_identity.get(
+                    (item.category, _initial_input_identity(item.label))
+                )
                 runtime_reference_present = bool(
                     str(normalized_setup.runtime_input_references.get(item.key) or "").strip()
                     or (
@@ -1644,7 +1838,9 @@ def _setup_profile(
             runtime_requests = []
             for item in normalized_setup.runtime_input_requests:
                 decision = decisions.get(item.key)
-                saved_runtime_value = saved_by_key.get(item.key)
+                saved_runtime_value = saved_by_key.get(item.key) or saved_by_identity.get(
+                    (item.category, _initial_input_identity(item.label))
+                )
                 direct_reference = str(
                     (normalized_setup.runtime_input_references or {}).get(item.key) or ""
                 ).strip()
@@ -1952,7 +2148,11 @@ async def _setup_with_input_metadata(
     for key in request_keys:
         decisions.pop(key, None)
     for item in active_metadata:
-        decisions[item.key] = item.decision
+        # Old encrypted rows may be offered in the reuse picker, but their
+        # prior decision cannot satisfy this job until the user explicitly
+        # rebinds that value to the current job.
+        if item.job_id == job_id:
+            decisions[item.key] = item.decision
     raw["input_decisions"] = decisions
     approval_decision = decisions.get("safe_authentication_approved")
     if approval_decision in {"provide", "reuse"}:
@@ -1997,14 +2197,28 @@ async def _resolve_suite_input_values(
 
     async def read(key: str) -> Optional[str]:
         try:
-            return await resolve_value(
+            value = await resolve_value(
                 db,
                 settings,
                 record.owner_id,
                 record.project_id,
                 surface_key,
                 key,
+                job_id=record.job_id,
             )
+            request = by_key.get(key)
+            if value is None and request is not None and request.category == "test_data":
+                value = await resolve_value_by_label(
+                    db,
+                    settings,
+                    record.owner_id,
+                    record.project_id,
+                    surface_key,
+                    record.job_id,
+                    request.label,
+                    request.category,
+                )
+            return value
         except Exception:
             # Missing/rotated encryption configuration should leave the case
             # blocked by the compiler rather than fail the whole suite or
@@ -2178,6 +2392,7 @@ async def _resolve_discovery_input_values(
             record.project_id,
             surface_key,
             "credential_reference",
+            job_id=record.job_id,
         )
         if credential_bundle and credential_bundle.lstrip().startswith("{"):
             parsed = json.loads(credential_bundle)
@@ -2651,6 +2866,11 @@ async def _start_analysis_from_asset(
     surface_identity: str = "",
     surface_version: int = 1,
     setup_profile: Optional[dict] = None,
+    initial_inputs: Optional[list[AutopilotInitialInput]] = None,
+    save_initial_inputs_for_reuse: bool = False,
+    reuse_existing_test_data: bool = False,
+    safe_authentication_approved: bool = False,
+    execution_mode: AutopilotExecutionMode = "safe_navigation",
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
 
@@ -2683,6 +2903,18 @@ async def _start_analysis_from_asset(
     await _link_repository_asset(db, service, job_id, asset.id)
     if setup_profile:
         await service.update_job(job_id, setup_profile=setup_profile)
+    await _save_initial_autopilot_inputs(
+        db=db,
+        settings=settings,
+        service=service,
+        job_id=job_id,
+        owner_id=user.id,
+        initial_inputs=initial_inputs or [],
+        save_for_reuse=save_initial_inputs_for_reuse,
+        reuse_existing_test_data=reuse_existing_test_data,
+        safe_authentication_approved=safe_authentication_approved,
+        execution_mode=execution_mode,
+    )
     _queue_repository_materialization(background_tasks, settings, job_id, asset.id, user.id)
     result = await service.get_job_status(job_id)
     return await _mark_repository_available(db, result, user.id)
@@ -2691,6 +2923,7 @@ async def _start_analysis_from_asset(
 async def _start_analysis_from_local_path(
     *,
     background_tasks: BackgroundTasks,
+    db: AsyncSession,
     settings: Settings,
     user: User,
     source_path: Path,
@@ -2705,6 +2938,11 @@ async def _start_analysis_from_local_path(
     surface_identity: str = "",
     surface_version: int = 1,
     setup_profile: Optional[dict] = None,
+    initial_inputs: Optional[list[AutopilotInitialInput]] = None,
+    save_initial_inputs_for_reuse: bool = False,
+    reuse_existing_test_data: bool = False,
+    safe_authentication_approved: bool = False,
+    execution_mode: AutopilotExecutionMode = "safe_navigation",
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -2739,6 +2977,18 @@ async def _start_analysis_from_local_path(
         await reader.close()
     if setup_profile:
         await service.update_job(job_id, setup_profile=setup_profile)
+    await _save_initial_autopilot_inputs(
+        db=db,
+        settings=settings,
+        service=service,
+        job_id=job_id,
+        owner_id=user.id,
+        initial_inputs=initial_inputs or [],
+        save_for_reuse=save_initial_inputs_for_reuse,
+        reuse_existing_test_data=reuse_existing_test_data,
+        safe_authentication_approved=safe_authentication_approved,
+        execution_mode=execution_mode,
+    )
     background_tasks.add_task(service.analyze_safely, job_id)
     return await service.get_job_status(job_id)
 
@@ -3785,11 +4035,22 @@ async def analyze_autopilot_target(
     surface_action: str = Form(default="ask"),
     document_asset_ids: str = Form(default=""),
     document_analysis_run_id: str = Form(default=""),
+    initial_inputs: str = Form(default="[]"),
+    save_initial_inputs_for_reuse: bool = Form(default=False),
+    reuse_existing_test_data: bool = Form(default=False),
+    safe_authentication_approved: bool = Form(default=False),
+    execution_mode: AutopilotExecutionMode = Form(default="safe_navigation"),
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Analyze a website URL, Android APK or iOS IPA as one Autopilot job."""
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     service = _service(settings)
+    parsed_initial_inputs = _parse_initial_inputs(initial_inputs)
+    safe_authentication_approved = bool(
+        safe_authentication_approved
+        or reuse_existing_test_data
+        or any(item.category == "credential" for item in parsed_initial_inputs)
+    )
     if surface_action not in {"ask", "new", "override"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="surface_action must be ask, new or override")
     profile_id = _canonical_profile_id(profile_id)
@@ -3853,6 +4114,18 @@ async def analyze_autopilot_target(
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        await _save_initial_autopilot_inputs(
+            db=db,
+            settings=settings,
+            service=service,
+            job_id=job_id,
+            owner_id=user.id,
+            initial_inputs=parsed_initial_inputs,
+            save_for_reuse=save_initial_inputs_for_reuse,
+            reuse_existing_test_data=reuse_existing_test_data,
+            safe_authentication_approved=safe_authentication_approved,
+            execution_mode=execution_mode,
+        )
         background_tasks.add_task(service.analyze_safely, job_id)
         result = await service.get_job_status(job_id)
         return await _mark_repository_available(db, result, user.id)
@@ -3959,6 +4232,18 @@ async def analyze_autopilot_target(
             ) from exc
     if asset is not None:
         await _link_repository_asset(db, service, job_id, asset.id)
+    await _save_initial_autopilot_inputs(
+        db=db,
+        settings=settings,
+        service=service,
+        job_id=job_id,
+        owner_id=user.id,
+        initial_inputs=parsed_initial_inputs,
+        save_for_reuse=save_initial_inputs_for_reuse,
+        reuse_existing_test_data=reuse_existing_test_data,
+        safe_authentication_approved=safe_authentication_approved,
+        execution_mode=execution_mode,
+    )
     background_tasks.add_task(service.analyze_safely, job_id)
     result = await service.get_job_status(job_id)
     return await _mark_repository_available(db, result, user.id)
@@ -4040,6 +4325,15 @@ async def analyze_existing_mobile_app(
         surface_key=surface_key,
         surface_identity=surface_identity,
         surface_version=surface_version,
+        initial_inputs=payload.initial_inputs,
+        save_initial_inputs_for_reuse=payload.save_initial_inputs_for_reuse,
+        reuse_existing_test_data=payload.reuse_existing_test_data,
+        safe_authentication_approved=(
+            payload.safe_authentication_approved
+            or payload.reuse_existing_test_data
+            or any(item.category == "credential" for item in payload.initial_inputs)
+        ),
+        execution_mode=payload.execution_mode,
     )
 
 
@@ -4164,6 +4458,23 @@ async def rerun_autopilot_analysis(
                 await service.update_job(new_job_id, setup_profile=setup_profile_to_copy)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        await _save_initial_autopilot_inputs(
+            db=db,
+            settings=settings,
+            service=service,
+            job_id=new_job_id,
+            owner_id=user.id,
+            initial_inputs=payload.initial_inputs,
+            save_for_reuse=payload.save_initial_inputs_for_reuse,
+            reuse_existing_test_data=(payload.reuse_existing_test_data or payload.setup_action == "reuse"),
+            safe_authentication_approved=(
+                payload.safe_authentication_approved
+                or payload.reuse_existing_test_data
+                or payload.setup_action == "reuse"
+                or any(item.category == "credential" for item in payload.initial_inputs)
+            ),
+            execution_mode=payload.execution_mode,
+        )
         background_tasks.add_task(service.analyze_safely, new_job_id)
         return await service.get_job_status(new_job_id)
     if settings.AUTOPILOT_DEGRADED_MODE_ENABLED and payload.upload_id is None:
@@ -4184,6 +4495,7 @@ async def rerun_autopilot_analysis(
         )
         return await _start_analysis_from_local_path(
             background_tasks=background_tasks,
+            db=db,
             settings=settings,
             user=user,
             source_path=Path(str(original.get("apk_path", ""))),
@@ -4198,6 +4510,16 @@ async def rerun_autopilot_analysis(
             surface_identity=surface_identity,
             surface_version=surface_version,
             setup_profile=setup_profile_to_copy,
+            initial_inputs=payload.initial_inputs,
+            save_initial_inputs_for_reuse=payload.save_initial_inputs_for_reuse,
+            reuse_existing_test_data=payload.reuse_existing_test_data or payload.setup_action == "reuse",
+            safe_authentication_approved=(
+                payload.safe_authentication_approved
+                or payload.reuse_existing_test_data
+                or payload.setup_action == "reuse"
+                or any(item.category == "credential" for item in payload.initial_inputs)
+            ),
+            execution_mode=payload.execution_mode,
         )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
@@ -4248,6 +4570,16 @@ async def rerun_autopilot_analysis(
         surface_identity=surface_identity,
         surface_version=surface_version,
         setup_profile=setup_profile_to_copy,
+        initial_inputs=payload.initial_inputs,
+        save_initial_inputs_for_reuse=payload.save_initial_inputs_for_reuse,
+        reuse_existing_test_data=payload.reuse_existing_test_data or payload.setup_action == "reuse",
+        safe_authentication_approved=(
+            payload.safe_authentication_approved
+            or payload.reuse_existing_test_data
+            or payload.setup_action == "reuse"
+            or any(item.category == "credential" for item in payload.initial_inputs)
+        ),
+        execution_mode=payload.execution_mode,
     )
 
 
@@ -5240,6 +5572,11 @@ async def execute_autopilot_suite(
     # back the request session and expire the User ORM instance.
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    if payload.run_all_eligible and payload.execution_mode != "full_uat":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="run_all_eligible is available only when full_uat execution mode is selected.",
+        )
     if payload.execution_mode == "full_uat" and not payload.confirm_isolated_uat:
         raise HTTPException(
             status_code=409,
@@ -6156,8 +6493,3 @@ async def rerun_autopilot_smoke(
         job_id=job_id,
         request=request,
     )
-
-
-
-
-

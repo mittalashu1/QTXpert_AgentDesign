@@ -172,10 +172,19 @@ class AutopilotInputSubmission(BaseModel):
     random_spec: Optional[AutopilotRandomSpec] = None
 
 
+class AutopilotInitialInput(BaseModel):
+    """Write-only test data or UAT credentials supplied before analysis."""
+
+    label: str = Field(min_length=1, max_length=120)
+    category: Literal["credential", "test_data"] = "test_data"
+    value: str = Field(min_length=1, max_length=4000)
+
+
 class AutopilotSavedInput(BaseModel):
     """Safe metadata for a saved encrypted input; never contains its value."""
 
     key: str
+    job_id: Optional[str] = None
     label: str
     category: AutopilotInputCategory
     decision: AutopilotInputDecision
@@ -708,6 +717,8 @@ class AutopilotSetupUpdateRequest(BaseModel):
     acceptance_criteria_reference: str = Field(default="", max_length=500)
     api_oracle_reference: str = Field(default="", max_length=500)
     navigation_notes: str = Field(default="", max_length=4000)
+    preferred_execution_mode: AutopilotExecutionMode = "safe_navigation"
+    reuse_existing_test_data: bool = False
     safe_authentication_approved: bool = False
     # Approval applies to any number of observed cases; the plan itself is
     # finite because it is derived from the target graph, not a fixed quota.
@@ -927,6 +938,11 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     # A rerun must not silently reuse credentials or seeded data.  The UI asks
     # the user to confirm ``reuse`` (or choose ``fresh``) before submitting.
     setup_action: Literal["ask", "reuse", "fresh"] = "ask"
+    initial_inputs: List[AutopilotInitialInput] = Field(default_factory=list, max_length=50)
+    save_initial_inputs_for_reuse: bool = False
+    reuse_existing_test_data: bool = False
+    safe_authentication_approved: bool = False
+    execution_mode: AutopilotExecutionMode = "safe_navigation"
     document_asset_ids: Optional[List[UUID]] = Field(default=None, max_length=20)
     document_analysis_run_id: Optional[UUID] = Field(
         default=None,
@@ -1096,6 +1112,8 @@ class AutopilotSuiteRequest(AutopilotExecutionRequest):
     # the checkpoint-resume worker when it chains discovery into execution.
     auto_run_safe_suite: bool = True
     execution_mode: AutopilotExecutionMode = "safe_navigation"
+    # Full UAT can run the full set of eligible cases without the safe-mode batch cap.
+    run_all_eligible: bool = False
     # Required per run in addition to server-side sandbox and exact allowlist checks.
     confirm_isolated_uat: bool = False
 
@@ -1144,7 +1162,5 @@ class AutopilotSuiteResult(BaseModel):
 # can be referenced by the analysis/job contracts above.  Resolve the forward
 # references once all of the concrete discovery models are available.
 AutopilotApplicationMap.model_rebuild()
-
-
 
 
