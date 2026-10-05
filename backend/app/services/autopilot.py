@@ -2855,9 +2855,21 @@ class AutopilotPrototypeService:
                     paths[transition.to_screen_id] = [*paths[source_id], f"Tap {control.semantic_label}"]
                     pending.append(transition.to_screen_id)
         prompt_tests: list[AutopilotTest] = []
+        if discovery.runtime_prompts:
+            # Older persisted maps can contain non-terminal options such as
+            # location accuracy toggles, even though new captures filter them.
+            # Revalidate the label at case generation so legacy records cannot
+            # turn a modifier into a runnable allow/deny branch.
+            from app.services.autopilot_discovery import AutopilotDiscoveryService
+
         for prompt in discovery.runtime_prompts:
             for choice in prompt.choices:
-                if choice.decision not in {"allow", "deny"}:
+                normalized_choice = re.sub(r"\s+", " ", str(choice.label or "")).strip().lower()
+                terminal_decision = AutopilotDiscoveryService._prompt_choice_decision(normalized_choice)
+                if (
+                    choice.decision not in {"allow", "deny"}
+                    or terminal_decision != choice.decision
+                ):
                     continue
                 decision_label = "allow" if choice.decision == "allow" else "deny"
                 prompt_label = prompt.title or f"{prompt.kind.replace('_', ' ')} prompt"
