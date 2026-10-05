@@ -846,27 +846,32 @@ class AutopilotSuiteService:
             raise ProviderLifecycleUnavailable(
                 f"The provider could not clear app data to replay this Android prompt ({type(exc).__name__})."
             ) from exc
-        AutopilotSuiteService._revoke_android_prompt_permissions(driver, package)
+        AutopilotSuiteService._revoke_android_prompt_permissions(
+            driver, package, app_stopped=True
+        )
 
     @staticmethod
-    def _revoke_android_prompt_permissions(driver, package: str) -> None:
+    def _revoke_android_prompt_permissions(
+        driver, package: str, *, app_stopped: bool = False
+    ) -> None:
         """Revoke only the AUT's runtime grants before replaying Android prompts."""
         execute_script = getattr(driver, "execute_script", None)
         if not callable(execute_script):
             raise ProviderLifecycleUnavailable(
                 "The Android provider cannot revoke runtime permissions for this app; use a resettable Appium device."
             )
-        terminator = getattr(driver, "terminate_app", None)
-        if not callable(terminator):
-            raise ProviderLifecycleUnavailable(
-                "The Android provider cannot stop the app before resetting its permission prompt."
-            )
-        try:
-            terminator(package)
-        except Exception as exc:
-            raise ProviderLifecycleUnavailable(
-                f"The provider could not stop the app before resetting Android permissions ({type(exc).__name__})."
-            ) from exc
+        if not app_stopped:
+            terminator = getattr(driver, "terminate_app", None)
+            if not callable(terminator):
+                raise ProviderLifecycleUnavailable(
+                    "The Android provider cannot stop the app before resetting its permission prompt."
+                )
+            try:
+                terminator(package)
+            except Exception as exc:
+                raise ProviderLifecycleUnavailable(
+                    f"The provider could not stop the app before resetting Android permissions ({type(exc).__name__})."
+                ) from exc
         try:
             execute_script(
                 "mobile: changePermissions",
