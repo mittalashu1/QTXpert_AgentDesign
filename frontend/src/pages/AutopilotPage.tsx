@@ -1925,11 +1925,15 @@ export default function AutopilotPage() {
         } else if (!providerStatus?.full_uat_sandbox_verified) {
           setContextNotice("Discovery is complete, but this server has not verified and allowlisted the isolated UAT environment. No state-changing cases were run.");
         } else {
-          await runSuite(jobId);
+          await runSuite(jobId, "full_uat");
         }
-      } else if (autoRunFirstPass && discoveryMode === "safe" && suiteMode === "safe_navigation" && hasSafeDiscoverySurface) {
-        await runSuite(jobId);
-      } else if (autoRunFirstPass && discoveryMode === "safe" && suiteMode === "safe_navigation" && response.data.screens.length > 0) {
+        if (autoRunFirstPass && discoveryMode === "safe" && hasSafeDiscoverySurface
+          && (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified)) {
+          await runSuite(jobId, "safe_navigation");
+        }
+      } else if (autoRunFirstPass && discoveryMode === "safe" && hasSafeDiscoverySurface) {
+        await runSuite(jobId, "safe_navigation");
+      } else if (autoRunFirstPass && discoveryMode === "safe" && response.data.screens.length > 0) {
         setContextNotice(
           "The app opened, but Autopilot could not read any safe, labeled controls. Discovery is incomplete, so no automated batch was started.",
         );
@@ -1999,14 +2003,17 @@ export default function AutopilotPage() {
     } catch (err) { setError(readableError(err, "The generated cases could not be approved")); return false; }
     finally { setWorkflowBusy(false); }
   };
-  const runSuite = async (requestedJobId?: unknown) => {
+  const runSuite = async (requestedJobId?: unknown, requestedExecutionMode?: "safe_navigation" | "full_uat") => {
     const jobId = typeof requestedJobId === "string" ? requestedJobId : analysis?.job_id;
     if (!jobId) return;
-    if (suiteMode === "full_uat" && !fullUatConfirmed) {
-      setContextNotice("Confirm that this app and its downstream services are isolated UAT before running full transactions.");
+    const executionMode = requestedExecutionMode ?? suiteMode;
+    if (executionMode === "full_uat" && (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified)) {
+      setContextNotice(!fullUatConfirmed
+        ? "Confirm that this app and its downstream services are isolated UAT before running full transactions."
+        : "This server has not verified and allowlisted the isolated UAT environment. No state-changing cases were run.");
       return;
     }
-    if (suiteMode === "full_uat") setFullUatConfirmed(false);
+    if (executionMode === "full_uat") setFullUatConfirmed(false);
     setSuiteBusy(true); setError("");
     try {
       const [jobResponse, discoveryResponse] = await Promise.all([
@@ -2022,7 +2029,7 @@ export default function AutopilotPage() {
           || latestDiscovery?.error
           || latestJob.checkpoint_message
           || "The uploaded app was not verified in the foreground.";
-        setContextNotice(`${suiteMode === "full_uat" ? "Full UAT execution" : "Safe execution"} was not started because Runtime Discovery did not verify the selected app. ${reason}`);
+        setContextNotice(`${executionMode === "full_uat" ? "Full UAT execution" : "Safe execution"} was not started because Runtime Discovery did not verify the selected app. ${reason}`);
         return;
       }
       const phase = latestJob.phase || latestJob.analysis?.phase || "context_ready";
@@ -2042,11 +2049,11 @@ export default function AutopilotPage() {
         ...executionPayload(),
         max_tests: suiteMaxTests,
         test_ids: [],
-        buckets: suiteMode === "full_uat" || suiteBucket === "all" ? [] : [suiteBucket],
+        buckets: executionMode === "full_uat" || suiteBucket === "all" ? [] : [suiteBucket],
         include_deferred: true,
-        execution_mode: suiteMode,
-        run_all_eligible: suiteMode === "full_uat",
-        confirm_isolated_uat: suiteMode === "full_uat" && fullUatConfirmed,
+        execution_mode: executionMode,
+        run_all_eligible: executionMode === "full_uat",
+        confirm_isolated_uat: executionMode === "full_uat" && fullUatConfirmed,
       }, { timeout: 960000 });
       setSuite(response.data);
       await refreshSuiteDefects(jobId);
@@ -2444,7 +2451,7 @@ export default function AutopilotPage() {
             <Stack spacing={.55} sx={{ mt: .8 }}>
               <Button size="small" variant="outlined" onClick={openScopeSetup} startIcon={<AutoAwesomeIcon />}>{analysis ? "Refine scope" : "Choose target"}</Button>
               {analysis && planAwaitingApproval && <Button size="small" variant="contained" onClick={() => { void approvePlanAndDiscover(); }} disabled={workflowBusy || discoveryBusy || executionUnavailable} startIcon={<TravelExploreOutlinedIcon />}>Approve &amp; discover</Button>}
-              {analysis && !planAwaitingApproval && <Button size="small" variant="contained" onClick={() => void runSuite()} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryVerifiedForExecution(discovery)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>}
+              {analysis && !planAwaitingApproval && <Button size="small" variant="contained" onClick={() => void runSuite(analysis.job_id, "safe_navigation")} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryVerifiedForExecution(discovery)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>}
             </Stack>
           </CardContent>
         </Card>
