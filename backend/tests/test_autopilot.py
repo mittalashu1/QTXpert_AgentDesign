@@ -3169,7 +3169,7 @@ def _confirmation_discovery(*, include_warning=True, include_cancel=True):
             control_id="warning-copy",
             semantic_label="By proceeding, you will be logged out from other devices.",
             class_name="android.widget.TextView",
-            clickable=False,
+            clickable=True,
             risk="safe",
         ))
     controls.append(DiscoveredControl(
