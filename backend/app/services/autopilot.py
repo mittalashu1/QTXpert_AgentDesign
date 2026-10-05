@@ -2985,13 +2985,13 @@ class AutopilotPrototypeService:
             "cancel", "no", "not now", "no thanks", "decline", "reject", "back", "stay",
         }
         confirmation_copy = re.compile(
-            r"\\b(?:are you sure|by proceeding|do you want|confirmation|this action will|"
+            r"\b(?:are you sure|by proceeding|do you want|confirmation|this action will|"
             r"will be logged out|logged out from|cannot be undone|discard|remove|delete|sign out|log out)\\b",
             re.I,
         )
 
         def normalized_checkpoint_label(value: str | None) -> str:
-            return re.sub(r"\\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold())).strip()
+            return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold())).strip()
 
         for screen_index, screen in enumerate(screens, start=1):
             screen_label = cls._runtime_screen_label(screen, screen_index)
