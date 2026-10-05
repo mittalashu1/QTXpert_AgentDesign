@@ -1181,6 +1181,10 @@ def test_suite_device_farm_reopens_prompt_cases_with_fast_reset(tmp_path, monkey
             self.page_source = '<hierarchy><node package="com.qtx.demo" text="Welcome" /></hierarchy>'
             self.prompt_active = True
             self.quit_calls = 0
+            self.permission_calls = []
+
+        def execute_script(self, command, arguments):
+            self.permission_calls.append((command, arguments))
 
         def quit(self):
             self.quit_calls += 1
@@ -1251,6 +1255,15 @@ def test_suite_device_farm_reopens_prompt_cases_with_fast_reset(tmp_path, monkey
     assert all("appium:fullReset" not in capabilities for _, capabilities in calls)
     assert drivers[0].quit_calls == 1
     assert drivers[1].quit_calls == 1
+    assert drivers[0].permission_calls == [(
+        "mobile: changePermissions",
+        {
+            "permissions": "all",
+            "action": "revoke",
+            "target": "pm",
+            "appPackage": "com.qtx.demo",
+        },
+    )]
 
 
 def test_identify_discovered_screen_uses_unique_observed_token_for_sparse_hierarchy():
@@ -1341,3 +1354,81 @@ def test_suite_prompt_choice_uses_observed_locator_fallback(tmp_path):
     ]
     assert driver.fallback_element.clicked is True
     assert evidence["actions"][0]["mechanism"] == "observed_prompt_choice:deny"
+
+def test_suite_confirmation_assertion_passes_only_when_observed_screen_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    class ChangingDriver(_Driver):
+        def __init__(self):
+            super().__init__()
+            self.page_source = (
+                '<hierarchy><node package="com.qtx.demo" class="android.widget.Button" '
+                'text="Proceed" resource-id="com.qtx.demo:id/proceed" clickable="true" /></hierarchy>'
+            )
+
+        def find_element(self, by, value):
+            self.locators.append((by, value))
+            driver = self
+
+            class TransitionElement(_Element):
+                def click(inner_self):
+                    super(TransitionElement, inner_self).click()
+                    driver.page_source = (
+                        '<hierarchy><node package="com.qtx.demo" class="android.widget.Button" '
+                        'text="Home" resource-id="com.qtx.demo:id/home" clickable="true" /></hierarchy>'
+                    )
+
+            return TransitionElement()
+
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    test = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Tap Proceed",
+            target="Proceed",
+            screen_id="confirmation",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/proceed",
+            locator_confidence=0.99,
+        ),
+        QTXIRStep(
+            action="assert_screen_changed",
+            description="Verify the application leaves or changes the observed confirmation state",
+            screen_id="confirmation",
+        ),
+    ])
+
+    assert service._supported(test)
+    evidence = service._execute_test(
+        ChangingDriver(), test, tmp_path, "com.qtx.demo", discovery=None,
+    )
+    assert evidence["actions"][1]["mechanism"] == "observed_screen_changed"
+
+
+def test_suite_confirmation_assertion_fails_when_screen_is_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _Driver()
+    driver.page_source = (
+        '<hierarchy><node package="com.qtx.demo" class="android.widget.Button" '
+        'text="Proceed" resource-id="com.qtx.demo:id/proceed" clickable="true" /></hierarchy>'
+    )
+    test = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Tap Proceed",
+            target="Proceed",
+            screen_id="confirmation",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/proceed",
+            locator_confidence=0.99,
+        ),
+        QTXIRStep(
+            action="assert_screen_changed",
+            description="Verify the application leaves or changes the observed confirmation state",
+            screen_id="confirmation",
+        ),
+    ])
+
+    with pytest.raises(AssertionError, match="did not change the observed application state"):
+        service._execute_test(driver, test, tmp_path, "com.qtx.demo", discovery=None)
