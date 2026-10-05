@@ -13,7 +13,8 @@ from app.api.routes import autopilot
     ("2026-09-27T10:00:00Z", "2026-09-27T11:00:00Z", "old-user@example.test"),
 ])
 def test_corrected_runtime_credential_takes_precedence_over_old_bundle(monkeypatch, field_time, bundle_time, expected):
-    async def resolve(*args):
+    async def resolve(*args, **kwargs):
+        assert kwargs.get("job_id") == "job"
         return {
             "runtime_user": "corrected-user@example.test",
             "credential_reference": json.dumps({
@@ -59,7 +60,8 @@ def test_disabled_sign_in_can_resume_after_corrected_input():
 def test_discovery_does_not_replay_rejected_credentials_without_a_new_value(
     monkeypatch, bundle_time, expected_auth_approval,
 ):
-    async def resolve(*args):
+    async def resolve(*args, **kwargs):
+        assert kwargs.get("job_id") == "job"
         return {
             "runtime_user": "saved-user@example.test",
             "credential_reference": json.dumps({
