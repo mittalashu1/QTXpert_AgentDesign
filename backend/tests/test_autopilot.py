@@ -2982,6 +2982,15 @@ def test_suite_resets_android_prompt_state_between_branches():
     assert calls == [
         ("terminate_app", "com.qtx.demo"),
         ("mobile: clearApp", {"appId": "com.qtx.demo"}),
+        (
+            "mobile: changePermissions",
+            {
+                "permissions": "all",
+                "action": "revoke",
+                "target": "pm",
+                "appPackage": "com.qtx.demo",
+            },
+        ),
     ]
 
 
