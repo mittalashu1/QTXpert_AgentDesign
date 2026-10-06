@@ -571,6 +571,7 @@ class AutopilotSuiteService:
             package = str(package_hint or target_identity.get("package") or identity["package"] or "").strip() or None
             prompt_case_count = 0
             transient_launch_settle_attempted: set[str] = set()
+            transient_launch_recovery_attempted: set[str] = set()
             for test_index, test in enumerate(tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -669,6 +670,7 @@ class AutopilotSuiteService:
                         package,
                         request.target_kind,
                         transient_launch_settle_attempted=transient_launch_settle_attempted,
+                        transient_launch_recovery_attempted=transient_launch_recovery_attempted,
                     )
                     evidence = self._execute_test(
                         driver,
@@ -819,14 +821,27 @@ class AutopilotSuiteService:
                 "The AWS Device Farm Appium endpoint cannot uninstall the app to reset its permission prompt."
             )
         try:
-            removed = remover(package)
+            # Appium Python Client returns the WebDriver object from
+            # remove_app(); it does not return UiAutomator2's boolean result.
+            remover(package)
         except Exception as exc:
             raise ProviderLifecycleUnavailable(
                 "AWS Device Farm could not uninstall the app to reset its permission prompt."
             ) from exc
-        if removed is not True:
+        installed_check = getattr(driver, "is_app_installed", None)
+        if not callable(installed_check):
             raise ProviderLifecycleUnavailable(
-                "AWS Device Farm did not confirm that the app was uninstalled; its permission state was not reset."
+                "AWS Device Farm cannot verify that the app was uninstalled; its permission state was not reset."
+            )
+        try:
+            still_installed = installed_check(package)
+        except Exception as exc:
+            raise ProviderLifecycleUnavailable(
+                "AWS Device Farm could not verify whether the app was uninstalled."
+            ) from exc
+        if still_installed is not False:
+            raise ProviderLifecycleUnavailable(
+                "AWS Device Farm still reports the app installed; its permission state was not reset."
             )
         installer = getattr(device_farm_service, "install_app_in_session", None)
         if not callable(installer):
@@ -1410,6 +1425,7 @@ class AutopilotSuiteService:
         package: str | None,
         target_kind: str = "android",
         transient_launch_settle_attempted: set[str] | None = None,
+        transient_launch_recovery_attempted: set[str] | None = None,
     ) -> list[dict[str, str]]:
         if not discovery or not discovery.screens:
             return []
@@ -1478,11 +1494,11 @@ class AutopilotSuiteService:
             return []
 
         # A hosted mobile session may expose a sparse launch hierarchy before
-        # its observed target surface is ready. Wait briefly; never click a
-        # guessed control, and retain the safe-route block if it stays sparse.
+        # its observed target surface is ready. Wait briefly, then make one
+        # verified app relaunch if the same generic surface persists. Never
+        # click an unknown container or dismiss a native permission prompt.
         if (
-            current.screen_id == discovery.screens[0].screen_id
-            and current.screen_id != target.screen_id
+            current.screen_id != target.screen_id
             and self._is_transient_launch_surface(current)
         ):
             should_settle = (
@@ -1496,7 +1512,10 @@ class AutopilotSuiteService:
                 while time.monotonic() < settle_deadline:
                     time.sleep(0.5)
                     settled = self._identify_discovered_screen(driver, discovery, package)
-                    if settled is not None and settled.screen_id != current.screen_id:
+                    if settled is not None and (
+                        settled.screen_id == target.screen_id
+                        or not self._is_transient_launch_surface(settled)
+                    ):
                         current = settled
                         break
             if current.screen_id == target.screen_id:
@@ -1506,6 +1525,53 @@ class AutopilotSuiteService:
                         "No test action was taken."
                     )
                 return []
+
+            if self._is_transient_launch_surface(current):
+                prompt_kind = known_native_prompt_kind(
+                    driver, safe_page_source(driver), target_kind
+                )
+                should_relaunch = (
+                    transient_launch_recovery_attempted is None
+                    or self._claim_transient_launch_recovery_attempt(
+                        current.screen_id, transient_launch_recovery_attempted
+                    )
+                )
+                if package and should_relaunch and not prompt_kind:
+                    self._activate_application(
+                        driver,
+                        package,
+                        discovery.target_activity,
+                        force_launch=True,
+                        timeout_seconds=15.0,
+                    )
+                    recovery_deadline = time.monotonic() + 15.0
+                    while time.monotonic() < recovery_deadline:
+                        time.sleep(0.5)
+                        recovered = self._identify_discovered_screen(
+                            driver, discovery, package
+                        )
+                        if recovered is not None and (
+                            recovered.screen_id == target.screen_id
+                            or not self._is_transient_launch_surface(recovered)
+                        ):
+                            current = recovered
+                            break
+                if current.screen_id == target.screen_id:
+                    if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
+                        raise ProviderLifecycleUnavailable(
+                            f"The app relaunched to {self._screen_reference(current)}, but the case's observed control is not visible. "
+                            "No test action was taken."
+                        )
+                    return []
+                if self._is_transient_launch_surface(current):
+                    if prompt_kind:
+                        raise ProviderLifecycleUnavailable(
+                            f"The observed {prompt_kind.replace('_', ' ')} prompt is active; Autopilot left it open for its generated choice cases."
+                        )
+                    raise ProviderLifecycleUnavailable(
+                        "The app remained on a generic startup screen after a verified relaunch. "
+                        "No guessed control was tapped and no screen case was attempted."
+                    )
 
         path = self._safe_discovery_path(discovery, current.screen_id, target.screen_id)
         if path is None:
@@ -1671,6 +1737,16 @@ class AutopilotSuiteService:
         screen_id: str, attempted: set[str]
     ) -> bool:
         """Claim one bounded startup wait per sparse screen for this suite run."""
+        if not screen_id or screen_id in attempted:
+            return False
+        attempted.add(screen_id)
+        return True
+
+    @staticmethod
+    def _claim_transient_launch_recovery_attempt(
+        screen_id: str, attempted: set[str]
+    ) -> bool:
+        """Allow at most one verified relaunch per sparse screen in a suite."""
         if not screen_id or screen_id in attempted:
             return False
         attempted.add(screen_id)
