@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -40,6 +41,9 @@ from app.services.appium_compat import (
     validate_target_surface,
 )
 from app.services.autopilot_ir import AutopilotIRCompiler
+
+
+_LOGGER = logging.getLogger("qtxpert")
 
 
 class AutopilotSuiteService:
@@ -543,21 +547,49 @@ class AutopilotSuiteService:
                 from appium.options.android import UiAutomator2Options
 
                 options = UiAutomator2Options().load_capabilities(capabilities)
-            return webdriver.Remote(appium_url, options=options)
+            started = time.monotonic()
+            try:
+                created_driver = webdriver.Remote(appium_url, options=options)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "autopilot_stage=appium_session_create outcome=error elapsed_ms=%s error_type=%s",
+                    max(0, round((time.monotonic() - started) * 1000)),
+                    type(exc).__name__[:80],
+                )
+                raise
+            _LOGGER.info(
+                "autopilot_stage=appium_session_create outcome=success elapsed_ms=%s",
+                max(0, round((time.monotonic() - started) * 1000)),
+            )
+            return created_driver
 
         driver = create_driver()
         results: list[AutopilotSuiteTestResult] = []
         try:
             time.sleep(2)
             initial_source = safe_page_source(driver)
-            target_ready, target_reason, target_identity = self._activate_verified_target(
-                driver,
-                package_hint,
-                activity_hint=activity_hint,
-                timeout_seconds=15.0,
-                poll_interval=0.5,
-                page_source=initial_source,
-                preserve_known_system_prompt=has_prompt_cases,
+            foreground_started = time.monotonic()
+            try:
+                target_ready, target_reason, target_identity = self._activate_verified_target(
+                    driver,
+                    package_hint,
+                    activity_hint=activity_hint,
+                    timeout_seconds=15.0,
+                    poll_interval=0.5,
+                    page_source=initial_source,
+                    preserve_known_system_prompt=has_prompt_cases,
+                )
+            except Exception as exc:
+                _LOGGER.warning(
+                    "autopilot_stage=verified_app_foreground outcome=error elapsed_ms=%s error_type=%s",
+                    max(0, round((time.monotonic() - foreground_started) * 1000)),
+                    type(exc).__name__[:80],
+                )
+                raise
+            _LOGGER.info(
+                "autopilot_stage=verified_app_foreground outcome=%s elapsed_ms=%s",
+                "ready" if target_ready else "not_ready",
+                max(0, round((time.monotonic() - foreground_started) * 1000)),
             )
             if not target_ready:
                 raise ProviderLifecycleUnavailable(target_reason)
@@ -877,9 +909,12 @@ class AutopilotSuiteService:
         try:
             installer(device_farm_session.arn, device_farm_session.app_arn)
         except Exception as exc:
-            raise ProviderLifecycleUnavailable(
-                "AWS Device Farm could not reinstall the selected app upload after resetting its permission state."
-            ) from exc
+            safe_reason = getattr(exc, "safe_reason", None)
+            if not isinstance(safe_reason, str) or not safe_reason.strip():
+                safe_reason = (
+                    "AWS Device Farm could not reinstall the selected app upload after resetting its permission state."
+                )
+            raise ProviderLifecycleUnavailable(safe_reason) from None
 
     @staticmethod
     def _reset_prompt_case_state(driver, package: str | None, target_kind: str) -> None:
