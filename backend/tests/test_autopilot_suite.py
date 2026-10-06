@@ -1401,10 +1401,10 @@ def test_suite_short_circuits_screen_cases_after_target_foreground_failure(tmp_p
             return tmp_path
 
     service = AutopilotSuiteService(Settings(), prototype=Prototype())
-    service._activate_verified_target = lambda package, **_kwargs: (
+    service._activate_verified_target = lambda _driver, package, **_kwargs: (
         True,
         "ready",
-        {"package": "com.qtx.demo"},
+        {"package": package},
     )
     request = AutopilotSuiteRequest(
         target_kind="android",
