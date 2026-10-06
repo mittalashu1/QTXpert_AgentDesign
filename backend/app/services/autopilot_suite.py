@@ -572,6 +572,8 @@ class AutopilotSuiteService:
             prompt_case_count = 0
             transient_launch_settle_attempted: set[str] = set()
             transient_launch_recovery_attempted: set[str] = set()
+            device_farm_prompt_reset_failure: str | None = None
+            target_foreground_failure: str | None = None
             for test_index, test in enumerate(tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -590,6 +592,16 @@ class AutopilotSuiteService:
                     # Do not immediately force-stop that known-good first surface; hosted providers may
                     # switch to Android system UI when restarting the attached app.
                     has_prompt_step = any(step.action == "prompt_choice" for step in test.steps)
+                    has_discovery_screen = any(step.screen_id for step in test.steps)
+                    if has_prompt_step and device_farm_prompt_reset_failure:
+                        raise ProviderLifecycleUnavailable(device_farm_prompt_reset_failure)
+                    if (
+                        has_discovery_screen
+                        and not has_prompt_step
+                        and target_foreground_failure
+                    ):
+                        raise ProviderLifecycleUnavailable(target_foreground_failure)
+
                     expected_prompt_kind = next(
                         (step.target for step in test.steps if step.action == "prompt_choice"),
                         None,
@@ -605,9 +617,16 @@ class AutopilotSuiteService:
                             # permission-reset extension. Uninstall the AUT to
                             # clear its grants, then reinstall this exact upload
                             # through the active remote-access session.
-                            self._reset_device_farm_prompt_state(
-                                driver, package, device_farm_service, device_farm_session
-                            )
+                            try:
+                                self._reset_device_farm_prompt_state(
+                                    driver, package, device_farm_service, device_farm_session
+                                )
+                            except ProviderLifecycleUnavailable as exc:
+                                # The same provider reset cannot succeed for another
+                                # permission permutation in this session. Preserve the
+                                # blocked outcome and avoid repeating its long failure.
+                                device_farm_prompt_reset_failure = str(exc)[:1200]
+                                raise
                             safe_quit(driver)
                             driver = create_driver()
                             time.sleep(2)
@@ -689,6 +708,13 @@ class AutopilotSuiteService:
                     error = None
                     dependency = test.dependency
                 except ProviderLifecycleUnavailable as exc:
+                    blocked_reason = str(exc)[:1200]
+                    if (
+                        has_discovery_screen
+                        and not has_prompt_step
+                        and self._is_target_foreground_failure(blocked_reason)
+                    ):
+                        target_foreground_failure = blocked_reason
                     evidence = safe_app_identity(
                         driver,
                         page_source=safe_page_source(driver),
@@ -699,8 +725,8 @@ class AutopilotSuiteService:
                     # the durable result.
                     evidence["evidence_dir"] = str(evidence_dir)
                     status = "blocked"
-                    error = str(exc)[:1200]
-                    dependency = str(exc)[:1200]
+                    error = blocked_reason
+                    dependency = blocked_reason
                 except Exception as exc:
                     evidence = safe_app_identity(
                         driver,
@@ -1726,6 +1752,20 @@ class AutopilotSuiteService:
                 "entry control is not visible. No test action was taken."
             )
         return navigation
+
+    @staticmethod
+    def _is_target_foreground_failure(reason: str) -> bool:
+        """Identify a provider launch failure that will not improve by replaying every screen case."""
+        normalized = " ".join(str(reason or "").casefold().split())
+        return any(
+            phrase in normalized
+            for phrase in (
+                "runtime session reached only android system ui",
+                "target was not verified in the foreground",
+                "target was not verified in foreground",
+                "app remained on a generic startup screen",
+            )
+        )
 
     @staticmethod
     def _screen_reference(screen) -> str:
