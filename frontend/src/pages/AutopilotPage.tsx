@@ -2893,7 +2893,7 @@ export default function AutopilotPage() {
                    <Typography variant="body2" fontWeight={800}>Generation plan v{effectivePlan.version}</Typography>
                    <Chip size="small" label={workflowPhaseLabel(workflowPhase)} color={planAwaitingApproval ? "warning" : "success"} variant="outlined" />
                  </Stack>
-                 <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .35 }}>{effectivePlan.summary || "Evidence-backed coverage will be explored before cases are compiled."}</Typography>
+                 <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .35 }}>Selected coverage areas for this run. Current case totals and outcomes appear above.</Typography>
                </Box>
                <Stack direction="row" spacing={.75} flexShrink={0}>
                  {effectivePlan.editable && <Button size="small" variant="text" onClick={openPlanEditor} disabled={workflowBusy || discoveryBusy}>Edit plan</Button>}
