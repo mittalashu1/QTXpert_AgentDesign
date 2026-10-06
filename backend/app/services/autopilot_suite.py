@@ -570,6 +570,7 @@ class AutopilotSuiteService:
             )
             package = str(package_hint or target_identity.get("package") or identity["package"] or "").strip() or None
             prompt_case_count = 0
+            transient_launch_settle_attempted: set[str] = set()
             for test_index, test in enumerate(tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -667,6 +668,7 @@ class AutopilotSuiteService:
                         discovery,
                         package,
                         request.target_kind,
+                        transient_launch_settle_attempted=transient_launch_settle_attempted,
                     )
                     evidence = self._execute_test(
                         driver,
@@ -1407,6 +1409,7 @@ class AutopilotSuiteService:
         discovery: AutopilotDiscoveryResult | None,
         package: str | None,
         target_kind: str = "android",
+        transient_launch_settle_attempted: set[str] | None = None,
     ) -> list[dict[str, str]]:
         if not discovery or not discovery.screens:
             return []
@@ -1482,13 +1485,20 @@ class AutopilotSuiteService:
             and current.screen_id != target.screen_id
             and self._is_transient_launch_surface(current)
         ):
-            settle_deadline = time.monotonic() + 12.0
-            while time.monotonic() < settle_deadline:
-                time.sleep(0.5)
-                settled = self._identify_discovered_screen(driver, discovery, package)
-                if settled is not None and settled.screen_id != current.screen_id:
-                    current = settled
-                    break
+            already_settled_this_run = (
+                transient_launch_settle_attempted is not None
+                and current.screen_id in transient_launch_settle_attempted
+            )
+            if not already_settled_this_run:
+                if transient_launch_settle_attempted is not None:
+                    transient_launch_settle_attempted.add(current.screen_id)
+                settle_deadline = time.monotonic() + 12.0
+                while time.monotonic() < settle_deadline:
+                    time.sleep(0.5)
+                    settled = self._identify_discovered_screen(driver, discovery, package)
+                    if settled is not None and settled.screen_id != current.screen_id:
+                        current = settled
+                        break
             if current.screen_id == target.screen_id:
                 if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
                     raise ProviderLifecycleUnavailable(
