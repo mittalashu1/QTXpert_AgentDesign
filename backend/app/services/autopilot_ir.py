@@ -696,8 +696,10 @@ class AutopilotIRCompiler:
         if discovery.status not in {"completed", "partial"} or not discovery.screens:
             return None, "Runtime Discovery has no usable screen graph."
 
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
         screens = {screen.screen_id: screen for screen in discovery.screens}
-        root = discovery.screens[0]
+        root = AutopilotDiscoveryService.select_entry_screen(discovery.screens) or discovery.screens[0]
         current = root
         runtime_screen = screens.get(test.runtime_screen_id or "")
         if runtime_screen is not None and runtime_screen.screen_id != root.screen_id:
@@ -842,11 +844,22 @@ class AutopilotIRCompiler:
 
             tap_match = self._TAP_RE.match(step)
             if tap_match:
+                checkpoint_choice = re.sub(
+                    r"[^a-z0-9]+", " ", str(tap_match.group(1)).casefold()
+                ).strip()
+                observed_cancel_branch = (
+                    test.id.startswith("QT-RUNTIME-CHECKPOINT-")
+                    and not test.destructive
+                    and test.bucket == "functional_negative"
+                    and checkpoint_choice in {
+                        "cancel", "no", "not now", "no thanks", "decline", "reject", "back", "stay",
+                    }
+                )
                 control = self._best_control(
                     current,
                     tap_match.group(1),
                     interaction=True,
-                    allow_full_uat=full_uat,
+                    allow_full_uat=full_uat or observed_cancel_branch,
                 )
                 if control is None:
                     return None, f"No high-confidence safe control matched step: {raw_step}"
