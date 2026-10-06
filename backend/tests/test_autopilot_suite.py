@@ -1724,3 +1724,34 @@ def test_sparse_launch_settle_is_limited_to_once_per_screen_per_suite():
     assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-001", attempted) is True
     assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-001", attempted) is False
     assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-002", attempted) is True
+
+
+def test_device_farm_prompt_reset_preserves_sanitized_provider_reason():
+    class Driver:
+        def remove_app(self, _package):
+            return None
+
+        def is_app_installed(self, _package):
+            return False
+
+    class DeviceFarm:
+        def install_app_in_session(self, *_args):
+            error = RuntimeError("private provider response")
+            error.safe_reason = (
+                "AWS Device Farm could not reinstall the selected app upload "
+                "(aws_error_code=AccessDeniedException http_status=403)."
+            )
+            raise error
+
+    class Session:
+        arn = "arn:remote-session"
+        app_arn = "arn:uploaded-app"
+
+    with pytest.raises(ProviderLifecycleUnavailable, match="aws_error_code=AccessDeniedException") as captured:
+        AutopilotSuiteService._reset_device_farm_prompt_state(
+            Driver(),
+            "com.qtx.demo",
+            DeviceFarm(),
+            Session(),
+        )
+    assert "private provider response" not in str(captured.value)
