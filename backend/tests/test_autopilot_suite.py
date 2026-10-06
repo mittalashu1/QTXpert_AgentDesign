@@ -1373,6 +1373,182 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
     assert device_farm.installs == [("arn:remote-session", "arn:uploaded-app")]
 
 
+
+def test_suite_short_circuits_screen_cases_after_target_foreground_failure(tmp_path, monkeypatch):
+    import appium
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    driver = _SystemUiForegroundDriver(launch_target=False)
+    driver.quit = lambda: None
+    monkeypatch.setattr(appium.webdriver, "Remote", lambda *args, **kwargs: driver)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    recovery_checks = []
+
+    def recovery_verification(*_args, **_kwargs):
+        recovery_checks.append(True)
+        return False, "Runtime session reached only Android system UI; the uploaded application was not launched.", {}
+
+    monkeypatch.setattr(
+        AutopilotSuiteService,
+        "_activate_verified_target",
+        staticmethod(recovery_verification),
+    )
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotSuiteService(Settings(), prototype=Prototype())
+    service._activate_verified_target = lambda _driver, package, **_kwargs: (
+        True,
+        "ready",
+        {"package": package},
+    )
+    request = AutopilotSuiteRequest(
+        target_kind="android",
+        provider="devicefarm",
+        device_name="Google Pixel 8",
+        max_tests=3,
+    )
+    screen_tests = [
+        _test_ir([
+            QTXIRStep(
+                action="inspect_ui",
+                description="Inspect the observed app screen",
+                screen_id="screen-root",
+            ),
+        ]).model_copy(update={"test_id": f"screen-{index}", "bucket": "installation"})
+        for index in range(3)
+    ]
+
+    results = service._run_sync(
+        "job-screen-failure",
+        "https://devicefarm.invalid/appium",
+        "arn:uploaded-app",
+        request,
+        screen_tests,
+        "com.qtx.demo",
+        None,
+        None,
+        1000,
+        1000,
+        1000,
+    )
+
+    assert [result.status for result in results] == ["blocked", "blocked", "blocked"]
+    assert recovery_checks == [True]
+    assert all(result.error for result in results)
+
+
+def test_suite_does_not_retry_failed_device_farm_prompt_reset(tmp_path, monkeypatch):
+    import appium
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    class PromptDriver(_ColdRelaunchDriver):
+        def __init__(self):
+            super().__init__()
+            self.prompt_active = False
+            self.removed_packages = []
+            self.app_installed = True
+            self.install_checks = []
+            self.quit_calls = 0
+
+        def remove_app(self, package):
+            self.removed_packages.append(package)
+            self.app_installed = False
+            return self
+
+        def is_app_installed(self, package):
+            self.install_checks.append(package)
+            return self.app_installed
+
+        def quit(self):
+            self.quit_calls += 1
+
+    driver = PromptDriver()
+    remote_calls = []
+    monkeypatch.setattr(
+        appium.webdriver,
+        "Remote",
+        lambda url, options: remote_calls.append((url, options.to_capabilities())) or driver,
+    )
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "app.services.autopilot_suite.known_native_prompt_kind",
+        lambda current, _source, _target: "runtime_permission" if current.prompt_active else None,
+    )
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    class DeviceFarm:
+        def __init__(self):
+            self.installs = []
+
+        def install_app_in_session(self, session_arn, app_arn):
+            self.installs.append((session_arn, app_arn))
+            raise RuntimeError("provider reset unavailable")
+
+    class Session:
+        arn = "arn:remote-session"
+        app_arn = "arn:uploaded-app"
+
+    device_farm = DeviceFarm()
+    service = AutopilotSuiteService(Settings(), prototype=Prototype())
+    service._activate_verified_target = lambda current, package, **_kwargs: (
+        True,
+        "ready",
+        {"package": package},
+    )
+    request = AutopilotSuiteRequest(
+        target_kind="android",
+        provider="devicefarm",
+        device_name="Google Pixel 8",
+        max_tests=3,
+    )
+    prompt_tests = [
+        _test_ir([
+            QTXIRStep(
+                action="prompt_choice",
+                description="Replay an observed permission branch",
+                target="runtime_permission",
+                value="dont-allow",
+                locator_strategy="id",
+                locator_value="com.android.permissioncontroller:id/deny_button",
+                locator_confidence=0.98,
+            ),
+        ]).model_copy(update={"test_id": f"prompt-failure-{index}", "bucket": "installation"})
+        for index in range(3)
+    ]
+
+    results = service._run_sync(
+        "job-prompt-failure",
+        "https://devicefarm.invalid/appium",
+        "arn:uploaded-app",
+        request,
+        prompt_tests,
+        "com.qtx.demo",
+        None,
+        None,
+        1000,
+        1000,
+        1000,
+        device_farm_service=device_farm,
+        device_farm_session=Session(),
+    )
+
+    assert [result.status for result in results] == ["blocked", "blocked", "blocked"]
+    assert len(remote_calls) == 1
+    assert device_farm.installs == [("arn:remote-session", "arn:uploaded-app")]
+    assert driver.removed_packages == ["com.qtx.demo"]
+    assert driver.install_checks == ["com.qtx.demo"]
+    assert driver.quit_calls == 1
+
+
 def test_identify_discovered_screen_uses_unique_observed_token_for_sparse_hierarchy():
     service = AutopilotSuiteService(Settings(), prototype=object())
     discovery = _navigation_discovery()
