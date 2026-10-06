@@ -2835,12 +2835,15 @@ class AutopilotPrototypeService:
         # provider boundary. Do not apply a second arbitrary case cap here;
         # every observed screen and safe control must be represented in the
         # report, even when that produces hundreds of cases.
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
         screens = list(discovery.screens)
         screen_map = {screen.screen_id: screen for screen in screens}
-        # Replay observed navigation from the launch screen for every case.
-        # A label on a later screen is not reachable merely by launching again.
-        paths: dict[str, list[str]] = {screens[0].screen_id: []} if screens else {}
-        pending = [screens[0].screen_id] if screens else []
+        # Ignore sparse startup/splash observations when grounding routes. A
+        # case starts from the first settled screen with a real safe entry point.
+        entry_screen = AutopilotDiscoveryService.select_entry_screen(screens)
+        paths: dict[str, list[str]] = {entry_screen.screen_id: []} if entry_screen else {}
+        pending = [entry_screen.screen_id] if entry_screen else []
         while pending:
             source_id = pending.pop(0)
             for transition in discovery.transitions:
