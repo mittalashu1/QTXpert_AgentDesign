@@ -795,6 +795,94 @@ def test_suite_waits_briefly_for_sparse_launch_screen_to_settle(monkeypatch):
     assert driver.navigation_clicks == 0
     assert driver.page_source == driver.auth_source
 
+def test_suite_relaunches_once_when_sparse_launch_screen_does_not_settle(monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    discovery.screens[0].controls = [
+        DiscoveredControl(
+            control_id="splash-root",
+            semantic_label="View",
+            class_name="android.view.View",
+            enabled=True,
+            risk="review",
+        )
+    ]
+    driver = _RouteDriver()
+    activation_calls = []
+
+    service._claim_transient_launch_settle_attempt = lambda *_args: False
+
+    def reactivate(driver, package, activity, **_kwargs):
+        activation_calls.append((package, activity))
+        driver.page_source = driver.auth_source
+
+    service._activate_application = reactivate
+    service._identify_discovered_screen = lambda _driver, _discovery, _package: (
+        discovery.screens[1]
+        if driver.page_source == driver.auth_source
+        else discovery.screens[0]
+    )
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify the User ID field on the observed sign-in screen",
+            target="User ID",
+            screen_id="screen-auth",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/user_id",
+            locator_confidence=0.98,
+        )
+    ])
+
+    navigation = service._prepare_test_screen(
+        driver,
+        test,
+        discovery,
+        "com.qtx.demo",
+        transient_launch_settle_attempted={"screen-root"},
+        transient_launch_recovery_attempted=set(),
+    )
+
+    assert navigation == []
+    assert activation_calls == [("com.qtx.demo", None)]
+    assert driver.page_source == driver.auth_source
+
+
+def test_device_farm_prompt_reset_requires_confirmed_uninstall():
+    class Driver:
+        def __init__(self):
+            self.installed = True
+
+        def remove_app(self, _package):
+            self.installed = True
+            return self
+
+        def is_app_installed(self, _package):
+            return self.installed
+
+    class DeviceFarm:
+        def __init__(self):
+            self.installs = []
+
+        def install_app_in_session(self, *args):
+            self.installs.append(args)
+
+    class Session:
+        arn = "arn:remote-session"
+        app_arn = "arn:uploaded-app"
+
+    device_farm = DeviceFarm()
+    driver = Driver()
+    with pytest.raises(ProviderLifecycleUnavailable, match="still reports the app installed"):
+        AutopilotSuiteService._reset_device_farm_prompt_state(
+            driver,
+            "com.qtx.demo",
+            device_farm,
+            Session(),
+        )
+    assert device_farm.installs == []
+
+
 def test_suite_retraces_one_observed_safe_edge_from_empty_sign_in_form():
     service = AutopilotSuiteService(Settings(), prototype=object())
     discovery = _navigation_discovery()
@@ -1182,10 +1270,17 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
             self.prompt_active = True
             self.quit_calls = 0
             self.removed_packages = []
+            self.app_installed = True
+            self.install_checks = []
 
         def remove_app(self, package):
             self.removed_packages.append(package)
-            return True
+            self.app_installed = False
+            return self
+
+        def is_app_installed(self, package):
+            self.install_checks.append(package)
+            return self.app_installed
 
         def execute_script(self, command, arguments):
             raise AssertionError("Device Farm permission replay must not use unsupported mobile extensions")
@@ -1274,6 +1369,7 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
     assert drivers[0].quit_calls == 1
     assert drivers[1].quit_calls == 1
     assert drivers[0].removed_packages == ["com.qtx.demo"]
+    assert drivers[0].install_checks == ["com.qtx.demo"]
     assert device_farm.installs == [("arn:remote-session", "arn:uploaded-app")]
 
 
