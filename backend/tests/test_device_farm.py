@@ -128,3 +128,21 @@ def test_session_without_upload_confirmation_times_out_instead_of_assuming_attac
     else:  # pragma: no cover - assertion documents the attachment contract
         raise AssertionError("a session without an app upload must not be accepted")
 
+
+
+def test_install_app_in_session_reinstalls_the_selected_upload():
+    app_arn = "arn:aws:devicefarm:us-west-2:123:upload:selected-build"
+    calls = []
+    service = DeviceFarmService(Settings())
+    service._client = lambda: SimpleNamespace(
+        install_to_remote_access_session=lambda **kwargs: (
+            calls.append(kwargs) or {"appUpload": {"arn": app_arn}}
+        )
+    )
+
+    service.install_app_in_session("arn:aws:devicefarm:us-west-2:123:session:test", app_arn)
+
+    assert calls == [{
+        "remoteAccessSessionArn": "arn:aws:devicefarm:us-west-2:123:session:test",
+        "appArn": app_arn,
+    }]
