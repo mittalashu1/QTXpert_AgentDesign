@@ -1438,7 +1438,7 @@ def test_suite_short_circuits_screen_cases_after_target_foreground_failure(tmp_p
     )
 
     assert [result.status for result in results] == ["blocked", "blocked", "blocked"]
-    assert recovery_checks == []
+    assert recovery_checks == [True]
     assert all("Android system UI" in result.error for result in results)
 
 
