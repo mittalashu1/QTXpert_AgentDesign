@@ -35,6 +35,7 @@ type TestBucket =
   | "installation" | "page_level" | "functional" | "functional_positive" | "functional_negative"
   | "uat" | "ui" | "ui_positive" | "ui_negative" | "accessibility" | "integration" | "sit" | "performance" | "security" | "compatibility" | "resilience"
   | "permissions" | "regression";
+type TestBucketFilter = "all" | TestBucket | "functional_all" | "uat_sit" | "ui_accessibility" | "runtime_guardrails";
 type TargetKind = "android" | "ios" | "web";
 type Provider = "browserstack" | "devicefarm" | "appium" | "playwright";
 type WorkflowPhase =
@@ -391,6 +392,18 @@ const TEST_BUCKETS: TestBucket[] = [
   "integration", "sit", "performance", "security", "compatibility", "resilience",
   "permissions", "regression",
 ];
+const COVERAGE_BUCKET_GROUPS: Record<Exclude<TestBucketFilter, "all" | TestBucket>, TestBucket[]> = {
+  functional_all: ["functional", "functional_positive", "functional_negative"],
+  uat_sit: ["uat", "sit", "integration"],
+  ui_accessibility: ["ui", "ui_positive", "ui_negative", "accessibility"],
+  runtime_guardrails: ["installation", "page_level", "performance", "security", "compatibility", "resilience", "permissions", "regression"],
+};
+const COVERAGE_GROUP_LABELS: Record<Exclude<TestBucketFilter, "all" | TestBucket>, string> = {
+  functional_all: "Functional journeys",
+  uat_sit: "UAT / SIT",
+  ui_accessibility: "UI & accessibility",
+  runtime_guardrails: "Runtime & guardrails",
+};
 const testBucketLabel: Record<TestBucket, string> = {
   installation: "Installation", page_level: "Page-level", functional: "Functional",
   functional_positive: "Functional · Positive", functional_negative: "Functional · Negative",
@@ -816,7 +829,8 @@ export default function AutopilotPage() {
   const [platformVersion, setPlatformVersion] = useState("14.0");
   const [appiumApp, setAppiumApp] = useState("");
   const [autoGrantPermissions, setAutoGrantPermissions] = useState(true);
-  const [testBucketFilter, setTestBucketFilter] = useState<"all" | TestBucket>("all");
+  const [testBucketFilter, setTestBucketFilter] = useState<TestBucketFilter>("all");
+  const [suiteOutcomeFilter, setSuiteOutcomeFilter] = useState<"all" | "passed" | "failed" | "incomplete">("all");
   const [journeyFilter, setJourneyFilter] = useState("all");
   const [suiteBucket, setSuiteBucket] = useState<"all" | TestBucket>("all");
   const [suiteMaxTests, setSuiteMaxTests] = useState(20);
@@ -861,6 +875,9 @@ export default function AutopilotPage() {
     setArtifactAvailable(true);
     setAnalysisProgress(0);
     setAnalysisStage("");
+    setTestBucketFilter("all");
+    setSuiteOutcomeFilter("all");
+    setJourneyFilter("all");
     setContextNotice("");
     setContextScope(null);
     setError("");
@@ -1290,19 +1307,33 @@ export default function AutopilotPage() {
     }
     return counts;
   }, [analysis]);
+  const suiteOutcomeByTestId = useMemo(
+    () => new Map((suite?.tests || []).map((test) => [test.test_id, test])),
+    [suite],
+  );
   const testPlanSummary = useMemo(() => {
     const counts = bucketCounts;
     const sum = (buckets: TestBucket[]) => buckets.reduce((total, bucket) => total + (counts[bucket] || 0), 0);
     return [
-      { label: "Functional journeys", value: sum(["functional", "functional_positive", "functional_negative"]), detail: "Core flows and positive/negative paths" },
-      { label: "UAT / SIT", value: sum(["uat", "sit", "integration"]), detail: "Business acceptance and service boundaries" },
-      { label: "UI & accessibility", value: sum(["ui", "ui_positive", "ui_negative", "accessibility"]), detail: "Visual, interaction and inclusive behavior" },
-      { label: "Runtime & guardrails", value: sum(["installation", "page_level", "performance", "security", "compatibility", "resilience", "permissions", "regression"]), detail: "Platform, resilience, security and regression checks" },
+      { label: "Functional journeys", value: sum(COVERAGE_BUCKET_GROUPS.functional_all), detail: "Core flows and positive/negative paths", filter: "functional_all" as const },
+      { label: "UAT / SIT", value: sum(COVERAGE_BUCKET_GROUPS.uat_sit), detail: "Business acceptance and service boundaries", filter: "uat_sit" as const },
+      { label: "UI & accessibility", value: sum(COVERAGE_BUCKET_GROUPS.ui_accessibility), detail: "Visual, interaction and inclusive behavior", filter: "ui_accessibility" as const },
+      { label: "Runtime & guardrails", value: sum(COVERAGE_BUCKET_GROUPS.runtime_guardrails), detail: "Platform, resilience, security and regression checks", filter: "runtime_guardrails" as const },
     ];
   }, [bucketCounts]);
   const visibleTests = useMemo(
-    () => analysis?.tests.filter((test) => testBucketFilter === "all" || normalizedBucket(test) === testBucketFilter) ?? [],
-    [analysis, testBucketFilter],
+    () => analysis?.tests.filter((test) => {
+      const bucket = normalizedBucket(test);
+      const groupedBuckets = testBucketFilter !== "all" && testBucketFilter in COVERAGE_BUCKET_GROUPS
+        ? COVERAGE_BUCKET_GROUPS[testBucketFilter as keyof typeof COVERAGE_BUCKET_GROUPS]
+        : null;
+      const matchesBucket = testBucketFilter === "all" || (groupedBuckets ? groupedBuckets.includes(bucket) : bucket === testBucketFilter);
+      if (!matchesBucket || suiteOutcomeFilter === "all" || !suite) return matchesBucket;
+      const result = suiteOutcomeByTestId.get(test.id);
+      if (suiteOutcomeFilter === "passed" || suiteOutcomeFilter === "failed") return result?.status === suiteOutcomeFilter;
+      return result?.status !== "passed" && result?.status !== "failed";
+    }) ?? [],
+    [analysis, suite, suiteOutcomeByTestId, suiteOutcomeFilter, testBucketFilter],
   );
   const journeyOptions = useMemo(
     () => Array.from(new Set(visibleTests.map((test) => test.journey || "General coverage"))).sort((left, right) => left.localeCompare(right)),
@@ -2258,10 +2289,12 @@ export default function AutopilotPage() {
   const targetName = targetKind === "web"
     ? analysis?.target_url || targetUrl || "Add a website URL"
     : selectedApplicationName || analysis?.filename || `Choose an ${targetKind === "ios" ? "iOS IPA" : "Android APK"}`;
-  const functionalCaseCount = (bucketCounts.functional || 0)
-    + (bucketCounts.functional_positive || 0)
-    + (bucketCounts.functional_negative || 0);
-  const executionCount = report?.metrics.executed_test_cases ?? suite?.tests.length ?? (execution ? 1 : 0);
+  const hasOutcomeMetrics = Boolean(suite || (report && !reportPending));
+  const passedCaseCount = suite?.passed_count ?? (reportPending ? null : report?.metrics.passed_count ?? null);
+  const failedCaseCount = suite?.failed_count ?? (reportPending ? null : report?.metrics.failed_count ?? null);
+  const incompleteCaseCount = stats && passedCaseCount !== null && failedCaseCount !== null
+    ? Math.max(0, stats.tests - passedCaseCount - failedCaseCount)
+    : null;
   const confidencePercent = effectiveApplicationMap
     ? Math.round(Math.max(0, Math.min(1, effectiveApplicationMap.confidence)) * 100)
     : null;
@@ -2284,6 +2317,29 @@ export default function AutopilotPage() {
   const activeStageIndex = Math.max(0, autopilotStages.findIndex((stage) => !stage.complete));
   const scrollToSection = (sectionId: string) => {
     document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const openCaseOutcome = (filter: "all" | "passed" | "failed" | "incomplete") => {
+    setTestBucketFilter("all");
+    setJourneyFilter("all");
+    if (filter !== "all" && !suite) {
+      setSuiteOutcomeFilter("all");
+      scrollToSection("autopilot-report");
+      return;
+    }
+    setSuiteOutcomeFilter(filter);
+    scrollToSection("autopilot-test-coverage");
+  };
+  const openCoverageGroup = (filter: Exclude<TestBucketFilter, "all" | TestBucket>) => {
+    setTestBucketFilter(filter);
+    setJourneyFilter("all");
+    setSuiteOutcomeFilter("all");
+    scrollToSection("autopilot-test-coverage");
+  };
+  const openJourneyCases = (journey: string) => {
+    setTestBucketFilter("all");
+    setSuiteOutcomeFilter("all");
+    setJourneyFilter(journey);
+    scrollToSection("autopilot-test-coverage");
   };
   const openScopeSetup = () => {
     setScopeExpanded(true);
@@ -2393,15 +2449,22 @@ export default function AutopilotPage() {
           <CardContent>
             <Stack direction="row" justifyContent="space-between" alignItems="center"><Stack direction="row" spacing={.7} alignItems="center"><AccountTreeOutlinedIcon color="primary" fontSize="small" /><Typography variant="subtitle2" fontWeight={800}>Coverage at a glance</Typography></Stack><Button size="small" onClick={() => scrollToSection("autopilot-test-coverage")} disabled={!analysis}>View all</Button></Stack>
             <Grid container spacing={.6} sx={{ mt: .35 }}>
-              {[
-                ["Cases", stats?.tests ?? 0],
-                ["Functional", functionalCaseCount],
-                ["Ready", automation?.executable_count ?? 0],
-                ["Executed", executionCount],
-              ].map(([label, value]) => <Grid item xs={3} key={String(label)}><Box sx={{ p: .7, borderRadius: 1.5, bgcolor: "var(--design-surface-subtle)" }}><Typography variant="caption" color="text.secondary" noWrap>{label}</Typography><Typography variant="h6" fontWeight={800} lineHeight={1.1}>{value}</Typography></Box></Grid>)}
+              {([
+                { label: "Planned", value: stats?.tests ?? 0, filter: "all" },
+                { label: "Passed", value: passedCaseCount ?? "—", filter: "passed" },
+                { label: "Failed", value: failedCaseCount ?? "—", filter: "failed" },
+                { label: "Not complete", value: incompleteCaseCount ?? "—", filter: "incomplete" },
+              ] as const).map(({ label, value, filter }) => <Grid item xs={3} key={label}>
+                <Button fullWidth disabled={!analysis || (filter !== "all" && !hasOutcomeMetrics)} onClick={() => openCaseOutcome(filter)} title={`Open ${String(label).toLowerCase()} test cases`} sx={{ p: .7, minWidth: 0, minHeight: 54, borderRadius: 1.5, bgcolor: "var(--design-surface-subtle)", display: "flex", flexDirection: "column", alignItems: "flex-start", justifyContent: "center", textTransform: "none", color: "text.primary", "&:hover .autopilot-metric-value": { textDecoration: "underline" } }}>
+                  <Typography variant="caption" color="text.secondary" noWrap>{label}</Typography><Typography className="autopilot-metric-value" variant="h6" fontWeight={800} lineHeight={1.1}>{value}</Typography>
+                </Button>
+              </Grid>)}
             </Grid>
             <Stack direction="row" spacing={.6} useFlexGap flexWrap="wrap" sx={{ mt: .9 }}>
-              {analysis ? <><Chip size="small" label={`${stats?.journeys ?? 0} planned journeys`} color="primary" variant="outlined" /><Chip size="small" label={`${discovery?.screen_count ?? 0} screens found`} variant="outlined" /></> : <Typography variant="caption" color="text.secondary">Your test coverage will appear here after analysis.</Typography>}
+              {analysis ? <>
+                <Button size="small" variant="text" onClick={() => { setJourneyFilter("all"); setSuiteOutcomeFilter("all"); scrollToSection("autopilot-test-coverage"); }} title="Open the planned journeys">{stats?.journeys ?? 0} journeys</Button>
+                <Button size="small" variant="text" onClick={() => scrollToSection("autopilot-runtime-discovery")} disabled={!discovery} title="Open observed screens">{discovery?.screen_count ?? 0} screens</Button>
+              </> : <Typography variant="caption" color="text.secondary">Your test coverage will appear here after analysis.</Typography>}
             </Stack>
           </CardContent>
         </Card>
@@ -2426,9 +2489,8 @@ export default function AutopilotPage() {
       <Grid item xs={12} lg={6}>
         <Card className="autopilot-glass autopilot-compact" variant="outlined" sx={{ height: "100%", borderRadius: 3 }}>
           <CardContent>
-            <Stack direction="row" justifyContent="space-between" alignItems="center"><Stack direction="row" spacing={.7} alignItems="center"><FactCheckOutlinedIcon color="primary" fontSize="small" /><Typography variant="subtitle2" fontWeight={800}>Generated test plan</Typography></Stack><Chip size="small" label={`${stats?.tests ?? 0} tests`} color="primary" variant="outlined" /></Stack>
-            {visibleJourneyPreview.length ? <Stack spacing={.55} sx={{ mt: .8 }}>{visibleJourneyPreview.map(([journey, count]) => <Stack key={journey} direction="row" spacing={.8} alignItems="center" sx={{ p: .6, borderRadius: 1.5, bgcolor: "var(--design-surface-subtle)" }}><AccountTreeOutlinedIcon sx={{ fontSize: 16, color: "primary.main" }} /><Typography variant="caption" fontWeight={700} noWrap sx={{ flex: 1 }}>{journey}</Typography><Chip size="small" label={`${count} ${count === 1 ? "case" : "cases"}`} variant="outlined" sx={{ height: 22 }} /></Stack>)}</Stack> : <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Journeys appear here when Autopilot analyzes the target.</Typography>}
-            {analysis && <Button size="small" sx={{ mt: .5 }} onClick={() => scrollToSection("autopilot-test-coverage")}>Review cases</Button>}
+            <Stack direction="row" justifyContent="space-between" alignItems="center"><Stack direction="row" spacing={.7} alignItems="center"><FactCheckOutlinedIcon color="primary" fontSize="small" /><Typography variant="subtitle2" fontWeight={800}>Generated test plan</Typography></Stack><Button size="small" onClick={() => openCaseOutcome("all")} disabled={!analysis}>View cases</Button></Stack>
+            {visibleJourneyPreview.length ? <Stack spacing={.55} sx={{ mt: .8 }}>{visibleJourneyPreview.map(([journey, count]) => <Stack key={journey} direction="row" spacing={.8} alignItems="center" sx={{ p: .35, pl: .6, borderRadius: 1.5, bgcolor: "var(--design-surface-subtle)" }}><AccountTreeOutlinedIcon sx={{ fontSize: 16, color: "primary.main" }} /><Button size="small" variant="text" onClick={() => openJourneyCases(journey)} title={`Show ${journey} test cases`} sx={{ flex: 1, minWidth: 0, justifyContent: "flex-start", textTransform: "none", fontWeight: 700 }}><Typography variant="caption" fontWeight={700} noWrap>{journey}</Typography></Button><Button size="small" variant="text" onClick={() => openJourneyCases(journey)} title={`Show ${count} ${count === 1 ? "case" : "cases"} in ${journey}`} sx={{ minWidth: 0, px: .5, height: 24 }}>{count} {count === 1 ? "case" : "cases"}</Button></Stack>)}</Stack> : <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Journeys appear here when Autopilot analyzes the target.</Typography>}
           </CardContent>
         </Card>
       </Grid>
@@ -2647,7 +2709,7 @@ export default function AutopilotPage() {
     </Alert>}
 
     {analysis && stats && <>
-      {report && <Card variant="outlined" sx={{ borderRadius: 3, borderColor: report.recommendation === "NO_GO" ? "error.main" : reportPending ? "info.main" : "warning.main" }}><CardContent>
+      {report && <Card id="autopilot-report" variant="outlined" sx={{ borderRadius: 3, borderColor: report.recommendation === "NO_GO" ? "error.main" : reportPending ? "info.main" : "warning.main", scrollMarginTop: 16 }}><CardContent>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}>
           <Stack direction="row" spacing={1} alignItems="center"><FactCheckOutlinedIcon color="primary" /><Box><Typography variant="h6" fontWeight={800}>{report.report_title}</Typography><Typography variant="caption" color="text.secondary">{report.role} · {report.prepared_for}</Typography><Typography variant="caption" color="text.secondary" display="block">Last run: {report.last_run_at ? new Date(report.last_run_at).toLocaleString() : "Pending — execution is yet to be completed."}</Typography></Box></Stack>
           <Stack direction="row" spacing={1} alignItems="center">
@@ -2670,20 +2732,20 @@ export default function AutopilotPage() {
         {reportPending ? <Grid container spacing={1.5} sx={{ mt: .5 }}>
           {[["Decision", "PENDING"], ["Execution", "Pending"], ["Functional", "Pending"], ["Non-functional", "Pending"], ["Compliance", "Pending"], ["Last run", "—"]].map(([label, value]) => <Grid item xs={6} sm={4} md={2} key={label}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}
         </Grid> : <Grid container spacing={1.5} sx={{ mt: .5 }}>
-          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Designed cases</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.designed_test_cases}</Typography></Box></Grid>
-          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Executed</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.executed_test_cases ?? "—"}</Typography></Box></Grid>
-          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Pass rate</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.pass_rate === null ? "—" : `${report.metrics.pass_rate}%`}</Typography></Box></Grid>
-          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Failed / blocked</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.failed_count} / {report.metrics.blocked_count}</Typography></Box></Grid>
-          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Defects</Typography><Typography variant="h5" fontWeight={800}>{report.metrics.defect_count ?? "—"}</Typography></Box></Grid>
-          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Open risks</Typography><Typography variant="h5" fontWeight={800}>{report.risk_matrix.filter((risk) => risk.status === "open" || risk.status === "pending_validation").length}</Typography></Box></Grid>
+          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Designed cases</Typography><Button size="small" onClick={() => openCaseOutcome("all")} sx={{ p: 0, minWidth: 0, display: "block", fontSize: "1.5rem", fontWeight: 800, lineHeight: 1.25 }}>{report.metrics.designed_test_cases}</Button></Box></Grid>
+          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Executed</Typography><Button size="small" onClick={() => scrollToSection(suite ? "autopilot-suite-results" : "autopilot-automation")} sx={{ p: 0, minWidth: 0, display: "block", fontSize: "1.5rem", fontWeight: 800, lineHeight: 1.25 }}>{report.metrics.executed_test_cases ?? "—"}</Button></Box></Grid>
+          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Pass rate</Typography><Button size="small" onClick={() => scrollToSection(suite ? "autopilot-suite-results" : "autopilot-automation")} sx={{ p: 0, minWidth: 0, display: "block", fontSize: "1.5rem", fontWeight: 800, lineHeight: 1.25 }}>{report.metrics.pass_rate === null ? "—" : `${report.metrics.pass_rate}%`}</Button></Box></Grid>
+          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Failed / blocked</Typography><Button size="small" onClick={() => scrollToSection(suite ? "autopilot-suite-results" : "autopilot-automation")} sx={{ p: 0, minWidth: 0, display: "block", fontSize: "1.5rem", fontWeight: 800, lineHeight: 1.25 }}>{report.metrics.failed_count} / {report.metrics.blocked_count}</Button></Box></Grid>
+          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Defects</Typography><Button size="small" onClick={() => scrollToSection(suite ? "autopilot-suite-results" : "autopilot-automation")} sx={{ p: 0, minWidth: 0, display: "block", fontSize: "1.5rem", fontWeight: 800, lineHeight: 1.25 }}>{report.metrics.defect_count ?? "—"}</Button></Box></Grid>
+          <Grid item xs={6} sm={4} md={2}><Box sx={{ p: 1.5, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">Open risks</Typography><Button size="small" onClick={() => scrollToSection("autopilot-report-risks")} sx={{ p: 0, minWidth: 0, display: "block", fontSize: "1.5rem", fontWeight: 800, lineHeight: 1.25 }}>{report.risk_matrix.filter((risk) => risk.status === "open" || risk.status === "pending_validation").length}</Button></Box></Grid>
         </Grid>}
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>{report.metrics.evidence_state}</Typography>
-        {(report.evidence_assets || []).length > 0 && <Box sx={{ mt: 1.5, p: 1.25, border: "1px solid", borderColor: "divider", borderRadius: 2, bgcolor: "action.hover" }}>
+        {(report.evidence_assets || []).length > 0 && <Box id="autopilot-report-evidence" sx={{ mt: 1.5, p: 1.25, border: "1px solid", borderColor: "divider", borderRadius: 2, bgcolor: "action.hover", scrollMarginTop: 16 }}>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}>
             <Box><Typography variant="subtitle2" fontWeight={800}>Evidence in this report</Typography><Typography variant="caption" color="text.secondary">Durable assets are retained with this report and excluded from the general repository list.</Typography></Box>
-            <Chip size="small" label={`${(report.evidence_assets || []).length} asset${(report.evidence_assets || []).length === 1 ? "" : "s"}`} variant="outlined" />
+            <Button size="small" onClick={() => scrollToSection("autopilot-report-evidence-list")} title="View report screenshots, videos and other evidence">{(report.evidence_assets || []).length} evidence items</Button>
           </Stack>
-          <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .75 }}>
+          <Stack id="autopilot-report-evidence-list" direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .75, scrollMarginTop: 16 }}>
             {(report.evidence_assets || []).map((asset) => <Button key={asset.asset_id} size="small" variant="outlined" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }} title={asset.title || asset.filename}>
               {evidenceAssetLabel(asset.kind)}{asset.bucket ? ` · ${testBucketLabel[asset.bucket]}` : ""}
             </Button>)}
@@ -2695,7 +2757,13 @@ export default function AutopilotPage() {
             <Tooltip title={report.scope.authentication_gate}><InfoOutlinedIcon fontSize="small" color="action" /></Tooltip>
           </Stack>
           <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .75 }}>{[...report.scope.functional_scope, ...report.scope.non_functional_scope].slice(0, 10).map((item) => <Chip key={item} size="small" label={item} variant="outlined" />)}</Stack>
-          <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>Sources: {report.scope.sources.length} · Documents retained: {report.scope.document_sections.length} · Scope sections: {report.scope.scope_sections.length} · Runtime observed: {report.scope.runtime_observed ? "yes" : "not yet"} · Sign-in observed: {report.scope.login_observed ? "yes" : "no"}</Typography>
+          <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>
+            <Button size="small" onClick={() => scrollToSection("autopilot-scope-summary")} title="Open the evidence and sources used to shape the scope">Sources · {report.scope.sources.length}</Button>
+            <Button size="small" onClick={() => scrollToSection("autopilot-scope-summary")} title="Open the retained document sections">Documents · {report.scope.document_sections.length}</Button>
+            <Button size="small" onClick={() => scrollToSection("autopilot-scope-summary")} title="Open the scope sections">Scope sections · {report.scope.scope_sections.length}</Button>
+            <Button size="small" onClick={() => scrollToSection("autopilot-runtime-discovery")} title="Open observed runtime screens">Runtime · {report.scope.runtime_observed ? "observed" : "not yet"}</Button>
+            <Button size="small" onClick={() => scrollToSection("autopilot-runtime-discovery")} title="Open the observed sign-in boundary">Sign-in · {report.scope.login_observed ? "observed" : "not observed"}</Button>
+          </Stack>
         </Box>}
         {!reportPending && report.executive_findings.length > 0 && <Stack spacing={.5} sx={{ mt: 1.5 }}>{report.executive_findings.map((finding) => <Typography key={finding} variant="body2">• {finding}</Typography>)}</Stack>}
         {!reportPending && report.reported_issues.length > 0 && <Alert severity="warning" sx={{ mt: 1.5 }}><b>Context-reported status (unverified):</b><Stack spacing={.25} sx={{ mt: .5 }}>{report.reported_issues.map((issue) => <Typography key={issue} variant="body2">• {issue}</Typography>)}</Stack></Alert>}
@@ -2724,7 +2792,7 @@ export default function AutopilotPage() {
         <ReportChecksTable checks={report.non_functional_testing} />
         <Typography variant="subtitle1" fontWeight={800} sx={{ mt: 2 }}>Audit and regulatory compliance verification</Typography>
         <ReportChecksTable checks={report.compliance_verification} />
-        <Typography variant="subtitle1" fontWeight={800} sx={{ mt: 2 }}>Risk matrix</Typography>
+        <Typography id="autopilot-report-risks" variant="subtitle1" fontWeight={800} sx={{ mt: 2, scrollMarginTop: 16 }}>Risk matrix</Typography>
         <ReportRiskTable risks={report.risk_matrix} />
         <Typography variant="subtitle1" fontWeight={800} sx={{ mt: 2 }}>Engineering recommendations</Typography>
         <Stack spacing={.5} sx={{ mt: 1 }}>{report.recommendations.map((item) => <Typography key={item} variant="body2">• {item}</Typography>)}</Stack>
@@ -2732,14 +2800,19 @@ export default function AutopilotPage() {
         </>}
       </CardContent></Card>}
       {analysis.warnings.length > 0 && <Alert severity="warning">{analysis.warnings.join(" ")}</Alert>}
-       <Grid container spacing={1.25}>{[["Generated tests", stats.tests], ["Coverage buckets", stats.buckets], ["Autonomous-safe", stats.autonomous], ["Critical / high", stats.critical]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Card variant="outlined"><CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h4" fontWeight={800}>{value}</Typography></CardContent></Card></Grid>)}</Grid>
+      <Grid container spacing={1.25}>{([
+        { label: "Automation-ready", value: automation?.executable_count ?? 0, open: () => scrollToSection("autopilot-automation") },
+        { label: "Coverage buckets", value: stats.buckets, open: () => scrollToSection("autopilot-test-coverage") },
+        { label: "Autonomous-safe", value: stats.autonomous, open: () => scrollToSection("autopilot-automation") },
+        { label: "Critical / high", value: stats.critical, open: () => scrollToSection("autopilot-test-coverage") },
+      ] as const).map(({ label, value, open }) => <Grid item xs={6} md={3} key={label}><Card variant="outlined"><CardContent sx={{ p: 1.25, "&:last-child": { pb: 1.25 } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Button size="small" onClick={open} sx={{ p: 0, minWidth: 0, display: "block", fontSize: "1.75rem", fontWeight: 800, lineHeight: 1.25 }}>{value}</Button></CardContent></Card></Grid>)}</Grid>
 
         <Grid container spacing={2}>
          <Grid item xs={12} lg={8}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><AccountTreeOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Application intelligence</Typography></Stack><Typography sx={{ mt: 1.5 }}>{analysis.app_summary}</Typography><Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1.5 }}><Chip size="small" label={contextBadge.label} color={contextBadge.color} variant="outlined" /><Chip size="small" label={aiBadge.label} color={aiBadge.color} variant="outlined" /></Stack>{analysis.analysis_basis && analysis.analysis_basis.length > 0 && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Basis: {analysis.analysis_basis.join(" · ")}</Typography>}<Divider sx={{ my: 2 }} /><Grid container spacing={2}><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Application</Typography><Typography fontWeight={700}>{analysis.app_name || "Unknown"}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Domain</Typography><Typography fontWeight={700}>{analysis.inferred_domain}</Typography></Grid><Grid item xs={6} md={4}><Typography variant="caption" color="text.secondary">Version</Typography><Typography fontWeight={700}>{analysis.version_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Package</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.package_name || "—"}</Typography></Grid><Grid item xs={12} md={6}><Typography variant="caption" color="text.secondary">Main activity</Typography><Typography sx={{ wordBreak: "break-all" }}>{analysis.main_activity || "—"}</Typography></Grid></Grid></CardContent></Card></Grid>
         <Grid item xs={12} lg={4}><Card variant="outlined" sx={{ height: "100%" }}><CardContent><Stack direction="row" spacing={1} alignItems="center"><SecurityOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Guardrails</Typography></Stack><Stack spacing={1} sx={{ mt: 1.5 }}><Chip label="Safe discovery: enabled" color="success" variant="outlined" /><Chip label="Transactions / destructive actions: blocked" color="warning" variant="outlined" /><Chip label={`Debuggable: ${analysis.debuggable === true ? "YES" : analysis.debuggable === false ? "No" : "Unknown"}`} variant="outlined" /></Stack></CardContent></Card></Grid>
       </Grid>
 
-      {analysis.scope && (analysis.scope.summary || analysis.scope.sources.length > 0 || analysis.scope.scope_sections.length > 0) && <Card variant="outlined"><CardContent>
+      {analysis.scope && (analysis.scope.summary || analysis.scope.sources.length > 0 || analysis.scope.scope_sections.length > 0) && <Card id="autopilot-scope-summary" variant="outlined" sx={{ scrollMarginTop: 16 }}><CardContent>
         <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}>
           <Box>
             <Typography variant="h6" fontWeight={800}>Scope at a glance</Typography>
@@ -2797,7 +2870,8 @@ export default function AutopilotPage() {
           </Box>
         </Stack>
         <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" sx={{ mt: 1.5 }}>
-          <Chip size="small" label={`All (${stats.tests})`} color={testBucketFilter === "all" ? "primary" : "default"} variant={testBucketFilter === "all" ? "filled" : "outlined"} onClick={() => setTestBucketFilter("all")} />
+          <Chip size="small" label="All cases" color={testBucketFilter === "all" ? "primary" : "default"} variant={testBucketFilter === "all" ? "filled" : "outlined"} onClick={() => { setTestBucketFilter("all"); setSuiteOutcomeFilter("all"); setJourneyFilter("all"); }} />
+          {Object.prototype.hasOwnProperty.call(COVERAGE_GROUP_LABELS, testBucketFilter) && <Chip size="small" label={`Coverage: ${COVERAGE_GROUP_LABELS[testBucketFilter as keyof typeof COVERAGE_GROUP_LABELS]}`} color="primary" variant="outlined" onDelete={() => setTestBucketFilter("all")} />}
           {TEST_BUCKETS.filter((bucket) => bucketCounts[bucket]).map((bucket) => (
             <Chip
               key={bucket}
@@ -2808,6 +2882,7 @@ export default function AutopilotPage() {
               onClick={() => setTestBucketFilter(bucket)}
             />
           ))}
+          {suiteOutcomeFilter !== "all" && <Chip size="small" label={`Outcome: ${suiteOutcomeFilter === "incomplete" ? "not complete" : suiteOutcomeFilter}`} color="info" variant="outlined" onDelete={() => setSuiteOutcomeFilter("all")} />}
           {journeyOptions.length > 0 && <FormControl size="small" sx={{ minWidth: 190 }}>
             <InputLabel id="autopilot-journey-filter-label">Journey</InputLabel>
             <Select labelId="autopilot-journey-filter-label" label="Journey" value={journeyOptions.includes(journeyFilter) ? journeyFilter : "all"} onChange={(event) => setJourneyFilter(event.target.value)}>
@@ -2860,7 +2935,7 @@ export default function AutopilotPage() {
             {testPlanSummary.map((item) => <Grid item xs={6} md={3} key={item.label}>
               <Box sx={{ p: 1, height: "100%", borderRadius: 1.5, bgcolor: "background.paper" }}>
                 <Typography variant="caption" color="text.secondary" display="block">{item.label}</Typography>
-                <Typography variant="h6" fontWeight={800}>{item.value}</Typography>
+                 <Button size="small" onClick={() => openCoverageGroup(item.filter)} title={`Show ${item.label.toLowerCase()} cases`} sx={{ p: 0, minWidth: 0, display: "block", fontSize: "1.25rem", fontWeight: 800, lineHeight: 1.25 }}>{item.value}</Button>
                 <Typography variant="caption" color="text.secondary">{item.detail}</Typography>
               </Box>
             </Grid>)}
@@ -2912,6 +2987,14 @@ export default function AutopilotPage() {
                   const setupRequired = Boolean(!test.autonomous_candidate && (test.requires_auth || test.requires_test_data || test.dependency));
                   const probes = test.data_probes || [];
                   const setupRequest = setupRequired ? requestForTest(test) : null;
+                  const runResult = suiteOutcomeByTestId.get(test.id);
+                  const runStatusLabel = suite
+                    ? runResult ? (runResult.status === "blocked" || runResult.status === "skipped" ? "Not complete" : runResult.status) : "Not run"
+                    : testModeLabel(test);
+                  const runStatusColor = !suite ? (test.destructive ? "warning" : setupRequired ? "info" : "success")
+                    : runResult?.status === "passed" ? "success"
+                      : runResult?.status === "failed" ? "error"
+                        : runResult ? "warning" : "default";
                   return <TableRow key={test.id} hover>
                     <TableCell sx={{ minWidth: 320 }}>
                       <Stack direction="row" spacing={.5} alignItems="flex-start">
@@ -2933,9 +3016,9 @@ export default function AutopilotPage() {
                         {(test.provenance || []).length > 0 && <Tooltip title={<Box>{(test.provenance || []).map((item) => <Typography key={`${item.kind}-${item.reference}`} variant="caption" display="block"><b>{item.label}</b>{item.observed ? " · observed" : " · scope"}</Typography>)}</Box>}><InfoOutlinedIcon sx={{ fontSize: 15, color: "text.secondary" }} /></Tooltip>}
                       </Stack>
                     </TableCell>
-                     <TableCell sx={{ minWidth: 250 }}>
-                      <Chip size="small" label={testModeLabel(test)} color={test.destructive ? "warning" : setupRequired ? "info" : "success"} variant="outlined" />
-                      {test.dependency && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>{test.dependency}</Typography>}
+                      <TableCell sx={{ minWidth: 250 }}>
+                       <Chip size="small" label={runStatusLabel} color={runStatusColor} variant="outlined" />
+                       {(runResult?.error || runResult?.dependency || test.dependency) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .5 }}>{runResult?.error || runResult?.dependency || test.dependency}</Typography>}
                        {setupRequired && <Button size="small" sx={{ mt: .5 }} onClick={() => openSetup(setupRequest?.key)}>{setupRequest ? "Resolve input" : "Review setup"}</Button>}
                      </TableCell>
                      <TableCell align="right" sx={{ minWidth: 108 }}>
@@ -2955,16 +3038,16 @@ export default function AutopilotPage() {
        <Card id="autopilot-runtime-discovery" variant="outlined" sx={{ scrollMarginTop: 16 }}><CardContent>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, destructive submits, confirmations and OTP actions remain blocked.</Typography></Box><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}><FormControlLabel sx={{ mr: 0 }} control={<Switch size="small" checked={includeTransactionJourneys && activeTargetKind !== "web"} disabled={activeTargetKind === "web" || discoveryBusy} onChange={(event) => setIncludeTransactionJourneys(event.target.checked)} />} label={<Typography variant="caption">Map transaction screens (no submit)</Typography>} /><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable || planAwaitingApproval} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : planAwaitingApproval ? "Approve plan first" : "Run discovery"}</Button></Stack></Stack>
         {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
-        {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.target_ready === false && <Alert severity="warning" sx={{ mt: 1.25 }}><b>Target not attached.</b> The provider did not expose the uploaded application, so no new coverage was generated. {discovery.target_identity_reason || discovery.error || "Check the app package/activity or the device session and retry."}</Alert>}{discovery.target_ready === true && discovery.interactive_surface_ready === false && <Alert severity="warning" action={<Button color="inherit" size="small" disabled={discoveryBusy} onClick={() => void runDiscovery()}>Retry discovery</Button>} sx={{ mt: 1.25 }}><b>Operator checkpoint.</b> {discovery.checkpoint_message || "The app is attached but has not reached an interactive page. Check the app startup/device state, then retry. No functional journeys were inferred."}</Alert>}{discovery.last_attempt_status && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The previous evidence map is retained. Latest Runtime Discovery attempt: {discovery.last_attempt_status}{discovery.last_attempt_reason ? ` · ${discovery.last_attempt_reason}` : ""}</Typography>}{(discovery.runtime_prompts || []).length > 0 && <Alert severity="info" sx={{ mt: 1.25 }}>
+        {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Screens", discovery.screen_count], ["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Button fullWidth onClick={() => scrollToSection(label === "Screens" ? "autopilot-runtime-screens" : "autopilot-runtime-controls")} disabled={label === "Screens" ? discovery.screens.length === 0 : discoveredRows.length === 0} title={`Open discovered ${String(label).toLowerCase()}`} sx={{ p: 1.25, minHeight: 62, bgcolor: "action.hover", borderRadius: 2, display: "flex", flexDirection: "column", alignItems: "flex-start", textTransform: "none", color: "text.primary", "&:hover .autopilot-metric-value": { textDecoration: "underline" } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography className="autopilot-metric-value" variant="h6" fontWeight={800}>{value}</Typography></Button></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.target_ready === false && <Alert severity="warning" sx={{ mt: 1.25 }}><b>Target not attached.</b> The provider did not expose the uploaded application, so no new coverage was generated. {discovery.target_identity_reason || discovery.error || "Check the app package/activity or the device session and retry."}</Alert>}{discovery.target_ready === true && discovery.interactive_surface_ready === false && <Alert severity="warning" action={<Button color="inherit" size="small" disabled={discoveryBusy} onClick={() => void runDiscovery()}>Retry discovery</Button>} sx={{ mt: 1.25 }}><b>Operator checkpoint.</b> {discovery.checkpoint_message || "The app is attached but has not reached an interactive page. Check the app startup/device state, then retry. No functional journeys were inferred."}</Alert>}{discovery.last_attempt_status && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The previous evidence map is retained. Latest Runtime Discovery attempt: {discovery.last_attempt_status}{discovery.last_attempt_reason ? ` · ${discovery.last_attempt_reason}` : ""}</Typography>}{(discovery.runtime_prompts || []).length > 0 && <Alert severity="info" sx={{ mt: 1.25 }}>
           <b>Observed prompt branches.</b>{" "}
           {(discovery.runtime_prompts || []).map((prompt) =>
             `${prompt.title || prompt.kind}: ${prompt.choices.map((choice) => `${choice.label} (${choice.outcome_status})`).join(", ") || "no deterministic choices captured"}`
           ).join(" · ")} Separate allow/deny cases are added to the test plan; only outcomes actually traversed are marked observed.
-        </Alert>}{discovery.screens.length > 0 && <Grid container spacing={1.5} sx={{ mt: .5 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{(discovery.last_attempt_screens || []).length > 0 && <><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1.5 }}>Latest attempt evidence</Typography><Grid container spacing={1.5} sx={{ mt: .25 }}>{discovery.last_attempt_screens!.map((screen) => <Grid item xs={12} sm={6} lg={4} key={`latest-${screen.screen_id}`}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid></>}{discoveredRows.length > 0 && <TableContainer sx={{ mt: 2, maxHeight: 400 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Journey / page</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen.screen_id}-${control.control_id}`} hover><TableCell><Typography variant="body2" fontWeight={700}>{screen.page_label || screen.title || screen.journey || "Observed page"}</Typography><Typography variant="caption" color="text.secondary">{screen.journey || "Observed journey"} · {screen.screen_id}</Typography></TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+        </Alert>}{discovery.screens.length > 0 && <Grid id="autopilot-runtime-screens" container spacing={1.5} sx={{ mt: .5, scrollMarginTop: 16 }}>{discovery.screens.map((screen) => <Grid item xs={12} sm={6} lg={4} key={screen.screen_id}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid>}{(discovery.last_attempt_screens || []).length > 0 && <><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1.5 }}>Latest attempt evidence</Typography><Grid container spacing={1.5} sx={{ mt: .25 }}>{discovery.last_attempt_screens!.map((screen) => <Grid item xs={12} sm={6} lg={4} key={`latest-${screen.screen_id}`}><RuntimeScreenPreview screen={screen} /></Grid>)}</Grid></>}{discoveredRows.length > 0 && <TableContainer id="autopilot-runtime-controls" sx={{ mt: 2, maxHeight: 400, scrollMarginTop: 16 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Journey / page</TableCell><TableCell>Control</TableCell><TableCell>Risk</TableCell><TableCell>Best locator</TableCell><TableCell>Confidence</TableCell></TableRow></TableHead><TableBody>{discoveredRows.map(({ screen, control }) => { const locator = control.locators[0]; return <TableRow key={`${screen.screen_id}-${control.control_id}`} hover><TableCell><Typography variant="body2" fontWeight={700}>{screen.page_label || screen.title || screen.journey || "Observed page"}</Typography><Typography variant="caption" color="text.secondary">{screen.journey || "Observed journey"} · {screen.screen_id}</Typography></TableCell><TableCell><Typography variant="body2" fontWeight={700}>{control.semantic_label}</Typography><Typography variant="caption" color="text.secondary">{control.class_name.split(".").pop() || control.class_name}</Typography></TableCell><TableCell><Chip size="small" label={control.risk} color={riskColor[control.risk]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 320 }}><Typography variant="caption" sx={{ wordBreak: "break-all" }}>{locator ? `${locator.strategy}: ${locator.value}` : "No deterministic locator"}</Typography></TableCell><TableCell>{locator ? `${Math.round(locator.confidence * 100)}%` : "—"}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
         {discovery && (discovery.warnings || []).length > 0 && <Box component="details" sx={{ mt: 1 }}><Typography component="summary" variant="caption" sx={{ cursor: "pointer" }}>Discovery details</Typography>{discovery.warnings.map((warning, index) => <Typography key={index} variant="caption" display="block" sx={{ mt: .5 }}>{warning}</Typography>)}</Box>}
       </CardContent></Card>
 
-      <Card variant="outlined"><CardContent>
+      <Card id="autopilot-automation" variant="outlined" sx={{ scrollMarginTop: 16 }}><CardContent>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}>
           <Box>
             <Stack direction="row" spacing={1} alignItems="center"><SmartToyOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Semantic automation & safe execution</Typography></Stack>
@@ -3014,8 +3097,8 @@ export default function AutopilotPage() {
           {runtimeInputRequests.length > 0 && <Box sx={{ mt: 1.25, p: 1.25, borderRadius: 1.5, bgcolor: runtimePendingCount > 0 ? "warning.lighter" : "info.lighter", border: "1px solid", borderColor: runtimePendingCount > 0 ? "warning.light" : "info.light" }}><Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}><Box><Typography variant="body2" fontWeight={700}>Runtime fields mapped</Typography><Typography variant="caption" color="text.secondary">{runtimeInputRequests.length} field{runtimeInputRequests.length === 1 ? "" : "s"} were found on the live screen map. {runtimePendingCount > 0 ? `The ${runtimePendingCount} credential or sensitive field${runtimePendingCount === 1 ? " is" : "s are"} waiting for you in the checkpoint above.` : `${runtimeSyntheticCount || "These"} non-sensitive field${runtimeInputRequests.length === 1 ? " is" : "s are"} ready for bounded synthetic data on the first pass.`}</Typography></Box><Button size="small" variant="outlined" onClick={() => openSetup()}>Review probes</Button></Stack></Box>}
           {resumeBusy && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Validating saved references and resuming the checkpoint…</Typography>}
         </Box>
-        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Box sx={{ p: 1.25, bgcolor: "action.hover", borderRadius: 2 }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · all evidence-scoped cases shown</Typography><TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.map((test) => { const bucket = normalizedBucket(test); const setupRequest = test.readiness !== "executable" ? requestForTest(test) : null; return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={() => openSetup(setupRequest?.key)}>{setupRequest ? "Resolve input" : "Review setup"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
-      {suite && <><Alert sx={{ mt: 2 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>{suite.execution_mode === "full_uat" ? "Full UAT transaction run:" : "Safe-navigation run:"} <b>{suite.status.toUpperCase()}</b> · {suite.passed_count} passed · {suite.failed_count} failed · {suite.skipped_count} deferred/blocked · {suite.duration_seconds}s{suite.deferred_count ? ` · ${suite.deferred_count} plan case(s) still pending` : ""}{suite.promoted_count ? ` · ${suite.promoted_count} discovery-promoted` : ""}{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{suite.execution_mode === "full_uat" ? "The full UAT run selected every generated case and attempted each case eligible for this environment; setup-gated or unsupported cases remain visible and never count as passed." : `The plan includes every evidence-scoped case. This safe batch runs up to ${suiteMaxTests} eligible cases; setup-gated or unsupported cases remain visible and never count as passed.`} Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>{suiteDefects.length} defect{suiteDefects.length === 1 ? "" : "s"} logged from this suite. Each record keeps the failed-case history and opaque evidence links.</Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
+        {automation && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Executable", automation.executable_count], ["Promoted by discovery", automation.promoted_count], ["Needs discovery/data", automation.discovery_required_count], ["Approval required", automation.approval_required_count]].map(([label, value]) => <Grid item xs={6} md={3} key={String(label)}><Button fullWidth onClick={() => scrollToSection("autopilot-automation-cases")} title={`Open ${String(label).toLowerCase()} cases`} sx={{ p: 1.25, minHeight: 62, bgcolor: "action.hover", borderRadius: 2, display: "flex", flexDirection: "column", alignItems: "flex-start", textTransform: "none", color: "text.primary", "&:hover .autopilot-metric-value": { textDecoration: "underline" } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography className="autopilot-metric-value" variant="h6" fontWeight={800}>{value}</Typography></Button></Grid>)}</Grid><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>IR {automation.schema_version} · runtime discovery {automation.discovery_used ? "consumed" : "not yet available"} · all evidence-scoped cases shown</Typography><TableContainer id="autopilot-automation-cases" sx={{ mt: 1.5, maxHeight: 360, scrollMarginTop: 16 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Readiness</TableCell><TableCell>Dependency / reason</TableCell></TableRow></TableHead><TableBody>{automation.tests.map((test) => { const bucket = normalizedBucket(test); const setupRequest = test.readiness !== "executable" ? requestForTest(test) : null; return <TableRow key={test.test_id} hover><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell><Chip size="small" label={testBucketLabel[bucket]} variant="outlined" /></TableCell><TableCell><Chip size="small" label={test.readiness.replaceAll("_", " ")} color={readinessColor[test.readiness]} variant="outlined" /></TableCell><TableCell sx={{ maxWidth: 430 }}><Typography variant="caption" color="text.secondary">{test.readiness_reason || test.dependency || "—"}</Typography>{test.readiness !== "executable" && <Button size="small" sx={{ ml: 1 }} onClick={() => openSetup(setupRequest?.key)}>{setupRequest ? "Resolve input" : "Review setup"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer></>}
+      {suite && <><Alert id="autopilot-suite-results" sx={{ mt: 2, scrollMarginTop: 16 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>{suite.execution_mode === "full_uat" ? "Full UAT transaction run:" : "Safe-navigation run:"} <b>{suite.status.toUpperCase()}</b> · {suite.duration_seconds}s{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{suite.execution_mode === "full_uat" ? "The full UAT run selected every generated case and attempted each case eligible for this environment; setup-gated or unsupported cases remain visible and never count as passed." : `The plan includes every evidence-scoped case. This safe batch runs up to ${suiteMaxTests} eligible cases; setup-gated or unsupported cases remain visible and never count as passed.`} Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>Defects were logged from this suite. <Button size="small" onClick={() => scrollToSection("autopilot-suite-results")}>Review failed cases</Button></Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></Card>
 
       <Card variant="outlined"><CardContent><Stack direction="row" spacing={1} alignItems="center"><PlayArrowRoundedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Execution target & safe smoke</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>This target is shared by Runtime Discovery, the autonomous safe suite and smoke execution.</Typography>
