@@ -146,3 +146,28 @@ def test_install_app_in_session_reinstalls_the_selected_upload():
         "remoteAccessSessionArn": "arn:aws:devicefarm:us-west-2:123:session:test",
         "appArn": app_arn,
     }]
+
+
+def test_device_farm_install_error_exposes_only_sanitized_provider_code_and_status():
+    service = DeviceFarmService(Settings())
+    provider_error = RuntimeError("sensitive provider message containing an account identifier")
+    provider_error.response = {
+        "Error": {"Code": "AccessDeniedException", "Message": "never expose this"},
+        "ResponseMetadata": {"HTTPStatusCode": 403},
+    }
+
+    def fail_install(**_kwargs):
+        raise provider_error
+
+    service._client = lambda: SimpleNamespace(install_to_remote_access_session=fail_install)
+
+    try:
+        service.install_app_in_session("arn:session", "arn:upload")
+    except DeviceFarmError as exc:
+        assert exc.safe_reason
+        assert "AccessDeniedException" in exc.safe_reason
+        assert "http_status=403" in exc.safe_reason
+        assert "sensitive provider message" not in exc.safe_reason
+        assert "account identifier" not in exc.safe_reason
+    else:  # pragma: no cover
+        raise AssertionError("provider installation failure should remain explicit")
