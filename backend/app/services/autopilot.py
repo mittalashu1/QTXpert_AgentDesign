@@ -92,6 +92,24 @@ logger = logging.getLogger(__name__)
 _MISSING = object()
 _JOB_UPDATE_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 _JOB_UPDATE_LOCKS_GUARD = threading.Lock()
+_PERSISTENCE_DISABLED_UNTIL = 0.0
+_PERSISTENCE_CIRCUIT_GUARD = threading.Lock()
+_DURABLE_JOB_LOADS: dict[tuple[int, str], asyncio.Task[Dict[str, Any] | None]] = {}
+_DURABLE_JOB_LOADS_GUARD = threading.Lock()
+
+
+def _persistence_circuit_open() -> bool:
+    with _PERSISTENCE_CIRCUIT_GUARD:
+        return time.monotonic() < _PERSISTENCE_DISABLED_UNTIL
+
+
+def _disable_persistence_for(seconds: float = 60.0) -> None:
+    global _PERSISTENCE_DISABLED_UNTIL
+    deadline = time.monotonic() + max(0.0, seconds)
+    with _PERSISTENCE_CIRCUIT_GUARD:
+        _PERSISTENCE_DISABLED_UNTIL = max(_PERSISTENCE_DISABLED_UNTIL, deadline)
+
+
 
 
 def _job_update_lock(path: Path) -> asyncio.Lock:
@@ -208,6 +226,10 @@ class _WebSurfaceParser(html.parser.HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._in_title and data.strip():
             self.title_parts.append(data.strip())
+
+
+class AutopilotStorageUnavailable(RuntimeError):
+    """Raised when durable Autopilot data cannot be read temporarily."""
 
 
 class AutopilotUploadTooLarge(ValueError):
@@ -560,7 +582,7 @@ class AutopilotPrototypeService:
 
     async def _persist_job(self, job: Dict[str, Any], analysis: Any = _MISSING) -> None:
         """Best-effort durable write; filesystem operation must never fail on DB hiccups."""
-        if not self._durable_results_enabled or time.monotonic() < self._persistence_disabled_until:
+        if not self._durable_results_enabled or _persistence_circuit_open() or time.monotonic() < self._persistence_disabled_until:
             return
 
         async def persist_once() -> None:
@@ -752,11 +774,40 @@ class AutopilotPrototypeService:
         # optional result store is temporarily unavailable. Avoid repeatedly
         # waiting on a broken connection for the next minute.
         self._persistence_disabled_until = time.monotonic() + 60
-        logger.warning("Autopilot durable result write skipped after %d attempt(s): %s", attempts, last_error)
+        _disable_persistence_for()
+        logger.warning(
+            "Autopilot durable result write skipped after %d attempt(s); error_type=%s",
+            attempts,
+            type(last_error).__name__ if last_error is not None else "UnknownError",
+        )
 
     async def _load_job_from_db(self, job_id: str) -> Dict[str, Any] | None:
-        if not self._durable_results_enabled or time.monotonic() < self._persistence_disabled_until:
+        if not self._durable_results_enabled:
             return None
+        if _persistence_circuit_open() or time.monotonic() < self._persistence_disabled_until:
+            raise AutopilotStorageUnavailable(
+                "Autopilot job storage is temporarily unavailable."
+            )
+
+        # A page restore makes several API calls for the same job at once.
+        # Coalesce those reads so the burst uses one database connection.
+        loop_key = id(asyncio.get_running_loop())
+        cache_key = (loop_key, job_id)
+        with _DURABLE_JOB_LOADS_GUARD:
+            pending = _DURABLE_JOB_LOADS.get(cache_key)
+            if pending is None or pending.done():
+                pending = asyncio.create_task(self._read_job_from_db(job_id))
+                _DURABLE_JOB_LOADS[cache_key] = pending
+
+        try:
+            return await asyncio.shield(pending)
+        finally:
+            if pending.done():
+                with _DURABLE_JOB_LOADS_GUARD:
+                    if _DURABLE_JOB_LOADS.get(cache_key) is pending:
+                        _DURABLE_JOB_LOADS.pop(cache_key, None)
+
+    async def _read_job_from_db(self, job_id: str) -> Dict[str, Any] | None:
         try:
             async with AsyncSessionLocal() as session:
                 record = await session.scalar(
@@ -778,7 +829,11 @@ class AutopilotPrototypeService:
                     "repository_asset_id": str(record.repository_asset_id) if record.repository_asset_id else None,
                     "context": record.context or "",
                     "document_asset_ids": list(getattr(record, "document_asset_ids", None) or []),
-                    "document_analysis_run_id": str(record.document_analysis_run_id) if getattr(record, "document_analysis_run_id", None) else None,
+                    "document_analysis_run_id": (
+                        str(record.document_analysis_run_id)
+                        if getattr(record, "document_analysis_run_id", None)
+                        else None
+                    ),
                     "apk_path": record.apk_path,
                     "status": record.status,
                     "stage": record.stage,
@@ -809,12 +864,22 @@ class AutopilotPrototypeService:
                 return result
         except Exception as exc:  # pragma: no cover - exercised by unavailable production DBs
             self._persistence_disabled_until = time.monotonic() + 60
-            logger.warning("Autopilot durable result read skipped: %s", exc)
-            return None
+            _disable_persistence_for()
+            logger.warning(
+                "Autopilot durable result read failed; error_type=%s",
+                type(exc).__name__,
+            )
+            raise AutopilotStorageUnavailable(
+                "Autopilot job storage is temporarily unavailable."
+            ) from exc
 
     async def _latest_job_id_from_db(self, owner_id: str) -> str | None:
-        if not self._durable_results_enabled or time.monotonic() < self._persistence_disabled_until:
+        if not self._durable_results_enabled:
             return None
+        if _persistence_circuit_open() or time.monotonic() < self._persistence_disabled_until:
+            raise AutopilotStorageUnavailable(
+                "Autopilot job storage is temporarily unavailable."
+            )
         try:
             async with AsyncSessionLocal() as session:
                 record = await session.scalar(
@@ -829,8 +894,14 @@ class AutopilotPrototypeService:
                 return record.job_id if record else None
         except Exception as exc:  # pragma: no cover - exercised by unavailable production DBs
             self._persistence_disabled_until = time.monotonic() + 60
-            logger.warning("Autopilot durable latest-job read skipped: %s", exc)
-            return None
+            _disable_persistence_for()
+            logger.warning(
+                "Autopilot durable latest-job read failed; error_type=%s",
+                type(exc).__name__,
+            )
+            raise AutopilotStorageUnavailable(
+                "Autopilot job storage is temporarily unavailable."
+            ) from exc
 
     def _job_dir(self, job_id: str) -> Path:
         if not re.fullmatch(r"[0-9a-f-]{36}", job_id):
