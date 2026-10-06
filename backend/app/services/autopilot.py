@@ -870,6 +870,7 @@ class AutopilotPrototypeService:
             raise AutopilotStorageUnavailable(
                 "Autopilot job storage is temporarily unavailable."
             ) from exc
+
     async def _latest_job_id_from_db(self, owner_id: str) -> str | None:
         if not self._durable_results_enabled:
             return None
@@ -899,6 +900,7 @@ class AutopilotPrototypeService:
             raise AutopilotStorageUnavailable(
                 "Autopilot job storage is temporarily unavailable."
             ) from exc
+
     def _job_dir(self, job_id: str) -> Path:
         if not re.fullmatch(r"[0-9a-f-]{36}", job_id):
             raise ValueError("Invalid Autopilot job id")
