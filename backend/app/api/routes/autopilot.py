@@ -71,6 +71,7 @@ from app.schemas.execution import AutopilotDefectCreate, DefectJiraDraftOut, Def
 from app.schemas.upload_repository import ReuseUploadedAssetRequest
 from app.services.autopilot import (
     AutopilotPrototypeService,
+    AutopilotStorageUnavailable,
     AutopilotUploadInvalid,
     AutopilotUploadTooLarge,
     build_report_tab_key,
@@ -791,6 +792,11 @@ async def _require_owned_job(
     """Load a job and verify ownership without refreshing an expired User row."""
     try:
         job = await service.load_job(job_id)
+    except AutopilotStorageUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Autopilot job storage is temporarily busy. Wait briefly, then retry.",
+        ) from exc
     except (FileNotFoundError, ValueError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot job not found")
     # A previous rollback can expire the ORM instance supplied by the auth
