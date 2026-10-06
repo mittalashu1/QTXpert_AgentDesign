@@ -944,6 +944,17 @@ class AutopilotIRCompiler:
                         current = screens[next(iter(predecessor_ids))]
                 continue
 
+            if step.casefold() == "verify the application leaves or changes the observed confirmation state":
+                resolved.append(
+                    QTXIRStep(
+                        action="assert_screen_changed",
+                        description=raw_step,
+                        screen_id=current.screen_id,
+                    )
+                )
+                assertion_count += 1
+                continue
+
             assert_match = self._ASSERT_RE.match(step)
             if assert_match:
                 assertion_phrase = assert_match.group(1)

@@ -63,6 +63,7 @@ class AutopilotSuiteService:
         "reset",
         "assert_visible",
         "assert_text",
+        "assert_screen_changed",
         "assert_validation_feedback",
     }
     # Record only user-journey coverage.  Installation, discovery, security
@@ -116,7 +117,7 @@ class AutopilotSuiteService:
                 prompt_decision = choice.decision if choice else None
             return (
                 not (test.readiness == "executable" and self._supported(test)),
-                test.runtime_prompt_id is None,
+                test.runtime_prompt_id is not None,
                 0 if prompt_decision == "deny" else 1,
             )
         selected.sort(key=selection_priority)
@@ -595,11 +596,10 @@ class AutopilotSuiteService:
                         prompt_case_count > 0 or current_prompt_kind != expected_prompt_kind
                     ):
                         if is_device_farm:
-                            # Device Farm excludes mobile: clearApp and
-                            # mobile: resetPermission. Its Appium endpoint
-                            # supports multiple sessions per remote-access
-                            # device, and fastReset clears the app state without
-                            # requiring an Appium app capability.
+                            # Revoke the AUT's Android runtime grants before
+                            # reopening a fast-reset session. Session reset
+                            # alone can leave OS permission decisions intact.
+                            self._revoke_android_prompt_permissions(driver, package)
                             safe_quit(driver)
                             driver = create_driver()
                             time.sleep(2)
@@ -845,6 +845,47 @@ class AutopilotSuiteService:
         except Exception as exc:
             raise ProviderLifecycleUnavailable(
                 f"The provider could not clear app data to replay this Android prompt ({type(exc).__name__})."
+            ) from exc
+        AutopilotSuiteService._revoke_android_prompt_permissions(
+            driver, package, app_stopped=True
+        )
+
+    @staticmethod
+    def _revoke_android_prompt_permissions(
+        driver, package: str, *, app_stopped: bool = False
+    ) -> None:
+        """Revoke only the AUT's runtime grants before replaying Android prompts."""
+        execute_script = getattr(driver, "execute_script", None)
+        if not callable(execute_script):
+            raise ProviderLifecycleUnavailable(
+                "The Android provider cannot revoke runtime permissions for this app; use a resettable Appium device."
+            )
+        if not app_stopped:
+            terminator = getattr(driver, "terminate_app", None)
+            if not callable(terminator):
+                raise ProviderLifecycleUnavailable(
+                    "The Android provider cannot stop the app before resetting its permission prompt."
+                )
+            try:
+                terminator(package)
+            except Exception as exc:
+                raise ProviderLifecycleUnavailable(
+                    f"The provider could not stop the app before resetting Android permissions ({type(exc).__name__})."
+                ) from exc
+        try:
+            execute_script(
+                "mobile: changePermissions",
+                {
+                    "permissions": "all",
+                    "action": "revoke",
+                    "target": "pm",
+                    "appPackage": package,
+                },
+            )
+        except Exception as exc:
+            raise ProviderLifecycleUnavailable(
+                "The Android provider could not revoke this app's runtime permissions "
+                "with mobile: changePermissions; use a provider that supports the UiAutomator2 permission API."
             ) from exc
 
     @staticmethod
@@ -1636,6 +1677,24 @@ class AutopilotSuiteService:
                 return False
         return True
 
+    @staticmethod
+    def _semantic_surface_fingerprint(driver, package: str | None) -> str | None:
+        """Fingerprint only observed screen semantics; never retain field values."""
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        source = safe_page_source(driver)
+        if not source:
+            return None
+        identity = safe_app_identity(driver, page_source=source, package_hint=package)
+        controls = AutopilotDiscoveryService.parse_controls(source)
+        if not controls and not identity.get("package") and not identity.get("activity"):
+            return None
+        return AutopilotDiscoveryService.fingerprint(
+            identity.get("package"),
+            identity.get("activity"),
+            controls,
+        )
+
     def _execute_test(
         self,
         driver,
@@ -1659,6 +1718,7 @@ class AutopilotSuiteService:
         input_values = input_values or {}
         sensitive_input_keys = sensitive_input_keys or set()
         sensitive_input_touched = False
+        previous_surface_fingerprint: str | None = None
         for index, step in enumerate(test.steps, start=1):
             mechanism: str | None = None
             resulting_prompt_kind: str | None = None
@@ -1862,7 +1922,24 @@ class AutopilotSuiteService:
                 # The bounded wait is an explicit IR action so a slow screen
                 # is distinguishable from an unsupported provider command.
                 time.sleep(min(120.0, max(0.0, float(step.timeout_ms or 1000) / 1000)))
+            elif step.action == "assert_screen_changed":
+                current_fingerprint = self._semantic_surface_fingerprint(driver, package)
+                if not previous_surface_fingerprint or not current_fingerprint:
+                    raise AssertionError(
+                        "The observed confirmation state could not be compared from readable app screens."
+                    )
+                if current_fingerprint == previous_surface_fingerprint:
+                    raise AssertionError(
+                        "The selected confirmation option did not change the observed application state."
+                    )
+                mechanism = "observed_screen_changed"
             elif step.action in {"tap", "click", "assert_visible", "assert_text", "clear", "select"}:
+                if (
+                    step.action in {"tap", "click"}
+                    and index < len(test.steps)
+                    and test.steps[index].action == "assert_screen_changed"
+                ):
+                    previous_surface_fingerprint = self._semantic_surface_fingerprint(driver, package)
                 # Native Android/iOS back controls are often present in the
                 # discovery hierarchy but are not addressable on the next
                 # fresh Appium hierarchy (the provider may expose them only

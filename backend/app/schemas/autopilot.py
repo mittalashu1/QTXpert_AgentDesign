@@ -802,6 +802,7 @@ class QTXIRStep(BaseModel):
         "navigate",
         "assert_visible",
         "assert_text",
+        "assert_screen_changed",
         "assert_url",
         "request_json",
         "request",

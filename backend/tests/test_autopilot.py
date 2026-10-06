@@ -2982,6 +2982,15 @@ def test_suite_resets_android_prompt_state_between_branches():
     assert calls == [
         ("terminate_app", "com.qtx.demo"),
         ("mobile: clearApp", {"appId": "com.qtx.demo"}),
+        (
+            "mobile: changePermissions",
+            {
+                "permissions": "all",
+                "action": "revoke",
+                "target": "pm",
+                "appPackage": "com.qtx.demo",
+            },
+        ),
     ]
 
 
@@ -3161,3 +3170,106 @@ def test_smoke_safely_recovers_from_google_location_prompt(monkeypatch):
     assert prompt_evidence["device_settings_modified"] is False
     assert driver.calls == ["back"]
 
+def _confirmation_discovery(*, include_warning=True, include_cancel=True):
+    job_id = "77777777-7777-7777-7777-777777777777"
+    controls = []
+    if include_warning:
+        controls.append(DiscoveredControl(
+            control_id="warning-copy",
+            semantic_label="By proceeding, you will be logged out from other devices.",
+            class_name="android.widget.TextView",
+            clickable=True,
+            risk="safe",
+        ))
+    controls.append(DiscoveredControl(
+        control_id="proceed",
+        semantic_label="Proceed",
+        class_name="android.widget.Button",
+        clickable=True,
+        risk="review",
+        locators=[DiscoveryLocator(
+            strategy="accessibility_id", value="Proceed", confidence=0.99,
+        )],
+    ))
+    if include_cancel:
+        controls.append(DiscoveredControl(
+            control_id="cancel",
+            semantic_label="Cancel",
+            class_name="android.widget.Button",
+            clickable=True,
+            risk="review",
+            locators=[DiscoveryLocator(
+                strategy="accessibility_id", value="Cancel", confidence=0.99,
+            )],
+        ))
+    analysis = AutopilotAnalysis(
+        job_id=job_id,
+        filename="confirmation.apk",
+        sha256="7" * 64,
+        tests=[],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-10-05T00:00:00+00:00",
+        finished_at="2026-10-05T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screens=[DiscoveredScreen(
+            screen_id="confirmation",
+            fingerprint="confirmation",
+            package_name="com.example.uat",
+            activity_name=".MainActivity",
+            journey="Session verification",
+            page_label="Verify this session",
+            controls=controls,
+        )],
+    )
+    return analysis, discovery
+
+
+def test_runtime_expansion_generates_both_observed_confirmation_branches(tmp_path):
+    service = _service(tmp_path)
+    analysis, discovery = _confirmation_discovery()
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    cases = [
+        test for test in expanded.tests
+        if test.id.startswith("QT-RUNTIME-CHECKPOINT-")
+    ]
+
+    assert len(cases) == 2
+    proceed = next(test for test in cases if "Proceed" in test.title)
+    cancel = next(test for test in cases if "Cancel" in test.title)
+    assert proceed.destructive is True
+    assert cancel.destructive is False
+    assert all(
+        "Verify the application leaves or changes the observed confirmation state"
+        in test.steps
+        for test in cases
+    )
+
+    compiled = AutopilotIRCompiler().compile_bundle(
+        AutopilotAnalysis.model_validate(expanded.model_dump()),
+        discovery,
+        full_uat=True,
+    )
+    for case in cases:
+        ir_case = next(test for test in compiled.tests if test.test_id == case.id)
+        assert ir_case.readiness == "executable"
+        assert any(step.action == "assert_screen_changed" for step in ir_case.steps)
+
+
+def test_runtime_expansion_requires_confirmation_copy_and_both_choices(tmp_path):
+    service = _service(tmp_path)
+    for kwargs in (
+        {"include_warning": False, "include_cancel": True},
+        {"include_warning": True, "include_cancel": False},
+    ):
+        analysis, discovery = _confirmation_discovery(**kwargs)
+        expanded = service.expand_discovered_coverage(analysis, discovery)
+        assert not any(
+            test.id.startswith("QT-RUNTIME-CHECKPOINT-")
+            for test in expanded.tests
+        )
