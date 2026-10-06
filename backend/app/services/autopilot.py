@@ -111,7 +111,6 @@ def _disable_persistence_for(seconds: float = 60.0) -> None:
 
 
 
-
 def _job_update_lock(path: Path) -> asyncio.Lock:
     """Share one in-process manifest lock across service instances for a job."""
     key = str(path.resolve())
@@ -230,7 +229,6 @@ class _WebSurfaceParser(html.parser.HTMLParser):
 
 class AutopilotStorageUnavailable(RuntimeError):
     """Raised when durable Autopilot data cannot be read temporarily."""
-
 
 class AutopilotUploadTooLarge(ValueError):
     """Raised when an Autopilot upload exceeds the configured byte limit."""
@@ -872,7 +870,6 @@ class AutopilotPrototypeService:
             raise AutopilotStorageUnavailable(
                 "Autopilot job storage is temporarily unavailable."
             ) from exc
-
     async def _latest_job_id_from_db(self, owner_id: str) -> str | None:
         if not self._durable_results_enabled:
             return None
@@ -902,7 +899,6 @@ class AutopilotPrototypeService:
             raise AutopilotStorageUnavailable(
                 "Autopilot job storage is temporarily unavailable."
             ) from exc
-
     def _job_dir(self, job_id: str) -> Path:
         if not re.fullmatch(r"[0-9a-f-]{36}", job_id):
             raise ValueError("Invalid Autopilot job id")
