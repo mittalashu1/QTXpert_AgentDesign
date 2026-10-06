@@ -14,6 +14,7 @@ secrets, an attached role, or a local AWS profile).
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import time
@@ -29,6 +30,10 @@ from app.config import Settings
 
 class DeviceFarmError(RuntimeError):
     """Raised when Device Farm cannot prepare or expose an Appium session."""
+
+    def __init__(self, message: str, *, safe_reason: str | None = None):
+        super().__init__(message)
+        self.safe_reason = safe_reason
 
 
 class DeviceFarmTrialBalanceError(DeviceFarmError):
@@ -67,6 +72,40 @@ class DeviceFarmSession:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _safe_aws_failure_diagnostics(exc: Exception) -> str:
+    """Return only provider error codes/status or the exception type."""
+    root_error = exc.__cause__ or exc
+    response = getattr(root_error, "response", None)
+    response = response if isinstance(response, dict) else {}
+    error = response.get("Error")
+    error = error if isinstance(error, dict) else {}
+    raw_code = _text(error.get("Code"))
+    code = raw_code if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", raw_code) else ""
+    metadata = response.get("ResponseMetadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    status = metadata.get("HTTPStatusCode")
+    parts = [f"aws_error_code={code}"] if code else [
+        f"error_type={type(root_error).__name__[:80]}"
+    ]
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        parts.append(f"http_status={status}")
+    return " ".join(parts)
+
+
+def _log_device_farm_stage(stage: str, started: float, error: Exception | None = None) -> None:
+    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+    logger = logging.getLogger("qtxpert")
+    if error is None:
+        logger.info("devicefarm_stage=%s outcome=success elapsed_ms=%s", stage, elapsed_ms)
+    else:
+        logger.warning(
+            "devicefarm_stage=%s outcome=error elapsed_ms=%s %s",
+            stage,
+            elapsed_ms,
+            _safe_aws_failure_diagnostics(error),
+        )
 
 
 def _device_from_payload(payload: dict[str, Any]) -> DeviceFarmDevice:
@@ -296,13 +335,16 @@ class DeviceFarmService:
         if suffix not in {".apk", ".ipa"}:
             raise DeviceFarmError("AWS Device Farm Appium requires an .apk or .ipa application artifact")
 
+        cache_started = time.monotonic()
         if cache_path.exists():
             try:
                 cached = json.loads(cache_path.read_text(encoding="utf-8"))
                 if cached.get("sha256") == sha256 and _text(cached.get("app_arn")):
+                    _log_device_farm_stage("upload_cache_hit", cache_started)
                     return str(cached["app_arn"])
             except (OSError, ValueError, TypeError):
                 pass
+        _log_device_farm_stage("upload_cache_miss", cache_started)
 
         client = self._client()
         kind = "ANDROID_APP" if suffix == ".apk" else "IOS_APP"
@@ -314,12 +356,20 @@ class DeviceFarmService:
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", app_path.name)[:220] or f"qtxpert{suffix}"
         if not safe_name.lower().endswith(suffix):
             safe_name = f"qtxpert-{sha256[:16]}{suffix}"
-        created = client.create_upload(
-            projectArn=self._project_arn(),
-            name=safe_name,
-            type=kind,
-            contentType=content_type,
-        )
+        create_upload_started = time.monotonic()
+        try:
+            created = client.create_upload(
+                projectArn=self._project_arn(),
+                name=safe_name,
+                type=kind,
+                contentType=content_type,
+            )
+        except Exception as exc:
+            _log_device_farm_stage("create_app_upload", create_upload_started, exc)
+            raise DeviceFarmError(
+                f"AWS Device Farm could not create the app upload ({_safe_aws_failure_diagnostics(exc)})."
+            ) from None
+        _log_device_farm_stage("create_app_upload", create_upload_started)
         upload = created.get("upload") or {}
         upload_arn = _text(upload.get("arn"))
         upload_url = _text(upload.get("url"))
@@ -327,6 +377,7 @@ class DeviceFarmService:
             raise DeviceFarmError("AWS Device Farm did not return a usable upload URL")
 
         timeout = httpx.Timeout(float(self.settings.DEVICE_FARM_UPLOAD_TIMEOUT_SECONDS), connect=30.0)
+        upload_started = time.monotonic()
         try:
             with app_path.open("rb") as handle, httpx.Client(timeout=timeout) as http_client:
                 response = http_client.put(
@@ -336,9 +387,17 @@ class DeviceFarmService:
                 )
                 response.raise_for_status()
         except (OSError, httpx.HTTPError) as exc:
-            raise DeviceFarmError(f"AWS Device Farm app upload failed: {type(exc).__name__}") from exc
+            _log_device_farm_stage("upload_app_bytes", upload_started, exc)
+            raise DeviceFarmError(f"AWS Device Farm app upload failed: {type(exc).__name__}") from None
+        _log_device_farm_stage("upload_app_bytes", upload_started)
 
-        self._wait_for_upload(client, upload_arn)
+        processing_started = time.monotonic()
+        try:
+            self._wait_for_upload(client, upload_arn)
+        except Exception as exc:
+            _log_device_farm_stage("wait_app_upload_processing", processing_started, exc)
+            raise
+        _log_device_farm_stage("wait_app_upload_processing", processing_started)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(
             json.dumps(
@@ -362,7 +421,13 @@ class DeviceFarmService:
         session_name: str,
     ) -> DeviceFarmSession:
         client = self._client()
-        devices = self.list_android_devices()
+        inventory_started = time.monotonic()
+        try:
+            devices = self.list_android_devices()
+        except Exception as exc:
+            _log_device_farm_stage("device_inventory", inventory_started, exc)
+            raise
+        _log_device_farm_stage("device_inventory", inventory_started)
         device = choose_device(
             devices,
             preferred_arn=_text(self.settings.DEVICE_FARM_DEVICE_ARN) or None,
@@ -386,16 +451,24 @@ class DeviceFarmService:
         }
         if "appArn" in request_members:
             request["appArn"] = app_arn
+        create_started = time.monotonic()
         try:
             created = client.create_remote_access_session(**request)
         except Exception as exc:
-            raise DeviceFarmError(f"AWS Device Farm could not start the Android session: {exc}") from exc
+            _log_device_farm_stage("create_remote_access_session", create_started, exc)
+            diagnostic = _safe_aws_failure_diagnostics(exc)
+            raise DeviceFarmError(
+                f"AWS Device Farm could not start the Android session ({diagnostic})."
+            ) from None
+        _log_device_farm_stage("create_remote_access_session", create_started)
 
         session_payload = created.get("remoteAccessSession") or {}
         session_arn = _text(session_payload.get("arn"))
         if not session_arn:
             raise DeviceFarmError("AWS Device Farm did not return a remote session ARN")
         app_arn_in_request = "appArn" in request_members
+        wait_stage = "wait_session_with_app" if app_arn_in_request else "wait_session_running"
+        wait_started = time.monotonic()
         try:
             session = self._wait_for_session(
                 client,
@@ -404,11 +477,13 @@ class DeviceFarmService:
                 device,
                 require_app_attachment=app_arn_in_request,
             )
-        except Exception:
+        except Exception as exc:
+            _log_device_farm_stage(wait_stage, wait_started, exc)
             # A failed wait can happen before a DeviceFarmSession object exists,
             # so the caller's normal finally block cannot clean up this ARN.
             self.stop_session(session_arn)
             raise
+        _log_device_farm_stage(wait_stage, wait_started)
         if not app_arn_in_request:
             installer = getattr(client, "install_to_remote_access_session", None)
             if installer is None:
@@ -515,15 +590,21 @@ class DeviceFarmService:
             raise DeviceFarmError(
                 "The installed AWS SDK cannot reinstall an app into a remote access session"
             )
+        install_started = time.monotonic()
         try:
             response = installer(
                 remoteAccessSessionArn=session_arn,
                 appArn=app_arn,
             )
         except Exception as exc:
-            raise DeviceFarmError(
-                f"AWS Device Farm could not reinstall the selected app upload ({type(exc).__name__})"
-            ) from exc
+            _log_device_farm_stage("reinstall_app_for_prompt_reset", install_started, exc)
+            diagnostic = _safe_aws_failure_diagnostics(exc)
+            safe_reason = (
+                "AWS Device Farm could not reinstall the selected app upload after resetting "
+                f"its permission state ({diagnostic})."
+            )
+            raise DeviceFarmError(safe_reason, safe_reason=safe_reason) from None
+        _log_device_farm_stage("reinstall_app_for_prompt_reset", install_started)
 
         upload = (response or {}).get("appUpload") or {}
         installed_arn = _text(upload.get("arn")) if isinstance(upload, dict) else ""
