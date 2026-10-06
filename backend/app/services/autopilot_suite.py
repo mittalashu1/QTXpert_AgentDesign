@@ -1485,13 +1485,13 @@ class AutopilotSuiteService:
             and current.screen_id != target.screen_id
             and self._is_transient_launch_surface(current)
         ):
-            already_settled_this_run = (
-                transient_launch_settle_attempted is not None
-                and current.screen_id in transient_launch_settle_attempted
+            should_settle = (
+                transient_launch_settle_attempted is None
+                or self._claim_transient_launch_settle_attempt(
+                    current.screen_id, transient_launch_settle_attempted
+                )
             )
-            if not already_settled_this_run:
-                if transient_launch_settle_attempted is not None:
-                    transient_launch_settle_attempted.add(current.screen_id)
+            if should_settle:
                 settle_deadline = time.monotonic() + 12.0
                 while time.monotonic() < settle_deadline:
                     time.sleep(0.5)
@@ -1665,6 +1665,16 @@ class AutopilotSuiteService:
     def _screen_reference(screen) -> str:
         label = str(screen.page_label or screen.journey or "Observed screen").strip()
         return f"{label} [{screen.screen_id}]"
+
+    @staticmethod
+    def _claim_transient_launch_settle_attempt(
+        screen_id: str, attempted: set[str]
+    ) -> bool:
+        """Claim one bounded startup wait per sparse screen for this suite run."""
+        if not screen_id or screen_id in attempted:
+            return False
+        attempted.add(screen_id)
+        return True
 
     @staticmethod
     def _is_transient_launch_surface(screen) -> bool:
