@@ -1443,3 +1443,12 @@ def test_suite_confirmation_assertion_fails_when_screen_is_unchanged(tmp_path, m
 
     with pytest.raises(AssertionError, match="did not change the observed application state"):
         service._execute_test(driver, test, tmp_path, "com.qtx.demo", discovery=None)
+
+
+
+def test_sparse_launch_settle_is_limited_to_once_per_screen_per_suite():
+    attempted = set()
+
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-001", attempted) is True
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-001", attempted) is False
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-002", attempted) is True
