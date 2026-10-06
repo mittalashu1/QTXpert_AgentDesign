@@ -499,6 +499,39 @@ class DeviceFarmService:
                 raise DeviceFarmError("Timed out while AWS Device Farm started the Android session")
             time.sleep(self.settings.DEVICE_FARM_POLL_INTERVAL_SECONDS)
 
+    def install_app_in_session(self, session_arn: str, app_arn: str) -> None:
+        """Reinstall the selected app into an active remote session.
+
+        Android removes the package's runtime grant state on uninstall, so this
+        gives permission-prompt cases a deterministic reset without unsupported
+        ADB or UiAutomator2 permission commands.
+        """
+        if not session_arn or not app_arn:
+            raise DeviceFarmError("AWS Device Farm needs the active session and selected app upload to reinstall the target")
+
+        client = self._client()
+        installer = getattr(client, "install_to_remote_access_session", None)
+        if not callable(installer):
+            raise DeviceFarmError(
+                "The installed AWS SDK cannot reinstall an app into a remote access session"
+            )
+        try:
+            response = installer(
+                remoteAccessSessionArn=session_arn,
+                appArn=app_arn,
+            )
+        except Exception as exc:
+            raise DeviceFarmError(
+                f"AWS Device Farm could not reinstall the selected app upload ({type(exc).__name__})"
+            ) from exc
+
+        upload = (response or {}).get("appUpload") or {}
+        installed_arn = _text(upload.get("arn")) if isinstance(upload, dict) else ""
+        if installed_arn and installed_arn != app_arn:
+            raise DeviceFarmError(
+                "AWS Device Farm reinstalled a different app upload than the selected build"
+            )
+
     def stop_session(self, session_arn: str) -> None:
         if not session_arn:
             return

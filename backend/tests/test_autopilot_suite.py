@@ -1170,7 +1170,7 @@ def test_suite_prompt_choice_accepts_a_new_observed_system_prompt(tmp_path):
         service._execute_test(PromptFollowupDriver(), strict_test, tmp_path, "com.qtx.demo")
 
 
-def test_suite_device_farm_reopens_prompt_cases_with_fast_reset(tmp_path, monkeypatch):
+def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkeypatch):
     import appium
     from app.schemas.autopilot import AutopilotSuiteRequest
 
@@ -1181,10 +1181,14 @@ def test_suite_device_farm_reopens_prompt_cases_with_fast_reset(tmp_path, monkey
             self.page_source = '<hierarchy><node package="com.qtx.demo" text="Welcome" /></hierarchy>'
             self.prompt_active = True
             self.quit_calls = 0
-            self.permission_calls = []
+            self.removed_packages = []
+
+        def remove_app(self, package):
+            self.removed_packages.append(package)
+            return True
 
         def execute_script(self, command, arguments):
-            self.permission_calls.append((command, arguments))
+            raise AssertionError("Device Farm permission replay must not use unsupported mobile extensions")
 
         def quit(self):
             self.quit_calls += 1
@@ -1208,6 +1212,18 @@ def test_suite_device_farm_reopens_prompt_cases_with_fast_reset(tmp_path, monkey
         def _job_dir(_job_id):
             return tmp_path
 
+    class DeviceFarm:
+        def __init__(self):
+            self.installs = []
+
+        def install_app_in_session(self, session_arn, app_arn):
+            self.installs.append((session_arn, app_arn))
+
+    class Session:
+        arn = "arn:remote-session"
+        app_arn = "arn:uploaded-app"
+
+    device_farm = DeviceFarm()
     service = AutopilotSuiteService(Settings(), prototype=Prototype())
     service._activate_verified_target = lambda driver, package, **_kwargs: (
         True,
@@ -1247,23 +1263,18 @@ def test_suite_device_farm_reopens_prompt_cases_with_fast_reset(tmp_path, monkey
         1000,
         1000,
         1000,
+        device_farm_service=device_farm,
+        device_farm_session=Session(),
     )
 
     assert [result.status for result in results] == ["passed", "passed"]
     assert len(calls) == 2
-    assert all(capabilities["appium:fastReset"] is True for _, capabilities in calls)
+    assert all("appium:fastReset" not in capabilities for _, capabilities in calls)
     assert all("appium:fullReset" not in capabilities for _, capabilities in calls)
     assert drivers[0].quit_calls == 1
     assert drivers[1].quit_calls == 1
-    assert drivers[0].permission_calls == [(
-        "mobile: changePermissions",
-        {
-            "permissions": "all",
-            "action": "revoke",
-            "target": "pm",
-            "appPackage": "com.qtx.demo",
-        },
-    )]
+    assert drivers[0].removed_packages == ["com.qtx.demo"]
+    assert device_farm.installs == [("arn:remote-session", "arn:uploaded-app")]
 
 
 def test_identify_discovered_screen_uses_unique_observed_token_for_sparse_hierarchy():
@@ -1432,3 +1443,12 @@ def test_suite_confirmation_assertion_fails_when_screen_is_unchanged(tmp_path, m
 
     with pytest.raises(AssertionError, match="did not change the observed application state"):
         service._execute_test(driver, test, tmp_path, "com.qtx.demo", discovery=None)
+
+
+
+def test_sparse_launch_settle_is_limited_to_once_per_screen_per_suite():
+    attempted = set()
+
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-001", attempted) is True
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-001", attempted) is False
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-002", attempted) is True

@@ -634,6 +634,15 @@ class AutopilotDiscoveryService:
         )
 
     @classmethod
+    def select_entry_screen(cls, screens: Iterable[DiscoveredScreen]) -> DiscoveredScreen | None:
+        """Choose the first settled, interactive screen as the journey root."""
+        candidates = list(screens or [])
+        return next(
+            (screen for screen in candidates if not cls._looks_like_loading_screen(screen)),
+            candidates[0] if candidates else None,
+        )
+
+    @classmethod
     def _risk(cls, label: str, attrs: Dict[str, str]) -> tuple[str, Optional[str]]:
         haystack = " ".join(
             [label, attrs.get("text", ""), attrs.get("label", ""), attrs.get("name", ""), attrs.get("content-desc", ""), attrs.get("resource-id", ""), attrs.get("identifier", "")]

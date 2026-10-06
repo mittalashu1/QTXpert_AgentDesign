@@ -3253,12 +3253,15 @@ def test_runtime_expansion_generates_both_observed_confirmation_branches(tmp_pat
     compiled = AutopilotIRCompiler().compile_bundle(
         AutopilotAnalysis.model_validate(expanded.model_dump()),
         discovery,
-        full_uat=True,
+        full_uat=False,
     )
     for case in cases:
         ir_case = next(test for test in compiled.tests if test.test_id == case.id)
-        assert ir_case.readiness == "executable"
-        assert any(step.action == "assert_screen_changed" for step in ir_case.steps)
+        if case.destructive:
+            assert ir_case.readiness == "approval_required"
+        else:
+            assert ir_case.readiness == "executable"
+            assert any(step.action == "assert_screen_changed" for step in ir_case.steps)
 
 
 def test_runtime_expansion_requires_confirmation_copy_and_both_choices(tmp_path):

@@ -1134,3 +1134,38 @@ def test_prompt_choice_decision_prioritizes_explicit_declines(label, decision):
 @pytest.mark.parametrize("label", ["Precise", "Approximate"])
 def test_location_accuracy_options_are_not_terminal_permission_decisions(label):
     assert AutopilotDiscoveryService._prompt_choice_decision(label.lower()) is None
+
+
+def test_entry_screen_skips_sparse_startup_surface():
+    def control(label, class_name, *, risk, clickable, locators=None):
+        return SimpleNamespace(
+            semantic_label=label,
+            class_name=class_name,
+            risk=risk,
+            enabled=True,
+            input_capable=False,
+            clickable=clickable,
+            locators=locators or [],
+            scrollable=False,
+        )
+
+    sparse = SimpleNamespace(
+        activity_name=".MainActivity",
+        title=None,
+        controls=[control("View", "android.view.View", risk="review", clickable=False)],
+    )
+    login_landing = SimpleNamespace(
+        activity_name=".MainActivity",
+        title="Authentication",
+        controls=[control(
+            "Login",
+            "android.widget.Button",
+            risk="safe",
+            clickable=True,
+            locators=[SimpleNamespace(confidence=0.99)],
+        )],
+    )
+
+    assert AutopilotDiscoveryService.select_entry_screen([sparse, login_landing]) is login_landing
+    assert AutopilotDiscoveryService.select_entry_screen([sparse]) is sparse
+    assert AutopilotDiscoveryService.select_entry_screen([]) is None

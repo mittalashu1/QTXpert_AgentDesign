@@ -220,6 +220,8 @@ class AutopilotSuiteService:
                     input_values=input_values or {},
                     sensitive_input_keys=sensitive_input_keys or set(),
                     discovery=discovery,
+                    device_farm_service=device_farm_service,
+                    device_farm_session=device_farm_session,
                 ),
                 timeout=self.settings.AUTOPILOT_SUITE_TIMEOUT_SECONDS,
             )
@@ -454,6 +456,8 @@ class AutopilotSuiteService:
         input_values: Dict[str, str] | None = None,
         sensitive_input_keys: set[str] | None = None,
         discovery: AutopilotDiscoveryResult | None = None,
+        device_farm_service: Any = None,
+        device_farm_session: Any = None,
     ) -> list[AutopilotSuiteTestResult]:
         from appium import webdriver
 
@@ -518,12 +522,11 @@ class AutopilotSuiteService:
                     "appium:appWaitDuration": adb_exec_timeout_ms,
                 }
             )
-        if has_prompt_cases:
-            # Each prompt branch needs a fresh install to re-arm remembered
-            # platform permissions. Device Farm installs the selected app
-            # outside Appium's app capability, so use fastReset there; Appium
-            # requires an app capability before it accepts fullReset.
-            capabilities["appium:fastReset" if is_device_farm else "appium:fullReset"] = True
+        if has_prompt_cases and not is_device_farm:
+            # Local Appium can re-arm the prompt with a full uninstall/install.
+            # Device Farm prompt replay uses its remote-access install API below;
+            # fastReset is not reliable on the managed endpoint.
+            capabilities["appium:fullReset"] = True
         if request.platform_version and not is_device_farm:
             capabilities["appium:platformVersion"] = request.platform_version
         if browserstack_options:
@@ -567,6 +570,7 @@ class AutopilotSuiteService:
             )
             package = str(package_hint or target_identity.get("package") or identity["package"] or "").strip() or None
             prompt_case_count = 0
+            transient_launch_settle_attempted: set[str] = set()
             for test_index, test in enumerate(tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -596,10 +600,13 @@ class AutopilotSuiteService:
                         prompt_case_count > 0 or current_prompt_kind != expected_prompt_kind
                     ):
                         if is_device_farm:
-                            # Revoke the AUT's Android runtime grants before
-                            # reopening a fast-reset session. Session reset
-                            # alone can leave OS permission decisions intact.
-                            self._revoke_android_prompt_permissions(driver, package)
+                            # Device Farm does not expose UiAutomator2's
+                            # permission-reset extension. Uninstall the AUT to
+                            # clear its grants, then reinstall this exact upload
+                            # through the active remote-access session.
+                            self._reset_device_farm_prompt_state(
+                                driver, package, device_farm_service, device_farm_session
+                            )
                             safe_quit(driver)
                             driver = create_driver()
                             time.sleep(2)
@@ -630,6 +637,7 @@ class AutopilotSuiteService:
                             package,
                             activity_hint,
                             preserve_known_system_prompt=has_prompt_step,
+                            use_provider_reset=not is_device_farm,
                         )
                     if has_prompt_step:
                         prompt_case_count += 1
@@ -660,6 +668,7 @@ class AutopilotSuiteService:
                         discovery,
                         package,
                         request.target_kind,
+                        transient_launch_settle_attempted=transient_launch_settle_attempted,
                     )
                     evidence = self._execute_test(
                         driver,
@@ -789,6 +798,49 @@ class AutopilotSuiteService:
             raise ProviderLifecycleUnavailable(reason)
 
     @staticmethod
+    def _reset_device_farm_prompt_state(
+        driver,
+        package: str | None,
+        device_farm_service: Any,
+        device_farm_session: Any,
+    ) -> None:
+        """Reinstall the exact AUT upload to clear remembered Android grants."""
+        if not package:
+            raise ProviderLifecycleUnavailable(
+                "The uploaded Android app package is unavailable for permission-prompt replay."
+            )
+        if device_farm_session is None or device_farm_service is None:
+            raise ProviderLifecycleUnavailable(
+                "The active AWS Device Farm session is unavailable for permission-prompt replay."
+            )
+        remover = getattr(driver, "remove_app", None)
+        if not callable(remover):
+            raise ProviderLifecycleUnavailable(
+                "The AWS Device Farm Appium endpoint cannot uninstall the app to reset its permission prompt."
+            )
+        try:
+            removed = remover(package)
+        except Exception as exc:
+            raise ProviderLifecycleUnavailable(
+                "AWS Device Farm could not uninstall the app to reset its permission prompt."
+            ) from exc
+        if removed is not True:
+            raise ProviderLifecycleUnavailable(
+                "AWS Device Farm did not confirm that the app was uninstalled; its permission state was not reset."
+            )
+        installer = getattr(device_farm_service, "install_app_in_session", None)
+        if not callable(installer):
+            raise ProviderLifecycleUnavailable(
+                "The AWS Device Farm adapter cannot reinstall the selected app upload in this session."
+            )
+        try:
+            installer(device_farm_session.arn, device_farm_session.app_arn)
+        except Exception as exc:
+            raise ProviderLifecycleUnavailable(
+                "AWS Device Farm could not reinstall the selected app upload after resetting its permission state."
+            ) from exc
+
+    @staticmethod
     def _reset_prompt_case_state(driver, package: str | None, target_kind: str) -> None:
         """Re-arm native prompt state before replaying another prompt branch.
 
@@ -894,6 +946,7 @@ class AutopilotSuiteService:
         package: str | None,
         activity: str | None = None,
         preserve_known_system_prompt: bool = False,
+        use_provider_reset: bool = True,
     ) -> None:
         if not package:
             return
@@ -923,7 +976,7 @@ class AutopilotSuiteService:
         # selected app is foreground. Hosted Android devices can briefly expose
         # Play Services or the launcher while a cold start is still settling.
         resetter = getattr(driver, "reset", None)
-        if callable(resetter):
+        if use_provider_reset and callable(resetter):
             try:
                 resetter()
                 time.sleep(1.8)
@@ -1356,6 +1409,7 @@ class AutopilotSuiteService:
         discovery: AutopilotDiscoveryResult | None,
         package: str | None,
         target_kind: str = "android",
+        transient_launch_settle_attempted: set[str] | None = None,
     ) -> list[dict[str, str]]:
         if not discovery or not discovery.screens:
             return []
@@ -1431,13 +1485,20 @@ class AutopilotSuiteService:
             and current.screen_id != target.screen_id
             and self._is_transient_launch_surface(current)
         ):
-            settle_deadline = time.monotonic() + 12.0
-            while time.monotonic() < settle_deadline:
-                time.sleep(0.5)
-                settled = self._identify_discovered_screen(driver, discovery, package)
-                if settled is not None and settled.screen_id != current.screen_id:
-                    current = settled
-                    break
+            should_settle = (
+                transient_launch_settle_attempted is None
+                or self._claim_transient_launch_settle_attempt(
+                    current.screen_id, transient_launch_settle_attempted
+                )
+            )
+            if should_settle:
+                settle_deadline = time.monotonic() + 12.0
+                while time.monotonic() < settle_deadline:
+                    time.sleep(0.5)
+                    settled = self._identify_discovered_screen(driver, discovery, package)
+                    if settled is not None and settled.screen_id != current.screen_id:
+                        current = settled
+                        break
             if current.screen_id == target.screen_id:
                 if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
                     raise ProviderLifecycleUnavailable(
@@ -1604,6 +1665,16 @@ class AutopilotSuiteService:
     def _screen_reference(screen) -> str:
         label = str(screen.page_label or screen.journey or "Observed screen").strip()
         return f"{label} [{screen.screen_id}]"
+
+    @staticmethod
+    def _claim_transient_launch_settle_attempt(
+        screen_id: str, attempted: set[str]
+    ) -> bool:
+        """Claim one bounded startup wait per sparse screen for this suite run."""
+        if not screen_id or screen_id in attempted:
+            return False
+        attempted.add(screen_id)
+        return True
 
     @staticmethod
     def _is_transient_launch_surface(screen) -> bool:
