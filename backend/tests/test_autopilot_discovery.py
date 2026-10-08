@@ -622,6 +622,14 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
     webdriver = types.ModuleType("appium.webdriver")
     webdriver.Remote = lambda *_args, **_kwargs: driver
     appium.webdriver = webdriver
+    client_config_module = types.ModuleType("appium.webdriver.client_config")
+
+    class FakeAppiumClientConfig:
+        def __init__(self, remote_server_addr):
+            self.remote_server_addr = remote_server_addr
+            self.timeout = None
+
+    client_config_module.AppiumClientConfig = FakeAppiumClientConfig
     appium_by_module = types.ModuleType("appium.webdriver.common.appiumby")
     appium_by_module.AppiumBy = AppiumBy
     android_options = types.ModuleType("appium.options.android")
@@ -631,6 +639,7 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
     for name, module in {
         "appium": appium,
         "appium.webdriver": webdriver,
+        "appium.webdriver.client_config": client_config_module,
         "appium.webdriver.common": types.ModuleType("appium.webdriver.common"),
         "appium.webdriver.common.appiumby": appium_by_module,
         "appium.options": types.ModuleType("appium.options"),

@@ -4490,6 +4490,8 @@ class AutopilotPrototypeService:
         expected_package: str | None = None,
     ) -> Dict[str, Any]:
         from appium import webdriver
+        from appium.webdriver.client_config import AppiumClientConfig
+
         is_ios = request.target_kind == "ios"
         is_device_farm = request.provider == "devicefarm"
         capabilities: Dict[str, Any] = {
@@ -4545,7 +4547,28 @@ class AutopilotPrototypeService:
             from appium.options.android import UiAutomator2Options
 
             options = UiAutomator2Options().load_capabilities(capabilities)
-        driver = webdriver.Remote(appium_url, options=options)
+        client_config = AppiumClientConfig(remote_server_addr=appium_url)
+        # Bound each HTTP request so a stale provider session cannot hold the
+        # smoke worker indefinitely.
+        client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
+        appium_started = time.monotonic()
+        try:
+            driver = webdriver.Remote(
+                appium_url,
+                options=options,
+                client_config=client_config,
+            )
+        except Exception as exc:
+            logger.warning(
+                "autopilot_stage=appium_session_create outcome=error flow=smoke elapsed_ms=%s error_type=%s",
+                max(0, round((time.monotonic() - appium_started) * 1000)),
+                type(exc).__name__[:80],
+            )
+            raise
+        logger.info(
+            "autopilot_stage=appium_session_create outcome=success flow=smoke elapsed_ms=%s",
+            max(0, round((time.monotonic() - appium_started) * 1000)),
+        )
         try:
             time.sleep(3)
             page_source = safe_page_source(driver)
