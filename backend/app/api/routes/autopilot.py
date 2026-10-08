@@ -150,6 +150,29 @@ def _resolved_autopilot_phase(job: dict[str, Any], record: Optional[AutopilotJob
     return status_phase_for_job(job, durable_suite_execution=suite)
 
 
+def _repository_materialization_needs_initial_analysis(job: dict[str, Any]) -> bool:
+    """Recover repository APKs only while their initial analysis is pending.
+
+    A checkpoint resume temporarily uses status=analyzing, but it must not
+    enqueue a second materialize-and-analyze worker from the polling endpoint.
+    Partial reports also retain their plan and should be resumed through the
+    checkpoint-aware flow rather than sent back through preflight.
+    """
+    if str(job.get("status") or "").strip().lower() not in {"uploaded", "analyzing"}:
+        return False
+    stage = str(job.get("stage") or "").strip().lower()
+    if stage in {
+        "validating_inputs",
+        "input_collection",
+        "ready_for_discovery",
+        "runtime_discovery",
+        "exploring",
+        "case_review",
+    }:
+        return False
+    return phase_for_job(job) not in {"completed", "partial", "blocked", "failed"}
+
+
 def _apply_durable_suite_phase(result: AutopilotJobStatus, job: dict[str, Any], record: Optional[AutopilotJob]) -> AutopilotJobStatus:
     """Use the durable database suite snapshot when a manifest still says running."""
     if str(job.get("phase") or "") != "running":
@@ -187,7 +210,7 @@ async def _materialize_repository_asset_and_analyze(
             asset_id,
         )
         job = await service.load_job(job_id)
-        if job.get("status") in {"analyzed", "failed", "superseded"}:
+        if not _repository_materialization_needs_initial_analysis(job):
             return
         target = Path(job.get("apk_path") or service.root / job_id / Path(job.get("filename") or "application.apk").name)
         if not target.is_file():
@@ -205,6 +228,13 @@ async def _materialize_repository_asset_and_analyze(
             apk_path=str(target),
             artifact_materialization="complete",
         )
+        latest_job = await service.load_job(job_id)
+        if not _repository_materialization_needs_initial_analysis(latest_job):
+            logger.info(
+                "Autopilot repository materialization skipped duplicate analysis job_id=%s",
+                job_id,
+            )
+            return
         await service.analyze_safely(job_id)
         final_job = await service.load_job(job_id)
         logger.info(
@@ -4667,7 +4697,8 @@ async def get_latest_autopilot_job(
     job = await _require_owned_job(service, record.job_id, user)
     local_path = job.get("apk_path")
     if (
-        record.status in {"uploaded", "analyzing"}
+        _repository_materialization_needs_initial_analysis(job)
+        and record.status in {"uploaded", "analyzing"}
         and record.target_kind != "web"
         and record.repository_asset_id is not None
         and (not local_path or not Path(local_path).is_file())
@@ -4701,7 +4732,7 @@ async def get_autopilot_job_status(
     local_path = job.get("apk_path")
     record = await _safe_job_record(db, job_id, user.id)
     if (
-        job.get("status") in {"uploaded", "analyzing"}
+        _repository_materialization_needs_initial_analysis(job)
         and str(job.get("target_kind") or "android") != "web"
         and record is not None
         and record.repository_asset_id is not None
