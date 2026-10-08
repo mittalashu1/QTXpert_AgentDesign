@@ -1327,7 +1327,7 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
     drivers = [PromptDriver(), PromptDriver()]
     calls = []
 
-    def remote(url, options):
+    def remote(url, options, **_kwargs):
         calls.append((url, options.to_capabilities()))
         return drivers[len(calls) - 1]
 
@@ -1508,7 +1508,7 @@ def test_suite_does_not_retry_failed_device_farm_prompt_reset(tmp_path, monkeypa
     monkeypatch.setattr(
         appium.webdriver,
         "Remote",
-        lambda url, options: remote_calls.append((url, options.to_capabilities())) or driver,
+        lambda url, options, **_kwargs: remote_calls.append((url, options.to_capabilities())) or driver,
     )
     monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
@@ -1789,5 +1789,6 @@ def test_device_farm_prompt_reset_preserves_sanitized_provider_reason():
             "com.qtx.demo",
             DeviceFarm(),
             Session(),
+            close_driver=lambda: None,
         )
     assert "private provider response" not in str(captured.value)
