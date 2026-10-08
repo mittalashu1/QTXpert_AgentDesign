@@ -5105,7 +5105,9 @@ async def run_autopilot_discovery(
             "provider": "playwright",
             "target_url": payload.target_url or job.get("target_url"),
         })
-        result = await AutopilotWebService(settings, service).discover(
+        result = await _run_without_db_connection(
+            db,
+            AutopilotWebService(settings, service).discover,
             job_id,
             web_request,
             input_values=discovery_input_values,
@@ -5147,7 +5149,9 @@ async def run_autopilot_discovery(
             record = await _safe_job_record(db, job_id, owner_id)
             if settings.APP_ENV != "local" and record is not None and record.repository_asset_id and not payload.appium_app:
                 raise HTTPException(status_code=400, detail="Hosted custom Appium requires a remote IPA reference for iOS discovery.")
-        result = await AutopilotDiscoveryService(settings, service).run(
+        result = await _run_without_db_connection(
+            db,
+            AutopilotDiscoveryService(settings, service).run,
             job_id,
             payload,
             input_values=discovery_input_values,
@@ -5507,21 +5511,31 @@ async def _persist_suite_evidence(
 SuiteRunT = TypeVar("SuiteRunT")
 
 
+async def _run_without_db_connection(
+    db: AsyncSession,
+    runner: Callable[..., Awaitable[SuiteRunT]],
+    *args: Any,
+    **kwargs: Any,
+) -> SuiteRunT:
+    """Release a request DB transaction before long mobile or web work.
+
+    Device Farm discovery and suites can hold a request open for minutes. The
+    endpoint keeps its AsyncSession for persistence after the runner returns,
+    but this releases its checked-out connection while the remote operation
+    runs. The caller reloads durable rows in a fresh transaction afterward.
+    """
+    await db.rollback()
+    return await runner(*args, **kwargs)
+
+
 async def _run_suite_without_db_connection(
     db: AsyncSession,
     runner: Callable[..., Awaitable[SuiteRunT]],
     *args: Any,
     **kwargs: Any,
 ) -> SuiteRunT:
-    """Release the request DB transaction before a long remote test run.
-
-    Mobile-device and browser suites can take several minutes. Keeping the
-    request-scoped session's connection checked out for that entire time lets
-    Neon/Render close the idle connection before suite evidence is persisted.
-    The caller re-reads its job row after the runner returns.
-    """
-    await db.rollback()
-    return await runner(*args, **kwargs)
+    """Compatibility wrapper for the safe-suite lifecycle helper."""
+    return await _run_without_db_connection(db, runner, *args, **kwargs)
 
 
 @router.get("/{job_id}/discovery", response_model=AutopilotDiscoveryResult | None)
