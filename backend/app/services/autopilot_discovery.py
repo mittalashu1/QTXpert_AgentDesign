@@ -1614,6 +1614,7 @@ class AutopilotDiscoveryService:
         input_values: Optional[Mapping[str, str]] = None,
     ) -> Dict[str, Any]:
         from appium import webdriver
+        from appium.webdriver.client_config import AppiumClientConfig
         from appium.webdriver.common.appiumby import AppiumBy
 
         is_ios = request.target_kind == "ios"
@@ -1672,7 +1673,29 @@ class AutopilotDiscoveryService:
             from appium.options.android import UiAutomator2Options
 
             options = UiAutomator2Options().load_capabilities(capabilities)
-        driver = webdriver.Remote(appium_url, options=options)
+        client_config = AppiumClientConfig(remote_server_addr=appium_url)
+        # Bound each HTTP request so a stale Device Farm session cannot hold
+        # the discovery worker indefinitely. This complements server-side
+        # appium:newCommandTimeout.
+        client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
+        appium_started = time.monotonic()
+        try:
+            driver = webdriver.Remote(
+                appium_url,
+                options=options,
+                client_config=client_config,
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "autopilot_stage=appium_session_create outcome=error flow=discovery elapsed_ms=%s error_type=%s",
+                max(0, round((time.monotonic() - appium_started) * 1000)),
+                type(exc).__name__[:80],
+            )
+            raise
+        logging.getLogger(__name__).info(
+            "autopilot_stage=appium_session_create outcome=success flow=discovery elapsed_ms=%s",
+            max(0, round((time.monotonic() - appium_started) * 1000)),
+        )
         screens: list[DiscoveredScreen] = []
         transitions: list[DiscoveredTransition] = []
         seen_fingerprints: dict[str, str] = {}
