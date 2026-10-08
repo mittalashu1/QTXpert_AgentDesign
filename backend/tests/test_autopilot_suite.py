@@ -873,14 +873,50 @@ def test_device_farm_prompt_reset_requires_confirmed_uninstall():
 
     device_farm = DeviceFarm()
     driver = Driver()
+    close_calls = []
     with pytest.raises(ProviderLifecycleUnavailable, match="still reports the app installed"):
         AutopilotSuiteService._reset_device_farm_prompt_state(
             driver,
             "com.qtx.demo",
             device_farm,
             Session(),
+            close_driver=lambda: close_calls.append("close"),
         )
     assert device_farm.installs == []
+    assert close_calls == []
+
+
+def test_device_farm_prompt_reset_closes_appium_before_reinstall():
+    events = []
+
+    class Driver:
+        installed = True
+
+        def remove_app(self, _package):
+            events.append("uninstall")
+            self.installed = False
+
+        def is_app_installed(self, _package):
+            events.append("verify_uninstalled")
+            return self.installed
+
+    class DeviceFarm:
+        def install_app_in_session(self, *_args):
+            events.append("install")
+
+    class Session:
+        arn = "arn:remote-session"
+        app_arn = "arn:uploaded-app"
+
+    AutopilotSuiteService._reset_device_farm_prompt_state(
+        Driver(),
+        "com.qtx.demo",
+        DeviceFarm(),
+        Session(),
+        close_driver=lambda: events.append("close_appium"),
+    )
+
+    assert events == ["uninstall", "verify_uninstalled", "close_appium", "install"]
 
 
 def test_suite_retraces_one_observed_safe_edge_from_empty_sign_in_form():
@@ -1291,7 +1327,7 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
     drivers = [PromptDriver(), PromptDriver()]
     calls = []
 
-    def remote(url, options):
+    def remote(url, options, **_kwargs):
         calls.append((url, options.to_capabilities()))
         return drivers[len(calls) - 1]
 
@@ -1472,7 +1508,7 @@ def test_suite_does_not_retry_failed_device_farm_prompt_reset(tmp_path, monkeypa
     monkeypatch.setattr(
         appium.webdriver,
         "Remote",
-        lambda url, options: remote_calls.append((url, options.to_capabilities())) or driver,
+        lambda url, options, **_kwargs: remote_calls.append((url, options.to_capabilities())) or driver,
     )
     monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
@@ -1753,5 +1789,6 @@ def test_device_farm_prompt_reset_preserves_sanitized_provider_reason():
             "com.qtx.demo",
             DeviceFarm(),
             Session(),
+            close_driver=lambda: None,
         )
     assert "private provider response" not in str(captured.value)

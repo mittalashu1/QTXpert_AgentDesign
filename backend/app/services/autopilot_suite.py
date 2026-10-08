@@ -13,7 +13,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from app.config import Settings
 from app.schemas.autopilot import (
@@ -464,6 +464,7 @@ class AutopilotSuiteService:
         device_farm_session: Any = None,
     ) -> list[AutopilotSuiteTestResult]:
         from appium import webdriver
+        from appium.webdriver.client_config import AppiumClientConfig
 
         input_values = input_values or {}
         sensitive_input_keys = sensitive_input_keys or set()
@@ -547,9 +548,17 @@ class AutopilotSuiteService:
                 from appium.options.android import UiAutomator2Options
 
                 options = UiAutomator2Options().load_capabilities(capabilities)
+            client_config = AppiumClientConfig(remote_server_addr=appium_url)
+            # newCommandTimeout is server-side idle protection; this also bounds
+            # each client HTTP call when a remote-access session becomes stale.
+            client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
             started = time.monotonic()
             try:
-                created_driver = webdriver.Remote(appium_url, options=options)
+                created_driver = webdriver.Remote(
+                    appium_url,
+                    options=options,
+                    client_config=client_config,
+                )
             except Exception as exc:
                 _LOGGER.warning(
                     "autopilot_stage=appium_session_create outcome=error elapsed_ms=%s error_type=%s",
@@ -606,6 +615,28 @@ class AutopilotSuiteService:
             transient_launch_recovery_attempted: set[str] = set()
             device_farm_prompt_reset_failure: str | None = None
             target_foreground_failure: str | None = None
+
+            def close_driver_for_prompt_reset() -> None:
+                nonlocal driver
+                active_driver = driver
+                driver = None
+                if active_driver is None:
+                    return
+                close_started = time.monotonic()
+                try:
+                    active_driver.quit()
+                except Exception as exc:
+                    _LOGGER.warning(
+                        "autopilot_stage=appium_session_close outcome=error elapsed_ms=%s error_type=%s",
+                        max(0, round((time.monotonic() - close_started) * 1000)),
+                        type(exc).__name__[:80],
+                    )
+                else:
+                    _LOGGER.info(
+                        "autopilot_stage=appium_session_close outcome=success elapsed_ms=%s",
+                        max(0, round((time.monotonic() - close_started) * 1000)),
+                    )
+
             for test_index, test in enumerate(tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -623,6 +654,12 @@ class AutopilotSuiteService:
                     # The newly created session was just launched and its target foreground verified above.
                     # Do not immediately force-stop that known-good first surface; hosted providers may
                     # switch to Android system UI when restarting the attached app.
+                    if driver is None:
+                        raise ProviderLifecycleUnavailable(
+                            target_foreground_failure
+                            or device_farm_prompt_reset_failure
+                            or "The Appium session is unavailable; remaining cases cannot be executed."
+                        )
                     has_prompt_step = any(step.action == "prompt_choice" for step in test.steps)
                     has_discovery_screen = any(step.screen_id for step in test.steps)
                     if has_prompt_step and device_farm_prompt_reset_failure:
@@ -651,7 +688,11 @@ class AutopilotSuiteService:
                             # through the active remote-access session.
                             try:
                                 self._reset_device_farm_prompt_state(
-                                    driver, package, device_farm_service, device_farm_session
+                                    driver,
+                                    package,
+                                    device_farm_service,
+                                    device_farm_session,
+                                    close_driver=close_driver_for_prompt_reset,
                                 )
                             except ProviderLifecycleUnavailable as exc:
                                 # The same provider reset cannot succeed for another
@@ -659,8 +700,26 @@ class AutopilotSuiteService:
                                 # blocked outcome and avoid repeating its long failure.
                                 device_farm_prompt_reset_failure = str(exc)[:1200]
                                 raise
-                            safe_quit(driver)
-                            driver = create_driver()
+                            reconnect_started = time.monotonic()
+                            try:
+                                driver = create_driver()
+                            except Exception as exc:
+                                message = (
+                                    "AWS Device Farm Appium could not reconnect after reinstalling the app "
+                                    "to reset its permission state."
+                                )
+                                device_farm_prompt_reset_failure = message
+                                target_foreground_failure = message
+                                _LOGGER.warning(
+                                    "autopilot_stage=appium_prompt_reconnect outcome=error elapsed_ms=%s error_type=%s",
+                                    max(0, round((time.monotonic() - reconnect_started) * 1000)),
+                                    type(exc).__name__[:80],
+                                )
+                                raise ProviderLifecycleUnavailable(message) from None
+                            _LOGGER.info(
+                                "autopilot_stage=appium_prompt_reconnect outcome=success elapsed_ms=%s",
+                                max(0, round((time.monotonic() - reconnect_started) * 1000)),
+                            )
                             time.sleep(2)
                             reset_source = safe_page_source(driver)
                             reset_ready, reset_reason, _ = self._activate_verified_target(
@@ -673,6 +732,7 @@ class AutopilotSuiteService:
                                 preserve_known_system_prompt=True,
                             )
                             if not reset_ready:
+                                device_farm_prompt_reset_failure = reset_reason[:1200]
                                 raise ProviderLifecycleUnavailable(reset_reason)
                         else:
                             self._reset_prompt_case_state(driver, package, request.target_kind)
@@ -747,10 +807,14 @@ class AutopilotSuiteService:
                         and self._is_target_foreground_failure(blocked_reason)
                     ):
                         target_foreground_failure = blocked_reason
-                    evidence = safe_app_identity(
-                        driver,
-                        page_source=safe_page_source(driver),
-                        package_hint=package,
+                    evidence = (
+                        {"target_package": package, "target_surface_verified": False}
+                        if driver is None
+                        else safe_app_identity(
+                            driver,
+                            page_source=safe_page_source(driver),
+                            package_hint=package,
+                        )
                     )
                     # Keep the evidence location internal; the API route
                     # replaces it with repository asset IDs before returning
@@ -760,10 +824,14 @@ class AutopilotSuiteService:
                     error = blocked_reason
                     dependency = blocked_reason
                 except Exception as exc:
-                    evidence = safe_app_identity(
-                        driver,
-                        page_source=safe_page_source(driver),
-                        package_hint=package,
+                    evidence = (
+                        {"target_package": package, "target_surface_verified": False}
+                        if driver is None
+                        else safe_app_identity(
+                            driver,
+                            page_source=safe_page_source(driver),
+                            package_hint=package,
+                        )
                     )
                     evidence["evidence_dir"] = str(evidence_dir)
                     status = "failed"
@@ -863,8 +931,10 @@ class AutopilotSuiteService:
         package: str | None,
         device_farm_service: Any,
         device_farm_session: Any,
+        *,
+        close_driver: Callable[[], None],
     ) -> None:
-        """Reinstall the exact AUT upload to clear remembered Android grants."""
+        """Uninstall, close Appium, then reinstall the exact upload to reset grants."""
         if not package:
             raise ProviderLifecycleUnavailable(
                 "The uploaded Android app package is unavailable for permission-prompt replay."
@@ -906,6 +976,10 @@ class AutopilotSuiteService:
             raise ProviderLifecycleUnavailable(
                 "The AWS Device Farm adapter cannot reinstall the selected app upload in this session."
             )
+        # End Appium while the remote context is still valid. Device Farm
+        # installs the APK into the active remote-access session; a new Appium
+        # session will receive the reinstalled app.
+        close_driver()
         try:
             installer(device_farm_session.arn, device_farm_session.app_arn)
         except Exception as exc:
