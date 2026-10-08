@@ -77,7 +77,8 @@ def test_mobile_flows_use_the_provider_app_install_contract(
             )
 
     assert captured["client_config"] is not None
-    assert captured["client_config"].timeout == 30
+    expected_timeout = 120 if flow == "smoke" else 30
+    assert captured["client_config"].timeout == expected_timeout
     assert captured["platformName"] == "Android"
     assert captured["appium:automationName"] == "UiAutomator2"
     if provider == "devicefarm":
