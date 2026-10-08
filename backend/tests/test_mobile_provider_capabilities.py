@@ -32,7 +32,7 @@ def test_mobile_flows_use_the_provider_app_install_contract(
     class SessionCaptured(Exception):
         pass
 
-    def capture_session(url, *, options):
+    def capture_session(url, *, options, **_kwargs):
         captured.update(options.to_capabilities())
         raise SessionCaptured()
 
