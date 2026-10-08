@@ -971,15 +971,15 @@ class AutopilotSuiteService:
             raise ProviderLifecycleUnavailable(
                 "AWS Device Farm still reports the app installed; its permission state was not reset."
             )
-        # End Appium while the remote context is still valid. Device Farm
-        # installs the APK into the active remote-access session; a new Appium
-        # session will receive the reinstalled app.
-        close_driver()
         installer = getattr(device_farm_service, "install_app_in_session", None)
         if not callable(installer):
             raise ProviderLifecycleUnavailable(
                 "The AWS Device Farm adapter cannot reinstall the selected app upload in this session."
             )
+        # End Appium while the remote context is still valid. Device Farm
+        # installs the APK into the active remote-access session; a new Appium
+        # session will receive the reinstalled app.
+        close_driver()
         try:
             installer(device_farm_session.arn, device_farm_session.app_arn)
         except Exception as exc:
