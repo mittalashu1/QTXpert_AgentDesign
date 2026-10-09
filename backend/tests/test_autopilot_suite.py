@@ -848,6 +848,49 @@ def test_suite_relaunches_once_when_sparse_launch_screen_does_not_settle(monkeyp
     assert driver.page_source == driver.auth_source
 
 
+def test_suite_selection_prioritizes_allow_prompt_branch_for_startup_crawl():
+    from types import SimpleNamespace
+
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = SimpleNamespace(
+        runtime_prompts=[
+            SimpleNamespace(
+                prompt_id="permission-prompt",
+                choices=[
+                    SimpleNamespace(key="allow", decision="allow"),
+                    SimpleNamespace(key="deny", decision="deny"),
+                ],
+            )
+        ]
+    )
+
+    def candidate(test_id, prompt_choice):
+        return SimpleNamespace(
+            test_id=test_id,
+            readiness="executable",
+            runtime_prompt_id="permission-prompt",
+            runtime_prompt_choice=prompt_choice,
+            steps=[SimpleNamespace(action="prompt_choice")],
+        )
+
+    deny_case = candidate("deny", "deny")
+    allow_case = candidate("allow", "allow")
+    smoke_case = SimpleNamespace(
+        test_id="smoke",
+        readiness="executable",
+        runtime_prompt_id=None,
+        runtime_prompt_choice=None,
+        steps=[SimpleNamespace(action="inspect_ui")],
+    )
+
+    ordered = sorted(
+        [deny_case, allow_case, smoke_case],
+        key=lambda test: service._selection_priority(test, discovery),
+    )
+
+    assert [test.test_id for test in ordered] == ["smoke", "allow", "deny"]
+
+
 def test_device_farm_prompt_reset_requires_confirmed_uninstall():
     class Driver:
         def __init__(self):
