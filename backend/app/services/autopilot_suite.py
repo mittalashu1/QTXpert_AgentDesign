@@ -113,18 +113,7 @@ class AutopilotSuiteService:
             if (not requested_ids or test.test_id in requested_ids)
             and (not requested_buckets or test.bucket in requested_buckets)
         ]
-        def selection_priority(test):
-            prompt_decision = None
-            if test.runtime_prompt_id and discovery is not None:
-                prompt = next((item for item in discovery.runtime_prompts if item.prompt_id == test.runtime_prompt_id), None)
-                choice = next((item for item in prompt.choices if item.key == test.runtime_prompt_choice), None) if prompt else None
-                prompt_decision = choice.decision if choice else None
-            return (
-                not (test.readiness == "executable" and self._supported(test)),
-                test.runtime_prompt_id is not None,
-                0 if prompt_decision == "deny" else 1,
-            )
-        selected.sort(key=selection_priority)
+        selected.sort(key=lambda test: self._selection_priority(test, discovery))
         if not request.run_all_eligible:
             selected = selected[: request.max_tests]
         candidates = [
@@ -312,6 +301,46 @@ class AutopilotSuiteService:
             bucket_counts=self._bucket_counts(selected),
             error=None,
             tests=ordered_results,
+        )
+
+    def _selection_priority(self, test: QTXTestIR, discovery: AutopilotDiscoveryResult | None) -> tuple[bool, bool, int]:
+        """Keep the app navigable before running denial branches.
+
+        When startup shows a permission prompt, _run_sync moves the first
+        matching choice to the front of the suite. Prefer an observed allow
+        choice for that first branch so screen crawling can continue; denial
+        permutations remain in the plan and run after regular screen cases.
+        """
+        prompt_decision = None
+        if test.runtime_prompt_id and discovery is not None:
+            prompt = next(
+                (
+                    item for item in discovery.runtime_prompts
+                    if item.prompt_id == test.runtime_prompt_id
+                ),
+                None,
+            )
+            choice = (
+                next(
+                    (
+                        item for item in prompt.choices
+                        if item.key == test.runtime_prompt_choice
+                    ),
+                    None,
+                )
+                if prompt
+                else None
+            )
+            prompt_decision = choice.decision if choice else None
+        decision_priority = (
+            0 if prompt_decision == "allow"
+            else 2 if prompt_decision == "deny"
+            else 1
+        )
+        return (
+            not (test.readiness == "executable" and self._supported(test)),
+            test.runtime_prompt_id is not None,
+            decision_priority,
         )
 
     @staticmethod
@@ -649,27 +678,6 @@ class AutopilotSuiteService:
             device_farm_prompt_reset_failure: str | None = None
             target_foreground_failure: str | None = None
 
-            def close_driver_for_prompt_reset() -> None:
-                nonlocal driver
-                active_driver = driver
-                driver = None
-                if active_driver is None:
-                    return
-                close_started = time.monotonic()
-                try:
-                    active_driver.quit()
-                except Exception as exc:
-                    _LOGGER.warning(
-                        "autopilot_stage=appium_session_close outcome=error elapsed_ms=%s error_type=%s",
-                        max(0, round((time.monotonic() - close_started) * 1000)),
-                        type(exc).__name__[:80],
-                    )
-                else:
-                    _LOGGER.info(
-                        "autopilot_stage=appium_session_close outcome=success elapsed_ms=%s",
-                        max(0, round((time.monotonic() - close_started) * 1000)),
-                    )
-
             for test_index, test in enumerate(execution_tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
@@ -682,6 +690,11 @@ class AutopilotSuiteService:
                     test,
                     input_values,
                     sensitive_input_keys,
+                )
+                _LOGGER.info(
+                    "autopilot_case_start test_id=%s execution_index=%s",
+                    test.test_id,
+                    test_index,
                 )
                 try:
                     # The newly created session was just launched and its target foreground verified above.
@@ -715,58 +728,44 @@ class AutopilotSuiteService:
                         prompt_case_count > 0 or current_prompt_kind != expected_prompt_kind
                     ):
                         if is_device_farm:
-                            # Device Farm does not expose UiAutomator2's
-                            # permission-reset extension. Uninstall the AUT to
-                            # clear its grants, then reinstall this exact upload
-                            # through the active remote-access session.
+                            # Keep the current Appium session alive. Remote-access
+                            # endpoints may not accept a second Appium session after
+                            # the first one has been quit.
                             try:
                                 self._reset_device_farm_prompt_state(
                                     driver,
                                     package,
                                     device_farm_service,
                                     device_farm_session,
-                                    close_driver=close_driver_for_prompt_reset,
                                 )
                             except ProviderLifecycleUnavailable as exc:
-                                # The same provider reset cannot succeed for another
-                                # permission permutation in this session. Preserve the
-                                # blocked outcome and avoid repeating its long failure.
                                 device_farm_prompt_reset_failure = str(exc)[:1200]
                                 raise
-                            reconnect_started = time.monotonic()
+                            reset_started = time.monotonic()
                             try:
-                                driver = create_driver()
+                                reset_source = safe_page_source(driver)
+                                reset_ready, reset_reason, _ = self._activate_verified_target(
+                                    driver,
+                                    package,
+                                    activity_hint=activity_hint,
+                                    timeout_seconds=15.0,
+                                    poll_interval=0.5,
+                                    page_source=reset_source,
+                                    preserve_known_system_prompt=True,
+                                )
                             except Exception as exc:
-                                message = (
-                                    "AWS Device Farm Appium could not reconnect after reinstalling the app "
-                                    "to reset its permission state."
+                                reset_reason = (
+                                    "AWS Device Farm could not launch the uploaded app after reinstalling it "
+                                    f"to reset its permission state ({type(exc).__name__})."
                                 )
-                                device_farm_prompt_reset_failure = message
-                                target_foreground_failure = message
-                                _LOGGER.warning(
-                                    "autopilot_stage=appium_prompt_reconnect outcome=error elapsed_ms=%s error_type=%s",
-                                    max(0, round((time.monotonic() - reconnect_started) * 1000)),
-                                    type(exc).__name__[:80],
-                                )
-                                raise ProviderLifecycleUnavailable(message) from None
-                            _LOGGER.info(
-                                "autopilot_stage=appium_prompt_reconnect outcome=success elapsed_ms=%s",
-                                max(0, round((time.monotonic() - reconnect_started) * 1000)),
-                            )
-                            time.sleep(2)
-                            reset_source = safe_page_source(driver)
-                            reset_ready, reset_reason, _ = self._activate_verified_target(
-                                driver,
-                                package,
-                                activity_hint=activity_hint,
-                                timeout_seconds=15.0,
-                                poll_interval=0.5,
-                                page_source=reset_source,
-                                preserve_known_system_prompt=True,
-                            )
+                                reset_ready = False
                             if not reset_ready:
                                 device_farm_prompt_reset_failure = reset_reason[:1200]
                                 raise ProviderLifecycleUnavailable(reset_reason)
+                            _LOGGER.info(
+                                "autopilot_stage=prompt_reset outcome=ready elapsed_ms=%s",
+                                max(0, round((time.monotonic() - reset_started) * 1000)),
+                            )
                         else:
                             self._reset_prompt_case_state(driver, package, request.target_kind)
                             self._activate_application(
@@ -787,8 +786,8 @@ class AutopilotSuiteService:
                     if has_prompt_step:
                         prompt_case_count += 1
                     if video_requested:
-                        # Prompt replay can replace the Appium session above;
-                        # begin recording only on the session that runs the case.
+                        # Prompt state reset finishes before recording starts, so this case's
+                        # video begins on the reinstalled app.
                         video_started, video_status = self._start_video_recording(driver)
                     case_source = safe_page_source(driver)
                     if expected_prompt_kind and known_native_prompt_kind(driver, case_source, request.target_kind) == expected_prompt_kind:
@@ -893,21 +892,26 @@ class AutopilotSuiteService:
                             evidence["video_status"] = video_status
                         elif video_status == "captured":
                             evidence["video_status"] = "captured"
-                results.append(
-                    AutopilotSuiteTestResult(
-                        test_id=test.test_id,
-                        title=test.title,
-                        status=status,
-                        bucket=test.bucket,
-                        readiness=test.readiness,
-                        dependency=dependency,
-                        duration_seconds=round(time.perf_counter() - test_started, 2),
-                        error=error,
-                        evidence=evidence,
-                        journey=test.journey,
-                        page_label=test.page_label,
-                        page_url=test.page_url,
-                    )
+                result = AutopilotSuiteTestResult(
+                    test_id=test.test_id,
+                    title=test.title,
+                    status=status,
+                    bucket=test.bucket,
+                    readiness=test.readiness,
+                    dependency=dependency,
+                    duration_seconds=round(time.perf_counter() - test_started, 2),
+                    error=error,
+                    evidence=evidence,
+                    journey=test.journey,
+                    page_label=test.page_label,
+                    page_url=test.page_url,
+                )
+                results.append(result)
+                _LOGGER.info(
+                    "autopilot_case_result test_id=%s status=%s duration_ms=%s",
+                    test.test_id,
+                    status,
+                    max(0, round((time.perf_counter() - test_started) * 1000)),
                 )
             results_by_test_id = {result.test_id: result for result in results}
             return [
@@ -969,8 +973,6 @@ class AutopilotSuiteService:
         package: str | None,
         device_farm_service: Any,
         device_farm_session: Any,
-        *,
-        close_driver: Callable[[], None],
     ) -> None:
         """Uninstall, close Appium, then reinstall the exact upload to reset grants."""
         if not package:
@@ -1014,10 +1016,8 @@ class AutopilotSuiteService:
             raise ProviderLifecycleUnavailable(
                 "The AWS Device Farm adapter cannot reinstall the selected app upload in this session."
             )
-        # End Appium while the remote context is still valid. Device Farm
-        # installs the APK into the active remote-access session; a new Appium
-        # session will receive the reinstalled app.
-        close_driver()
+        # Keep Appium connected while Device Farm installs the selected APK.
+        # The active driver is also used below to verify that installation finished.
         try:
             installer(device_farm_session.arn, device_farm_session.app_arn)
         except Exception as exc:
@@ -1027,6 +1027,28 @@ class AutopilotSuiteService:
                     "AWS Device Farm could not reinstall the selected app upload after resetting its permission state."
                 )
             raise ProviderLifecycleUnavailable(safe_reason) from None
+        verify_started = time.monotonic()
+        for attempt in range(60):
+            try:
+                installed = installed_check(package) is True
+            except Exception:
+                installed = False
+            if installed:
+                _LOGGER.info(
+                    "autopilot_stage=prompt_reinstall_verify outcome=success poll_count=%s elapsed_ms=%s",
+                    attempt + 1,
+                    max(0, round((time.monotonic() - verify_started) * 1000)),
+                )
+                return
+            if attempt < 59:
+                time.sleep(0.5)
+        _LOGGER.warning(
+            "autopilot_stage=prompt_reinstall_verify outcome=timeout poll_count=60"
+        )
+        raise ProviderLifecycleUnavailable(
+            "AWS Device Farm accepted the app reinstall request, but Appium did not confirm "
+            "that the uploaded app was installed."
+        )
 
     @staticmethod
     def _reset_prompt_case_state(driver, package: str | None, target_kind: str) -> None:
