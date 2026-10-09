@@ -872,21 +872,17 @@ def test_device_farm_prompt_reset_requires_confirmed_uninstall():
         app_arn = "arn:uploaded-app"
 
     device_farm = DeviceFarm()
-    driver = Driver()
-    close_calls = []
     with pytest.raises(ProviderLifecycleUnavailable, match="still reports the app installed"):
         AutopilotSuiteService._reset_device_farm_prompt_state(
-            driver,
+            Driver(),
             "com.qtx.demo",
             device_farm,
             Session(),
-            close_driver=lambda: close_calls.append("close"),
         )
     assert device_farm.installs == []
-    assert close_calls == []
 
 
-def test_device_farm_prompt_reset_closes_appium_before_reinstall():
+def test_device_farm_prompt_reset_keeps_appium_session_open_and_verifies_reinstall():
     events = []
 
     class Driver:
@@ -897,26 +893,29 @@ def test_device_farm_prompt_reset_closes_appium_before_reinstall():
             self.installed = False
 
         def is_app_installed(self, _package):
-            events.append("verify_uninstalled")
+            events.append("verify_installed")
             return self.installed
+
+    driver = Driver()
 
     class DeviceFarm:
         def install_app_in_session(self, *_args):
             events.append("install")
+            driver.installed = True
 
     class Session:
         arn = "arn:remote-session"
         app_arn = "arn:uploaded-app"
 
     AutopilotSuiteService._reset_device_farm_prompt_state(
-        Driver(),
+        driver,
         "com.qtx.demo",
         DeviceFarm(),
         Session(),
-        close_driver=lambda: events.append("close_appium"),
     )
 
-    assert events == ["uninstall", "verify_uninstalled", "close_appium", "install"]
+    assert events == ["uninstall", "verify_installed", "install", "verify_installed"]
+    assert driver.installed is True
 
 
 def test_suite_retraces_one_observed_safe_edge_from_empty_sign_in_form():
@@ -1410,18 +1409,18 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
         def quit(self):
             self.quit_calls += 1
 
-    drivers = [PromptDriver(), PromptDriver()]
+    driver = PromptDriver()
     calls = []
 
     def remote(url, options, **_kwargs):
         calls.append((url, options.to_capabilities()))
-        return drivers[len(calls) - 1]
+        return driver
 
     monkeypatch.setattr(appium.webdriver, "Remote", remote)
     monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
         "app.services.autopilot_suite.known_native_prompt_kind",
-        lambda driver, _source, _target: "runtime_permission" if driver.prompt_active else None,
+        lambda current_driver, _source, _target: "runtime_permission" if current_driver.prompt_active else None,
     )
 
     class Prototype:
@@ -1435,6 +1434,7 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
 
         def install_app_in_session(self, session_arn, app_arn):
             self.installs.append((session_arn, app_arn))
+            driver.app_installed = True
 
     class Session:
         arn = "arn:remote-session"
@@ -1442,7 +1442,7 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
 
     device_farm = DeviceFarm()
     service = AutopilotSuiteService(Settings(), prototype=Prototype())
-    service._activate_verified_target = lambda driver, package, **_kwargs: (
+    service._activate_verified_target = lambda current_driver, package, **_kwargs: (
         True,
         "ready",
         {"package": package},
@@ -1485,14 +1485,14 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
     )
 
     assert [result.status for result in results] == ["passed", "passed"]
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert all("appium:fastReset" not in capabilities for _, capabilities in calls)
     assert all("appium:fullReset" not in capabilities for _, capabilities in calls)
-    assert drivers[0].quit_calls == 1
-    assert drivers[1].quit_calls == 1
-    assert drivers[0].removed_packages == ["com.qtx.demo"]
-    assert drivers[0].install_checks == ["com.qtx.demo"]
+    assert driver.quit_calls == 1
+    assert driver.removed_packages == ["com.qtx.demo"]
+    assert driver.install_checks == ["com.qtx.demo", "com.qtx.demo"]
     assert device_farm.installs == [("arn:remote-session", "arn:uploaded-app")]
+
 
 
 
