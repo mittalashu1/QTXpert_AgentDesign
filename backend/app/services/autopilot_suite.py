@@ -107,9 +107,10 @@ class AutopilotSuiteService:
 
         requested_ids = set(request.test_ids)
         requested_buckets = set(request.buckets)
+        case_pool = self._prompt_only_cases(bundle.tests) if request.prompt_only else bundle.tests
         selected = [
             test
-            for test in bundle.tests
+            for test in case_pool
             if (not requested_ids or test.test_id in requested_ids)
             and (not requested_buckets or test.bucket in requested_buckets)
         ]
@@ -302,6 +303,16 @@ class AutopilotSuiteService:
             error=None,
             tests=ordered_results,
         )
+
+    @staticmethod
+    def _prompt_only_cases(tests: list[QTXTestIR]) -> list[QTXTestIR]:
+        """Keep only cases that replay one observed native-prompt choice."""
+        return [
+            test
+            for test in tests
+            if test.runtime_prompt_id
+            and any(step.action == "prompt_choice" for step in test.steps)
+        ]
 
     def _selection_priority(
         self,

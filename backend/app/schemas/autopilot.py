@@ -1104,6 +1104,8 @@ class AutopilotSuiteRequest(AutopilotExecutionRequest):
 
     test_ids: List[str] = Field(default_factory=list)
     buckets: List[AutopilotTestBucket] = Field(default_factory=list, max_length=20)
+    # Restrict a safe batch to deterministic branches from observed native prompts.
+    prompt_only: bool = False
     # The plan has no arbitrary case-count cap. A safe batch still defaults to
     # 20 so callers can choose an execution size appropriate for their device
     # provider and timeout budget.

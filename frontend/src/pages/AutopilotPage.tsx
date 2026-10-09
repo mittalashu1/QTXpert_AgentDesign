@@ -511,6 +511,22 @@ function discoveryVerifiedForExecution(discovery: Discovery | null | undefined) 
   );
 }
 
+function discoverySupportsPromptReplay(discovery: Discovery | null | undefined) {
+  return Boolean(
+    discovery
+    && discovery.target_ready === true
+    && (discovery.status === "completed" || discovery.status === "partial")
+    && discovery.last_attempt_status !== "blocked"
+    && discovery.last_attempt_status !== "failed"
+    && (discovery.runtime_prompts?.length || 0) > 0
+  );
+}
+
+function discoveryAllowsSuiteSelection(discovery: Discovery | null | undefined, bucket: string) {
+  return discoveryVerifiedForExecution(discovery)
+    || (bucket === "permissions" && discoverySupportsPromptReplay(discovery));
+}
+
 function isBlockingCheckpoint(request: AutopilotInputRequest) {
   if (request.status !== "pending") return false;
   // The only automatic pause is a real live authentication/sensitive-field
@@ -2087,7 +2103,12 @@ export default function AutopilotPage() {
       const latestJob = jobResponse.data;
       const latestDiscovery = discoveryResponse.data;
       if (analysis?.job_id === jobId) applyJob(latestJob);
-      if (!discoveryVerifiedForExecution(latestDiscovery) || latestJob.phase === "blocked" || latestJob.analysis?.phase === "blocked") {
+      const latestDiscoveryReady = discoveryVerifiedForExecution(latestDiscovery);
+      const promptOnly = executionMode === "safe_navigation"
+        && suiteBucket === "permissions"
+        && !latestDiscoveryReady
+        && discoverySupportsPromptReplay(latestDiscovery);
+      if ((!latestDiscoveryReady && !promptOnly) || latestJob.phase === "blocked" || latestJob.analysis?.phase === "blocked") {
         const reason = latestDiscovery?.last_attempt_reason
           || latestDiscovery?.target_identity_reason
           || latestDiscovery?.error
@@ -2115,6 +2136,7 @@ export default function AutopilotPage() {
         test_ids: [],
         buckets: executionMode === "full_uat" || suiteBucket === "all" ? [] : [suiteBucket],
         include_deferred: true,
+        prompt_only: promptOnly,
         execution_mode: executionMode,
         run_all_eligible: executionMode === "full_uat",
         confirm_isolated_uat: executionMode === "full_uat" && fullUatConfirmed,
@@ -2556,7 +2578,7 @@ export default function AutopilotPage() {
             <Stack spacing={.55} sx={{ mt: .8 }}>
               <Button size="small" variant="outlined" onClick={openScopeSetup} startIcon={<AutoAwesomeIcon />}>{analysis ? "Refine scope" : "Choose target"}</Button>
               {analysis && planAwaitingApproval && <Button size="small" variant="contained" onClick={() => { void approvePlanAndDiscover(); }} disabled={workflowBusy || discoveryBusy || executionUnavailable} startIcon={<TravelExploreOutlinedIcon />}>Approve &amp; discover</Button>}
-              {analysis && !planAwaitingApproval && <Button size="small" variant="contained" onClick={() => void runSuite(analysis.job_id, "safe_navigation")} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryVerifiedForExecution(discovery)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>}
+              {analysis && !planAwaitingApproval && <Button size="small" variant="contained" onClick={() => void runSuite(analysis.job_id, "safe_navigation")} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryAllowsSuiteSelection(discovery, suiteBucket)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>}
             </Stack>
           </CardContent>
         </Card>
@@ -3054,7 +3076,7 @@ export default function AutopilotPage() {
                 </Select>
               </FormControl>
             </>}
-            <Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || !discoveryVerifiedForExecution(discovery) || (suiteMode === "full_uat" ? (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified || !analysis?.tests?.length) : suiteExecutableCount === 0)} onClick={runSuite}>
+            <Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || !(suiteMode === "safe_navigation" ? discoveryAllowsSuiteSelection(discovery, suiteBucket) : discoveryVerifiedForExecution(discovery)) || (suiteMode === "full_uat" ? (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified || !analysis?.tests?.length) : suiteExecutableCount === 0)} onClick={runSuite}>
               {suiteBusy ? "Running suite…" : suiteMode === "full_uat" ? "Run all eligible UAT cases" : suiteBucket === "all" ? `Run safe batch (${suiteMaxTests})` : `Run ${testBucketLabel[suiteBucket]} (${suiteMaxTests})`}
             </Button>
           </Stack>
