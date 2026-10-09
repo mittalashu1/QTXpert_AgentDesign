@@ -269,9 +269,22 @@ class AutopilotDiscoveryService:
         driver: Any,
         choices: list[RuntimePromptChoice],
         appium_by: Any,
+        *,
+        prompt_kind: Optional[str] = None,
     ) -> tuple[Optional[str], bool]:
-        """Select an observed decline control so safe discovery can continue."""
-        choice = next((item for item in choices if item.decision == "deny"), None)
+        """Choose a discovery branch that reveals the next useful app checkpoint.
+
+        Grant an observed Android runtime permission first so any follow-up
+        location-settings checkpoint can be discovered. Other native prompts
+        use an observed decline choice during discovery; generated cases still
+        cover every recorded allow and deny option.
+        """
+        preferred_decision = (
+            "allow" if str(prompt_kind or "").casefold() == "runtime_permission" else "deny"
+        )
+        choice = next((item for item in choices if item.decision == preferred_decision), None)
+        if choice is None and preferred_decision == "allow":
+            choice = next((item for item in choices if item.decision == "deny"), None)
         if choice is None:
             return None, False
         locator_map = {
@@ -1740,18 +1753,22 @@ class AutopilotDiscoveryService:
                     pending_prompt_links.clear()
                 if request.observe_only:
                     break
-                selected_key, clicked = self._choose_system_prompt_branch(driver, prompt.choices, AppiumBy)
+                selected_key, clicked = self._choose_system_prompt_branch(
+                    driver,
+                    prompt.choices,
+                    AppiumBy,
+                    prompt_kind=prompt.kind,
+                )
                 if selected_key and clicked:
                     actions_attempted += 1
                 elif prompt.choices:
                     warnings.append(
-                        f"Could not activate an observed decline option for the {prompt.kind.replace('_', ' ')} prompt; "
+                        f"Could not activate an observed choice for the {prompt.kind.replace('_', ' ')} prompt; "
                         "the prompt was retained for branch execution."
                     )
                 try:
-                    # Use Back only to dismiss a recognized Android prompt when
-                    # no observed decline action was available; never report it
-                    # as an observed deny branch.
+                    # Use Back only when no observed branch choice was available;
+                    # recovery is not reported as an observed prompt outcome.
                     if not (selected_key and clicked):
                         driver.back()
                 except Exception:
@@ -1804,10 +1821,10 @@ class AutopilotDiscoveryService:
                     continue
                 returned_to_app = decline_returned_to_app
                 if not returned_to_app:
-                    # A native prompt can remain foreground after its decline
-                    # button was clicked. Dismiss only a recognized Android
-                    # system prompt, then verify the uploaded app before
-                    # resuming; this recovery is not evidence of a deny result.
+                    # A native prompt can remain foreground after a choice.
+                    # Dismiss only a recognized Android system prompt, then
+                    # verify the uploaded app before resuming; recovery is not
+                    # evidence of the selected branch's outcome.
                     prompt_kind = known_native_prompt_kind(
                         driver,
                         safe_page_source(driver),
