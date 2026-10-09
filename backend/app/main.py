@@ -78,6 +78,11 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def recover_autopilot_after_restart() -> None:
+        logger.info(
+            "Database connection pool configured size=%s max_overflow=%s",
+            settings_obj.DB_POOL_SIZE,
+            settings_obj.DB_MAX_OVERFLOW,
+        )
         # Recovery is opt-in. A large APK replay belongs on a worker/queue; doing
         # it automatically on the web instance can starve authentication during
         # Render deploys and trigger the 512 MiB memory limit.

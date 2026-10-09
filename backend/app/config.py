@@ -53,11 +53,11 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://qtxpert:qtxpert@localhost:5432/qtxpert",
         description="Async SQLAlchemy connection string",
     )
-    # Keep the default pool deliberately small: Render currently runs one API
-    # instance and Neon bills compute/transfer, not idle application sockets.
-    # Increase only after measured concurrency requires it.
-    DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 5
+    # Autopilot opens several report and execution endpoints in parallel.
+    # Keep enough headroom for that measured burst while retaining a bounded
+    # pool on the single Render API instance.
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 10
     # Keep an unavailable/quota-exhausted provider from holding an HTTP request
     # or the container startup indefinitely.  asyncpg applies
     # ``command_timeout`` to statements as well as migration DDL.

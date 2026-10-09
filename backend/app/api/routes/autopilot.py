@@ -6193,13 +6193,23 @@ async def get_autopilot_report(
 ):
     """Build an executive Test and Audit Report from the latest evidence."""
     service = _service(settings)
-    job = await _require_owned_job(service, job_id, user)
+    # Prefer the owner's durable row for the report. Loading a manifest and
+    # then loading analysis separately creates two extra database checkouts
+    # during the page's parallel report/plan/discovery requests.
+    record = await _safe_job_record(db, job_id, user.id)
+    if record is not None:
+        job = {"context": str(record.context or "")}
+    else:
+        job = await _require_owned_job(service, job_id, user)
+
     try:
-        analysis = await service.load_analysis(job_id)
+        if record is not None and record.analysis is not None:
+            analysis = AutopilotAnalysis.model_validate(record.analysis)
+        else:
+            analysis = await service.load_analysis(job_id)
     except FileNotFoundError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Autopilot analysis is not complete")
 
-    record = await _safe_job_record(db, job_id, user.id)
     discovery = await _sanitize_discovery_assets(db, user, record, _record_discovery(record, job))
     suite = None
     if record is not None and record.suite_execution is not None:
