@@ -113,18 +113,7 @@ class AutopilotSuiteService:
             if (not requested_ids or test.test_id in requested_ids)
             and (not requested_buckets or test.bucket in requested_buckets)
         ]
-        def selection_priority(test):
-            prompt_decision = None
-            if test.runtime_prompt_id and discovery is not None:
-                prompt = next((item for item in discovery.runtime_prompts if item.prompt_id == test.runtime_prompt_id), None)
-                choice = next((item for item in prompt.choices if item.key == test.runtime_prompt_choice), None) if prompt else None
-                prompt_decision = choice.decision if choice else None
-            return (
-                not (test.readiness == "executable" and self._supported(test)),
-                test.runtime_prompt_id is not None,
-                0 if prompt_decision == "deny" else 1,
-            )
-        selected.sort(key=selection_priority)
+        selected.sort(key=lambda test: self._selection_priority(test, discovery))
         if not request.run_all_eligible:
             selected = selected[: request.max_tests]
         candidates = [
@@ -312,6 +301,46 @@ class AutopilotSuiteService:
             bucket_counts=self._bucket_counts(selected),
             error=None,
             tests=ordered_results,
+        )
+
+    def _selection_priority(self, test: QTXTestIR, discovery: AutopilotDiscoveryResult | None) -> tuple[bool, bool, int]:
+        """Keep the app navigable before running denial branches.
+
+        When startup shows a permission prompt, _run_sync moves the first
+        matching choice to the front of the suite. Prefer an observed allow
+        choice for that first branch so screen crawling can continue; denial
+        permutations remain in the plan and run after regular screen cases.
+        """
+        prompt_decision = None
+        if test.runtime_prompt_id and discovery is not None:
+            prompt = next(
+                (
+                    item for item in discovery.runtime_prompts
+                    if item.prompt_id == test.runtime_prompt_id
+                ),
+                None,
+            )
+            choice = (
+                next(
+                    (
+                        item for item in prompt.choices
+                        if item.key == test.runtime_prompt_choice
+                    ),
+                    None,
+                )
+                if prompt
+                else None
+            )
+            prompt_decision = choice.decision if choice else None
+        decision_priority = (
+            0 if prompt_decision == "allow"
+            else 2 if prompt_decision == "deny"
+            else 1
+        )
+        return (
+            not (test.readiness == "executable" and self._supported(test)),
+            test.runtime_prompt_id is not None,
+            decision_priority,
         )
 
     @staticmethod
