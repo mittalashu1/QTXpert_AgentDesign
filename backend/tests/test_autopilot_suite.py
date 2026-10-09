@@ -848,7 +848,7 @@ def test_suite_relaunches_once_when_sparse_launch_screen_does_not_settle(monkeyp
     assert driver.page_source == driver.auth_source
 
 
-def test_suite_selection_prioritizes_allow_prompt_branch_for_startup_crawl():
+def test_suite_selection_runs_prompt_chains_before_crawling_app_screens():
     from types import SimpleNamespace
 
     service = AutopilotSuiteService(Settings(), prototype=object())
@@ -860,21 +860,30 @@ def test_suite_selection_prioritizes_allow_prompt_branch_for_startup_crawl():
                     SimpleNamespace(key="allow", decision="allow"),
                     SimpleNamespace(key="deny", decision="deny"),
                 ],
-            )
+            ),
+            SimpleNamespace(
+                prompt_id="location-settings-prompt",
+                choices=[
+                    SimpleNamespace(key="turn-on", decision="allow"),
+                    SimpleNamespace(key="no-thanks", decision="deny"),
+                ],
+            ),
         ]
     )
 
-    def candidate(test_id, prompt_choice):
+    def candidate(test_id, prompt_id, prompt_choice, depth):
         return SimpleNamespace(
             test_id=test_id,
             readiness="executable",
-            runtime_prompt_id="permission-prompt",
+            runtime_prompt_id=prompt_id,
             runtime_prompt_choice=prompt_choice,
-            steps=[SimpleNamespace(action="prompt_choice")],
+            steps=[SimpleNamespace(action="prompt_choice") for _ in range(depth)],
         )
 
-    deny_case = candidate("deny", "deny")
-    allow_case = candidate("allow", "allow")
+    root_deny = candidate("root-deny", "permission-prompt", "deny", 1)
+    root_allow = candidate("root-allow", "permission-prompt", "allow", 1)
+    followup_deny = candidate("followup-deny", "location-settings-prompt", "no-thanks", 2)
+    followup_allow = candidate("followup-allow", "location-settings-prompt", "turn-on", 2)
     smoke_case = SimpleNamespace(
         test_id="smoke",
         readiness="executable",
@@ -884,11 +893,17 @@ def test_suite_selection_prioritizes_allow_prompt_branch_for_startup_crawl():
     )
 
     ordered = sorted(
-        [deny_case, allow_case, smoke_case],
+        [root_deny, followup_deny, smoke_case, followup_allow, root_allow],
         key=lambda test: service._selection_priority(test, discovery),
     )
 
-    assert [test.test_id for test in ordered] == ["smoke", "allow", "deny"]
+    assert [test.test_id for test in ordered] == [
+        "root-allow",
+        "root-deny",
+        "followup-allow",
+        "followup-deny",
+        "smoke",
+    ]
 
 
 def test_device_farm_prompt_reset_requires_confirmed_uninstall():
