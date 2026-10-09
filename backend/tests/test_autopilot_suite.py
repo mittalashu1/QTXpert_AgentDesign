@@ -1754,12 +1754,32 @@ def test_suite_confirmation_assertion_fails_when_screen_is_unchanged(tmp_path, m
 
 
 
-def test_sparse_launch_settle_is_limited_to_once_per_screen_per_suite():
-    attempted = set()
+def test_sparse_launch_recovery_attempts_are_limited_per_test_and_screen():
+    settle_attempted = set()
+    recovery_attempted = set()
 
-    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-001", attempted) is True
-    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-001", attempted) is False
-    assert AutopilotSuiteService._claim_transient_launch_settle_attempt("screen-002", attempted) is True
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt(
+        "case-001", "screen-001", settle_attempted
+    ) is True
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt(
+        "case-001", "screen-001", settle_attempted
+    ) is False
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt(
+        "case-001", "screen-002", settle_attempted
+    ) is True
+    assert AutopilotSuiteService._claim_transient_launch_settle_attempt(
+        "case-002", "screen-001", settle_attempted
+    ) is True
+
+    assert AutopilotSuiteService._claim_transient_launch_recovery_attempt(
+        "case-001", "screen-001", recovery_attempted
+    ) is True
+    assert AutopilotSuiteService._claim_transient_launch_recovery_attempt(
+        "case-001", "screen-001", recovery_attempted
+    ) is False
+    assert AutopilotSuiteService._claim_transient_launch_recovery_attempt(
+        "case-002", "screen-001", recovery_attempted
+    ) is True
 
 
 def test_device_farm_prompt_reset_preserves_sanitized_provider_reason():
