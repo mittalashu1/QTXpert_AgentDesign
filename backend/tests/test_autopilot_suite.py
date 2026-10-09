@@ -1951,6 +1951,5 @@ def test_device_farm_prompt_reset_preserves_sanitized_provider_reason():
             "com.qtx.demo",
             DeviceFarm(),
             Session(),
-            close_driver=lambda: None,
         )
     assert "private provider response" not in str(captured.value)
