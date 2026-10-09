@@ -757,8 +757,8 @@ class AutopilotSuiteService:
                     if has_prompt_step:
                         prompt_case_count += 1
                     if video_requested:
-                        # Prompt replay can replace the Appium session above;
-                        # begin recording only on the session that runs the case.
+                        # Prompt state reset finishes before recording starts, so this case's
+                        # video begins on the reinstalled app.
                         video_started, video_status = self._start_video_recording(driver)
                     case_source = safe_page_source(driver)
                     if expected_prompt_kind and known_native_prompt_kind(driver, case_source, request.target_kind) == expected_prompt_kind:
