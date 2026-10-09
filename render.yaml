@@ -14,9 +14,9 @@ services:
         # environment rather than creating a second Render Postgres instance.
         sync: false
       - key: DB_POOL_SIZE
-        value: "5"
+        value: "10"
       - key: DB_MAX_OVERFLOW
-        value: "5"
+        value: "10"
       - key: DB_CONNECT_TIMEOUT_SECONDS
         value: "10"
       - key: DB_COMMAND_TIMEOUT_SECONDS
