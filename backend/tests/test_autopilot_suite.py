@@ -155,6 +155,42 @@ def _test_ir(actions):
     )
 
 
+def test_prompt_only_filter_keeps_only_observed_prompt_choice_cases():
+    prompt_case = _test_ir([
+        QTXIRStep(
+            action="prompt_choice",
+            description="Choose Allow",
+            target="runtime_permission",
+            value="allow",
+            locator_strategy="id",
+            locator_value="permission_allow",
+            locator_confidence=0.97,
+        )
+    ]).model_copy(update={
+        "test_id": "QT-PROMPT-ALLOW",
+        "runtime_prompt_id": "camera-permission",
+        "runtime_prompt_choice": "allow",
+    })
+    ordinary_case = _test_ir([
+        QTXIRStep(action="tap", description="Open Help", target="Help", locator_strategy="id", locator_value="help", locator_confidence=0.97)
+    ]).model_copy(update={"test_id": "QT-NAV-HELP"})
+    malformed_case = _test_ir([
+        QTXIRStep(
+            action="prompt_choice",
+            description="Choose Allow",
+            target="runtime_permission",
+            value="allow",
+            locator_strategy="id",
+            locator_value="permission_allow",
+            locator_confidence=0.97,
+        )
+    ]).model_copy(update={"test_id": "QT-PROMPT-UNOBSERVED"})
+
+    selected = AutopilotSuiteService._prompt_only_cases([prompt_case, ordinary_case, malformed_case])
+
+    assert [test.test_id for test in selected] == ["QT-PROMPT-ALLOW"]
+
+
 def test_suite_runner_supports_only_explicit_ir_allowlist():
     service = AutopilotSuiteService(Settings(), prototype=object())
     safe = _test_ir([
