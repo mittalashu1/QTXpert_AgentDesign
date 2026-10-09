@@ -473,6 +473,18 @@ def activate_verified_target_surface(
             interval = max(0.05, float(poll_interval))
             time.sleep(min(interval, max(0.0, attempt_deadline - time.monotonic())))
             source = safe_page_source(driver)
+            prompt_kind = (
+                known_ios_prompt_kind(source)
+                if platform.casefold() == "ios"
+                else known_android_prompt_kind(driver, source)
+            )
+            if preserve_known_system_prompt and prompt_kind:
+                return (
+                    True,
+                    f"Recognized native {prompt_kind.replace('_', ' ')} prompt appeared via {strategy_name} "
+                    "and is ready for its observed choice branch.",
+                    {**observed_app_identity(driver, page_source=source), "package": package},
+                )
             ready, reason, identity = validate_target_surface(
                 driver,
                 expected_package=package,

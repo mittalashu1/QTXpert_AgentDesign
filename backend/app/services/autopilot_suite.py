@@ -303,13 +303,16 @@ class AutopilotSuiteService:
             tests=ordered_results,
         )
 
-    def _selection_priority(self, test: QTXTestIR, discovery: AutopilotDiscoveryResult | None) -> tuple[bool, bool, int]:
-        """Keep the app navigable before running denial branches.
+    def _selection_priority(
+        self,
+        test: QTXTestIR,
+        discovery: AutopilotDiscoveryResult | None,
+    ) -> tuple[bool, bool, int, int]:
+        """Resolve observed system-prompt branches before crawling app screens.
 
-        When startup shows a permission prompt, _run_sync moves the first
-        matching choice to the front of the suite. Prefer an observed allow
-        choice for that first branch so screen crawling can continue; denial
-        permutations remain in the plan and run after regular screen cases.
+        Root prompt choices run before their observed follow-up prompt paths.
+        The last denial branch returns discovery to the app before screen cases
+        begin, while every generated allow and deny permutation remains eligible.
         """
         prompt_decision = None
         if test.runtime_prompt_id and discovery is not None:
@@ -337,9 +340,13 @@ class AutopilotSuiteService:
             else 2 if prompt_decision == "deny"
             else 1
         )
+        prompt_depth = sum(
+            1 for step in test.steps if getattr(step, "action", None) == "prompt_choice"
+        )
         return (
             not (test.readiness == "executable" and self._supported(test)),
-            test.runtime_prompt_id is not None,
+            test.runtime_prompt_id is None,
+            prompt_depth,
             decision_priority,
         )
 

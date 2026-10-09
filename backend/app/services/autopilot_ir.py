@@ -404,7 +404,7 @@ class AutopilotIRCompiler:
 
     @staticmethod
     def _observed_prompt_prefix(discovery, prompt_id: str):
-        """Find a bounded observed denial path from app launch to a follow-up prompt."""
+        """Find a bounded observed choice path from app launch to a follow-up prompt."""
         if discovery is None:
             return [], None
         chain = []
@@ -417,14 +417,13 @@ class AutopilotIRCompiler:
                 for choice in source_prompt.choices
                 if choice.resulting_prompt_id == cursor
                 and choice.outcome_status == "observed"
-                and choice.decision == "deny"
             ]
             if not candidates:
                 return list(reversed(chain)), None
             candidates.sort(key=lambda item: (item[0].prompt_id, item[1].key))
             source_prompt, choice = candidates[0]
             if not choice.locators:
-                return [], "The observed prompt path contains a denial without a deterministic locator."
+                return [], "The observed prompt path contains a choice without a deterministic locator."
             if source_prompt.prompt_id in visited:
                 return [], "The observed prompt path contains a cycle and cannot be replayed safely."
             chain.append((source_prompt, choice))

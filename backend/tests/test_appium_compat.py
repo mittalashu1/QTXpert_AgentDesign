@@ -353,6 +353,65 @@ class _GoogleLocationCheckerDriver:
         self.calls.append(("package", package))
 
 
+def test_target_launch_preserves_prompt_that_appears_during_relaunch_wait(monkeypatch):
+    from app.services.appium_compat import known_android_prompt_kind
+
+    class DelayedPromptDriver:
+        capabilities = {
+            "appium:platformName": "Android",
+            "appium:appPackage": "com.qtx.demo",
+            "appium:appActivity": ".MainActivity",
+        }
+
+        def __init__(self):
+            self._current_activity = "com.android.launcher3.Launcher"
+            self.page_source = (
+                '<hierarchy><node package="com.android.launcher3" text="Launcher" /></hierarchy>'
+            )
+            self.calls = []
+
+        @property
+        def current_activity(self):
+            return self._current_activity
+
+        def activate_app(self, package):
+            self.calls.append(("package", package))
+
+    driver = DelayedPromptDriver()
+    fake_clock = {"now": 0.0}
+
+    def monotonic():
+        return fake_clock["now"]
+
+    def sleep(seconds):
+        fake_clock["now"] += seconds
+        driver._current_activity = (
+            "com.google.android.location.settings.LocationSettingsCheckerActivity"
+        )
+        driver.page_source = (
+            '<hierarchy><node package="com.google.android.gms" text="Location settings" /></hierarchy>'
+        )
+
+    monkeypatch.setattr("app.services.appium_compat.time.monotonic", monotonic)
+    monkeypatch.setattr("app.services.appium_compat.time.sleep", sleep)
+
+    ready, reason, identity = activate_verified_target_surface(
+        driver,
+        "com.qtx.demo",
+        expected_activity="com.qtx.demo.MainActivity",
+        timeout_seconds=1,
+        poll_interval=0.5,
+        page_source=driver.page_source,
+        preserve_known_system_prompt=True,
+    )
+
+    assert ready is True, reason
+    assert "location settings prompt appeared" in reason
+    assert identity["package"] == "com.qtx.demo"
+    assert driver.calls == [("package", "com.qtx.demo")]
+    assert known_android_prompt_kind(driver, driver.page_source) == "location_settings"
+
+
 def test_target_launch_safely_returns_from_observed_google_location_prompt(monkeypatch):
     monkeypatch.setattr("app.services.appium_compat.time.sleep", lambda _seconds: None)
     driver = _GoogleLocationCheckerDriver(back_returns_to_app=True)

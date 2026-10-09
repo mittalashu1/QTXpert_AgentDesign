@@ -2,7 +2,12 @@ import pytest
 from pydantic import ValidationError
 from types import SimpleNamespace
 
-from app.schemas.autopilot import AutopilotDiscoveryRequest, DiscoveredControl, DiscoveryLocator
+from app.schemas.autopilot import (
+    AutopilotDiscoveryRequest,
+    DiscoveredControl,
+    DiscoveryLocator,
+    RuntimePromptChoice,
+)
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 
 
@@ -53,6 +58,72 @@ def test_runtime_prompt_parser_captures_observed_location_choices(tmp_path):
     assert prompt.screenshot_path
     assert prompt.page_source_path
 
+
+
+def test_prompt_discovery_grants_runtime_permission_and_declines_location_settings():
+    class AppiumBy:
+        ACCESSIBILITY_ID = "accessibility id"
+        ID = "id"
+        XPATH = "xpath"
+
+    class Element:
+        def __init__(self, driver, value):
+            self.driver = driver
+            self.value = value
+
+        def is_enabled(self):
+            return True
+
+        def click(self):
+            self.driver.clicked = self.value
+
+    class Driver:
+        clicked = None
+
+        def find_element(self, _by, value):
+            return Element(self, value)
+
+    driver = Driver()
+    runtime_choices = [
+        RuntimePromptChoice(
+            key="dont-allow",
+            label="Don't allow",
+            decision="deny",
+            locators=[DiscoveryLocator(strategy="id", value="deny-button", confidence=0.99)],
+        ),
+        RuntimePromptChoice(
+            key="while-using",
+            label="While using the app",
+            decision="allow",
+            locators=[DiscoveryLocator(strategy="id", value="allow-button", confidence=0.99)],
+        ),
+    ]
+    location_choices = [
+        RuntimePromptChoice(
+            key="turn-on",
+            label="Turn on",
+            decision="allow",
+            locators=[DiscoveryLocator(strategy="id", value="turn-on", confidence=0.99)],
+        ),
+        RuntimePromptChoice(
+            key="no-thanks",
+            label="No thanks",
+            decision="deny",
+            locators=[DiscoveryLocator(strategy="id", value="no-thanks", confidence=0.99)],
+        ),
+    ]
+
+    runtime_key, runtime_clicked = AutopilotDiscoveryService._choose_system_prompt_branch(
+        driver, runtime_choices, AppiumBy, prompt_kind="runtime_permission"
+    )
+    assert (runtime_key, runtime_clicked) == ("while-using", True)
+    assert driver.clicked == "allow-button"
+
+    settings_key, settings_clicked = AutopilotDiscoveryService._choose_system_prompt_branch(
+        driver, location_choices, AppiumBy, prompt_kind="location_settings"
+    )
+    assert (settings_key, settings_clicked) == ("no-thanks", True)
+    assert driver.clicked == "no-thanks"
 
 
 def test_runtime_prompt_id_distinguishes_same_kind_with_different_prompt_copy(tmp_path):
@@ -520,8 +591,10 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
             return True
 
         def click(self):
-            if self.value == "com.android.permissioncontroller:id/deny_button":
+            if self.value == "com.android.permissioncontroller:id/allow_button":
                 self.driver.state = "location_prompt"
+            elif self.value == "com.android.permissioncontroller:id/deny_button":
+                self.driver.state = "landing"
             elif self.value == "com.google.android.gms:id/negative_button":
                 if self.driver.deny_click_returns:
                     self.driver.state = "landing"
@@ -688,13 +761,13 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
     assert driver.back_calls == (0 if deny_click_returns else 1)
     permission_prompt = next(item for item in result["runtime_prompts"] if item.kind == "runtime_permission")
     location_prompt = next(item for item in result["runtime_prompts"] if item.kind == "location_settings")
-    permission_denial = next(choice for choice in permission_prompt.choices if choice.decision == "deny")
     permission_allowance = next(choice for choice in permission_prompt.choices if choice.decision == "allow")
+    permission_denial = next(choice for choice in permission_prompt.choices if choice.decision == "deny")
     location_denial = next(choice for choice in location_prompt.choices if choice.decision == "deny")
-    assert permission_denial.outcome_status == "observed"
-    assert permission_denial.resulting_prompt_id == location_prompt.prompt_id
-    assert permission_denial.resulting_screen_id is None
-    assert permission_allowance.outcome_status == "planned"
+    assert permission_allowance.outcome_status == "observed"
+    assert permission_allowance.resulting_prompt_id == location_prompt.prompt_id
+    assert permission_allowance.resulting_screen_id is None
+    assert permission_denial.outcome_status == "planned"
     assert location_denial.outcome_status == ("observed" if deny_click_returns else "unavailable")
     assert location_denial.resulting_screen_id == ("screen-001" if deny_click_returns else None)
     assert len(result["screens"]) == 2
