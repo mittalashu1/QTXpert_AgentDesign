@@ -83,7 +83,7 @@ def create_app() -> FastAPI:
             settings_obj.DB_POOL_SIZE,
             settings_obj.DB_MAX_OVERFLOW,
         )
-                # Recovery is opt-in. A large APK replay belongs on a worker/queue; doing
+        # Recovery is opt-in. A large APK replay belongs on a worker/queue; doing
         # it automatically on the web instance can starve authentication during
         # Render deploys and trigger the 512 MiB memory limit.
         if not settings_obj.AUTOPILOT_RECOVERY_ENABLED:
