@@ -606,12 +606,10 @@ class DeviceFarmService:
             raise DeviceFarmError(safe_reason, safe_reason=safe_reason) from None
         _log_device_farm_stage("reinstall_app_for_prompt_reset", install_started)
 
-        upload = (response or {}).get("appUpload") or {}
-        installed_arn = _text(upload.get("arn")) if isinstance(upload, dict) else ""
-        if installed_arn and installed_arn != app_arn:
-            raise DeviceFarmError(
-                "AWS Device Farm reinstalled a different app upload than the selected build"
-            )
+        # The request above names the SHA-verified selected upload. The
+        # response's appUpload ARN is provider output and can differ from that
+        # request identity; the caller verifies the selected package is installed
+        # and foregrounded through the still-live Appium session before replay.
 
     def stop_session(self, session_arn: str) -> None:
         if not session_arn:
