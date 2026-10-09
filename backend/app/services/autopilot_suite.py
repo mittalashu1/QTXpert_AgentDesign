@@ -1639,7 +1639,7 @@ class AutopilotSuiteService:
             should_settle = (
                 transient_launch_settle_attempted is None
                 or self._claim_transient_launch_settle_attempt(
-                    current.screen_id, transient_launch_settle_attempted
+                    test.test_id, current.screen_id, transient_launch_settle_attempted
                 )
             )
             if should_settle:
@@ -1668,7 +1668,7 @@ class AutopilotSuiteService:
                 should_relaunch = (
                     transient_launch_recovery_attempted is None
                     or self._claim_transient_launch_recovery_attempt(
-                        current.screen_id, transient_launch_recovery_attempted
+                        test.test_id, current.screen_id, transient_launch_recovery_attempted
                     )
                 )
                 if package and should_relaunch and not prompt_kind:
@@ -1883,22 +1883,24 @@ class AutopilotSuiteService:
 
     @staticmethod
     def _claim_transient_launch_settle_attempt(
-        screen_id: str, attempted: set[str]
+        test_id: str, screen_id: str, attempted: set[str]
     ) -> bool:
-        """Claim one bounded startup wait per sparse screen for this suite run."""
-        if not screen_id or screen_id in attempted:
+        """Claim one bounded startup wait for each test and observed screen."""
+        attempt_key = f"{test_id}:{screen_id}"
+        if not test_id or not screen_id or attempt_key in attempted:
             return False
-        attempted.add(screen_id)
+        attempted.add(attempt_key)
         return True
 
     @staticmethod
     def _claim_transient_launch_recovery_attempt(
-        screen_id: str, attempted: set[str]
+        test_id: str, screen_id: str, attempted: set[str]
     ) -> bool:
-        """Allow at most one verified relaunch per sparse screen in a suite."""
-        if not screen_id or screen_id in attempted:
+        """Allow one verified relaunch for each test and observed screen."""
+        attempt_key = f"{test_id}:{screen_id}"
+        if not test_id or not screen_id or attempt_key in attempted:
             return False
-        attempted.add(screen_id)
+        attempted.add(attempt_key)
         return True
 
     @staticmethod
