@@ -892,6 +892,7 @@ def test_suite_selection_runs_prompt_chains_before_crawling_app_screens():
         runtime_prompts=[
             SimpleNamespace(
                 prompt_id="permission-prompt",
+                kind="runtime_permission",
                 choices=[
                     SimpleNamespace(key="allow", decision="allow"),
                     SimpleNamespace(key="deny", decision="deny"),
@@ -899,6 +900,7 @@ def test_suite_selection_runs_prompt_chains_before_crawling_app_screens():
             ),
             SimpleNamespace(
                 prompt_id="location-settings-prompt",
+                kind="location_settings",
                 choices=[
                     SimpleNamespace(key="turn-on", decision="allow"),
                     SimpleNamespace(key="no-thanks", decision="deny"),
@@ -936,8 +938,8 @@ def test_suite_selection_runs_prompt_chains_before_crawling_app_screens():
     assert [test.test_id for test in ordered] == [
         "root-allow",
         "root-deny",
-        "followup-allow",
         "followup-deny",
+        "followup-allow",
         "smoke",
     ]
 
