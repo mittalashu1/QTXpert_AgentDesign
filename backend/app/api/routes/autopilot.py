@@ -1522,6 +1522,22 @@ def _discovery_is_ready_for_cases(discovery: Optional[AutopilotDiscoveryResult])
     )
 
 
+def _discovery_supports_prompt_only_execution(
+    discovery: Optional[AutopilotDiscoveryResult],
+) -> bool:
+    """Allow only verified mobile targets with a replayable observed prompt choice."""
+    return bool(
+        _discovery_target_is_verified(discovery)
+        and discovery is not None
+        and discovery.target_kind in {"android", "ios"}
+        and any(
+            choice.decision in {"allow", "deny"} and bool(choice.locators)
+            for prompt in discovery.runtime_prompts
+            for choice in prompt.choices
+        )
+    )
+
+
 def _runtime_discovery_checkpoint_message(
     discovery: AutopilotDiscoveryResult,
     *,
@@ -5635,6 +5651,14 @@ async def execute_autopilot_suite(
         )
     if payload.execution_mode == "full_uat" and str(job.get("target_kind") or "android") not in {"android", "ios"}:
         raise HTTPException(status_code=409, detail="Full transaction mode is currently restricted to Android/iOS UAT apps.")
+    if payload.prompt_only and (
+        payload.execution_mode != "safe_navigation"
+        or str(job.get("target_kind") or "android") not in {"android", "ios"}
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prompt-only execution is limited to safe Android/iOS cases.",
+        )
     record = await _safe_job_record(db, job_id, owner_id)
     phase = _resolved_autopilot_phase(job, record)
     if phase not in SUITE_RUNNABLE_PHASES:
@@ -5643,7 +5667,11 @@ async def execute_autopilot_suite(
             detail=f"Safe execution cannot start while Autopilot is in the {phase} phase.",
         )
     latest_discovery = _record_discovery(record, job)
-    if not _discovery_is_ready_for_cases(latest_discovery):
+    prompt_only_discovery_ready = (
+        payload.prompt_only
+        and _discovery_supports_prompt_only_execution(latest_discovery)
+    )
+    if not _discovery_is_ready_for_cases(latest_discovery) and not prompt_only_discovery_ready:
         reason = (
             (
                 latest_discovery.checkpoint_message
