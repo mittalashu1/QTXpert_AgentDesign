@@ -577,6 +577,22 @@ class AutopilotSuiteService:
         try:
             time.sleep(2)
             initial_source = safe_page_source(driver)
+            initial_prompt_kind = known_native_prompt_kind(
+                driver, initial_source, request.target_kind
+            )
+            initial_prompt_test_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(tests)
+                    if initial_prompt_kind
+                    and any(
+                        step.action == "prompt_choice"
+                        and step.target == initial_prompt_kind
+                        for step in candidate.steps
+                    )
+                ),
+                None,
+            )
             foreground_started = time.monotonic()
             try:
                 target_ready, target_reason, target_identity = self._activate_verified_target(
@@ -586,7 +602,11 @@ class AutopilotSuiteService:
                     timeout_seconds=15.0,
                     poll_interval=0.5,
                     page_source=initial_source,
-                    preserve_known_system_prompt=has_prompt_cases,
+                    # Preserve only a startup prompt with an observed choice case.
+                    # Otherwise use the provider-safe recovery path (for example,
+                    # Back from Google's location-settings checker) instead of
+                    # treating arbitrary Android system UI as a ready app surface.
+                    preserve_known_system_prompt=initial_prompt_test_index is not None,
                 )
             except Exception as exc:
                 _LOGGER.warning(
@@ -602,6 +622,19 @@ class AutopilotSuiteService:
             )
             if not target_ready:
                 raise ProviderLifecycleUnavailable(target_reason)
+
+            execution_tests = list(tests)
+            if initial_prompt_test_index is not None:
+                startup_prompt_test = execution_tests.pop(initial_prompt_test_index)
+                execution_tests.insert(0, startup_prompt_test)
+                _LOGGER.info(
+                    "autopilot_stage=startup_prompt_case outcome=routed "
+                    "prompt_kind=%s test_id=%s planned_index=%s",
+                    initial_prompt_kind,
+                    startup_prompt_test.test_id,
+                    initial_prompt_test_index,
+                )
+
             # The package hint is safe to use for lifecycle calls only after
             # the actual foreground surface has been checked against it.
             identity = safe_app_identity(
@@ -637,7 +670,7 @@ class AutopilotSuiteService:
                         max(0, round((time.monotonic() - close_started) * 1000)),
                     )
 
-            for test_index, test in enumerate(tests):
+            for test_index, test in enumerate(execution_tests):
                 test_started = time.perf_counter()
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
                 evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -876,7 +909,12 @@ class AutopilotSuiteService:
                         page_url=test.page_url,
                     )
                 )
-            return results
+            results_by_test_id = {result.test_id: result for result in results}
+            return [
+                results_by_test_id[test.test_id]
+                for test in tests
+                if test.test_id in results_by_test_id
+            ]
         finally:
             safe_quit(driver)
 

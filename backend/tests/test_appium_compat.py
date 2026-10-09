@@ -63,6 +63,18 @@ def test_expected_package_state_is_tristate():
     assert expected_package_state(UnknownDriver(), "com.qtx.demo") is None
 
 
+def test_expected_package_state_rejects_system_ui_despite_requested_app_capability():
+    class Driver:
+        capabilities = {"appium:appPackage": "com.qtx.demo"}
+        page_source = (
+            '<hierarchy><node package="com.android.systemui" '
+            'resource-id="android:id/navigationBarBackground" />'
+            '</hierarchy>'
+        )
+
+    assert expected_package_state(Driver(), "com.qtx.demo") is False
+
+
 def test_target_validation_rejects_system_only_surface():
     class Driver:
         capabilities = {"appium:appPackage": "com.qtx.demo"}
