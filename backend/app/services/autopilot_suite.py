@@ -1864,7 +1864,7 @@ class AutopilotSuiteService:
 
     @staticmethod
     def _is_target_foreground_failure(reason: str) -> bool:
-        """Identify a provider launch failure that will not improve by replaying every screen case."""
+        """Identify a provider-level foreground failure shared by all screen cases."""
         normalized = " ".join(str(reason or "").casefold().split())
         return any(
             phrase in normalized
@@ -1872,7 +1872,6 @@ class AutopilotSuiteService:
                 "runtime session reached only android system ui",
                 "target was not verified in the foreground",
                 "target was not verified in foreground",
-                "app remained on a generic startup screen",
             )
         )
 

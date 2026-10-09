@@ -1782,6 +1782,19 @@ def test_sparse_launch_recovery_attempts_are_limited_per_test_and_screen():
     ) is True
 
 
+def test_generic_startup_screen_failure_stays_local_to_its_case():
+    generic_startup = (
+        "The app remained on a generic startup screen after a verified relaunch. "
+        "No guessed control was tapped and no screen case was attempted."
+    )
+    android_system_ui = (
+        "Runtime session reached only Android system UI; the uploaded application was not launched."
+    )
+
+    assert not AutopilotSuiteService._is_target_foreground_failure(generic_startup)
+    assert AutopilotSuiteService._is_target_foreground_failure(android_system_ui)
+
+
 def test_device_farm_prompt_reset_preserves_sanitized_provider_reason():
     class Driver:
         def remove_app(self, _package):
