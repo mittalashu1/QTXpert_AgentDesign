@@ -322,10 +322,12 @@ class AutopilotSuiteService:
         """Resolve observed system-prompt branches before crawling app screens.
 
         Root prompt choices run before their observed follow-up prompt paths.
-        The last denial branch returns discovery to the app before screen cases
-        begin, while every generated allow and deny permutation remains eligible.
+        For location-settings prompts, decline before enabling: the latter changes
+        device-wide Location state, which app reinstall cannot reset and which
+        would suppress the observed settings checkpoint for later cases.
         """
         prompt_decision = None
+        prompt_kind = ""
         if test.runtime_prompt_id and discovery is not None:
             prompt = next(
                 (
@@ -334,6 +336,7 @@ class AutopilotSuiteService:
                 ),
                 None,
             )
+            prompt_kind = str(getattr(prompt, "kind", "") or "").casefold()
             choice = (
                 next(
                     (
@@ -346,11 +349,18 @@ class AutopilotSuiteService:
                 else None
             )
             prompt_decision = choice.decision if choice else None
-        decision_priority = (
-            0 if prompt_decision == "allow"
-            else 2 if prompt_decision == "deny"
-            else 1
-        )
+        if prompt_kind == "location_settings":
+            decision_priority = (
+                0 if prompt_decision == "deny"
+                else 2 if prompt_decision == "allow"
+                else 1
+            )
+        else:
+            decision_priority = (
+                0 if prompt_decision == "allow"
+                else 2 if prompt_decision == "deny"
+                else 1
+            )
         prompt_depth = sum(
             1 for step in test.steps if getattr(step, "action", None) == "prompt_choice"
         )
