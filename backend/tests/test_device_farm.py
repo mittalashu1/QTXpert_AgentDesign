@@ -130,13 +130,14 @@ def test_session_without_upload_confirmation_times_out_instead_of_assuming_attac
 
 
 
-def test_install_app_in_session_reinstalls_the_selected_upload():
+def test_install_app_in_session_uses_requested_upload_when_response_reports_an_alias():
     app_arn = "arn:aws:devicefarm:us-west-2:123:upload:selected-build"
     calls = []
     service = DeviceFarmService(Settings())
     service._client = lambda: SimpleNamespace(
         install_to_remote_access_session=lambda **kwargs: (
-            calls.append(kwargs) or {"appUpload": {"arn": app_arn}}
+            calls.append(kwargs)
+            or {"appUpload": {"arn": "arn:aws:devicefarm:us-west-2:123:upload:provider-response"}}
         )
     )
 
