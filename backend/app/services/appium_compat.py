@@ -542,11 +542,31 @@ def safe_app_identity(
 
 
 def expected_package_state(driver: Any, expected: Optional[str], *, page_source: Optional[str] = None) -> Optional[bool]:
-    """Return True/False when identity is observable, otherwise None."""
+    """Return whether the live foreground matches, without trusting appPackage alone."""
     if not expected:
         return None
     hierarchy = page_source if page_source is not None else safe_page_source(driver)
-    identity = safe_app_identity(driver, page_source=hierarchy)
+    ready, reason, identity = validate_target_surface(
+        driver,
+        expected_package=expected,
+        page_source=hierarchy,
+    )
+    if ready:
+        return True
+
+    # A package attribute in the live hierarchy is stronger than the requested
+    # appPackage capability. System UI, a launcher, or another foreground app
+    # must never be reported as the target just because the session requested it.
+    if identity.get("hierarchy_packages"):
+        return False
+
+    reason_key = reason.casefold()
+    if any(
+        marker in reason_key
+        for marker in ("system ui", "launcher", "does not match", "google play services")
+    ):
+        return False
+
     actual = identity.get("package")
     if actual:
         return actual == expected
