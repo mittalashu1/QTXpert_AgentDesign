@@ -1294,6 +1294,92 @@ def test_suite_prompt_choice_accepts_a_new_observed_system_prompt(tmp_path):
         service._execute_test(PromptFollowupDriver(), strict_test, tmp_path, "com.qtx.demo")
 
 
+def test_suite_routes_matching_startup_prompt_case_before_app_cases(tmp_path, monkeypatch):
+    import appium
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    class StartupPromptDriver(_Driver):
+        def __init__(self):
+            super().__init__()
+            self.prompt_active = True
+            self.current_activity = (
+                "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+            )
+            self.page_source = (
+                '<hierarchy><node package="com.android.permissioncontroller" '
+                'text="Allow while using the app" />'
+                '<node package="com.android.permissioncontroller" text="Don\'t allow" />'
+                '</hierarchy>'
+            )
+
+    driver = StartupPromptDriver()
+    monkeypatch.setattr(appium.webdriver, "Remote", lambda *_args, **_kwargs: driver)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotSuiteService(Settings(), prototype=Prototype())
+    service._activate_verified_target = lambda _driver, package, **_kwargs: (
+        True,
+        "ready",
+        {"package": package},
+    )
+    service._reset_to_application = lambda *_args, **_kwargs: None
+    execution_order = []
+
+    def execute(_driver, test, *_args, **_kwargs):
+        execution_order.append(test.test_id)
+        if test.test_id == "startup-prompt":
+            driver.prompt_active = False
+            driver.current_activity = ".MainActivity"
+            driver.page_source = (
+                '<hierarchy><node package="com.qtx.demo" text="Welcome" /></hierarchy>'
+            )
+        return {}
+
+    service._execute_test = execute
+    smoke_test = _test_ir([
+        QTXIRStep(action="launch_app", description="Launch the uploaded app."),
+        QTXIRStep(action="inspect_ui", description="Inspect its current screen."),
+    ]).model_copy(update={"test_id": "cold-launch"})
+    prompt_test = _test_ir([
+        QTXIRStep(
+            action="prompt_choice",
+            description="Choose an observed runtime permission option.",
+            target="runtime_permission",
+            value="deny",
+            locator_strategy="id",
+            locator_value="com.android.permissioncontroller:id/deny_button",
+            locator_confidence=0.98,
+        ),
+    ]).model_copy(update={"test_id": "startup-prompt"})
+
+    results = service._run_sync(
+        "job-startup-prompt",
+        "https://devicefarm.invalid/appium",
+        "arn:uploaded-app",
+        AutopilotSuiteRequest(
+            target_kind="android",
+            provider="devicefarm",
+            device_name="Google Pixel 8",
+            max_tests=2,
+        ),
+        [smoke_test, prompt_test],
+        "com.qtx.demo",
+        None,
+        1000,
+        1000,
+        1000,
+    )
+
+    assert execution_order == ["startup-prompt", "cold-launch"]
+    assert [result.test_id for result in results] == ["cold-launch", "startup-prompt"]
+    assert all(result.status == "passed" for result in results)
+
+
 def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkeypatch):
     import appium
     from app.schemas.autopilot import AutopilotSuiteRequest
