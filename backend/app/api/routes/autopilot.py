@@ -150,6 +150,21 @@ def _resolved_autopilot_phase(job: dict[str, Any], record: Optional[AutopilotJob
     return status_phase_for_job(job, durable_suite_execution=suite)
 
 
+def _ensure_runtime_operation_available(
+    job: dict[str, Any],
+    record: Optional[AutopilotJob],
+    operation: str,
+) -> None:
+    """Prevent two device-owning Autopilot operations from overlapping."""
+    phase = _resolved_autopilot_phase(job, record)
+    if phase in {"running", "exploring"}:
+        activity = "suite execution" if phase == "running" else "Runtime Discovery"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot {operation} while {activity} is active for this target. Wait for it to finish, then retry.",
+        )
+
+
 def _repository_materialization_needs_initial_analysis(job: dict[str, Any]) -> bool:
     """Recover repository APKs only while their initial analysis is pending.
 
@@ -4987,6 +5002,7 @@ async def resume_autopilot_checkpoint(
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
     record = await _safe_job_record(db, job_id, owner_id)
+    _ensure_runtime_operation_available(job, record, "resume the checkpoint")
     try:
         analysis = await service.load_analysis(job_id)
     except FileNotFoundError as exc:
@@ -5112,6 +5128,8 @@ async def run_autopilot_discovery(
     # reads remain safe in async SQLAlchemy.
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    record = await _safe_job_record(db, job_id, owner_id)
+    _ensure_runtime_operation_available(job, record, "start Runtime Discovery")
     target_kind = str(job.get("target_kind") or "android")
     if payload.include_transaction_journeys and target_kind == "web":
         raise HTTPException(status_code=409, detail="Transaction-module mapping is currently available for mobile app targets only.")
