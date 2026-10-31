@@ -1994,9 +1994,18 @@ class AutopilotDiscoveryService:
             # Appium sessions can report the launch/splash hierarchy before
             # the first real screen is ready. Settle it with a bounded retry
             # instead of treating the splash as the complete app map.
-            initial_wait = max(1, min(5, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_SECONDS", 4))))
-            retry_wait = max(1, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_SECONDS", 4)))
-            retry_limit = max(0, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_RETRIES", 3)))
+            initial_wait = max(1, min(5, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_SECONDS", 15))))
+            retry_wait = max(1, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_SECONDS", 15)))
+            retry_limit = max(0, int(getattr(self.settings, "AUTOPILOT_DISCOVERY_SETTLE_RETRIES", 6)))
+            max_settle_seconds = initial_wait + retry_wait * retry_limit
+            logging.getLogger(__name__).info(
+                "autopilot_stage=app_launch_settle_config initial_wait_seconds=%s "
+                "retry_wait_seconds=%s retry_limit=%s max_wait_seconds=%s",
+                initial_wait,
+                retry_wait,
+                retry_limit,
+                max_settle_seconds,
+            )
             time.sleep(initial_wait)
             # Keep launch/splash surfaces in memory until target identity has
             # been checked. If the provider left Android Home foreground, it
