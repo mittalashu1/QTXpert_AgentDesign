@@ -11,6 +11,13 @@ from app.schemas.autopilot import (
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 
 
+def test_mobile_discovery_defaults_allow_a_bounded_large_app_cold_start():
+    from app.config import Settings
+
+    assert Settings.model_fields["AUTOPILOT_DISCOVERY_SETTLE_SECONDS"].default == 15
+    assert Settings.model_fields["AUTOPILOT_DISCOVERY_SETTLE_RETRIES"].default == 6
+
+
 SAMPLE_XML = '''
 <hierarchy rotation="0">
   <node index="0" text="" resource-id="" class="android.widget.FrameLayout" clickable="false" enabled="true">
