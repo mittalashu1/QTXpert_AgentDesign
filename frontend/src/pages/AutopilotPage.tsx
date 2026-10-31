@@ -1666,6 +1666,10 @@ export default function AutopilotPage() {
   };
   const saveSetup = async () => {
     if (!analysis) return;
+    if (suiteBusy || discoveryBusy || resumeBusy || setupBusy) {
+      setContextNotice("Wait for the active Autopilot device work to finish before saving or resuming a checkpoint.");
+      return;
+    }
     const checkpointRequestMap = new Map(
       [...(setupDraft.input_requests || []), ...(setupDraft.runtime_input_requests || [])].map((item) => [item.key, item]),
     );
@@ -1918,6 +1922,10 @@ export default function AutopilotPage() {
   const runDiscovery = async (requestedJobId?: unknown) => {
     const jobId = typeof requestedJobId === "string" ? requestedJobId : analysis?.job_id;
     if (!jobId) return;
+    if (suiteBusy || discoveryBusy || resumeBusy) {
+      setContextNotice("Wait for the active Autopilot device work to finish before starting Runtime Discovery.");
+      return;
+    }
     setDiscoveryBusy(true); setError("");
     try {
       const response = await apiClient.post<Discovery>(`/autopilot/${jobId}/discover`, {
@@ -2086,6 +2094,10 @@ export default function AutopilotPage() {
   const runSuite = async (requestedJobId?: unknown, requestedExecutionMode?: "safe_navigation" | "full_uat") => {
     const jobId = typeof requestedJobId === "string" ? requestedJobId : analysis?.job_id;
     if (!jobId) return;
+    if (suiteBusy) {
+      setContextNotice("An execution batch is already using this target. Wait for it to finish before starting another batch.");
+      return;
+    }
     const executionMode = requestedExecutionMode ?? suiteMode;
     if (executionMode === "full_uat" && (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified)) {
       setContextNotice(!fullUatConfirmed
@@ -2262,7 +2274,7 @@ export default function AutopilotPage() {
   const customAppiumUnavailable = activeProvider === "appium" && providerStatus !== null && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
   const providerStatusPending = activeTargetKind !== "web" && providerStatus === null;
   const noExecutionProvider = activeTargetKind !== "web" && providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.device_farm_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
-  const executionUnavailable = resumeBusy || discoveryBusy || providerStatusPending || browserStackUnavailable || deviceFarmUnavailable || deviceFarmNotConfigured || customAppiumUnavailable || !artifactAvailable;
+  const executionUnavailable = suiteBusy || resumeBusy || discoveryBusy || providerStatusPending || browserStackUnavailable || deviceFarmUnavailable || deviceFarmNotConfigured || customAppiumUnavailable || !artifactAvailable;
   const reportPending = report?.recommendation === "PENDING";
   const effectivePlan = generationPlan || analysis?.generation_plan || null;
   const effectiveApplicationMap = applicationMap || analysis?.application_map || null;
@@ -2767,7 +2779,7 @@ export default function AutopilotPage() {
 
     {analysis && pendingCheckpointRequests.length > 0 && <Alert
       severity="warning"
-      action={<Button color="inherit" size="small" onClick={() => openSetup()} disabled={resumeBusy}>Review inputs</Button>}
+      action={<Button color="inherit" size="small" onClick={() => openSetup()} disabled={suiteBusy || resumeBusy || discoveryBusy}>Review inputs</Button>}
     >
       Analysis is paused for {pendingCheckpointRequests.length} required input{pendingCheckpointRequests.length === 1 ? "" : "s"}.
       Provide, skip, reuse or generate the non-production data before dependent tests continue.
@@ -3349,7 +3361,7 @@ export default function AutopilotPage() {
           <Grid item xs={12}><FormControlLabel control={<Switch checked={setupDraft.safe_authentication_approved} onChange={(event) => updateSetup("safe_authentication_approved", event.target.checked)} />} label="Approve safe, non-transactional sign-in in this non-production environment" /></Grid>
         </Grid>}
       </DialogContent>
-      <DialogActions><Button onClick={() => setSetupOpen(false)} disabled={setupBusy || resumeBusy}>Cancel</Button><Button variant="contained" onClick={saveSetup} disabled={setupBusy || resumeBusy}>{setupBusy ? "Saving…" : resumeBusy ? "Continuing…" : "Save and continue"}</Button></DialogActions>
+      <DialogActions><Button onClick={() => setSetupOpen(false)} disabled={setupBusy || resumeBusy}>Cancel</Button><Button variant="contained" onClick={saveSetup} disabled={setupBusy || resumeBusy || discoveryBusy || suiteBusy}>{setupBusy ? "Saving…" : resumeBusy ? "Continuing…" : "Save and continue"}</Button></DialogActions>
     </Dialog>
   </Stack>;
 }
