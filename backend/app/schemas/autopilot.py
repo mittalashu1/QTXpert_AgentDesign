@@ -943,7 +943,7 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     save_initial_inputs_for_reuse: bool = False
     reuse_existing_test_data: bool = False
     safe_authentication_approved: bool = False
-    execution_mode: AutopilotExecutionMode = "safe_navigation"
+    execution_mode: Optional[AutopilotExecutionMode] = None
     document_asset_ids: Optional[List[UUID]] = Field(default=None, max_length=20)
     document_analysis_run_id: Optional[UUID] = Field(
         default=None,

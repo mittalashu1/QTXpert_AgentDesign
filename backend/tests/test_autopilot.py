@@ -14,6 +14,7 @@ import pytest
 from app.config import Settings
 from app.schemas.autopilot import (
     AutopilotAnalysis,
+    AutopilotAnalysisRerunRequest,
     AutopilotDiscoveryResult,
     AutopilotExecutionRequest,
     AutopilotInputRequest,
@@ -44,6 +45,7 @@ from app.api.routes.autopilot import (
     _runtime_discovery_checkpoint_message,
     _refresh_mobile_analysis_identity,
     _remove_local_report_data,
+    _resolve_rerun_execution_mode,
     _sanitize_discovery_assets,
     _setup_profile,
     _strip_suite_evidence_paths,
@@ -70,6 +72,27 @@ from app.services.autopilot_report import build_test_audit_report
 def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
     settings = Settings(AUTOPILOT_STORAGE_PATH=str(tmp_path), **overrides)
     return AutopilotPrototypeService(settings)
+
+
+@pytest.mark.parametrize(
+    ("requested", "saved_setup", "target_kind", "expected"),
+    [
+        ("full_uat", {"preferred_execution_mode": "safe_navigation"}, "android", "full_uat"),
+        ("safe_navigation", {"preferred_execution_mode": "full_uat"}, "android", "safe_navigation"),
+        (None, {"preferred_execution_mode": "full_uat"}, "android", "full_uat"),
+        (None, {"preferred_execution_mode": "invalid"}, "android", "safe_navigation"),
+        (None, None, "android", "safe_navigation"),
+        ("full_uat", {"preferred_execution_mode": "full_uat"}, "web", "safe_navigation"),
+    ],
+)
+def test_rerun_execution_mode_honors_selection_and_preserves_legacy_preference(
+    requested, saved_setup, target_kind, expected
+):
+    assert _resolve_rerun_execution_mode(requested, saved_setup, target_kind) == expected
+
+
+def test_rerun_execution_mode_is_optional_for_legacy_clients():
+    assert AutopilotAnalysisRerunRequest().execution_mode is None
 
 
 @pytest.mark.asyncio
