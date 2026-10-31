@@ -557,7 +557,13 @@ class AutopilotIRCompiler:
             readiness = "discovery_required"
             readiness_reason = "Runtime screen/element discovery is required before deterministic locators can be emitted."
 
-        ir_steps = resolved_steps if resolved_steps is not None else self._ir_steps(test, analysis)
+        # A runtime prompt branch has no safe generic fallback. Until the exact
+        # choice and replay path have been observed with deterministic locators,
+        # retain the case for discovery without emitting a runnable intent step.
+        if test.runtime_prompt_id and resolved_steps is None:
+            ir_steps = []
+        else:
+            ir_steps = resolved_steps if resolved_steps is not None else self._ir_steps(test, analysis)
         generated = QTXTestIR(
             test_id=test.id,
             title=test.title,
