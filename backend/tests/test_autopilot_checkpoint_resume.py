@@ -1,9 +1,20 @@
 from types import SimpleNamespace
 
-from app.api.routes.autopilot import _resume_should_run_discovery
+import pytest
+from fastapi import HTTPException
+
+from app.api.routes.autopilot import _ensure_runtime_operation_available, _resume_should_run_discovery
 from app.schemas.autopilot import DiscoveredControl, DiscoveredScreen, DiscoveryLocator
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_workflow import transition_phase
+
+
+def test_runtime_work_rejects_checkpoint_resume_while_device_is_owned():
+    for phase in ("running", "exploring"):
+        with pytest.raises(HTTPException) as error:
+            _ensure_runtime_operation_available({"phase": phase}, None, "resume the checkpoint")
+        assert error.value.status_code == 409
+        assert "active for this target" in error.value.detail
 
 
 def test_checkpoint_resume_retries_partial_auth_discovery_after_approval():
