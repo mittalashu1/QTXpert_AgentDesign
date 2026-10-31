@@ -479,6 +479,9 @@ class AutopilotIRCompiler:
             if (
                 prompt is not None
                 and choice is not None
+                and discovery is not None
+                and discovery.target_ready is not False
+                and discovery.interactive_surface_ready is not False
                 and choice.outcome_status == "observed"
                 and choice.locators
                 and not prompt_path_error
@@ -519,7 +522,14 @@ class AutopilotIRCompiler:
                 readiness_reason = "The prompt option and its observed replay path have deterministic locators."
             else:
                 readiness = "discovery_required"
-                if prompt_path_error:
+                if discovery is not None and discovery.target_ready is False:
+                    readiness_reason = "Runtime Discovery did not confirm that the uploaded app is attached to the target device."
+                elif discovery is not None and discovery.interactive_surface_ready is False:
+                    readiness_reason = (
+                        "Runtime Discovery attached the app but did not reach an interactive surface; "
+                        "prompt replay requires a fresh usable screen."
+                    )
+                elif prompt_path_error:
                     readiness_reason = prompt_path_error
                 elif choice is None:
                     readiness_reason = "The observed prompt choice is missing from Runtime Discovery."
