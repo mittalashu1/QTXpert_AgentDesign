@@ -350,6 +350,20 @@ export default function GenerateTestCasesPage() {
   useEffect(() => {
     if (liveRun?.test_cases?.length) { setDraftCases(liveRun.test_cases); setLocalPreview(false); }
   }, [liveRun]);
+  useEffect(() => {
+    if (!liveRun || liveRun.id !== result?.id || ACTIVE_STATUSES.includes(liveRun.status)) return;
+    void queryClient.invalidateQueries({
+      queryKey: ["generation-history-summaries", selectedProjectId],
+    });
+    if (liveRun.status === "completed") {
+      setMessage(`Generation completed. ${liveRun.test_cases?.length ?? 0} test cases are ready.`);
+      setError(null);
+    } else if (liveRun.status === "failed") {
+      setMessage(null);
+      setError("Generation failed. Open the run details to inspect the error and retry.");
+    }
+  }, [liveRun?.id, liveRun?.status, liveRun?.test_cases?.length, result?.id, selectedProjectId, queryClient]);
+
   const inputSummary = useMemo(() => [
     ...files.map((file) => file.name),
     ...(source.kind === "link" && sourceUrl.trim() ? [sourceUrl.trim()] : []),

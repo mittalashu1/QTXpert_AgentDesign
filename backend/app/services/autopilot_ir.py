@@ -476,7 +476,13 @@ class AutopilotIRCompiler:
                 discovery,
                 prompt.prompt_id if prompt is not None else test.runtime_prompt_id,
             )
-            if prompt is not None and choice is not None and choice.locators and not prompt_path_error:
+            if (
+                prompt is not None
+                and choice is not None
+                and choice.outcome_status == "observed"
+                and choice.locators
+                and not prompt_path_error
+            ):
                 resolved_steps = [
                     QTXIRStep(
                         action="launch_app",
@@ -513,10 +519,17 @@ class AutopilotIRCompiler:
                 readiness_reason = "The prompt option and its observed replay path have deterministic locators."
             else:
                 readiness = "discovery_required"
-                readiness_reason = (
-                    prompt_path_error
-                    or "The observed prompt choice is missing a deterministic locator."
-                )
+                if prompt_path_error:
+                    readiness_reason = prompt_path_error
+                elif choice is None:
+                    readiness_reason = "The observed prompt choice is missing from Runtime Discovery."
+                elif choice.outcome_status != "observed":
+                    readiness_reason = (
+                        f"The '{choice.label}' prompt branch is {choice.outcome_status} and must be observed "
+                        "during Runtime Discovery before execution."
+                    )
+                else:
+                    readiness_reason = "The observed prompt choice is missing a deterministic locator."
         elif test.id.startswith("QT-RUNTIME-FUNC-POS-") and test.dependency and not test.autonomous_candidate:
             # A control seen on screen is a legitimate case candidate, but a
             # missing destination is not evidence that the action is replayable.
@@ -544,7 +557,13 @@ class AutopilotIRCompiler:
             readiness = "discovery_required"
             readiness_reason = "Runtime screen/element discovery is required before deterministic locators can be emitted."
 
-        ir_steps = resolved_steps if resolved_steps is not None else self._ir_steps(test, analysis)
+        # A runtime prompt branch has no safe generic fallback. Until the exact
+        # choice and replay path have been observed with deterministic locators,
+        # retain the case for discovery without emitting a runnable intent step.
+        if test.runtime_prompt_id and resolved_steps is None:
+            ir_steps = []
+        else:
+            ir_steps = resolved_steps if resolved_steps is not None else self._ir_steps(test, analysis)
         generated = QTXTestIR(
             test_id=test.id,
             title=test.title,

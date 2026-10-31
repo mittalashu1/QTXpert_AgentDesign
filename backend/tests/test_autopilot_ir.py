@@ -832,6 +832,7 @@ def test_observed_prompt_choice_compiles_to_executable_ir():
                 key="turn-on",
                 label="Turn on",
                 decision="allow",
+                outcome_status="observed",
                 locators=[
                     DiscoveryLocator(
                         strategy="xpath",
@@ -872,6 +873,46 @@ def test_observed_prompt_choice_compiles_to_executable_ir():
     assert generated.steps[1].locator_value == '//*[@text="Turn on"]'
     assert "known_native_prompt_kind" in generated.appium_python
     compile(generated.appium_python, "<qtx-generated-prompt>", "exec")
+
+def test_unobserved_runtime_prompt_choices_require_discovery_before_execution():
+    for outcome_status in ("planned", "unavailable"):
+        prompt = RuntimePromptObservation(
+            prompt_id=f"permission-{outcome_status}",
+            kind="runtime_permission",
+            title="Location permission",
+            choices=[
+                RuntimePromptChoice(
+                    key="allow",
+                    label="Allow",
+                    decision="allow",
+                    locators=[DiscoveryLocator(strategy="accessibility_id", value="Allow", confidence=0.99)],
+                    outcome_status=outcome_status,
+                )
+            ],
+        )
+        analysis = _analysis([
+            AutopilotTest(
+                id=f"QT-RUNTIME-PROMPT-{outcome_status.upper()}",
+                suite="Permissions",
+                title="Location permission grant behavior",
+                priority="high",
+                objective="Verify the selected permission branch.",
+                steps=["Choose Allow"],
+                expected=["The app returns to a readable screen."],
+                bucket="permissions",
+                runtime_prompt_id=prompt.prompt_id,
+                runtime_prompt_choice="allow",
+            )
+        ])
+
+        generated = AutopilotIRCompiler().compile_bundle(
+            analysis,
+            _discovery().model_copy(update={"runtime_prompts": [prompt]}),
+        ).tests[0]
+
+        assert generated.readiness == "discovery_required"
+        assert generated.steps == []
+
 
 def test_runtime_prompt_branch_metadata_survives_ir_compilation():
     prompt = RuntimePromptObservation(
@@ -944,6 +985,7 @@ def test_followup_prompt_case_replays_observed_parent_allow():
                 key="no-thanks",
                 label="No thanks",
                 decision="deny",
+                outcome_status="observed",
                 locators=[DiscoveryLocator(strategy="id", value="no-thanks", confidence=0.99)],
             )
         ],
@@ -1007,6 +1049,7 @@ def test_followup_prompt_case_replays_observed_parent_denial():
                 key="no-thanks",
                 label="No thanks",
                 decision="deny",
+                outcome_status="observed",
                 locators=[DiscoveryLocator(strategy="id", value="no-thanks", confidence=0.99)],
             )
         ],
