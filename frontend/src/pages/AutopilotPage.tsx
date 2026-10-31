@@ -515,6 +515,7 @@ function discoverySupportsPromptReplay(discovery: Discovery | null | undefined) 
   return Boolean(
     discovery
     && discovery.target_ready === true
+    && discovery.interactive_surface_ready !== false
     && (discovery.status === "completed" || discovery.status === "partial")
     && discovery.last_attempt_status !== "blocked"
     && discovery.last_attempt_status !== "failed"
@@ -2281,8 +2282,20 @@ export default function AutopilotPage() {
   const workflowPhase: WorkflowPhase = analysis?.phase
     || (effectivePlan?.status === "pending_review" ? "plan_pending_review" : effectivePlan?.status === "approved" ? "plan_approved" : "context_ready");
   const planAwaitingApproval = effectivePlan?.status === "pending_review" || workflowPhase === "plan_pending_review";
+  const safeCasesRunnable = Boolean(
+    analysis
+    && !planAwaitingApproval
+    && !executionUnavailable
+    && suiteExecutableCount > 0
+    && discoveryAllowsSuiteSelection(discovery, suiteBucket)
+  );
+  const safeCasesNeedInteractiveSurface = Boolean(
+    discovery?.target_ready === true && discovery.interactive_surface_ready === false
+  );
   const casesAwaitingApproval = Boolean(analysis && !["blocked", "failed"].includes(workflowPhase) && (workflowPhase === "cases_pending_review" || (effectiveApplicationMap && !["cases_approved", "execution_ready", "running", "completed", "partial"].includes(workflowPhase))));
-  const reviewedCaseCount = analysis ? Object.values(analysis.case_reviews || {}).filter((value) => value === "approve").length : 0;
+  const reviewedCaseCount = analysis
+    ? analysis.tests.filter((test) => analysis.case_reviews?.[test.id] === "approve").length
+    : 0;
   const usedContextSourceCount = contextSources.filter((source) => source.used !== false).length;
   const unusedContextSourceCount = Math.max(0, contextSources.length - usedContextSourceCount);
   const contextBadge = analysis?.context_considered === true
@@ -2963,7 +2976,14 @@ export default function AutopilotPage() {
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
             <Typography variant="caption" color="text.secondary">
               Input checkpoint: {pendingCheckpointRequests.length ? `${pendingCheckpointRequests.length} live item${pendingCheckpointRequests.length === 1 ? "" : "s"} pending` : "no blocking items"}.
-              {pendingCheckpointRequests.length ? ` ${pendingCheckpointRequests.slice(0, 3).map((item) => item.label).join(" · ")}${pendingCheckpointRequests.length > 3 ? " · …" : ""}` : " Safe deterministic cases can be run now."}
+              {pendingCheckpointRequests.length
+                ? ` ${pendingCheckpointRequests.slice(0, 3).map((item) => item.label).join(" · ")}${pendingCheckpointRequests.length > 3 ? " · …" : ""}`
+                : safeCasesRunnable
+                  ? " Safe deterministic cases can be run now."
+                  : safeCasesNeedInteractiveSurface
+                    ? " Runtime Discovery needs an interactive app surface before safe cases can run."
+                    : " Safe execution is waiting for target, provider or case readiness."
+              }
             </Typography>
             {(pendingCheckpointRequests.length > 0 || deferredInputRequests.length > 0) && <Button size="small" variant="text" onClick={() => openSetup()}>Review field data</Button>}
           </Stack>
