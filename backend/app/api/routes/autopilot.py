@@ -4404,6 +4404,22 @@ async def analyze_existing_mobile_app(
     )
 
 
+def _resolve_rerun_execution_mode(
+    requested: Optional[AutopilotExecutionMode],
+    saved_setup_profile: Optional[dict[str, Any]],
+    target_kind: str,
+) -> AutopilotExecutionMode:
+    """Honor the current selection, or preserve a saved preference for older clients."""
+    if target_kind == "web":
+        return "safe_navigation"
+    if requested in ("safe_navigation", "full_uat"):
+        return requested
+    saved = saved_setup_profile.get("preferred_execution_mode") if isinstance(saved_setup_profile, dict) else None
+    if saved in ("safe_navigation", "full_uat"):
+        return saved
+    return "safe_navigation"
+
+
 @router.post("/{job_id}/rerun-analysis", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
 async def rerun_autopilot_analysis(
     job_id: str,
@@ -4447,6 +4463,11 @@ async def rerun_autopilot_analysis(
     effective_project_id = project_id or (UUID(str(original["project_id"])) if original.get("project_id") and _is_uuid(original.get("project_id")) else None)
     canonical_profile_id = _canonical_profile_id(payload.profile_id)
     original_target_kind = str(original.get("target_kind") or "android")
+    effective_execution_mode = _resolve_rerun_execution_mode(
+        payload.execution_mode,
+        getattr(original_record, "setup_profile", None),
+        original_target_kind,
+    )
     original_document_ids: list[UUID] = []
     for value in original.get("document_asset_ids", []) or []:
         try:
@@ -4540,7 +4561,7 @@ async def rerun_autopilot_analysis(
                 or payload.setup_action == "reuse"
                 or any(item.category == "credential" for item in payload.initial_inputs)
             ),
-            execution_mode=payload.execution_mode,
+            execution_mode=effective_execution_mode,
         )
         background_tasks.add_task(service.analyze_safely, new_job_id)
         return await service.get_job_status(new_job_id)
@@ -4586,7 +4607,7 @@ async def rerun_autopilot_analysis(
                 or payload.setup_action == "reuse"
                 or any(item.category == "credential" for item in payload.initial_inputs)
             ),
-            execution_mode=payload.execution_mode,
+            execution_mode=effective_execution_mode,
         )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
@@ -4646,7 +4667,7 @@ async def rerun_autopilot_analysis(
             or payload.setup_action == "reuse"
             or any(item.category == "credential" for item in payload.initial_inputs)
         ),
-        execution_mode=payload.execution_mode,
+        execution_mode=effective_execution_mode,
     )
 
 
