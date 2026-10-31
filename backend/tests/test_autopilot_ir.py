@@ -914,6 +914,49 @@ def test_unobserved_runtime_prompt_choices_require_discovery_before_execution():
         assert generated.steps == []
 
 
+def test_observed_runtime_prompt_is_deferred_when_latest_surface_is_not_interactive():
+    prompt = RuntimePromptObservation(
+        prompt_id="location-permission",
+        kind="runtime_permission",
+        title="Location permission",
+        choices=[
+            RuntimePromptChoice(
+                key="allow",
+                label="Allow",
+                decision="allow",
+                locators=[DiscoveryLocator(strategy="accessibility_id", value="Allow", confidence=0.99)],
+                outcome_status="observed",
+            )
+        ],
+    )
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-RUNTIME-PROMPT-SPLASH",
+            suite="Permissions",
+            title="Location permission grant behavior",
+            priority="high",
+            objective="Verify the observed permission branch.",
+            steps=["Choose Allow"],
+            expected=["The app returns to an interactive screen."],
+            bucket="permissions",
+            runtime_prompt_id="location-permission",
+            runtime_prompt_choice="allow",
+        )
+    ])
+    discovery = _discovery().model_copy(update={
+        "runtime_prompts": [prompt],
+        "target_ready": True,
+        "interactive_surface_ready": False,
+        "last_attempt_status": "partial",
+    })
+
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+
+    assert generated.readiness == "discovery_required"
+    assert generated.steps == []
+    assert "interactive surface" in generated.readiness_reason.lower()
+
+
 def test_runtime_prompt_branch_metadata_survives_ir_compilation():
     prompt = RuntimePromptObservation(
         prompt_id="location-permission",
