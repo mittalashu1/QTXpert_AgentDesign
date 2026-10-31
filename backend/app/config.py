@@ -274,8 +274,11 @@ class Settings(BaseSettings):
     # Orphaned atomic-write files are safe to remove after this window. Job
     # manifests, analyses and source artifacts are never removed by this sweep.
     AUTOPILOT_LOCAL_STAGING_TTL_SECONDS: int = Field(default=3600, ge=300, le=604800)
-    AUTOPILOT_DISCOVERY_SETTLE_SECONDS: int = Field(default=8, ge=1, le=30)
-    AUTOPILOT_DISCOVERY_SETTLE_RETRIES: int = Field(default=4, ge=0, le=6)
+    # Some large non-production mobile builds keep a native splash visible
+    # while their bundled services initialize. Retry only on a loading surface;
+    # fast launches still proceed immediately.
+    AUTOPILOT_DISCOVERY_SETTLE_SECONDS: int = Field(default=15, ge=1, le=30)
+    AUTOPILOT_DISCOVERY_SETTLE_RETRIES: int = Field(default=6, ge=0, le=6)
     AUTOPILOT_ANALYSIS_TIMEOUT_SECONDS: int = Field(default=300, ge=30, le=1800)
     # Website exploration is intentionally bounded until an approved
     # non-production credential reference and test data are supplied.
