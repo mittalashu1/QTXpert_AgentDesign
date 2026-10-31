@@ -2230,7 +2230,7 @@ export default function AutopilotPage() {
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
-        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, surface_action: "new", setup_action: setupAction, target_url: targetKind === "web" ? targetUrl.trim() || undefined : undefined, document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined },
+        { upload_id: selectedUploadId || undefined, context: context || undefined, profile_id: profileId, surface_action: "new", setup_action: setupAction, execution_mode: suiteMode, target_url: targetKind === "web" ? targetUrl.trim() || undefined : undefined, document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined },
         { timeout: 300000 },
       );
       // Keep the last completed analysis visible while the replacement job
