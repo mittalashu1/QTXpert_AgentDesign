@@ -149,6 +149,7 @@ type RuntimePrompt = {
   choices: Array<{
     key: string; label: string; decision: "allow" | "deny" | "other";
     outcome_status: "observed" | "planned" | "unavailable"; resulting_screen_id?: string | null;
+    locators?: Locator[];
   }>;
 };
 type Discovery = {
@@ -512,16 +513,20 @@ function discoveryVerifiedForExecution(discovery: Discovery | null | undefined) 
 }
 
 function discoverySupportsPromptReplay(discovery: Discovery | null | undefined) {
-  // A verified native prompt is itself a replayable interactive surface even
-  // when the app is still on a splash. The prompt-only runner resets prompt
-  // state, verifies the expected prompt, and captures the post-choice surface.
+  // A verified native prompt is itself replayable even when the app shell stays
+  // on a splash. Require a deterministic allow/deny locator so the safe runner
+  // never treats a merely detected dialog as an executable choice.
   return Boolean(
     discovery
     && discovery.target_ready === true
     && (discovery.status === "completed" || discovery.status === "partial")
     && discovery.last_attempt_status !== "blocked"
     && discovery.last_attempt_status !== "failed"
-    && (discovery.runtime_prompts?.length || 0) > 0
+    && discovery.runtime_prompts?.some((prompt) => prompt.choices.some((choice) => (
+      choice.decision !== "other"
+      && choice.outcome_status !== "unavailable"
+      && (choice.locators?.length || 0) > 0
+    )))
   );
 }
 
@@ -1979,8 +1984,9 @@ export default function AutopilotPage() {
       await refreshReport(jobId);
       await refreshWorkflow(jobId);
       const verifiedDiscovery = discoveryVerifiedForExecution(response.data);
+      const promptReplayAvailable = discoverySupportsPromptReplay(response.data);
       const latestPhase = latestJob.phase || latestJob.analysis?.phase;
-      if (!verifiedDiscovery || latestPhase === "blocked" || latestJob.status === "failed") {
+      if ((!verifiedDiscovery && !promptReplayAvailable) || latestPhase === "blocked" || latestJob.status === "failed") {
         const reason = response.data.checkpoint_message
           || response.data.last_attempt_reason
           || response.data.target_identity_reason
@@ -2022,7 +2028,7 @@ export default function AutopilotPage() {
           && (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified)) {
           await runSuite(jobId, "safe_navigation");
         }
-      } else if (autoRunFirstPass && discoveryMode === "safe" && discoverySupportsPromptReplay(response.data)) {
+      } else if (autoRunFirstPass && discoveryMode === "safe" && promptReplayAvailable) {
         // Permission branches are safe to exercise from their observed native
         // prompts even when the app has not reached an interactive product page.
         await runSuite(jobId, "safe_navigation", "permissions");
@@ -2614,7 +2620,10 @@ export default function AutopilotPage() {
             <Stack spacing={.55} sx={{ mt: .8 }}>
               <Button size="small" variant="outlined" onClick={openScopeSetup} startIcon={<AutoAwesomeIcon />}>{analysis ? "Refine scope" : "Choose target"}</Button>
               {analysis && planAwaitingApproval && <Button size="small" variant="contained" onClick={() => { void approvePlanAndDiscover(); }} disabled={workflowBusy || discoveryBusy || executionUnavailable} startIcon={<TravelExploreOutlinedIcon />}>Approve &amp; discover</Button>}
-              {analysis && !planAwaitingApproval && <Button size="small" variant="contained" onClick={() => void runSuite(analysis.job_id, "safe_navigation")} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryAllowsSuiteSelection(discovery, suiteBucket)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>}
+              {analysis && !planAwaitingApproval && <>
+                <Button size="small" variant="contained" onClick={() => void runSuite(analysis.job_id, "safe_navigation")} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryAllowsSuiteSelection(discovery, suiteBucket)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>
+                {discoverySupportsPromptReplay(discovery) && <Button size="small" variant="outlined" onClick={() => void runSuite(analysis.job_id, "safe_navigation", "permissions")} disabled={suiteBusy || executionUnavailable} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run permission prompts</Button>}
+              </>}
             </Stack>
           </CardContent>
         </Card>
@@ -2993,7 +3002,7 @@ export default function AutopilotPage() {
                   ? " Safe deterministic cases can be run now."
                   : safeCasesNeedInteractiveSurface
                     ? discoverySupportsPromptReplay(discovery)
-                      ? " The app screen is noninteractive. Select the Permissions suite to replay observed native prompt choices; screen-based cases remain blocked."
+                      ? " The app screen is noninteractive. Run permission prompt cases to replay observed native dialog choices; screen-based cases remain blocked."
                       : " Runtime Discovery needs an interactive app surface before screen-based safe cases can run."
                     : " Safe execution is waiting for target, provider or case readiness."
               }
