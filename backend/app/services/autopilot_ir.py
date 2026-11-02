@@ -480,9 +480,11 @@ class AutopilotIRCompiler:
                 prompt is not None
                 and choice is not None
                 and discovery is not None
-                and discovery.target_ready is not False
-                and discovery.interactive_surface_ready is not False
-                and choice.outcome_status == "observed"
+                # The verified native prompt is independently interactive even when
+                # the application shell remains on a splash. A planned choice is
+                # safe to replay only when its observed prompt exposes a locator.
+                and discovery.target_ready is True
+                and choice.outcome_status in {"observed", "planned"}
                 and choice.locators
                 and not prompt_path_error
             ):
@@ -522,24 +524,18 @@ class AutopilotIRCompiler:
                 readiness_reason = "The prompt option and its observed replay path have deterministic locators."
             else:
                 readiness = "discovery_required"
-                if discovery is not None and discovery.target_ready is False:
+                if discovery is not None and discovery.target_ready is not True:
                     readiness_reason = "Runtime Discovery did not confirm that the uploaded app is attached to the target device."
-                elif discovery is not None and discovery.interactive_surface_ready is False:
-                    readiness_reason = (
-                        "Runtime Discovery attached the app but did not reach an interactive surface; "
-                        "prompt replay requires a fresh usable screen."
-                    )
                 elif prompt_path_error:
                     readiness_reason = prompt_path_error
                 elif choice is None:
                     readiness_reason = "The observed prompt choice is missing from Runtime Discovery."
-                elif choice.outcome_status != "observed":
-                    readiness_reason = (
-                        f"The '{choice.label}' prompt branch is {choice.outcome_status} and must be observed "
-                        "during Runtime Discovery before execution."
-                    )
+                elif choice.outcome_status == "unavailable":
+                    readiness_reason = f"The '{choice.label}' prompt choice was not available for replay."
+                elif not choice.locators:
+                    readiness_reason = "The prompt choice has no deterministic locator and cannot be replayed safely."
                 else:
-                    readiness_reason = "The observed prompt choice is missing a deterministic locator."
+                    readiness_reason = "The observed native prompt choice could not be compiled for safe replay."
         elif test.id.startswith("QT-RUNTIME-FUNC-POS-") and test.dependency and not test.autonomous_candidate:
             # A control seen on screen is a legitimate case candidate, but a
             # missing destination is not evidence that the action is replayable.
