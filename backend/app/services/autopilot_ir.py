@@ -536,8 +536,6 @@ class AutopilotIRCompiler:
                     readiness_reason = "The prompt choice has no deterministic locator and cannot be replayed safely."
                 else:
                     readiness_reason = "The observed native prompt choice could not be compiled for safe replay."
-                else:
-                    readiness_reason = "The observed prompt choice is missing a deterministic locator."
         elif test.id.startswith("QT-RUNTIME-FUNC-POS-") and test.dependency and not test.autonomous_candidate:
             # A control seen on screen is a legitimate case candidate, but a
             # missing destination is not evidence that the action is replayable.
