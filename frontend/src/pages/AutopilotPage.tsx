@@ -512,10 +512,12 @@ function discoveryVerifiedForExecution(discovery: Discovery | null | undefined) 
 }
 
 function discoverySupportsPromptReplay(discovery: Discovery | null | undefined) {
+  // A verified native prompt is itself a replayable interactive surface even
+  // when the app is still on a splash. The prompt-only runner resets prompt
+  // state, verifies the expected prompt, and captures the post-choice surface.
   return Boolean(
     discovery
     && discovery.target_ready === true
-    && discovery.interactive_surface_ready !== false
     && (discovery.status === "completed" || discovery.status === "partial")
     && discovery.last_attempt_status !== "blocked"
     && discovery.last_attempt_status !== "failed"
@@ -2020,6 +2022,10 @@ export default function AutopilotPage() {
           && (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified)) {
           await runSuite(jobId, "safe_navigation");
         }
+      } else if (autoRunFirstPass && discoveryMode === "safe" && discoverySupportsPromptReplay(response.data)) {
+        // Permission branches are safe to exercise from their observed native
+        // prompts even when the app has not reached an interactive product page.
+        await runSuite(jobId, "safe_navigation", "permissions");
       } else if (autoRunFirstPass && discoveryMode === "safe" && hasSafeDiscoverySurface) {
         await runSuite(jobId, "safe_navigation");
       } else if (autoRunFirstPass && discoveryMode === "safe" && response.data.screens.length > 0) {
@@ -2092,8 +2098,13 @@ export default function AutopilotPage() {
     } catch (err) { setError(readableError(err, "The generated cases could not be approved")); return false; }
     finally { setWorkflowBusy(false); }
   };
-  const runSuite = async (requestedJobId?: unknown, requestedExecutionMode?: "safe_navigation" | "full_uat") => {
+  const runSuite = async (
+    requestedJobId?: unknown,
+    requestedExecutionMode?: "safe_navigation" | "full_uat",
+    requestedBucket?: "all" | TestBucket,
+  ) => {
     const jobId = typeof requestedJobId === "string" ? requestedJobId : analysis?.job_id;
+    const executionBucket = requestedBucket ?? suiteBucket;
     if (!jobId) return;
     if (suiteBusy) {
       setContextNotice("An execution batch is already using this target. Wait for it to finish before starting another batch.");
@@ -2118,7 +2129,7 @@ export default function AutopilotPage() {
       if (analysis?.job_id === jobId) applyJob(latestJob);
       const latestDiscoveryReady = discoveryVerifiedForExecution(latestDiscovery);
       const promptOnly = executionMode === "safe_navigation"
-        && suiteBucket === "permissions"
+        && executionBucket === "permissions"
         && !latestDiscoveryReady
         && discoverySupportsPromptReplay(latestDiscovery);
       if ((!latestDiscoveryReady && !promptOnly) || latestJob.phase === "blocked" || latestJob.analysis?.phase === "blocked") {
@@ -2147,7 +2158,7 @@ export default function AutopilotPage() {
         ...executionPayload(),
         max_tests: suiteMaxTests,
         test_ids: [],
-        buckets: executionMode === "full_uat" || suiteBucket === "all" ? [] : [suiteBucket],
+        buckets: executionMode === "full_uat" || executionBucket === "all" ? [] : [executionBucket],
         include_deferred: true,
         prompt_only: promptOnly,
         execution_mode: executionMode,
@@ -2981,7 +2992,9 @@ export default function AutopilotPage() {
                 : safeCasesRunnable
                   ? " Safe deterministic cases can be run now."
                   : safeCasesNeedInteractiveSurface
-                    ? " Runtime Discovery needs an interactive app surface before safe cases can run."
+                    ? discoverySupportsPromptReplay(discovery)
+                      ? " The app screen is noninteractive. Select the Permissions suite to replay observed native prompt choices; screen-based cases remain blocked."
+                      : " Runtime Discovery needs an interactive app surface before screen-based safe cases can run."
                     : " Safe execution is waiting for target, provider or case readiness."
               }
             </Typography>
