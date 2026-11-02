@@ -843,7 +843,7 @@ def test_observed_prompt_choice_compiles_to_executable_ir():
             )
         ],
     )
-    discovery = _discovery().model_copy(update={"runtime_prompts": [prompt]})
+    discovery = _discovery().model_copy(update={"runtime_prompts": [prompt], "target_ready": True})
     test_case = AutopilotTest(
         id="QT-RUNTIME-PROMPT-ALLOW-01",
         suite="Permissions",
@@ -1040,7 +1040,7 @@ def test_runtime_prompt_branch_metadata_survives_ir_compilation():
 
     generated = AutopilotIRCompiler().compile_bundle(
         analysis,
-        _discovery().model_copy(update={"runtime_prompts": [prompt]}),
+        _discovery().model_copy(update={"runtime_prompts": [prompt], "target_ready": True}),
     ).tests[0]
 
     assert generated.readiness == "executable"
@@ -1098,7 +1098,7 @@ def test_followup_prompt_case_replays_observed_parent_allow():
             runtime_prompt_choice="no-thanks",
         )
     ])
-    discovery = _discovery().model_copy(update={"runtime_prompts": [parent, followup]})
+    discovery = _discovery().model_copy(update={"runtime_prompts": [parent, followup], "target_ready": True})
 
     generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
 
@@ -1162,7 +1162,7 @@ def test_followup_prompt_case_replays_observed_parent_denial():
             runtime_prompt_choice="no-thanks",
         )
     ])
-    discovery = _discovery().model_copy(update={"runtime_prompts": [parent, followup]})
+    discovery = _discovery().model_copy(update={"runtime_prompts": [parent, followup], "target_ready": True})
 
     generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
 
