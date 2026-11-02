@@ -874,47 +874,97 @@ def test_observed_prompt_choice_compiles_to_executable_ir():
     assert "known_native_prompt_kind" in generated.appium_python
     compile(generated.appium_python, "<qtx-generated-prompt>", "exec")
 
-def test_unobserved_runtime_prompt_choices_require_discovery_before_execution():
-    for outcome_status in ("planned", "unavailable"):
-        prompt = RuntimePromptObservation(
-            prompt_id=f"permission-{outcome_status}",
-            kind="runtime_permission",
-            title="Location permission",
-            choices=[
-                RuntimePromptChoice(
-                    key="allow",
-                    label="Allow",
-                    decision="allow",
-                    locators=[DiscoveryLocator(strategy="accessibility_id", value="Allow", confidence=0.99)],
-                    outcome_status=outcome_status,
-                )
-            ],
-        )
-        analysis = _analysis([
-            AutopilotTest(
-                id=f"QT-RUNTIME-PROMPT-{outcome_status.upper()}",
-                suite="Permissions",
-                title="Location permission grant behavior",
-                priority="high",
-                objective="Verify the selected permission branch.",
-                steps=["Choose Allow"],
-                expected=["The app returns to a readable screen."],
-                bucket="permissions",
-                runtime_prompt_id=prompt.prompt_id,
-                runtime_prompt_choice="allow",
+def test_planned_prompt_choice_compiles_for_prompt_only_replay_without_app_page():
+    prompt = RuntimePromptObservation(
+        prompt_id="permission-planned",
+        kind="runtime_permission",
+        title="Location permission",
+        choices=[
+            RuntimePromptChoice(
+                key="allow",
+                label="Allow",
+                decision="allow",
+                locators=[DiscoveryLocator(strategy="accessibility_id", value="Allow", confidence=0.99)],
+                outcome_status="planned",
             )
-        ])
+        ],
+    )
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-RUNTIME-PROMPT-PLANNED",
+            suite="Permissions",
+            title="Location permission grant behavior",
+            priority="high",
+            objective="Exercise the selected permission branch and verify app recovery.",
+            steps=["Choose Allow"],
+            expected=["The app returns to its own UI or a new native prompt."],
+            bucket="permissions",
+            runtime_prompt_id=prompt.prompt_id,
+            runtime_prompt_choice="allow",
+        )
+    ])
+    discovery = _discovery().model_copy(update={
+        "runtime_prompts": [prompt],
+        "target_ready": True,
+        "interactive_surface_ready": False,
+        "status": "partial",
+        "last_attempt_status": "partial",
+    })
 
-        generated = AutopilotIRCompiler().compile_bundle(
-            analysis,
-            _discovery().model_copy(update={"runtime_prompts": [prompt]}),
-        ).tests[0]
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
 
-        assert generated.readiness == "discovery_required"
-        assert generated.steps == []
+    assert generated.readiness == "executable"
+    assert generated.promoted_by_discovery is True
+    assert [step.action for step in generated.steps] == [
+        "launch_app", "prompt_choice", "inspect_ui", "capture_evidence"
+    ]
+    assert generated.steps[1].value == "allow"
+    assert generated.steps[1].locator_value == "Allow"
 
 
-def test_observed_runtime_prompt_is_deferred_when_latest_surface_is_not_interactive():
+def test_unavailable_runtime_prompt_choice_still_requires_discovery():
+    prompt = RuntimePromptObservation(
+        prompt_id="permission-unavailable",
+        kind="runtime_permission",
+        title="Location permission",
+        choices=[
+            RuntimePromptChoice(
+                key="allow",
+                label="Allow",
+                decision="allow",
+                locators=[DiscoveryLocator(strategy="accessibility_id", value="Allow", confidence=0.99)],
+                outcome_status="unavailable",
+            )
+        ],
+    )
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-RUNTIME-PROMPT-UNAVAILABLE",
+            suite="Permissions",
+            title="Location permission grant behavior",
+            priority="high",
+            objective="Exercise the selected permission branch.",
+            steps=["Choose Allow"],
+            expected=["The app returns to a readable screen."],
+            bucket="permissions",
+            runtime_prompt_id=prompt.prompt_id,
+            runtime_prompt_choice="allow",
+        )
+    ])
+    discovery = _discovery().model_copy(update={
+        "runtime_prompts": [prompt],
+        "target_ready": True,
+        "interactive_surface_ready": False,
+        "status": "partial",
+        "last_attempt_status": "partial",
+    })
+
+    generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+
+    assert generated.readiness == "discovery_required"
+    assert generated.steps == []
+
+def test_observed_prompt_choice_remains_executable_when_app_surface_is_not_interactive():
     prompt = RuntimePromptObservation(
         prompt_id="location-permission",
         kind="runtime_permission",
@@ -952,9 +1002,9 @@ def test_observed_runtime_prompt_is_deferred_when_latest_surface_is_not_interact
 
     generated = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
 
-    assert generated.readiness == "discovery_required"
-    assert generated.steps == []
-    assert "interactive surface" in generated.readiness_reason.lower()
+    assert generated.readiness == "executable"
+    assert generated.steps[1].action == "prompt_choice"
+    assert generated.steps[1].locator_value == "Allow"
 
 
 def test_runtime_prompt_branch_metadata_survives_ir_compilation():
