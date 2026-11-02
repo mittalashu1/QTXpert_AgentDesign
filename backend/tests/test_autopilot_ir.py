@@ -964,6 +964,7 @@ def test_unavailable_runtime_prompt_choice_still_requires_discovery():
     assert generated.readiness == "discovery_required"
     assert generated.steps == []
 
+
 def test_observed_prompt_choice_remains_executable_when_app_surface_is_not_interactive():
     prompt = RuntimePromptObservation(
         prompt_id="location-permission",
