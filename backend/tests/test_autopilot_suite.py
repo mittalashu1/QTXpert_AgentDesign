@@ -8,12 +8,15 @@ from app.services.appium_compat import ProviderLifecycleUnavailable, validate_ta
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
+    AutopilotSuiteTestResult,
     DiscoveredControl,
     DiscoveredScreen,
     DiscoveredTransition,
     DiscoveryLocator,
     QTXIRStep,
     QTXTestIR,
+    RuntimePromptChoice,
+    RuntimePromptObservation,
 )
 from app.services.autopilot_suite import AutopilotSuiteService
 
@@ -282,6 +285,78 @@ def test_prompt_only_filter_keeps_only_observed_prompt_choice_cases():
     selected = AutopilotSuiteService._prompt_only_cases([prompt_case, ordinary_case, malformed_case])
 
     assert [test.test_id for test in selected] == ["QT-PROMPT-ALLOW"]
+
+
+def test_observed_prompt_branch_is_linked_and_added_for_the_next_wave():
+    parent = RuntimePromptObservation(
+        prompt_id="permission-root",
+        kind="runtime_permission",
+        choices=[
+            RuntimePromptChoice(
+                key="allow",
+                label="Allow while using",
+                decision="allow",
+                locators=[DiscoveryLocator(strategy="id", value="allow", confidence=0.99)],
+            )
+        ],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id="prompt-branches",
+        status="completed",
+        provider="appium",
+        started_at="2026-11-07T00:00:00+00:00",
+        finished_at="2026-11-07T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Android Emulator",
+        target_ready=True,
+        runtime_prompts=[parent],
+    )
+    child = RuntimePromptObservation(
+        prompt_id="location-followup",
+        kind="location_settings",
+        source_prompt_id="permission-root",
+        source_choice_key="allow",
+        choices=[
+            RuntimePromptChoice(
+                key="yes",
+                label="Turn on",
+                decision="allow",
+                locators=[DiscoveryLocator(strategy="id", value="yes", confidence=0.99)],
+            ),
+            RuntimePromptChoice(
+                key="no",
+                label="No thanks",
+                decision="deny",
+                locators=[DiscoveryLocator(strategy="id", value="no", confidence=0.99)],
+            ),
+        ],
+    )
+    result = AutopilotSuiteTestResult(
+        test_id="QT-PROMPT-ALLOW",
+        title="Allow runtime permission",
+        status="passed",
+        evidence={
+            "actions": [{
+                "action": "prompt_choice",
+                "prompt_id": "permission-root",
+                "choice_key": "allow",
+                "resulting_prompt_id": "location-followup",
+            }]
+        },
+        observed_runtime_prompts=[child],
+    )
+
+    merged, changed = AutopilotSuiteService._merge_prompt_branch_observations(
+        discovery,
+        [result],
+    )
+
+    assert changed is True
+    parent_choice = merged.runtime_prompts[0].choices[0]
+    assert parent_choice.outcome_status == "observed"
+    assert parent_choice.resulting_prompt_id == "location-followup"
+    followup = next(item for item in merged.runtime_prompts if item.prompt_id == "location-followup")
+    assert {choice.decision for choice in followup.choices} == {"allow", "deny"}
 
 
 def test_suite_runner_supports_only_explicit_ir_allowlist():
@@ -1478,8 +1553,210 @@ def test_suite_prompt_choice_accepts_a_new_observed_system_prompt(tmp_path):
             *test.steps[1:],
         ]
     })
-    with pytest.raises(AssertionError, match="did not reach its observed follow-up system prompt"):
-        service._execute_test(PromptFollowupDriver(), strict_test, tmp_path, "com.qtx.demo")
+    branch_evidence = service._execute_test(
+        PromptFollowupDriver(),
+        strict_test,
+        tmp_path,
+        "com.qtx.demo",
+    )
+    assert branch_evidence["actions"][0]["resulting_prompt_id"]
+    assert branch_evidence["observed_runtime_prompts"][0].kind == "location_settings"
+    assert branch_evidence["observed_runtime_prompts"][0].source_prompt_id
+    assert branch_evidence["observed_runtime_prompts"][0].source_choice_key == "dont-allow"
+
+
+def test_prompt_branch_continues_from_its_trigger_tap_to_the_yes_no_choice(tmp_path):
+    class TriggerThenPermissionDriver(_Driver):
+        def __init__(self):
+            super().__init__()
+            self.current_activity = ".MainActivity"
+
+        def find_element(self, by, value):
+            self.locators.append((by, value))
+            driver = self
+
+            class Trigger(_Element):
+                def click(inner_self):
+                    super(Trigger, inner_self).click()
+                    driver.current_activity = (
+                        "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+                    )
+                    driver.page_source = (
+                        '<hierarchy><node package="com.android.permissioncontroller" '
+                        'class="android.widget.FrameLayout">'
+                        '<node package="com.android.permissioncontroller" text="Location permission" '
+                        'class="android.widget.TextView" />'
+                        '<node package="com.android.permissioncontroller" text="Allow while using the app" '
+                        'resource-id="com.android.permissioncontroller:id/permission_allow_foreground_only_button" '
+                        'class="android.widget.Button" clickable="true" enabled="true" />'
+                        '<node package="com.android.permissioncontroller" text="Don\'t allow" '
+                        'resource-id="com.android.permissioncontroller:id/deny_button" '
+                        'class="android.widget.Button" clickable="true" enabled="true" />'
+                        '</node></hierarchy>'
+                    )
+
+            class AllowChoice(_Element):
+                def click(inner_self):
+                    super(AllowChoice, inner_self).click()
+                    driver.current_activity = ".MainActivity"
+                    driver.page_source = '<hierarchy><node package="com.qtx.demo" text="Home" /></hierarchy>'
+
+            return Trigger() if value == "request-location" else AllowChoice()
+
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = TriggerThenPermissionDriver()
+    test = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Tap the observed control that opens the location permission prompt",
+            target="Request location",
+            screen_id="screen-root",
+            locator_strategy="id",
+            locator_value="request-location",
+            locator_confidence=0.99,
+        ),
+        QTXIRStep(
+            action="prompt_choice",
+            description="Choose Allow while using the app",
+            target="runtime_permission",
+            value="allow-while-using-the-app",
+            assertion="allow",
+            locator_strategy="id",
+            locator_value="com.android.permissioncontroller:id/permission_allow_foreground_only_button",
+            locator_confidence=0.99,
+        ),
+        QTXIRStep(action="inspect_ui", description="Inspect the app after the permission choice"),
+        QTXIRStep(action="capture_evidence", description="Capture the resulting app state"),
+    ])
+
+    evidence = service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    assert len(evidence["actions"]) == 4
+    assert evidence["actions"][0]["mechanism"] == "observed_runtime_prompt_trigger"
+    assert evidence["actions"][1]["action"] == "prompt_choice"
+    assert evidence["actions"][1]["choice_key"] == "allow-while-using-the-app"
+    assert driver.locators == [
+        ("id", "request-location"),
+        ("id", "com.android.permissioncontroller:id/permission_allow_foreground_only_button"),
+    ]
+
+
+def test_suite_prompt_choice_records_location_settings_as_a_valid_branch_outcome(tmp_path):
+    class LocationSettingsDriver(_Driver):
+        def __init__(self):
+            super().__init__()
+            self.current_activity = (
+                "com.google.android.location.settings.LocationSettingsCheckerActivity"
+            )
+            self.page_source = (
+                '<hierarchy><node package="com.google.android.gms" '
+                'text="Location settings checker activity" class="android.widget.FrameLayout">'
+                '<node package="com.google.android.gms" text="Turn on" '
+                'resource-id="com.google.android.gms:id/positive_button" '
+                'class="android.widget.Button" clickable="true" enabled="true" />'
+                '<node package="com.google.android.gms" text="No thanks" '
+                'resource-id="com.google.android.gms:id/negative_button" '
+                'class="android.widget.Button" clickable="true" enabled="true" />'
+                '</node></hierarchy>'
+            )
+
+        def find_element(self, by, value):
+            self.locators.append((by, value))
+            driver = self
+
+            class LocationChoice(_Element):
+                def click(inner_self):
+                    super(LocationChoice, inner_self).click()
+                    driver.current_activity = "com.android.settings.Settings$LocationSettingsActivity"
+                    driver.page_source = (
+                        '<hierarchy><node package="com.android.settings" '
+                        'class="android.widget.FrameLayout">'
+                        '<node package="com.android.settings" text="Location" '
+                        'class="android.widget.TextView" />'
+                        '<node package="com.android.settings" text="Use location" '
+                        'class="android.widget.Switch" checked="true" />'
+                        '</node></hierarchy>'
+                    )
+
+            return LocationChoice()
+
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    test = _test_ir([
+        QTXIRStep(
+            action="prompt_choice",
+            description="Choose Turn on on the observed location settings prompt",
+            target="location_settings",
+            value="turn-on",
+            assertion="allow",
+            locator_strategy="id",
+            locator_value="com.google.android.gms:id/positive_button",
+            locator_confidence=0.99,
+        ),
+        QTXIRStep(action="inspect_ui", description="Inspect Android Location settings"),
+        QTXIRStep(action="capture_evidence", description="Capture the resulting system settings screen"),
+    ])
+
+    evidence = service._execute_test(
+        LocationSettingsDriver(),
+        test,
+        tmp_path,
+        "com.qtx.demo",
+        target_kind="android",
+    )
+
+    action = evidence["actions"][0]
+    assert action["mechanism"] == "observed_external_surface"
+    assert action["resulting_surface"]["kind"] == "system_settings"
+    assert action["resulting_surface"]["label"] == "Android Location settings"
+
+
+def test_observed_external_prompt_surface_updates_choice_outcome():
+    prompt = RuntimePromptObservation(
+        prompt_id="location-settings",
+        kind="location_settings",
+        choices=[RuntimePromptChoice(
+            key="turn-on",
+            label="Turn on",
+            decision="allow",
+            locators=[DiscoveryLocator(strategy="id", value="on", confidence=0.99)],
+        )],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id="external-prompt-outcome",
+        status="completed",
+        provider="appium",
+        started_at="2026-11-07T00:00:00+00:00",
+        finished_at="2026-11-07T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Android Emulator",
+        runtime_prompts=[prompt],
+    )
+    result = AutopilotSuiteTestResult(
+        test_id="QT-PROMPT-ALLOW",
+        title="Allow location settings",
+        status="passed",
+        evidence={"actions": [{
+            "action": "prompt_choice",
+            "prompt_id": "location-settings",
+            "choice_key": "turn-on",
+            "resulting_surface": {
+                "kind": "system_settings",
+                "label": "Android Location settings",
+            },
+        }]},
+        observed_runtime_prompts=[prompt.model_copy(deep=True)],
+    )
+
+    merged, changed = AutopilotSuiteService._merge_prompt_branch_observations(
+        discovery,
+        [result],
+    )
+
+    assert changed is True
+    choice = merged.runtime_prompts[0].choices[0]
+    assert choice.outcome_status == "observed"
+    assert choice.resulting_surface_kind == "system_settings"
+    assert choice.resulting_surface_label == "Android Location settings"
 
 
 def test_suite_routes_matching_startup_prompt_case_before_app_cases(tmp_path, monkeypatch):
@@ -1608,7 +1885,7 @@ def test_suite_device_farm_reinstalls_app_to_rearm_prompt_cases(tmp_path, monkey
     monkeypatch.setattr(appium.webdriver, "Remote", remote)
     monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
-        "app.services.autopilot_suite.known_native_prompt_kind",
+        "app.services.autopilot_discovery.AutopilotDiscoveryService._runtime_prompt_kind",
         lambda current_driver, _source, _target: "runtime_permission" if current_driver.prompt_active else None,
     )
 
@@ -1787,7 +2064,7 @@ def test_suite_does_not_retry_failed_device_farm_prompt_reset(tmp_path, monkeypa
     )
     monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
-        "app.services.autopilot_suite.known_native_prompt_kind",
+        "app.services.autopilot_discovery.AutopilotDiscoveryService._runtime_prompt_kind",
         lambda current, _source, _target: "runtime_permission" if current.prompt_active else None,
     )
 

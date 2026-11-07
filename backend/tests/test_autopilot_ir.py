@@ -871,8 +871,83 @@ def test_observed_prompt_choice_compiles_to_executable_ir():
     assert generated.steps[1].target == "location_settings"
     assert generated.steps[1].value == "turn-on"
     assert generated.steps[1].locator_value == '//*[@text="Turn on"]'
-    assert "known_native_prompt_kind" in generated.appium_python
+    assert "_runtime_prompt_kind" in generated.appium_python
+    assert "_external_prompt_surface" in generated.appium_python
     compile(generated.appium_python, "<qtx-generated-prompt>", "exec")
+
+
+def test_prompt_after_saved_sign_in_compiles_replay_route_without_serializing_credentials():
+    compiler = AutopilotIRCompiler()
+    screen = _discovery().screens[0]
+    username = DiscoveredControl(
+        control_id="username",
+        semantic_label="Username",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="user-field", confidence=0.98)],
+    )
+    password = DiscoveredControl(
+        control_id="password",
+        semantic_label="Password",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        locators=[DiscoveryLocator(strategy="id", value="password-field", confidence=0.98)],
+    )
+    submit = _control("submit", "Sign in")
+    login_screen = screen.model_copy(update={"controls": [username, password, submit]})
+    prompt = RuntimePromptObservation(
+        prompt_id="post-login-permission",
+        kind="runtime_permission",
+        source_screen_id=login_screen.screen_id,
+        trigger_control_id="submit",
+        choices=[
+            RuntimePromptChoice(
+                key="allow",
+                label="Allow while using",
+                decision="allow",
+                locators=[DiscoveryLocator(strategy="id", value="allow", confidence=0.99)],
+            )
+        ],
+    )
+    discovery = _discovery().model_copy(update={
+        "screens": [login_screen],
+        "transitions": [],
+        "runtime_prompts": [prompt],
+        "target_ready": True,
+    })
+    username_key = compiler._runtime_input_key(login_screen.screen_id, "username", "credential")
+    password_key = compiler._runtime_input_key(login_screen.screen_id, "password", "credential")
+    analysis = _analysis([
+        AutopilotTest(
+            id="QT-RUNTIME-PROMPT-POST-LOGIN-ALLOW",
+            suite="Permissions",
+            title="Choose allow on the post-login permission prompt",
+            objective="Verify the observed permission choice after sign-in.",
+            steps=["Choose Allow"],
+            expected=["The application remains usable."],
+            bucket="permissions",
+            runtime_prompt_id=prompt.prompt_id,
+            runtime_prompt_choice="allow",
+        )
+    ])
+
+    generated = compiler.compile_bundle(
+        analysis,
+        discovery,
+        input_values={username_key: "uat-user", password_key: "uat-password"},
+    ).tests[0]
+
+    assert generated.readiness == "executable"
+    assert [step.action for step in generated.steps] == [
+        "launch_app", "fill", "fill", "tap", "prompt_choice", "inspect_ui", "capture_evidence"
+    ]
+    serialized = generated.model_dump_json()
+    assert "uat-user" not in serialized
+    assert "uat-password" not in serialized
+    assert generated.steps[1].input_key == username_key
+    assert generated.steps[2].input_key == password_key
 
 def test_planned_prompt_choice_compiles_for_prompt_only_replay_without_app_page():
     prompt = RuntimePromptObservation(

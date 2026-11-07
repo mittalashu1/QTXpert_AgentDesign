@@ -51,6 +51,35 @@ def test_persisted_web_html_redacts_typed_values_but_keeps_structure():
     assert "Sign in" in redacted
 
 
+@pytest.mark.parametrize("label", ["Yes", "No", "Allow while using", "No thanks", "Cancel"])
+def test_web_discovery_probes_observed_prompt_choices(label):
+    control = DiscoveredControl(
+        control_id=label.lower().replace(" ", "-"),
+        semantic_label=label,
+        class_name="button",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="css", value=f"#{label.lower().replace(' ', '-')}", confidence=0.95)],
+    )
+
+    assert AutopilotWebService._safe_probe_control(control) is True
+
+
+def test_web_discovery_does_not_treat_a_word_containing_no_as_a_prompt_choice():
+    control = DiscoveredControl(
+        control_id="notification",
+        semantic_label="Notification preferences",
+        class_name="button",
+        clickable=True,
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="css", value="#notification", confidence=0.95)],
+    )
+
+    assert AutopilotWebService._safe_probe_control(control) is False
+
+
 def test_unlabelled_web_login_fields_are_promoted_before_checkpointing():
     controls = [
         DiscoveredControl(

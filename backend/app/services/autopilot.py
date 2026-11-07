@@ -2994,11 +2994,11 @@ class AutopilotPrototypeService:
                         steps=["Launch application", f"Choose observed prompt option {choice.label}"],
                         expected=[
                             f"The {choice.label} choice is applied to the observed {prompt_label.lower()}",
-                            (
-                                f"The application returns to observed screen {choice.resulting_screen_id}"
-                                if choice.resulting_screen_id
-                                else "The application remains usable after the prompt choice"
-                            ),
+                            f"The application returns to observed screen {choice.resulting_screen_id}"
+                            if choice.resulting_screen_id
+                            else f"The choice opens {choice.resulting_surface_label}"
+                            if choice.resulting_surface_kind and choice.resulting_surface_label
+                            else "The application remains usable after the prompt choice",
                         ],
                         preconditions=[
                             "Reset the app/device prompt state so this branch is visible before execution.",

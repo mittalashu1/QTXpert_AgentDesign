@@ -1013,6 +1013,13 @@ class DiscoveredScreen(BaseModel):
     controls: List[DiscoveredControl] = Field(default_factory=list)
 
 
+class RuntimePromptBranchRef(BaseModel):
+    """One observed prompt decision used to reach a later checkpoint."""
+
+    prompt_id: str
+    choice_key: str
+
+
 class DiscoveredTransition(BaseModel):
     from_screen_id: str
     to_screen_id: str
@@ -1021,6 +1028,9 @@ class DiscoveredTransition(BaseModel):
     action: Literal["tap", "back", "scroll"] = "tap"
     duplicate_state: bool = False
     observation_ref: Optional[str] = None
+    # Some app transitions pass through one or more system dialogs. Keep those
+    # decisions in the route so a replay can reach the same downstream screen.
+    prompt_path: List[RuntimePromptBranchRef] = Field(default_factory=list)
 
 
 class RuntimePromptChoice(BaseModel):
@@ -1031,6 +1041,10 @@ class RuntimePromptChoice(BaseModel):
     outcome_status: Literal["observed", "planned", "unavailable"] = "planned"
     resulting_screen_id: Optional[str] = None
     resulting_prompt_id: Optional[str] = None
+    # Some affirmative options intentionally open Android Settings or another
+    # app. Preserve that observed destination as part of the branch outcome.
+    resulting_surface_kind: Optional[Literal["system_settings", "external_app"]] = None
+    resulting_surface_label: Optional[str] = None
 
 
 class RuntimePromptObservation(BaseModel):
@@ -1044,6 +1058,14 @@ class RuntimePromptObservation(BaseModel):
     page_source_asset_id: Optional[UUID] = None
     choices: List[RuntimePromptChoice] = Field(default_factory=list)
     observation_ref: Optional[str] = None
+    # An app action can surface a system prompt after a page or after sign-in.
+    # These stable references let a prompt case replay the observed route.
+    source_screen_id: Optional[str] = None
+    trigger_control_id: Optional[str] = None
+    # Runtime prompt replay can discover additional prompts after a selected
+    # yes/no choice; link those branches so each new checkpoint is replayable.
+    source_prompt_id: Optional[str] = None
+    source_choice_key: Optional[str] = None
 
 
 class AutopilotDiscoveryResult(BaseModel):
@@ -1089,6 +1111,9 @@ class AutopilotDiscoveryResult(BaseModel):
     # System prompts are first-class branch points, but remain outside the
     # product screen graph so their controls are not misrepresented as app UI.
     runtime_prompts: List[RuntimePromptObservation] = Field(default_factory=list)
+    # Decisions accepted immediately at app launch, before the first screen is
+    # available. Ordinary screen cases replay this observed startup path.
+    entry_prompt_path: List[RuntimePromptBranchRef] = Field(default_factory=list)
     # Field-specific, non-secret setup references inferred from the live UI.
     # These are informational until the generic credential/data checkpoint is
     # satisfied; values are never captured from the device.
@@ -1136,6 +1161,9 @@ class AutopilotSuiteTestResult(BaseModel):
     duration_seconds: float = 0
     error: Optional[str] = None
     evidence: Dict[str, Any] = Field(default_factory=dict)
+    # New prompt branches observed while replaying an allow/deny case. The API
+    # persists their screenshots and merges them into Runtime Discovery.
+    observed_runtime_prompts: List[RuntimePromptObservation] = Field(default_factory=list)
     journey: Optional[str] = None
     page_label: Optional[str] = None
     page_url: Optional[str] = None
@@ -1162,6 +1190,9 @@ class AutopilotSuiteResult(BaseModel):
     bucket_counts: Dict[str, int] = Field(default_factory=dict)
     error: Optional[str] = None
     tests: List[AutopilotSuiteTestResult] = Field(default_factory=list)
+    # Internal handoff to the API route; excluded from the suite response and
+    # durable suite record after the discovery snapshot is updated.
+    discovery_update: Optional[AutopilotDiscoveryResult] = Field(default=None, exclude=True)
     continuation_token: Optional[str] = None
     remaining_count: int = Field(default=0, ge=0)
 
