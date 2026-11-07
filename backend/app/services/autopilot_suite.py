@@ -1325,6 +1325,7 @@ class AutopilotSuiteService:
                 evidence_dir = evidence_root / self._safe_name(test.test_id)
                 evidence_dir.mkdir(parents=True, exist_ok=True)
                 evidence: Dict[str, Any] = {}
+                setup_prompt_choices: list[dict[str, str]] = []
                 video_requested = self._is_video_case(test)
                 video_started = False
                 video_status: str | None = None
@@ -1415,7 +1416,7 @@ class AutopilotSuiteService:
                             driver, startup_source, request.target_kind
                         )
                         if startup_prompt_kind and startup_prompt_kind != "app_confirmation":
-                            evidence["setup_prompt_choices"] = self._replay_observed_entry_prompt_path(
+                            setup_prompt_choices = self._replay_observed_entry_prompt_path(
                                 driver,
                                 test,
                                 discovery,
@@ -1538,6 +1539,8 @@ class AutopilotSuiteService:
                         launch_activity=activity_hint,
                         discovery=discovery,
                     )
+                    if setup_prompt_choices:
+                        evidence["setup_prompt_choices"] = setup_prompt_choices
                     if setup_navigation:
                         evidence["setup_navigation"] = setup_navigation
                     status = "passed"
