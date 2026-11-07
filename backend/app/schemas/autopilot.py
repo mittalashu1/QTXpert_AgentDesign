@@ -434,6 +434,11 @@ class AutopilotAnalysis(BaseModel):
     services: List[str] = Field(default_factory=list)
     receivers: List[str] = Field(default_factory=list)
     permissions: List[str] = Field(default_factory=list)
+    # Bounded AndroidManifest.xml facts are retained independently from the
+    # optional, memory-heavy resource-table parse so static security checks
+    # can run for large APKs too.
+    manifest_metadata_complete: bool = False
+    manifest_components: List[Dict[str, Any]] = Field(default_factory=list)
     file_count: int = 0
     size_bytes: int = 0
     sha256: str
@@ -702,7 +707,7 @@ class AutopilotProviderStatus(BaseModel):
     playwright_available: bool = True
     custom_appium_reason: Optional[str] = None
     custom_appium_url: Optional[str] = None
-    recommended_provider: AutopilotProvider = "appium"
+    recommended_provider: AutopilotProvider = "browserstack"
 
 
 class AutopilotSetupUpdateRequest(BaseModel):

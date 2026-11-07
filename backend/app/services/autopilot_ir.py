@@ -329,6 +329,8 @@ class AutopilotIRCompiler:
         "QT-AUTO-SMOKE-002",
         "QT-AUTO-UX-001",
         "QT-AUTO-UI-001",
+        "QT-AUTO-SEC-001",
+        "QT-AUTO-SEC-DEBUG",
     }
     WEB_EXECUTABLE_IDS = {
         "QT-WEB-SMOKE-001",

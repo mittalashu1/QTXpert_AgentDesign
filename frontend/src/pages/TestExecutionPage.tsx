@@ -39,8 +39,7 @@ import OpenInNewOutlinedIcon from "@mui/icons-material/OpenInNewOutlined";
 import SearchOutlinedIcon from "@mui/icons-material/SearchOutlined";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import { AxiosError } from "axios";
-import { executionPlansApi, executionsApi, localRunnersApi, testCasesApi, uploadsApi } from "@/services/api";
-import { API_BASE_URL } from "@/services/apiClient";
+import { executionPlansApi, executionsApi, testCasesApi, uploadsApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
 import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
@@ -154,8 +153,6 @@ export default function TestExecutionPage() {
   const [appAssetId, setAppAssetId] = useState("");
   const [deviceName, setDeviceName] = useState("Google Pixel 8");
   const [platformVersion, setPlatformVersion] = useState("14.0");
-  const [appiumUrl, setAppiumUrl] = useState("");
-  const [appiumApp, setAppiumApp] = useState("");
   const [noReset, setNoReset] = useState(false);
   const [autoGrantPermissions, setAutoGrantPermissions] = useState(true);
   const [runName, setRunName] = useState("");
@@ -177,7 +174,6 @@ export default function TestExecutionPage() {
   } | null>(null);
   const [caseEditorError, setCaseEditorError] = useState("");
   const [uploadError, setUploadError] = useState("");
-  const [enrollmentToken, setEnrollmentToken] = useState("");
 
   const history = useQuery({
     queryKey: ["execution-source-runs", selectedProjectId],
@@ -190,20 +186,6 @@ export default function TestExecutionPage() {
     excludeCategories: ["autopilot_evidence", "execution_evidence"],
     excludeSourceModules: ["autopilot_evidence", "execution_report"],
     cacheKey: "execution-mobile-assets",
-  });
-  const localRunners = useQuery({
-    queryKey: ["local-device-runners", selectedProjectId],
-    queryFn: () => localRunnersApi.list(selectedProjectId!).then((response) => response.data),
-    enabled: Boolean(selectedProjectId),
-    refetchInterval: (query) => query.state.data?.some((runner) => runner.status === "online") ? 15000 : 30000,
-  });
-  const enrollLocalRunner = useMutation({
-    mutationFn: () => localRunnersApi.createEnrollment(selectedProjectId!).then((response) => response.data),
-    onSuccess: (response) => setEnrollmentToken(response.enrollment_token),
-  });
-  const revokeLocalRunner = useMutation({
-    mutationFn: (runnerId: string) => localRunnersApi.revoke(runnerId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["local-device-runners", selectedProjectId] }),
   });
   const plans = useQuery({
     queryKey: ["execution-plans", selectedProjectId],
@@ -261,26 +243,15 @@ export default function TestExecutionPage() {
       : {
         app_asset_id: appAssetId || undefined,
         device_name: deviceName.trim() || undefined,
-        platform_version: provider === "local_runner" ? undefined : platformVersion.trim() || undefined,
-        ...(provider === "appium" ? {
-          appium_url: appiumUrl.trim() || undefined,
-          appium_app: appiumApp.trim() || undefined,
-        } : {}),
+        platform_version: platformVersion.trim() || undefined,
         no_reset: noReset,
         auto_grant_permissions: autoGrantPermissions,
       }),
-  }), [appAssetId, appiumApp, appiumUrl, autoGrantPermissions, baseUrl, deviceName, noReset, platformVersion, provider, targetKind]);
+  }), [appAssetId, autoGrantPermissions, baseUrl, deviceName, noReset, platformVersion, provider, targetKind]);
   const targetSignature = useMemo(() => JSON.stringify(targetPayload), [targetPayload]);
   const targetConfigured = targetKind === "web"
     ? Boolean(baseUrl.trim())
-    : Boolean(appAssetId && deviceName.trim() && provider !== "playwright"
-      && (provider !== "local_runner" || localRunners.data?.some((runner) => runner.status === "online" && runner.platforms.includes(targetKind))));
-
-  const localRunnerApiUrl = new URL(API_BASE_URL, window.location.origin).toString().replace(/\/$/, "");
-  const localRunnerPython = "tools/local_runner/.venv/Scripts/python.exe";
-  const localRunnerPairCommand = enrollmentToken
-    ? `${localRunnerPython} tools/local_runner/agent.py pair --api-url "${localRunnerApiUrl}" --token "${enrollmentToken}"`
-    : "";
+    : Boolean(appAssetId && deviceName.trim() && provider !== "playwright");
 
   useEffect(() => {
     if (!currentPlan) return;
@@ -305,7 +276,7 @@ export default function TestExecutionPage() {
       setPreflightSignature("");
       return;
     }
-    setProvider((value) => value === "playwright" ? "browserstack" : value);
+    setProvider("browserstack");
     const selected = mobileAssets.assets.find((asset) => asset.id === appAssetId);
     if (selected && repositoryAssetExtension(selected) !== (targetKind === "android" ? "apk" : "ipa")) {
       setAppAssetId("");
@@ -502,31 +473,8 @@ export default function TestExecutionPage() {
       <PageHeader
         eyebrow="M4 · EXECUTION FABRIC"
         title="Test execution"
-        description="Import a Test Design set, select cases, validate readiness, and retain run evidence."
+        description="Import a Test Design set, select cases, run mobile tests on BrowserStack or web checks with Playwright, and retain evidence."
       />
-
-      <Card variant="outlined" sx={{ mb: 2 }}>
-        <CardContent>
-          <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={1.5} alignItems={{ md: "center" }}>
-            <Box>
-              <Typography variant="subtitle1" fontWeight={800}>Local device runner</Typography>
-              <Typography variant="body2" color="text.secondary">Connect this Windows laptop to run Android suites on its local emulator. The runner makes outbound HTTPS requests; Appium stays on loopback.</Typography>
-            </Box>
-            <Stack direction="row" spacing={1} alignItems="center">
-              {localRunners.isFetching && <LinearProgress sx={{ width: 48 }} />}
-              <Chip size="small" variant="outlined" label={`${(localRunners.data ?? []).filter((runner) => runner.status === "online").length} online`} color={(localRunners.data ?? []).some((runner) => runner.status === "online") ? "success" : "default"} />
-              <Button size="small" variant="outlined" disabled={enrollLocalRunner.isPending} onClick={() => enrollLocalRunner.mutate()}>
-                {enrollLocalRunner.isPending ? "Preparing…" : "Pair this laptop"}
-              </Button>
-            </Stack>
-          </Stack>
-          {localRunners.isError && <Alert severity="warning" sx={{ mt: 1 }}>Runner status is unavailable. Refresh this page after the API update is deployed.</Alert>}
-          {enrollLocalRunner.isError && <Alert severity="error" sx={{ mt: 1 }}>{apiErrorMessage(enrollLocalRunner.error, "Could not create a runner pairing token.")}</Alert>}
-          {(localRunners.data ?? []).length > 0 && <Stack direction="row" spacing={0.75} flexWrap="wrap" useFlexGap sx={{ mt: 1 }}>
-            {localRunners.data!.map((runner) => <Chip key={runner.id} size="small" label={`${runner.name} · ${runner.status}`} color={runner.status === "online" ? "success" : runner.status === "revoked" ? "default" : "warning"} variant="outlined" onDelete={runner.status !== "revoked" ? () => revokeLocalRunner.mutate(runner.id) : undefined} />)}
-          </Stack>}
-        </CardContent>
-      </Card>
 
       <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 2 }}>
         {STEPS.map((label) => <Step key={label}><StepLabel>{label}</StepLabel></Step>)}
@@ -737,35 +685,10 @@ export default function TestExecutionPage() {
                 <Grid size={{ xs: 12, md: targetKind === "web" ? 4 : 3 }}><TextField fullWidth size="small" label="Run name (optional)" value={runName} onChange={(event) => setRunName(event.target.value)} /></Grid>
                 {targetKind !== "web" && <>
                   <Grid size={{ xs: 12, md: 3 }}>
-                    <FormControl fullWidth size="small">
-                      <InputLabel id="mobile-provider-label">Execution provider</InputLabel>
-                      <Select labelId="mobile-provider-label" label="Execution provider" value={provider} onChange={(event) => {
-                        const nextProvider = event.target.value as ExecutionProvider;
-                        setProvider(nextProvider);
-                        if (nextProvider === "local_runner") {
-                          const devices = [...new Set((localRunners.data ?? []).filter((runner) => runner.status === "online").flatMap((runner) => runner.devices))];
-                          setDeviceName(devices.length === 1 ? devices[0] : "");
-                          setPlatformVersion("");
-                        }
-                        setPreflightSignature("");
-                      }}>
-                        <MenuItem value="browserstack">BrowserStack real device</MenuItem>
-                        <MenuItem value="appium">Custom / local Appium</MenuItem>
-                        <MenuItem value="local_runner" disabled={targetKind !== "android"}>This Windows runner · Android</MenuItem>
-                      </Select>
-                    </FormControl>
+                    <TextField fullWidth size="small" label="Execution provider" value="BrowserStack real device" InputProps={{ readOnly: true }} />
                   </Grid>
-                  {provider === "local_runner" && <Grid size={{ xs: 12 }}>
-                    {localRunners.data?.some((runner) => runner.status === "online" && runner.platforms.includes(targetKind))
-                      ? <Alert severity="success">A local runner is online. Use the device ID shown by ADB (for example, emulator-5554) below.</Alert>
-                      : <Alert severity="warning">No compatible local runner is online for this project. Pair this laptop above and keep the runner process running before preflight.</Alert>}
-                  </Grid>}
                   <Grid size={{ xs: 12, md: 3 }}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => { setDeviceName(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "iPhone 15" : "Google Pixel 8"} /></Grid>
-                  <Grid size={{ xs: 12, md: 2 }}><TextField fullWidth size="small" label={provider === "local_runner" ? "OS version (automatic)" : "OS version"} disabled={provider === "local_runner"} value={platformVersion} onChange={(event) => { setPlatformVersion(event.target.value); setPreflightSignature(""); }} placeholder={provider === "local_runner" ? "Detected on device" : targetKind === "ios" ? "17" : "14.0"} /></Grid>
-                  {provider === "appium" && <>
-                    <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth size="small" label="Appium server URL (optional)" value={appiumUrl} onChange={(event) => { setAppiumUrl(event.target.value); setPreflightSignature(""); }} helperText="Hosted runs need a reachable HTTPS endpoint; local development can use 127.0.0.1." /></Grid>
-                    <Grid size={{ xs: 12, md: 4 }}><TextField fullWidth size="small" label="Remote app reference (optional)" value={appiumApp} onChange={(event) => { setAppiumApp(event.target.value); setPreflightSignature(""); }} helperText="Required for a hosted Appium lab unless it shares the API filesystem." /></Grid>
-                  </>}
+                  <Grid size={{ xs: 12, md: 2 }}><TextField fullWidth size="small" label="OS version" value={platformVersion} onChange={(event) => { setPlatformVersion(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "17" : "14.0"} /></Grid>
                   <Grid size={{ xs: 12 }}>
                     <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
                       <FormControlLabel control={<Switch size="small" checked={noReset} onChange={(event) => { setNoReset(event.target.checked); setPreflightSignature(""); }} />} label="Keep app state (no reset)" />
@@ -940,25 +863,6 @@ export default function TestExecutionPage() {
           <Button variant="contained" startIcon={<SaveOutlinedIcon />} onClick={saveCaseEditor} disabled={saveSelection.isPending}>
             {saveSelection.isPending ? "Saving…" : "Save and recheck"}
           </Button>
-        </DialogActions>
-      </Dialog>
-      <Dialog open={Boolean(enrollmentToken)} onClose={() => setEnrollmentToken("")} fullWidth maxWidth="md">
-        <DialogTitle>Pair this Windows laptop</DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={1.5}>
-            <Alert severity="info">This one-time pairing code expires in 10 minutes. It is not the FH Money or QTXpert password. The agent stores its runner identity encrypted with Windows DPAPI for this Windows account.</Alert>
-            <Typography variant="body2">From the QTXpert repository root, first check the local stack:</Typography>
-            <TextField fullWidth size="small" value={`${localRunnerPython} tools/local_runner/agent.py doctor`} InputProps={{ readOnly: true }} />
-            <Typography variant="body2">Then pair the runner with this project using the command below:</Typography>
-            <TextField fullWidth multiline minRows={2} value={localRunnerPairCommand} InputProps={{ readOnly: true }} />
-            <Typography variant="body2">After pairing, keep this laptop awake and run:</Typography>
-            <TextField fullWidth size="small" value={`${localRunnerPython} tools/local_runner/agent.py run`} InputProps={{ readOnly: true }} />
-            <Typography variant="caption" color="text.secondary">The agent polls over HTTPS, downloads only a leased project APK, checks its SHA-256, and sends run results and capped evidence. Appium must remain bound to 127.0.0.1:4723. Revoke the runner here if this laptop is retired.</Typography>
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setEnrollmentToken("")}>Close</Button>
-          <Button onClick={() => { void navigator.clipboard?.writeText(localRunnerPairCommand); }}>Copy pairing command</Button>
         </DialogActions>
       </Dialog>
     </Box>

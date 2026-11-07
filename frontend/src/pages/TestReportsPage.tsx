@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { AxiosError } from "axios";
 import {
   Alert,
@@ -28,6 +28,7 @@ import SearchOutlinedIcon from "@mui/icons-material/SearchOutlined";
 import TimelineOutlinedIcon from "@mui/icons-material/TimelineOutlined";
 import RefreshOutlinedIcon from "@mui/icons-material/RefreshOutlined";
 import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
+import { apiClient } from "@/services/apiClient";
 import { dashboardApi, executionPlansApi, executionsApi, uploadsApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
@@ -36,6 +37,18 @@ import type { ExecutionResult, ExecutionRun } from "@/types/domain";
 
 type RunFilter = "all" | ExecutionRun["status"];
 type ResultFilter = "all" | ExecutionResult["status"];
+type LatestAutopilotJob = { job_id: string; filename: string; status: string };
+type AutopilotSmokeExecution = {
+  execution_id: string;
+  job_id: string;
+  status: "passed" | "failed" | "blocked";
+  provider: string;
+  device_name: string;
+  created_at: string;
+  duration_seconds: number;
+  screenshot_asset_id?: string | null;
+  page_source_asset_id?: string | null;
+};
 
 function statusColor(status: string): "success" | "error" | "warning" | "info" | "default" {
   if (status === "completed") return "success";
@@ -172,6 +185,7 @@ function RunOverview({ run, counts }: { run: ExecutionRun; counts: ReturnType<ty
 
 export default function TestReportsPage() {
   const { selectedProjectId } = useSelectedProject();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [selectedRunId, setSelectedRunId] = useState(searchParams.get("run") || "");
@@ -193,6 +207,16 @@ export default function TestReportsPage() {
     queryFn: () => executionsApi.list(selectedProjectId!).then((response) => response.data),
     enabled: Boolean(selectedProjectId),
     refetchInterval: (query) => query.state.data?.some((run) => ["queued", "running"].includes(run.status)) ? 4000 : false,
+  });
+  const latestAutopilotJob = useQuery({
+    queryKey: ["autopilot-latest-job", selectedProjectId],
+    queryFn: () => apiClient.get<LatestAutopilotJob | null>("/autopilot/jobs/latest").then((response) => response.data),
+    enabled: Boolean(selectedProjectId),
+  });
+  const autopilotExecutions = useQuery({
+    queryKey: ["autopilot-executions", latestAutopilotJob.data?.job_id],
+    queryFn: () => apiClient.get<AutopilotSmokeExecution[]>(`/autopilot/${latestAutopilotJob.data!.job_id}/executions`).then((response) => response.data),
+    enabled: Boolean(latestAutopilotJob.data?.job_id),
   });
 
   const filteredRuns = useMemo(() => {
@@ -291,8 +315,48 @@ export default function TestReportsPage() {
     : [["Tests executed", summaryTotal, "Across recorded runs"], ["Pass rate", `${summaryPassRate}%`, "Passed ÷ total tests"], ["Execution runs", summary.data?.execution_runs ?? 0, "Recorded cycles"], ["Open defects", summary.data?.open_defects ?? 0, "Requiring triage"]];
 
   return <Box>
-    <PageHeader eyebrow="QUALITY INTELLIGENCE" title="Test reports" description="A concise, traceable view of every execution, result and evidence trail." actions={<Tooltip title="Refresh reports"><IconButton onClick={() => { void runs.refetch(); void summary.refetch(); }} aria-label="Refresh reports"><RefreshOutlinedIcon /></IconButton></Tooltip>} />
+    <PageHeader eyebrow="QUALITY INTELLIGENCE" title="Test reports" description="A concise, traceable view of every execution, result and evidence trail." actions={<Tooltip title="Refresh reports"><IconButton onClick={() => { void runs.refetch(); void summary.refetch(); void latestAutopilotJob.refetch(); if (latestAutopilotJob.data?.job_id) void autopilotExecutions.refetch(); }} aria-label="Refresh reports"><RefreshOutlinedIcon /></IconButton></Tooltip>} />
     <Grid container spacing={1.5} sx={{ mb: 2.5 }}>{metricCards.map(([label, value, helper]) => <Grid key={String(label)} size={{ xs: 6, md: 3 }}><Card variant="outlined" sx={{ height: "100%" }}><CardContent sx={{ p: 1.5, "&:last-child": { pb: 1.5 } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h5" sx={{ mt: 0.35, fontWeight: 800 }}>{value}</Typography><Typography variant="caption" color="text.secondary">{helper}</Typography></CardContent></Card></Grid>)}</Grid>
+
+    <Card variant="outlined" sx={{ mb: 2.5 }}>
+      <CardContent sx={{ p: 1.75, "&:last-child": { pb: 1.75 } }}>
+        <Stack direction={{ xs: "column", sm: "row" }} spacing={1} justifyContent="space-between" alignItems={{ sm: "center" }}>
+          <Box>
+            <Typography variant="h6" fontWeight={800}>Autopilot execution history</Typography>
+            <Typography variant="body2" color="text.secondary">Smoke runs and their saved evidence for the latest Autopilot analysis in this project.</Typography>
+          </Box>
+          <Button variant="outlined" onClick={() => navigate("/autopilot")}>Open Autopilot report</Button>
+        </Stack>
+        {latestAutopilotJob.isLoading && <LinearProgress sx={{ mt: 1.5 }} />}
+        {latestAutopilotJob.isError && <Alert severity="warning" sx={{ mt: 1.5 }}>Autopilot history could not be loaded. Refresh the report to retry.</Alert>}
+        {!latestAutopilotJob.isLoading && !latestAutopilotJob.isError && !latestAutopilotJob.data && <Alert severity="info" sx={{ mt: 1.5 }}>No Autopilot analysis is recorded for this project yet.</Alert>}
+        {latestAutopilotJob.data && <>
+          <Divider sx={{ my: 1.5 }} />
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={0.75} alignItems={{ sm: "center" }}>
+            <Typography variant="body2" fontWeight={700}>{latestAutopilotJob.data.filename}</Typography>
+            <Chip size="small" variant="outlined" label={`Analysis ${displayStatus(latestAutopilotJob.data.status)}`} />
+            {autopilotExecutions.isLoading && <LinearProgress sx={{ flex: 1, minWidth: 80 }} />}
+          </Stack>
+          {autopilotExecutions.isError && <Alert severity="warning" sx={{ mt: 1.25 }}>Autopilot smoke history is temporarily unavailable.</Alert>}
+          {autopilotExecutions.data?.length === 0 && <Alert severity="info" sx={{ mt: 1.25 }}>No smoke execution has been recorded for the latest Autopilot analysis.</Alert>}
+          {(autopilotExecutions.data ?? []).map((execution) => <Box key={execution.execution_id} sx={{ mt: 1.25, p: 1.25, border: "1px solid", borderColor: "divider", borderRadius: 1.75 }}>
+            <Stack direction={{ xs: "column", md: "row" }} spacing={1} justifyContent="space-between" alignItems={{ md: "center" }}>
+              <Box>
+                <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Typography variant="body2" fontWeight={800}>Autopilot smoke</Typography>
+                  <Chip size="small" label={displayStatus(execution.status)} color={resultColor(execution.status)} />
+                </Stack>
+                <Typography variant="caption" color="text.secondary">{execution.provider} · {execution.device_name} · {new Date(execution.created_at).toLocaleString()} · {durationLabel(execution.duration_seconds * 1000)}</Typography>
+              </Box>
+              <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                {execution.screenshot_asset_id && <Button size="small" startIcon={<DownloadOutlinedIcon />} onClick={() => void downloadEvidence(execution.screenshot_asset_id!, `autopilot-${execution.execution_id}-screenshot.png`)}>Screenshot</Button>}
+                {execution.page_source_asset_id && <Button size="small" startIcon={<DownloadOutlinedIcon />} onClick={() => void downloadEvidence(execution.page_source_asset_id!, `autopilot-${execution.execution_id}-page-source.xml`)}>UI hierarchy</Button>}
+              </Stack>
+            </Stack>
+          </Box>)}
+        </>}
+      </CardContent>
+    </Card>
 
     {downloadError && <Alert severity="error" onClose={() => setDownloadError("")} sx={{ mb: 2 }}>{downloadError}</Alert>}
     {runs.isLoading && <LinearProgress sx={{ mb: 2 }} />}

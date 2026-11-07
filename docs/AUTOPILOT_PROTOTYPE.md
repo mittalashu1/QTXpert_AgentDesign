@@ -133,6 +133,8 @@ When these backend secrets exist:
 
 QTXpert uploads the APK server-side to BrowserStack, caches the returned `bs://` application reference per APK SHA, and starts the Appium session using server-side credentials. No BrowserStack credentials are sent to the browser.
 
+The mobile Autopilot and Test Execution screens now use BrowserStack as their fixed provider. Web checks continue to use Playwright. AWS Device Farm and custom/local Appium are not offered as mobile provider choices in the standard UI.
+
 ## Setup and first safe smoke run
 
 ### BrowserStack real device (hosted Render deployment)

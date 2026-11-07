@@ -49,6 +49,8 @@ from app.api.routes.autopilot import (
     _sanitize_discovery_assets,
     _setup_profile,
     _strip_suite_evidence_paths,
+    get_autopilot_providers,
+    _primary_execution_provider,
 )
 from app.api.routes.executions import _validate_autopilot_case_scope
 from app.services.autopilot import (
@@ -93,6 +95,12 @@ def test_rerun_execution_mode_honors_selection_and_preserves_legacy_preference(
 
 def test_rerun_execution_mode_is_optional_for_legacy_clients():
     assert AutopilotAnalysisRerunRequest().execution_mode is None
+
+
+def test_mobile_autopilot_uses_browserstack_and_web_uses_playwright():
+    assert _primary_execution_provider("android") == "browserstack"
+    assert _primary_execution_provider("ios") == "browserstack"
+    assert _primary_execution_provider("web") == "playwright"
 
 
 @pytest.mark.asyncio
@@ -1131,6 +1139,25 @@ def test_autopilot_flags_debuggable_build(tmp_path):
     assert any("debuggable" in risk.lower() for risk in risks)
 
 
+def test_android_manifest_security_case_compiles_without_runtime_discovery(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="manifest-security",
+        filename="investnation.apk",
+        sha256="a" * 64,
+        target_kind="android",
+        package_name="com.example.investnation",
+        tests=service._build_deterministic_tests({"platform": "android", "debuggable": False}),
+    )
+
+    bundle = AutopilotIRCompiler().compile_bundle(analysis)
+    security_case = next(test for test in bundle.tests if test.test_id == "QT-AUTO-SEC-001")
+
+    assert security_case.readiness == "executable"
+    assert security_case.steps
+    assert all(step.action == "static_assertion" for step in security_case.steps)
+
+
 def test_autopilot_infers_financial_domain_from_context(tmp_path):
     service = _service(tmp_path)
     domain = service._infer_domain(
@@ -1350,6 +1377,23 @@ def test_browserstack_configuration_requires_both_secrets(tmp_path):
 
     assert incomplete.settings.browserstack_configured is False
     assert configured.settings.browserstack_configured is True
+
+
+@pytest.mark.asyncio
+async def test_browserstack_is_recommended_when_aws_and_appium_are_configured(tmp_path):
+    service = _service(
+        tmp_path,
+        DEVICE_FARM_ENABLED=True,
+        DEVICE_FARM_PROJECT_ARN="arn:aws:devicefarm:us-west-2:123456789012:project/example",
+        AUTOPILOT_CUSTOM_APPIUM_URL="https://appium.example.test/wd/hub",
+    )
+
+    status = await get_autopilot_providers(user=SimpleNamespace(), settings=service.settings)
+
+    assert status.browserstack_configured is False
+    assert status.device_farm_configured is True
+    assert status.custom_appium_available is True
+    assert status.recommended_provider == "browserstack"
 
 
 @pytest.mark.asyncio
@@ -2392,6 +2436,7 @@ def _fixture_binary_manifest() -> bytes:
         "name",
         "label",
         "debuggable",
+        "exported",
         "com.example.investnation",
         "Investnation",
         "27",
@@ -2491,7 +2536,13 @@ def _fixture_binary_manifest() -> bytes:
         start_element("uses-permission", [("name", "android.permission.INTERNET", None)]),
         end_element("uses-permission"),
         start_element("application", [("label", "Investnation", None), ("debuggable", "true", None)]),
-        start_element("activity", [("name", "com.example.investnation.MainActivity", None)]),
+        start_element(
+            "activity",
+            [
+                ("name", "com.example.investnation.MainActivity", None),
+                ("exported", "true", None),
+            ],
+        ),
         start_element("intent-filter", []),
         start_element("action", [("name", "android.intent.action.MAIN", None)]),
         end_element("action"),
@@ -2522,6 +2573,16 @@ def test_large_apk_recovers_binary_manifest_identity_for_runtime_launch(tmp_path
     assert result["min_sdk"] == "23"
     assert result["target_sdk"] == "34"
     assert result["debuggable"] is True
+    assert result["manifest_metadata_complete"] is True
+    assert result["manifest_components"] == [
+        {
+            "kind": "activity",
+            "name": "com.example.investnation.MainActivity",
+            "exported": True,
+            "permission": None,
+            "has_intent_filter": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -2559,6 +2620,42 @@ async def test_legacy_discovery_refreshes_missing_apk_identity_before_launch(tmp
         (tmp_path / job_id / "analysis.json").read_text(encoding="utf-8")
     )
     assert saved.package_name == refreshed.package_name
+
+
+@pytest.mark.asyncio
+async def test_existing_mobile_identity_refreshes_bounded_manifest_security_facts(tmp_path):
+    apk_path = tmp_path / "large-release.apk"
+    with zipfile.ZipFile(apk_path, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("AndroidManifest.xml", _fixture_binary_manifest())
+        archive.writestr("assets/payload.bin", b"x" * (2 * 1024 * 1024))
+
+    service = _service(tmp_path, AUTOPILOT_DEEP_PARSE_MAX_MB=1)
+    job_id, uploaded_apk = await service.save_upload(
+        "large-release.apk",
+        apk_path.read_bytes(),
+        "owner",
+    )
+    stale = AutopilotAnalysis(
+        job_id=job_id,
+        filename="large-release.apk",
+        sha256="f" * 64,
+        target_kind="android",
+        package_name="com.example.investnation",
+        main_activity="com.example.investnation.MainActivity",
+        manifest_metadata_complete=False,
+    )
+
+    refreshed = await _refresh_mobile_analysis_identity(
+        service,
+        stale.job_id,
+        stale,
+        artifact_path=uploaded_apk,
+    )
+
+    assert refreshed is not None
+    assert refreshed.manifest_metadata_complete is True
+    assert refreshed.debuggable is True
+    assert refreshed.manifest_components[0]["exported"] is True
 
 
 def test_large_apk_upload_limit_is_separate_from_deep_parse_limit(tmp_path):
