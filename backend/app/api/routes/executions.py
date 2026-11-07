@@ -1273,4 +1273,3 @@ async def dashboard(project_id: UUID, db: Annotated[AsyncSession, Depends(get_db
         autopilot=autopilot,
     )
 
-
