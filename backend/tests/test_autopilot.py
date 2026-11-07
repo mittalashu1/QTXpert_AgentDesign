@@ -3290,13 +3290,18 @@ def test_smoke_safely_recovers_from_google_location_prompt(monkeypatch):
     assert prompt_evidence["device_settings_modified"] is False
     assert driver.calls == ["back"]
 
-def _confirmation_discovery(*, include_warning=True, include_cancel=True):
+def _confirmation_discovery(
+    *,
+    include_warning=True,
+    include_cancel=True,
+    warning_copy="By proceeding, you will be logged out from other devices.",
+):
     job_id = "77777777-7777-7777-7777-777777777777"
     controls = []
     if include_warning:
         controls.append(DiscoveredControl(
             control_id="warning-copy",
-            semantic_label="By proceeding, you will be logged out from other devices.",
+            semantic_label=warning_copy,
             class_name="android.widget.TextView",
             clickable=True,
             risk="safe",
@@ -3362,7 +3367,7 @@ def test_runtime_expansion_generates_both_observed_confirmation_branches(tmp_pat
     assert len(cases) == 2
     proceed = next(test for test in cases if "Proceed" in test.title)
     cancel = next(test for test in cases if "Cancel" in test.title)
-    assert proceed.destructive is True
+    assert proceed.destructive is False
     assert cancel.destructive is False
     assert all(
         "Verify the application leaves or changes the observed confirmation state"
@@ -3377,11 +3382,38 @@ def test_runtime_expansion_generates_both_observed_confirmation_branches(tmp_pat
     )
     for case in cases:
         ir_case = next(test for test in compiled.tests if test.test_id == case.id)
-        if case.destructive:
-            assert ir_case.readiness == "approval_required"
-        else:
-            assert ir_case.readiness == "executable"
-            assert any(step.action == "assert_screen_changed" for step in ir_case.steps)
+        assert ir_case.readiness == "executable"
+        assert any(step.action == "assert_screen_changed" for step in ir_case.steps)
+
+
+def test_runtime_expansion_keeps_money_confirmation_affirmative_branch_gated(tmp_path):
+    service = _service(tmp_path)
+    analysis, discovery = _confirmation_discovery(
+        warning_copy="By proceeding, you will transfer money from this account. This cannot be undone."
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+    proceed = next(
+        test for test in expanded.tests
+        if test.id.startswith("QT-RUNTIME-CHECKPOINT-") and "Proceed" in test.title
+    )
+    cancel = next(
+        test for test in expanded.tests
+        if test.id.startswith("QT-RUNTIME-CHECKPOINT-") and "Cancel" in test.title
+    )
+
+    assert proceed.destructive is True
+    assert cancel.destructive is False
+
+    compiled = AutopilotIRCompiler().compile_bundle(
+        AutopilotAnalysis.model_validate(expanded.model_dump()),
+        discovery,
+        full_uat=False,
+    )
+    proceed_ir = next(test for test in compiled.tests if test.test_id == proceed.id)
+    cancel_ir = next(test for test in compiled.tests if test.test_id == cancel.id)
+    assert proceed_ir.readiness == "approval_required"
+    assert cancel_ir.readiness == "executable"
 
 
 def test_runtime_expansion_requires_confirmation_copy_and_both_choices(tmp_path):
