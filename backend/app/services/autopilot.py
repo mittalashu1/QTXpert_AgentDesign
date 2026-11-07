@@ -70,6 +70,7 @@ from app.services.autopilot_context import default_context, get_profile, sanitiz
 from app.services.autopilot_labels import input_probe_guidance, observed_journey_label, observed_page_label
 from app.services.autopilot_ir import is_blocking_input_request
 from app.services.autopilot_research import AutopilotResearchService
+from app.services.browserstack_errors import upload_error_message
 from app.services.autopilot_scope import (
     FUNCTIONAL_CASE_BUCKETS,
     add_test_provenance,
@@ -4242,8 +4243,8 @@ class AutopilotPrototypeService:
                     data={"custom_id": custom_id},
                 )
             if response.status_code >= 400:
-                detail = response.text[:500]
-                raise RuntimeError(f"BrowserStack app upload failed ({response.status_code}): {detail}")
+                logger.warning("BrowserStack rejected app upload with HTTP %s", response.status_code)
+                raise RuntimeError(upload_error_message(response.status_code, response.text))
             payload = response.json()
 
         app_url = payload.get("app_url")
@@ -4729,6 +4730,9 @@ class AutopilotPrototypeService:
                 "browserstack is not configured",
                 "browserstack app upload failed (401)",
                 "browserstack app upload failed (403)",
+                "browserstack app automate rejected the app upload",
+                "browserstack rejected the configured credentials",
+                "browserstack rejected the app upload",
                 "aws device farm",
                 "device farm",
                 "uploaded apk artifact is unavailable",
@@ -4740,6 +4744,7 @@ class AutopilotPrototypeService:
                 "authentication",
             )
         )
+
 
 
 
