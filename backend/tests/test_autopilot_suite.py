@@ -203,6 +203,21 @@ def test_suite_prefers_runtime_observed_activity_over_manifest_fallback():
     ) == "com.fhc.investnation.LoginActivity"
 
 
+def test_browserstack_uses_fresh_session_between_suite_cases():
+    assert not AutopilotSuiteService._requires_fresh_browserstack_case_session(
+        is_browserstack=True,
+        test_index=0,
+    )
+    assert AutopilotSuiteService._requires_fresh_browserstack_case_session(
+        is_browserstack=True,
+        test_index=1,
+    )
+    assert not AutopilotSuiteService._requires_fresh_browserstack_case_session(
+        is_browserstack=False,
+        test_index=1,
+    )
+
+
 def test_app_confirmation_replays_observed_startup_prompt_path(monkeypatch, tmp_path):
     from app.services.autopilot_discovery import AutopilotDiscoveryService
 

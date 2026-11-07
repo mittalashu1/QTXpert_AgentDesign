@@ -103,6 +103,15 @@ class AutopilotSuiteService:
         fallback = str(manifest_activity or "").strip()
         return fallback or None
 
+    @staticmethod
+    def _requires_fresh_browserstack_case_session(
+        *,
+        is_browserstack: bool,
+        test_index: int,
+    ) -> bool:
+        """BrowserStack app activation/reset commands are not reliable between cases."""
+        return bool(is_browserstack and test_index > 0)
+
     def __init__(self, settings: Settings, prototype: AutopilotPrototypeService):
         self.settings = settings
         self.prototype = prototype
@@ -1362,22 +1371,15 @@ class AutopilotSuiteService:
                 try:
                     has_prompt_step = any(step.action == "prompt_choice" for step in test.steps)
                     has_discovery_screen = any(step.screen_id for step in test.steps)
-                    isolate_browserstack_branch = (
-                        is_browserstack
-                        and test_index > 0
-                        and (
-                            has_prompt_step
-                            or (
-                                request.prompt_only
-                                and test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
-                            )
-                        )
+                    fresh_browserstack_session = self._requires_fresh_browserstack_case_session(
+                        is_browserstack=is_browserstack,
+                        test_index=test_index,
                     )
-                    if isolate_browserstack_branch:
-                        # BrowserStack cannot revoke Android permission grants in
-                        # a running session. Each sibling system choice and each
-                        # observed app confirmation gets a fresh session, so a
-                        # preceding deny path cannot strand later branches in OS UI.
+                    if fresh_browserstack_session:
+                        # BrowserStack may reject activate_app/force-stop after a
+                        # case changes the foreground surface. Start each case in
+                        # a fresh session so resets cannot strand later cases in
+                        # Android system UI. This also isolates sibling prompt paths.
                         safe_quit(driver)
                         driver = None
                         try:
@@ -1506,7 +1508,7 @@ class AutopilotSuiteService:
                                 force_launch=True,
                                 preserve_known_system_prompt=True,
                             )
-                    elif test_index > 0 and not isolate_browserstack_branch:
+                    elif test_index > 0 and not fresh_browserstack_session:
                         self._reset_to_application(
                             driver,
                             package,
