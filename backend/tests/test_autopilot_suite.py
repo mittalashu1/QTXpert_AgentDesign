@@ -161,6 +161,48 @@ def _test_ir(actions):
     )
 
 
+def test_suite_uses_manifest_launcher_when_discovery_has_no_activity():
+    discovery = AutopilotDiscoveryResult(
+        job_id="manifest-launcher-fallback",
+        status="completed",
+        provider="browserstack",
+        started_at="2026-11-07T00:00:00+00:00",
+        finished_at="2026-11-07T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Google Pixel 8",
+        screens=[
+            DiscoveredScreen(
+                screen_id="screen-root",
+                fingerprint="root",
+                controls=[],
+            )
+        ],
+    )
+
+    assert AutopilotSuiteService._resolve_android_activity_hint(
+        discovery,
+        "com.example.investnation.MainActivity",
+    ) == "com.example.investnation.MainActivity"
+
+
+def test_suite_prefers_runtime_observed_activity_over_manifest_fallback():
+    discovery = AutopilotDiscoveryResult(
+        job_id="observed-launcher-priority",
+        status="completed",
+        provider="browserstack",
+        started_at="2026-11-07T00:00:00+00:00",
+        finished_at="2026-11-07T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Google Pixel 8",
+        target_activity="com.fhc.investnation.LoginActivity",
+    )
+
+    assert AutopilotSuiteService._resolve_android_activity_hint(
+        discovery,
+        "com.example.investnation.MainActivity",
+    ) == "com.fhc.investnation.LoginActivity"
+
+
 def test_app_confirmation_replays_observed_startup_prompt_path(monkeypatch, tmp_path):
     from app.services.autopilot_discovery import AutopilotDiscoveryService
 

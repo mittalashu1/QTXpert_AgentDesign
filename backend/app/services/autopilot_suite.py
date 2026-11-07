@@ -80,6 +80,29 @@ class AutopilotSuiteService:
         "uat",
     })
 
+    @staticmethod
+    def _resolve_android_activity_hint(
+        discovery: AutopilotDiscoveryResult | None,
+        manifest_activity: str | None,
+    ) -> str | None:
+        """Prefer runtime-observed entry points, then the APK manifest launcher.
+
+        A previous discovery can stop at Android system UI before it records an
+        activity. BrowserStack may not implement ``activate_app``; passing the
+        manifest activity at session creation lets Appium launch the app without
+        relying on that optional package-reactivation command.
+        """
+        if discovery is not None:
+            target_activity = str(discovery.target_activity or "").strip()
+            if target_activity:
+                return target_activity
+            for screen in discovery.screens:
+                activity_name = str(screen.activity_name or "").strip()
+                if activity_name:
+                    return activity_name
+        fallback = str(manifest_activity or "").strip()
+        return fallback or None
+
     def __init__(self, settings: Settings, prototype: AutopilotPrototypeService):
         self.settings = settings
         self.prototype = prototype
@@ -276,6 +299,7 @@ class AutopilotSuiteService:
                             input_values=input_values or {},
                             sensitive_input_keys=sensitive_input_keys or set(),
                             discovery=current_discovery,
+                            manifest_activity_hint=analysis.main_activity,
                             device_farm_service=device_farm_service,
                             device_farm_session=device_farm_session,
                         ),
@@ -371,6 +395,7 @@ class AutopilotSuiteService:
                         input_values=input_values or {},
                         sensitive_input_keys=sensitive_input_keys or set(),
                         discovery=discovery,
+                        manifest_activity_hint=analysis.main_activity,
                         device_farm_service=device_farm_service,
                         device_farm_session=device_farm_session,
                     ),
@@ -1123,6 +1148,7 @@ class AutopilotSuiteService:
         input_values: Dict[str, str] | None = None,
         sensitive_input_keys: set[str] | None = None,
         discovery: AutopilotDiscoveryResult | None = None,
+        manifest_activity_hint: str | None = None,
         device_farm_service: Any = None,
         device_farm_session: Any = None,
     ) -> list[AutopilotSuiteTestResult]:
@@ -1163,16 +1189,10 @@ class AutopilotSuiteService:
         # MAIN/LAUNCHER intent for every test case.
         activity_hint = None
         if not is_ios:
-            activity_hint = str((discovery.target_activity if discovery else None) or "").strip()
-            if not activity_hint and discovery:
-                activity_hint = next(
-                    (
-                        str(screen.activity_name).strip()
-                        for screen in discovery.screens
-                        if str(screen.activity_name or "").strip()
-                    ),
-                    "",
-                )
+            activity_hint = self._resolve_android_activity_hint(
+                discovery,
+                manifest_activity_hint,
+            )
             if activity_hint:
                 capabilities["appium:appActivity"] = activity_hint
         if is_ios:
