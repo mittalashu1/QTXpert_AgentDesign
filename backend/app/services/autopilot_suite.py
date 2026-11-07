@@ -106,15 +106,7 @@ class AutopilotSuiteService:
             full_uat=request.execution_mode == "full_uat",
         )
 
-        requested_ids = set(request.test_ids)
-        requested_buckets = set(request.buckets)
-        case_pool = self._prompt_only_cases(bundle.tests) if request.prompt_only else bundle.tests
-        selected = [
-            test
-            for test in case_pool
-            if (not requested_ids or test.test_id in requested_ids)
-            and (not requested_buckets or test.bucket in requested_buckets)
-        ]
+        selected = self._select_tests(bundle.tests, request)
         selected.sort(key=lambda test: self._selection_priority(test, discovery))
         selection_remaining_count = 0
         if request.prompt_only:
@@ -490,12 +482,36 @@ class AutopilotSuiteService:
 
     @staticmethod
     def _prompt_only_cases(tests: list[QTXTestIR]) -> list[QTXTestIR]:
-        """Keep only cases that replay one observed native-prompt choice."""
+        """Keep observed native prompt choices and executable app confirmations."""
         return [
             test
             for test in tests
-            if test.runtime_prompt_id
-            and any(step.action == "prompt_choice" for step in test.steps)
+            if (
+                test.runtime_prompt_id
+                and any(step.action == "prompt_choice" for step in test.steps)
+            ) or (
+                test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
+                and test.readiness == "executable"
+            )
+        ]
+
+    @classmethod
+    def _select_tests(
+        cls,
+        tests: list[QTXTestIR],
+        request: AutopilotSuiteRequest,
+    ) -> list[QTXTestIR]:
+        requested_ids = set(request.test_ids)
+        requested_buckets = set(request.buckets)
+        case_pool = cls._prompt_only_cases(tests) if request.prompt_only else tests
+        return [
+            test
+            for test in case_pool
+            if (not requested_ids or test.test_id in requested_ids)
+            # A prompt-only run spans runtime_permissions and functional
+            # confirmation buckets, so a caller's originating bucket must not
+            # discard sibling affirmative/negative branches.
+            and (request.prompt_only or not requested_buckets or test.bucket in requested_buckets)
         ]
 
     @staticmethod

@@ -8,6 +8,7 @@ from app.services.appium_compat import ProviderLifecycleUnavailable, validate_ta
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
+    AutopilotSuiteRequest,
     AutopilotSuiteTestResult,
     DiscoveredControl,
     DiscoveredScreen,
@@ -251,7 +252,7 @@ def test_static_manifest_security_case_blocks_when_manifest_is_incomplete():
     assert result.dependency
 
 
-def test_prompt_only_filter_keeps_only_observed_prompt_choice_cases():
+def test_prompt_only_filter_keeps_native_choices_and_app_confirmation_branches():
     prompt_case = _test_ir([
         QTXIRStep(
             action="prompt_choice",
@@ -281,10 +282,49 @@ def test_prompt_only_filter_keeps_only_observed_prompt_choice_cases():
             locator_confidence=0.97,
         )
     ]).model_copy(update={"test_id": "QT-PROMPT-UNOBSERVED"})
+    proceed_case = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Choose Proceed on the observed confirmation",
+            target="Verify this session",
+            locator_strategy="id",
+            locator_value="proceed",
+            locator_confidence=0.97,
+        )
+    ]).model_copy(update={"test_id": "QT-RUNTIME-CHECKPOINT-PROCEED", "bucket": "functional_positive"})
+    cancel_case = _test_ir([
+        QTXIRStep(
+            action="tap",
+            description="Choose Cancel on the observed confirmation",
+            target="Verify this session",
+            locator_strategy="id",
+            locator_value="cancel",
+            locator_confidence=0.97,
+        )
+    ]).model_copy(update={"test_id": "QT-RUNTIME-CHECKPOINT-CANCEL", "bucket": "functional_negative"})
+    approval_gated_confirmation = cancel_case.model_copy(update={
+        "test_id": "QT-RUNTIME-CHECKPOINT-APPROVAL-GATED",
+        "readiness": "approval_required",
+    })
 
-    selected = AutopilotSuiteService._prompt_only_cases([prompt_case, ordinary_case, malformed_case])
+    cases = [prompt_case, ordinary_case, malformed_case, proceed_case, cancel_case, approval_gated_confirmation]
+    selected = AutopilotSuiteService._prompt_only_cases(cases)
 
-    assert [test.test_id for test in selected] == ["QT-PROMPT-ALLOW"]
+    assert [test.test_id for test in selected] == [
+        "QT-PROMPT-ALLOW",
+        "QT-RUNTIME-CHECKPOINT-PROCEED",
+        "QT-RUNTIME-CHECKPOINT-CANCEL",
+    ]
+
+    selected_for_prompt_run = AutopilotSuiteService._select_tests(
+        cases,
+        AutopilotSuiteRequest(buckets=["permissions"], prompt_only=True),
+    )
+    assert [test.test_id for test in selected_for_prompt_run] == [
+        "QT-PROMPT-ALLOW",
+        "QT-RUNTIME-CHECKPOINT-PROCEED",
+        "QT-RUNTIME-CHECKPOINT-CANCEL",
+    ]
 
 
 def test_observed_prompt_branch_is_linked_and_added_for_the_next_wave():
