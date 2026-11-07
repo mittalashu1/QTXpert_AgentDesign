@@ -1886,9 +1886,8 @@ export default function AutopilotPage() {
         if (resumeResponse.data.status === "uploaded" || resumeResponse.data.status === "analyzing") {
           await pollAnalysis(analysis.job_id);
         }
-        // The server continues discovery in the background. Give it a short
-        // foreground window so the user gets the map immediately when the
-        // provider is warm, then leave slower runs safely resumable.
+        // Keep the foreground poll and heartbeat alive for the bounded discovery window.
+        // This lets the user see the map as soon as it completes.
         const discoveryDeadline = Date.now() + 660000;
         let discoveryReady = false;
         while (Date.now() < discoveryDeadline) {
