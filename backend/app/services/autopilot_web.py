@@ -46,6 +46,9 @@ _SAFE_INTERACTIVE_TERMS = (
     "explore", "learn", "view", "detail", "tab", "accordion", "expand", "collapse",
     "previous", "next", "open",
 )
+_PROMPT_CHOICE_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:yes|no|allow|deny|accept|decline|cancel|not now|no thanks)(?![a-z0-9])"
+)
 
 
 def _same_origin(left: str, right: str) -> bool:
@@ -315,7 +318,9 @@ class AutopilotWebService:
         if not control.enabled or not control.clickable or control.input_capable or control.risk != "safe" or not control.locators:
             return False
         label = (control.semantic_label or "").strip().lower()
-        return any(term in label for term in _SAFE_INTERACTIVE_TERMS)
+        return any(term in label for term in _SAFE_INTERACTIVE_TERMS) or bool(
+            _PROMPT_CHOICE_PATTERN.search(label)
+        )
 
     async def smoke(self, job_id: str, request) -> dict[str, Any]:
         """Run a single non-mutating page-load smoke and capture evidence."""

@@ -78,7 +78,7 @@ def test_runtime_prompt_parser_captures_yes_no_app_confirmation_dialog(tmp_path)
 
     source = (
         '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">'
-        '<node package="com.qtx.demo" class="android.app.AlertDialog">'
+        '<node package="com.qtx.demo" class="android.view.ViewGroup">'
         '<node package="com.qtx.demo" text="Continue with location?" class="android.widget.TextView" />'
         '<node package="com.qtx.demo" text="Yes" resource-id="com.qtx.demo:id/yes" '
         'class="android.widget.Button" clickable="true" enabled="true" />'
@@ -89,6 +89,43 @@ def test_runtime_prompt_parser_captures_yes_no_app_confirmation_dialog(tmp_path)
 
     prompt = AutopilotDiscoveryService._runtime_prompt_observation(
         Driver(), source, tmp_path, "android"
+    )
+
+    assert prompt is not None
+    assert prompt.kind == "app_confirmation"
+    assert prompt.surface == "application"
+    assert [(choice.label, choice.decision) for choice in prompt.choices] == [
+        ("Yes", "allow"),
+        ("No", "deny"),
+    ]
+    separate_prompt = AutopilotDiscoveryService._runtime_prompt_observation(
+        Driver(),
+        source.replace("Continue with location?", "Continue with camera?"),
+        tmp_path,
+        "android",
+    )
+    assert separate_prompt is not None
+    assert separate_prompt.prompt_id != prompt.prompt_id
+
+
+def test_ios_yes_no_app_checkpoint_does_not_require_an_alert_role(tmp_path):
+    class Driver:
+        current_activity = ""
+
+        def get_screenshot_as_file(self, path):
+            from pathlib import Path
+
+            Path(path).write_bytes(b"png")
+            return True
+
+    source = (
+        '<AppiumAUT><XCUIElementTypeOther name="Location choice">'
+        '<XCUIElementTypeButton name="Yes" label="Yes" />'
+        '<XCUIElementTypeButton name="No" label="No" />'
+        '</XCUIElementTypeOther></AppiumAUT>'
+    )
+    prompt = AutopilotDiscoveryService._runtime_prompt_observation(
+        Driver(), source, tmp_path, "ios"
     )
 
     assert prompt is not None

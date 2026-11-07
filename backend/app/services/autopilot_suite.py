@@ -2890,7 +2890,7 @@ class AutopilotSuiteService:
                             resulting_prompt_id = prompt_observation.prompt_id
                             mechanism = "observed_runtime_prompt_trigger"
                             stop_after_observed_prompt = not prompt_choice_follows(index, prompt_kind)
-                    if not stop_after_observed_prompt and package:
+                    if not prompt_kind and package:
                         target_ready, target_reason, _ = validate_target_surface(
                             driver,
                             expected_package=package,

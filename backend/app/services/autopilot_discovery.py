@@ -163,24 +163,21 @@ class AutopilotDiscoveryService:
 
     @classmethod
     def _runtime_prompt_kind(cls, driver: Any, page_source: str, target_kind: str = "android") -> Optional[str]:
-        """Recognize native prompts and explicit yes/no app confirmation dialogs."""
+        """Recognize native prompts and explicit yes/no checkpoints on mobile."""
+        platform = str(target_kind or "").casefold()
+        if platform not in {"android", "ios"}:
+            return None
         kind = known_native_prompt_kind(driver, page_source, target_kind)
         if kind:
             return kind
-        if str(target_kind or "").casefold() != "android":
-            return None
         try:
             root = ET.fromstring(page_source or "")
         except ET.ParseError:
             return None
-        is_dialog = False
         decisions: set[str] = set()
         for node in root.iter():
             attrs = {str(key): str(value) for key, value in node.attrib.items()}
-            class_name = attrs.get("class", "").casefold()
-            resource_id = attrs.get("resource-id", "").casefold()
-            if "dialog" in class_name or "alert" in class_name or "alerttitle" in resource_id:
-                is_dialog = True
+            class_name = str(attrs.get("class") or attrs.get("type") or node.tag).casefold()
             actionable = (
                 attrs.get("clickable", "false").casefold() == "true"
                 or class_name.endswith("button")
@@ -190,7 +187,10 @@ class AutopilotDiscoveryService:
                 decision = cls._prompt_choice_decision(label)
                 if decision:
                     decisions.add(decision)
-        return "app_confirmation" if is_dialog and {"allow", "deny"}.issubset(decisions) else None
+        # An explicit affirmative and negative choice is itself a branch
+        # checkpoint, even when a cross-platform UI toolkit omits dialog roles
+        # from its accessibility hierarchy.
+        return "app_confirmation" if {"allow", "deny"}.issubset(decisions) else None
 
     @classmethod
     def _runtime_prompt_fingerprint(
@@ -207,12 +207,13 @@ class AutopilotDiscoveryService:
         if native_id:
             return native_id
         choice_keys: list[str] = []
+        visible_context: list[str] = []
         try:
             root = ET.fromstring(page_source or "")
             for node in root.iter():
                 attrs = {str(key): str(value) for key, value in node.attrib.items()}
                 label = cls._normalize(cls._semantic_label(attrs))
-                class_name = attrs.get("class", "").casefold()
+                class_name = str(attrs.get("class") or attrs.get("type") or node.tag).casefold()
                 actionable = (
                     attrs.get("clickable", "false").casefold() == "true"
                     or class_name.endswith("button")
@@ -221,10 +222,15 @@ class AutopilotDiscoveryService:
                 key = re.sub(r"[^a-z0-9]+", "-", label).strip("-") if decision else ""
                 if key and key not in choice_keys:
                     choice_keys.append(key[:48])
+                elif label and not decision:
+                    # Hash the visible prompt copy so separate yes/no dialogs
+                    # in the same activity remain distinct without persisting
+                    # their text in the discovery graph.
+                    visible_context.append(label[:160])
         except ET.ParseError:
             pass
         return hashlib.sha1(
-            f"{kind}|{safe_current_activity(driver)}|{'|'.join(choice_keys)}".encode(
+            f"{kind}|{safe_current_activity(driver)}|{'|'.join(choice_keys)}|{'|'.join(sorted(set(visible_context)))}".encode(
                 "utf-8", errors="ignore"
             )
         ).hexdigest()[:16]
@@ -321,7 +327,7 @@ class AutopilotDiscoveryService:
         *,
         persist_evidence: bool = True,
     ) -> Optional[RuntimePromptObservation]:
-        """Capture a supported Android system prompt as a branch artifact.
+        """Capture a native or explicit mobile yes/no prompt as a branch artifact.
 
         Prompt controls bypass parse_controls so system UI is never mistaken
         for product navigation. Keep only observed option labels and locators.
@@ -339,10 +345,10 @@ class AutopilotDiscoveryService:
         if root is not None:
             for node in root.iter():
                 attrs = {str(key): str(value) for key, value in node.attrib.items()}
-                class_name = attrs.get("class", "")
+                class_name = str(attrs.get("class") or attrs.get("type") or node.tag)
                 actionable = (
                     attrs.get("clickable", "false").casefold() == "true"
-                    or class_name in {"android.widget.Button", "XCUIElementTypeButton"}
+                    or class_name.casefold() in {"android.widget.button", "xcuielementtypebutton"}
                 )
                 label = cls._semantic_label(attrs)
                 normalized = cls._normalize(label)
