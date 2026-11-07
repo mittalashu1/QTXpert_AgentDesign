@@ -2682,6 +2682,9 @@ async def _resume_and_discover_background(
                 # distinct cases derived from observed evidence.
                 max_screens=120,
                 max_actions=300,
+                include_transaction_journeys=resume_payload.include_transaction_journeys,
+                full_uat_exploration=resume_payload.auto_run_full_uat,
+                confirm_isolated_uat=resume_payload.confirm_isolated_uat,
             )
             if target_kind == "web":
                 result = await AutopilotWebService(settings, service).discover(
@@ -2918,7 +2921,24 @@ async def _resume_and_discover_background(
             # Runtime Discovery has completed and no live credential field is
             # still unresolved. The suite compiler keeps those dependent
             # cases deferred and reports their exact dependencies.
-            if resume_payload.auto_run_safe_suite and latest_discovery_ready and result.screens and not pending_auth:
+            if (
+                resume_payload.auto_run_full_uat
+                and resume_payload.confirm_isolated_uat
+                and latest_discovery_ready
+                and result.screens
+                and not pending_auth
+            ):
+                suite_request = AutopilotSuiteRequest(
+                    **request.model_dump(exclude={"observe_only", "max_screens", "max_actions"}),
+                    execution_mode="full_uat",
+                    run_all_eligible=True,
+                    confirm_isolated_uat=True,
+                    include_deferred=True,
+                )
+                await execute_autopilot_suite(
+                    job_id, suite_request, user, settings, db,
+                )
+            elif resume_payload.auto_run_safe_suite and latest_discovery_ready and result.screens and not pending_auth:
                 await execute_autopilot_suite(
                     job_id,
                     AutopilotSuiteRequest(**request.model_dump(exclude={"observe_only", "max_screens", "max_actions"})),
@@ -2956,10 +2976,10 @@ async def _start_analysis_from_asset(
     surface_version: int = 1,
     setup_profile: Optional[dict] = None,
     initial_inputs: Optional[list[AutopilotInitialInput]] = None,
-    save_initial_inputs_for_reuse: bool = False,
-    reuse_existing_test_data: bool = False,
+    save_initial_inputs_for_reuse: bool = True,
+    reuse_existing_test_data: bool = True,
     safe_authentication_approved: bool = False,
-    execution_mode: AutopilotExecutionMode = "safe_navigation",
+    execution_mode: AutopilotExecutionMode = "full_uat",
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
 
@@ -3028,10 +3048,10 @@ async def _start_analysis_from_local_path(
     surface_version: int = 1,
     setup_profile: Optional[dict] = None,
     initial_inputs: Optional[list[AutopilotInitialInput]] = None,
-    save_initial_inputs_for_reuse: bool = False,
-    reuse_existing_test_data: bool = False,
+    save_initial_inputs_for_reuse: bool = True,
+    reuse_existing_test_data: bool = True,
     safe_authentication_approved: bool = False,
-    execution_mode: AutopilotExecutionMode = "safe_navigation",
+    execution_mode: AutopilotExecutionMode = "full_uat",
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -4130,10 +4150,10 @@ async def analyze_autopilot_target(
     document_asset_ids: str = Form(default=""),
     document_analysis_run_id: str = Form(default=""),
     initial_inputs: str = Form(default="[]"),
-    save_initial_inputs_for_reuse: bool = Form(default=False),
-    reuse_existing_test_data: bool = Form(default=False),
+    save_initial_inputs_for_reuse: bool = Form(default=True),
+    reuse_existing_test_data: bool = Form(default=True),
     safe_authentication_approved: bool = Form(default=False),
-    execution_mode: AutopilotExecutionMode = Form(default="safe_navigation"),
+    execution_mode: AutopilotExecutionMode = Form(default="full_uat"),
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Analyze a website URL, Android APK or iOS IPA as one Autopilot job."""
@@ -4444,7 +4464,7 @@ def _resolve_rerun_execution_mode(
     saved = saved_setup_profile.get("preferred_execution_mode") if isinstance(saved_setup_profile, dict) else None
     if saved in ("safe_navigation", "full_uat"):
         return saved
-    return "safe_navigation"
+    return "full_uat"
 
 
 @router.post("/{job_id}/rerun-analysis", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
@@ -5050,6 +5070,21 @@ async def resume_autopilot_checkpoint(
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
     record = await _safe_job_record(db, job_id, owner_id)
+    if payload.auto_run_full_uat:
+        if not payload.confirm_isolated_uat:
+            raise HTTPException(status_code=409, detail="Select Full UAT and confirm the isolated target for this run before continuing.")
+        try:
+            resume_analysis = await service.load_analysis(job_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail="Full UAT requires the analyzed mobile app identity.") from exc
+        target_kind = str(job.get("target_kind") or resume_analysis.target_kind or "android")
+        if target_kind not in {"android", "ios"} or not settings.full_uat_target_is_allowed(
+            target_kind, resume_analysis.package_name, resume_analysis.package_name,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Full UAT continuation is not enabled for this exact allowlisted app package.",
+            )
     _ensure_runtime_operation_available(job, record, "resume the checkpoint")
     try:
         analysis = await service.load_analysis(job_id)
@@ -5181,6 +5216,22 @@ async def run_autopilot_discovery(
     target_kind = str(job.get("target_kind") or "android")
     if payload.include_transaction_journeys and target_kind == "web":
         raise HTTPException(status_code=409, detail="Transaction-module mapping is currently available for mobile app targets only.")
+    if payload.full_uat_exploration:
+        if not payload.confirm_isolated_uat:
+            raise HTTPException(status_code=409, detail="Confirm the isolated UAT target before exploring affirmative confirmation branches.")
+        if target_kind not in {"android", "ios"}:
+            raise HTTPException(status_code=409, detail="Full UAT exploration is restricted to Android/iOS app targets.")
+        try:
+            full_uat_analysis = await service.load_analysis(job_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail="Full UAT exploration requires the analyzed app identity.") from exc
+        if not settings.full_uat_target_is_allowed(
+            target_kind, full_uat_analysis.package_name, full_uat_analysis.package_name,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Full UAT exploration is not enabled for this exact allowlisted app package.",
+            )
     # Clicking Run discovery is an explicit approval of the generated plan.
     # Keep the transition visible while preserving the legacy stage strings.
     try:

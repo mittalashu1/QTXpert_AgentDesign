@@ -3477,6 +3477,13 @@ class AutopilotPrototypeService:
             for control in input_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "input field"
                 input_is_sensitive = control.input_kind == "credential"
+                # Credentials are exercised by the authenticated journey using
+                # the encrypted, user-approved input bundle. Generating a
+                # separate synthetic "valid value" case for username/password
+                # would either fail on a generic fixture gate or risk repeated
+                # login attempts and account lockout.
+                if input_is_sensitive:
+                    continue
                 input_is_reachable = screen.screen_id in paths
                 input_candidate = input_is_reachable and not input_is_sensitive
                 input_navigation = [*navigation]

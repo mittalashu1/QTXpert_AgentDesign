@@ -722,8 +722,8 @@ class AutopilotSetupUpdateRequest(BaseModel):
     acceptance_criteria_reference: str = Field(default="", max_length=500)
     api_oracle_reference: str = Field(default="", max_length=500)
     navigation_notes: str = Field(default="", max_length=4000)
-    preferred_execution_mode: AutopilotExecutionMode = "safe_navigation"
-    reuse_existing_test_data: bool = False
+    preferred_execution_mode: AutopilotExecutionMode = "full_uat"
+    reuse_existing_test_data: bool = True
     safe_authentication_approved: bool = False
     # Approval applies to any number of observed cases; the plan itself is
     # finite because it is derived from the target graph, not a fixed quota.
@@ -765,6 +765,11 @@ class AutopilotResumeRequest(BaseModel):
     # read-only suite automatically.  Payments, OTP, destructive and other
     # approval-gated cases are never included by this switch.
     auto_run_safe_suite: bool = True
+    # Full UAT is an explicit run preference. The endpoint repeats the exact
+    # target allowlist check before any state-changing case is executed.
+    auto_run_full_uat: bool = False
+    confirm_isolated_uat: bool = False
+    include_transaction_journeys: bool = True
     # Optional safe-discovery preferences used when the server chains resume
     # directly into discovery. They contain no credentials or field values.
     discovery_provider: Optional[AutopilotProvider] = None
@@ -945,8 +950,8 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     # the user to confirm ``reuse`` (or choose ``fresh``) before submitting.
     setup_action: Literal["ask", "reuse", "fresh"] = "ask"
     initial_inputs: List[AutopilotInitialInput] = Field(default_factory=list, max_length=50)
-    save_initial_inputs_for_reuse: bool = False
-    reuse_existing_test_data: bool = False
+    save_initial_inputs_for_reuse: bool = True
+    reuse_existing_test_data: bool = True
     safe_authentication_approved: bool = False
     execution_mode: Optional[AutopilotExecutionMode] = None
     document_asset_ids: Optional[List[UUID]] = Field(default=None, max_length=20)
@@ -967,7 +972,11 @@ class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
     observe_only: bool = False
     # Open exact transaction-module entry points to map screens/forms; the
     # discovery walker does not submit business actions from this flag.
-    include_transaction_journeys: bool = False
+    include_transaction_journeys: bool = True
+    # Permit observed affirmative app-confirmation branches only for an exact
+    # mobile package allowlisted as isolated UAT by the server.
+    full_uat_exploration: bool = False
+    confirm_isolated_uat: bool = False
     continuation_token: Optional[str] = Field(default=None, max_length=512)
 
 

@@ -410,11 +410,11 @@ class AutopilotDiscoveryService:
     def _prompt_choice_decision(cls, normalized_label: str) -> Optional[str]:
         allow = (
             "allow", "yes", "ok", "turn on", "enable", "while using", "only this time",
-            "always allow",
+            "always allow", "proceed",
         )
         deny = (
             "deny", "no", "not now", "no thanks", "don't allow", "don’t allow",
-            "never allow", "cancel", "decline",
+            "never allow", "cancel", "decline", "do not proceed", "not proceed",
         )
         # Decline labels can contain an allow token ("Don't allow"). Test
         # them first so a denial is never generated as a grant branch.
@@ -432,16 +432,21 @@ class AutopilotDiscoveryService:
         appium_by: Any,
         *,
         prompt_kind: Optional[str] = None,
+        allow_app_confirmation: bool = False,
     ) -> tuple[Optional[str], bool]:
         """Choose a discovery branch that reveals the next useful app checkpoint.
 
         Grant an observed Android runtime permission first so any follow-up
-        location-settings checkpoint can be discovered. Other native prompts
-        use an observed decline choice during discovery; generated cases still
-        cover every recorded allow and deny option.
+        location-settings checkpoint can be discovered. App confirmations use
+        the affirmative route only for a server-verified isolated UAT crawl;
+        generated cases retain every observed allow and deny option.
         """
+        normalized_kind = str(prompt_kind or "").casefold()
         preferred_decision = (
-            "allow" if str(prompt_kind or "").casefold() == "runtime_permission" else "deny"
+            "allow"
+            if normalized_kind == "runtime_permission"
+            or normalized_kind == "app_confirmation" and allow_app_confirmation
+            else "deny"
         )
         choice = next((item for item in choices if item.decision == preferred_decision), None)
         if choice is None and preferred_decision == "allow":
@@ -1299,6 +1304,11 @@ class AutopilotDiscoveryService:
         otp_controls = [control for control in credential_controls if cls._credential_hint(control) == "otp"]
         if approved and not missing_controls and not otp_controls:
             return None
+        if approved and not missing_controls and otp_controls:
+            return (
+                "OTP checkpoint detected. This sign-in branch needs a user-provided verification code; "
+                "Autopilot will leave this branch incomplete and continue other reachable journeys."
+            )
         return (
             "Authentication checkpoint detected. Enter the non-production User ID and Password "
             "(and provide an approved OTP only when the flow permits it) before Autopilot continues."
@@ -1959,6 +1969,10 @@ class AutopilotDiscoveryService:
                     prompt.choices,
                     AppiumBy,
                     prompt_kind=prompt.kind,
+                    allow_app_confirmation=(
+                        request.full_uat_exploration
+                        and (source_screen is None or source_screen.screen_id not in transaction_screen_ids)
+                    ),
                 )
                 if selected_key and clicked:
                     actions_attempted += 1
@@ -2399,6 +2413,7 @@ class AutopilotDiscoveryService:
             input_values = input_values or {}
             authentication_blocked = False
             auth_rounds = 0
+            stack: list[DiscoveredScreen] = []
 
             def process_authentication(
                 screen: DiscoveredScreen,
@@ -2666,7 +2681,42 @@ class AutopilotDiscoveryService:
                         )
                 return screen, False, None
 
+            def recover_from_optional_otp(
+                screen: DiscoveredScreen,
+                blocked: bool,
+                reason: Optional[str],
+            ) -> tuple[DiscoveredScreen, bool, Optional[str], bool]:
+                """Back out of an OTP-only branch and keep exploring known siblings."""
+                if not blocked or not reason or not reason.casefold().startswith("otp checkpoint") or not stack:
+                    return screen, blocked, reason, False
+                ancestor_ids = [item.screen_id for item in stack]
+                for _ in range(min(6, max(1, len(screens) + 1))):
+                    try:
+                        safe_navigate_back(driver, target_kind=request.target_kind)
+                        time.sleep(0.6)
+                        recovered, _ = capture(persist_evidence=False, require_target=True)
+                    except Exception as exc:
+                        warnings.append(
+                            f"OTP branch recovery could not return to an observed app screen: {type(exc).__name__}."
+                        )
+                        return screen, True, reason, False
+                    if recovered.screen_id in ancestor_ids:
+                        ancestor_index = ancestor_ids.index(recovered.screen_id)
+                        stack[:] = stack[:ancestor_index]
+                        warnings.append(
+                            "The observed sign-in path requested an OTP. That branch remains incomplete; "
+                            "discovery returned to an observed parent screen and continued other app journeys."
+                        )
+                        return recovered, False, reason, True
+                warnings.append(
+                    "The OTP branch was not retried because no previously observed parent screen could be restored."
+                )
+                return screen, True, reason, False
+
             current, authentication_blocked, authentication_reason = process_authentication(current)
+            current, authentication_blocked, authentication_reason, _ = recover_from_optional_otp(
+                current, authentication_blocked, authentication_reason,
+            )
             if authentication_reason:
                 stop_reason = authentication_reason
 
@@ -2675,7 +2725,6 @@ class AutopilotDiscoveryService:
             # edge is attempted at most once per observed screen; all backtracking
             # is reversible and destructive controls remain excluded by risk.
             if not authentication_blocked and current is not None and not launch_surface_incomplete:
-                stack: list[DiscoveredScreen] = []
                 while len(screens) < request.max_screens and actions_attempted < request.max_actions:
                     visited_for_screen = {
                         control_id for screen_id, control_id in visited_edges if screen_id == current.screen_id
@@ -2799,8 +2848,13 @@ class AutopilotDiscoveryService:
                             current, authentication_blocked, authentication_reason = process_authentication(current)
                             if authentication_reason:
                                 stop_reason = authentication_reason
+                            current, authentication_blocked, authentication_reason, otp_resumed = recover_from_optional_otp(
+                                current, authentication_blocked, authentication_reason,
+                            )
                             if authentication_blocked:
                                 break
+                            if otp_resumed:
+                                continue
                             # After a successful sign-in, do not backtrack into
                             # the unauthenticated landing/login stack and risk
                             # replaying the same credential form.
