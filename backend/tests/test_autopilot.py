@@ -82,8 +82,8 @@ def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
         ("full_uat", {"preferred_execution_mode": "safe_navigation"}, "android", "full_uat"),
         ("safe_navigation", {"preferred_execution_mode": "full_uat"}, "android", "safe_navigation"),
         (None, {"preferred_execution_mode": "full_uat"}, "android", "full_uat"),
-        (None, {"preferred_execution_mode": "invalid"}, "android", "safe_navigation"),
-        (None, None, "android", "safe_navigation"),
+        (None, {"preferred_execution_mode": "invalid"}, "android", "full_uat"),
+        (None, None, "android", "full_uat"),
         ("full_uat", {"preferred_execution_mode": "full_uat"}, "web", "safe_navigation"),
     ],
 )
@@ -1001,6 +1001,60 @@ def test_runtime_discovery_treats_public_email_form_as_test_data_not_auth(tmp_pa
     assert not any(test.bucket in {"uat", "sit"} for test in expanded.tests)
     assert not any(test.requires_auth for test in expanded.tests)
     assert any(test.requires_test_data for test in expanded.tests)
+
+
+def test_runtime_discovery_does_not_create_synthetic_test_data_cases_for_credentials(tmp_path):
+    service = _service(tmp_path)
+    analysis = AutopilotAnalysis(
+        job_id="66666666-6666-6666-6666-666666666666",
+        filename="investnation.apk",
+        sha256="6" * 64,
+        tests=service._build_deterministic_tests({"permissions": []}),
+    )
+    username = DiscoveredControl(
+        control_id="user-id",
+        semantic_label="User ID",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/user", confidence=0.99)],
+    )
+    password = DiscoveredControl(
+        control_id="password",
+        semantic_label="Password",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        enabled=True,
+        risk="safe",
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/password", confidence=0.99)],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id=analysis.job_id,
+        status="completed",
+        provider="appium",
+        started_at="2026-09-05T00:00:00+00:00",
+        finished_at="2026-09-05T00:00:05+00:00",
+        duration_seconds=5,
+        device_name="Android Emulator",
+        screen_count=1,
+        control_count=2,
+        safe_control_count=0,
+        screens=[DiscoveredScreen(
+            screen_id="login",
+            fingerprint="f" * 64,
+            controls=[username, password],
+        )],
+    )
+
+    expanded = service.expand_discovered_coverage(analysis, discovery)
+
+    assert not any(
+        test.id.startswith("QT-RUNTIME-FUNC-INPUT-") and test.requires_test_data
+        for test in expanded.tests
+    )
 
 
 def test_runtime_expansion_promotes_deterministic_observed_cases(tmp_path):

@@ -274,7 +274,7 @@ function emptySetup(jobId = ""): SetupProfile {
     job_id: jobId, credential_reference: "", account_role: "", environment_name: "",
     environment_url: "", test_data_reference: "", reset_hook_reference: "",
     acceptance_criteria_reference: "", api_oracle_reference: "", navigation_notes: "",
-    safe_authentication_approved: false, approved_test_ids: [], runtime_input_references: {}, preferred_execution_mode: "safe_navigation", reuse_existing_test_data: false, input_decisions: {}, saved_inputs: [], skipped_input_keys: [], random_input_keys: [], provided_fields: [], missing_fields: [], input_requests: [], runtime_input_requests: [],
+    safe_authentication_approved: false, approved_test_ids: [], runtime_input_references: {}, preferred_execution_mode: "full_uat", reuse_existing_test_data: true, input_decisions: {}, saved_inputs: [], skipped_input_keys: [], random_input_keys: [], provided_fields: [], missing_fields: [], input_requests: [], runtime_input_requests: [],
     checkpoint_stage: "input_collection", checkpoint_message: null, last_validated_at: null,
   };
 }
@@ -846,8 +846,8 @@ export default function AutopilotPage() {
   const [initialUserId, setInitialUserId] = useState("");
   const [initialPassword, setInitialPassword] = useState("");
   const [initialDataEntries, setInitialDataEntries] = useState<InitialDataEntry[]>([]);
-  const [saveInitialInputsForReuse, setSaveInitialInputsForReuse] = useState(false);
-  const [reuseExistingTestData, setReuseExistingTestData] = useState(false);
+  const [saveInitialInputsForReuse, setSaveInitialInputsForReuse] = useState(true);
+  const [reuseExistingTestData, setReuseExistingTestData] = useState(true);
   const [inputDrafts, setInputDrafts] = useState<Record<string, InputDraft>>({});
   const [setupOpen, setSetupOpen] = useState(false);
   const [scopeExpanded, setScopeExpanded] = useState(true);
@@ -877,8 +877,8 @@ export default function AutopilotPage() {
   const [suiteBusy, setSuiteBusy] = useState(false);
   const [discoveryMode, setDiscoveryMode] = useState<"safe" | "observe">("safe");
   const [includeTransactionJourneys, setIncludeTransactionJourneys] = useState(true);
-  const [suiteMode, setSuiteMode] = useState<"safe_navigation" | "full_uat">("safe_navigation");
-  const [fullUatConfirmed, setFullUatConfirmed] = useState(false);
+  const [suiteMode, setSuiteMode] = useState<"safe_navigation" | "full_uat">("full_uat");
+  const [fullUatConfirmed, setFullUatConfirmed] = useState(true);
   const [runSafeSmokeOnly, setRunSafeSmokeOnly] = useState(false);
   const [error, setError] = useState("");
   const [appiumUrl, setAppiumUrl] = useState("");
@@ -900,9 +900,11 @@ export default function AutopilotPage() {
 
   useEffect(() => {
     if (!setup || setup.job_id !== analysis?.job_id) return;
-    setSuiteMode(setup.preferred_execution_mode || "safe_navigation");
-    setReuseExistingTestData(Boolean(setup.reuse_existing_test_data));
-  }, [analysis?.job_id, setup?.job_id, setup?.preferred_execution_mode, setup?.reuse_existing_test_data]);
+    const preferredMode = (analysis?.target_kind || targetKind) === "web" ? "safe_navigation" : "full_uat";
+    setSuiteMode(preferredMode);
+    setFullUatConfirmed(preferredMode === "full_uat");
+    setReuseExistingTestData(Boolean(setup.reuse_existing_test_data || setup.saved_inputs?.length));
+  }, [analysis?.job_id, analysis?.target_kind, targetKind, setup?.job_id, setup?.preferred_execution_mode, setup?.reuse_existing_test_data, setup?.saved_inputs]);
 
   const clearRunState = useCallback((options: { clearSurface?: boolean } = {}) => {
     // A refresh or project/surface change must not keep rendering an analysis
@@ -1830,6 +1832,9 @@ export default function AutopilotPage() {
             run_runtime_discovery: runRuntimeDiscovery,
             discovery_provider: executionPayload().provider,
             auto_run_safe_suite: !runSafeSmokeOnly && suiteMode === "safe_navigation",
+            auto_run_full_uat: !runSafeSmokeOnly && suiteMode === "full_uat" && Boolean(providerStatus?.full_uat_sandbox_verified),
+            confirm_isolated_uat: suiteMode === "full_uat" && fullUatConfirmed,
+            include_transaction_journeys: activeTargetKind !== "web" && includeTransactionJourneys,
             discovery_device_name: deviceName,
             discovery_platform_version: platformVersion || null,
             discovery_appium_url: provider === "appium" ? appiumUrl || null : null,
@@ -1929,6 +1934,8 @@ export default function AutopilotPage() {
         ...executionPayload(),
         observe_only: discoveryMode === "observe",
         include_transaction_journeys: activeTargetKind !== "web" && includeTransactionJourneys,
+        full_uat_exploration: suiteMode === "full_uat" && fullUatConfirmed && Boolean(providerStatus?.full_uat_sandbox_verified),
+        confirm_isolated_uat: suiteMode === "full_uat" && fullUatConfirmed,
         // Map the selected surface. Transaction entry points are opened only
         // when requested; no transaction submission happens during discovery.
         max_screens: discoveryMode === "observe" ? 1 : 120,
@@ -2008,9 +2015,7 @@ export default function AutopilotPage() {
       if (runSafeSmokeOnly) {
         await runSmoke(jobId);
       } else if (suiteMode === "full_uat" && hasInteractiveDiscoverySurface) {
-        if (!fullUatConfirmed) {
-          setContextNotice("Discovery is complete. Confirm the isolated-UAT transaction consent at the start of Autopilot before the full case batch can run.");
-        } else if (!providerStatus?.full_uat_sandbox_verified) {
+        if (!providerStatus?.full_uat_sandbox_verified) {
           setContextNotice("Discovery is complete, but this server has not verified and allowlisted the isolated UAT environment. No state-changing cases were run.");
         } else {
           await runSuite(jobId, "full_uat");
@@ -2114,7 +2119,6 @@ export default function AutopilotPage() {
         : "This server has not verified and allowlisted the isolated UAT environment. No state-changing cases were run.");
       return;
     }
-    if (executionMode === "full_uat") setFullUatConfirmed(false);
     setSuiteBusy(true); setError("");
     try {
       const [jobResponse, discoveryResponse] = await Promise.all([
@@ -2742,7 +2746,7 @@ export default function AutopilotPage() {
                 <Grid item xs={12} sm={6}>
                   <FormControl fullWidth size="small" disabled={busy}>
                     <InputLabel id="autopilot-start-mode-label">Execution preference</InputLabel>
-                    <Select labelId="autopilot-start-mode-label" label="Execution preference" value={suiteMode} onChange={(event) => { setSuiteMode(event.target.value as "safe_navigation" | "full_uat"); setFullUatConfirmed(false); }}>
+                    <Select labelId="autopilot-start-mode-label" label="Execution preference" value={suiteMode} onChange={(event) => { const mode = event.target.value as "safe_navigation" | "full_uat"; setSuiteMode(mode); setFullUatConfirmed(mode === "full_uat" && targetKind !== "web"); }}>
                       <MenuItem value="safe_navigation">Checkpointed case execution</MenuItem>
                       <MenuItem value="full_uat" disabled={targetKind === "web"}>Full autonomous UAT{targetKind === "web" ? " · mobile only" : ""}</MenuItem>
                     </Select>

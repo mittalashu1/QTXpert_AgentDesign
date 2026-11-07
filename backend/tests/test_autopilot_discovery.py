@@ -1,10 +1,12 @@
 import pytest
+from pathlib import Path
 from pydantic import ValidationError
 from types import SimpleNamespace
 
 from app.schemas.autopilot import (
     AutopilotDiscoveryRequest,
     DiscoveredControl,
+    DiscoveredScreen,
     DiscoveryLocator,
     RuntimePromptChoice,
 )
@@ -108,6 +110,58 @@ def test_runtime_prompt_parser_captures_yes_no_app_confirmation_dialog(tmp_path)
     assert separate_prompt.prompt_id != prompt.prompt_id
 
 
+def test_runtime_prompt_parser_recognizes_proceed_cancel_confirmation(tmp_path):
+    class Driver:
+        current_activity = "com.fhc.InvestNation.uat.LoginActivity"
+
+        def get_screenshot_as_file(self, path):
+            Path(path).write_bytes(b"png")
+            return True
+
+    source = (
+        '<hierarchy><node package="com.fhc.InvestNation.uat" class="android.widget.FrameLayout">'
+        '<node text="Verify this session" class="android.widget.TextView" />'
+        '<node text="Proceed" resource-id="com.fhc.InvestNation.uat:id/proceed" '
+        'class="android.widget.Button" clickable="true" enabled="true" />'
+        '<node text="Cancel" resource-id="com.fhc.InvestNation.uat:id/cancel" '
+        'class="android.widget.Button" clickable="true" enabled="true" />'
+        '</node></hierarchy>'
+    )
+
+    prompt = AutopilotDiscoveryService._runtime_prompt_observation(Driver(), source, tmp_path, "android")
+
+    assert prompt is not None
+    assert [(choice.label, choice.decision) for choice in prompt.choices] == [
+        ("Proceed", "allow"),
+        ("Cancel", "deny"),
+    ]
+
+
+def test_auth_checkpoint_marks_missing_otp_without_requiring_saved_credentials_again():
+    otp = DiscoveredControl(
+        control_id="verification-code",
+        semantic_label="Verification code",
+        class_name="android.widget.EditText",
+        input_capable=True,
+        input_kind="credential",
+        enabled=True,
+        locators=[DiscoveryLocator(strategy="id", value="com.example:id/otp", confidence=0.99)],
+    )
+    screen = DiscoveredScreen(
+        screen_id="otp-checkpoint",
+        fingerprint="otp-checkpoint",
+        controls=[otp],
+    )
+
+    reason = AutopilotDiscoveryService._authentication_checkpoint_reason(
+        screen,
+        {"__auth_approved": "1"},
+    )
+
+    assert reason is not None
+    assert reason.startswith("OTP checkpoint detected")
+
+
 def test_ios_yes_no_app_checkpoint_does_not_require_an_alert_role(tmp_path):
     class Driver:
         current_activity = ""
@@ -202,6 +256,41 @@ def test_prompt_discovery_grants_runtime_permission_and_declines_location_settin
     )
     assert (settings_key, settings_clicked) == ("no-thanks", True)
     assert driver.clicked == "no-thanks"
+
+    confirmation_key, confirmation_clicked = AutopilotDiscoveryService._choose_system_prompt_branch(
+        driver,
+        [
+            RuntimePromptChoice(
+                key="proceed", label="Proceed", decision="allow",
+                locators=[DiscoveryLocator(strategy="id", value="proceed", confidence=0.99)],
+            ),
+            RuntimePromptChoice(
+                key="cancel", label="Cancel", decision="deny",
+                locators=[DiscoveryLocator(strategy="id", value="cancel", confidence=0.99)],
+            ),
+        ],
+        AppiumBy,
+        prompt_kind="app_confirmation",
+    )
+    assert (confirmation_key, confirmation_clicked) == ("cancel", True)
+    confirmation_key, confirmation_clicked = AutopilotDiscoveryService._choose_system_prompt_branch(
+        driver,
+        [
+            RuntimePromptChoice(
+                key="proceed", label="Proceed", decision="allow",
+                locators=[DiscoveryLocator(strategy="id", value="proceed", confidence=0.99)],
+            ),
+            RuntimePromptChoice(
+                key="cancel", label="Cancel", decision="deny",
+                locators=[DiscoveryLocator(strategy="id", value="cancel", confidence=0.99)],
+            ),
+        ],
+        AppiumBy,
+        prompt_kind="app_confirmation",
+        allow_app_confirmation=True,
+    )
+    assert (confirmation_key, confirmation_clicked) == ("proceed", True)
+    assert driver.clicked == "proceed"
 
 
 def test_runtime_prompt_id_distinguishes_same_kind_with_different_prompt_copy(tmp_path):
@@ -539,6 +628,7 @@ def test_discovery_request_is_bounded():
     normal = AutopilotDiscoveryRequest()
     assert normal.max_screens == 120
     assert normal.max_actions == 300
+    assert normal.include_transaction_journeys is True
 
 
 @pytest.mark.asyncio
