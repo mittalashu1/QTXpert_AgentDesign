@@ -303,12 +303,10 @@ class AutopilotSuiteService:
                             input_values=input_values,
                             full_uat=request.execution_mode == "full_uat",
                         )
-                        discovered_cases = self._prompt_only_cases(expanded_bundle.tests)
+                        discovered_cases = self._select_tests(expanded_bundle.tests, request)
                         discovered_cases = [
                             item for item in discovered_cases
-                            if (not requested_ids or item.test_id in requested_ids)
-                            and (not requested_buckets or item.bucket in requested_buckets)
-                            and item.test_id not in queued_ids
+                            if item.test_id not in queued_ids
                             and item.test_id not in executed_ids
                         ]
                         discovered_cases.sort(
@@ -340,12 +338,7 @@ class AutopilotSuiteService:
                         input_values=input_values,
                         full_uat=request.execution_mode == "full_uat",
                     )
-                    all_cases = self._prompt_only_cases(expanded_bundle.tests)
-                    all_cases = [
-                        item for item in all_cases
-                        if (not requested_ids or item.test_id in requested_ids)
-                        and (not requested_buckets or item.bucket in requested_buckets)
-                    ]
+                    all_cases = self._select_tests(expanded_bundle.tests, request)
                     all_cases.sort(key=lambda item: self._selection_priority(item, current_discovery))
                     selection_remaining_count = max(
                         selection_remaining_count,
