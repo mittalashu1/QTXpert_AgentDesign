@@ -39,6 +39,7 @@ from app.schemas.execution import (
     ExecutionRunOut,
 )
 from app.services.autopilot import AutopilotPrototypeService
+from app.services.browserstack_errors import upload_error_message
 from app.services.defect_logging import safe_target_reference, secret_safe_text
 from app.services.upload_repository import UploadRepositoryService
 
@@ -502,7 +503,8 @@ async def _upload_mobile_app_to_browserstack(
                 data={"custom_id": custom_id},
             )
         if response.status_code >= 400:
-            raise RuntimeError(f"BrowserStack app upload failed ({response.status_code}): {response.text[:500]}")
+            logger.warning("BrowserStack rejected execution app upload with HTTP %s", response.status_code)
+            raise RuntimeError(upload_error_message(response.status_code, response.text))
         payload = response.json()
     app_url = payload.get("app_url")
     if not app_url:
@@ -1270,4 +1272,5 @@ async def dashboard(project_id: UUID, db: Annotated[AsyncSession, Depends(get_db
         pending_tests=pending,
         autopilot=autopilot,
     )
+
 
