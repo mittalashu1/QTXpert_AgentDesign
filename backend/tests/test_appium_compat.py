@@ -1,3 +1,5 @@
+import threading
+
 from app.services.appium_compat import (
     activate_verified_target_surface,
     ProviderLifecycleUnavailable,
@@ -189,6 +191,17 @@ def test_evidence_and_cleanup_are_best_effort():
     driver = BrokenDriver()
     assert safe_page_source(driver) == ""
     safe_quit(driver)
+
+
+def test_safe_quit_does_not_wait_forever_for_a_remote_session():
+    release_remote_quit = threading.Event()
+
+    class SlowRemoteDriver:
+        def quit(self):
+            release_remote_quit.wait(timeout=1)
+
+    assert safe_quit(SlowRemoteDriver(), timeout_seconds=0.01) is False
+    release_remote_quit.set()
 
 
 def test_background_falls_back_to_provider_supported_shell(monkeypatch):
