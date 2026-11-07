@@ -2177,7 +2177,7 @@ def test_suite_does_not_retry_failed_device_farm_prompt_reset(tmp_path, monkeypa
     assert driver.quit_calls == 1
 
 
-def test_browserstack_prompt_choices_use_fresh_sessions_and_continue_siblings(tmp_path, monkeypatch):
+def test_browserstack_prompt_and_confirmation_branches_use_fresh_sessions(tmp_path, monkeypatch):
     import appium
     from app.schemas.autopilot import AutopilotSuiteRequest
 
@@ -2185,14 +2185,26 @@ def test_browserstack_prompt_choices_use_fresh_sessions_and_continue_siblings(tm
         def __init__(self, session_number):
             super().__init__()
             self.session_number = session_number
-            self.prompt_active = True
-            self.current_activity = "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
-            self.page_source = (
-                '<hierarchy><node package="com.android.permissioncontroller">'
-                '<node text="Location permission" />'
-                '<node text="Allow" class="android.widget.Button" clickable="true" />'
-                '</node></hierarchy>'
+            self.prompt_active = session_number <= 3
+            self.current_activity = (
+                "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+                if self.prompt_active else "com.qtx.demo.MainActivity"
             )
+            if self.prompt_active:
+                self.page_source = (
+                    '<hierarchy><node package="com.android.permissioncontroller">'
+                    '<node text="Location permission" />'
+                    '<node text="Allow" class="android.widget.Button" clickable="true" />'
+                    '</node></hierarchy>'
+                )
+            else:
+                choice = "Proceed" if session_number == 4 else "Cancel"
+                self.page_source = (
+                    '<hierarchy><node package="com.qtx.demo">'
+                    '<node text="Verify this session" />'
+                    f'<node text="{choice}" class="android.widget.Button" clickable="true" />'
+                    '</node></hierarchy>'
+                )
             self.choice_calls = []
             self.terminate_calls = []
             self.quit_calls = 0
@@ -2253,7 +2265,8 @@ def test_browserstack_prompt_choices_use_fresh_sessions_and_continue_siblings(tm
         provider="browserstack",
         device_name="Google Pixel 8",
         platform_version="14.0",
-        max_tests=3,
+        max_tests=5,
+        prompt_only=True,
     )
     prompt_tests = [
         _test_ir([
@@ -2273,6 +2286,36 @@ def test_browserstack_prompt_choices_use_fresh_sessions_and_continue_siblings(tm
         })
         for index, choice in enumerate(("While using the app", "Only this time", "Don’t allow"), start=1)
     ]
+    prompt_tests.extend([
+        _test_ir([
+            QTXIRStep(
+                action="tap",
+                description="Choose Proceed on the observed app confirmation",
+                target="Proceed",
+                locator_strategy="accessibility_id",
+                locator_value="Proceed",
+                locator_confidence=0.99,
+            ),
+        ]).model_copy(update={
+            "test_id": "QT-RUNTIME-CHECKPOINT-PROCEED",
+            "title": "Proceed confirmation branch",
+            "bucket": "functional_positive",
+        }),
+        _test_ir([
+            QTXIRStep(
+                action="tap",
+                description="Choose Cancel on the observed app confirmation",
+                target="Cancel",
+                locator_strategy="accessibility_id",
+                locator_value="Cancel",
+                locator_confidence=0.99,
+            ),
+        ]).model_copy(update={
+            "test_id": "QT-RUNTIME-CHECKPOINT-CANCEL",
+            "title": "Cancel confirmation branch",
+            "bucket": "functional_negative",
+        }),
+    ])
 
     results = service._run_sync(
         "job-browserstack-prompt-sessions",
@@ -2288,11 +2331,16 @@ def test_browserstack_prompt_choices_use_fresh_sessions_and_continue_siblings(tm
         1000,
     )
 
-    assert [result.status for result in results] == ["passed", "blocked", "passed"]
-    assert len(capabilities) == 3
+    assert [result.status for result in results] == ["passed", "blocked", "passed", "passed", "passed"]
+    assert len(capabilities) == 5
     assert all(capability["appium:noReset"] is False for capability in capabilities)
     assert all(capability["appium:fullReset"] is True for capability in capabilities)
-    assert [driver.choice_calls for driver in drivers] == [["While using the app"], ["Don’t allow"]]
+    assert [driver.choice_calls for driver in drivers] == [
+        ["While using the app"],
+        ["Don’t allow"],
+        ["Proceed"],
+        ["Cancel"],
+    ]
     assert all(not driver.terminate_calls for driver in drivers)
     assert all(driver.quit_calls == 1 for driver in drivers)
 
