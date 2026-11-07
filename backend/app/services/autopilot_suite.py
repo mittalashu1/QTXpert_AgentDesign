@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict
 
 from app.config import Settings
 from app.schemas.autopilot import (
+    AutopilotAnalysis,
     AutopilotDiscoveryResult,
     AutopilotSetupProfile,
     AutopilotSuiteRequest,
@@ -56,6 +57,7 @@ class AutopilotSuiteService:
         "scroll",
         "capture_evidence",
         "inspect_ui",
+        "static_assertion",
         "prompt_choice",
         "wait_for_state",
         "tap",
@@ -163,6 +165,53 @@ class AutopilotSuiteService:
                 tests=deferred_results,
             )
 
+        static_candidates = [
+            test
+            for test in candidates
+            if test.steps and all(step.action == "static_assertion" for step in test.steps)
+        ]
+        runtime_candidates = [test for test in candidates if test not in static_candidates]
+        static_results = [self._execute_static_test(test, analysis) for test in static_candidates]
+        if not runtime_candidates:
+            result_map = {item.test_id: item for item in static_results}
+            deferred_map = {item.test_id: item for item in deferred_results}
+            ordered_results = [
+                item
+                for test in selected
+                if (item := result_map.get(test.test_id) or deferred_map.get(test.test_id)) is not None
+            ]
+            passed = sum(item.status == "passed" for item in ordered_results)
+            failed = sum(item.status == "failed" for item in ordered_results)
+            blocked_count = sum(item.status == "blocked" for item in ordered_results)
+            skipped = sum(item.status == "skipped" for item in ordered_results)
+            if failed == 0 and blocked_count == 0 and skipped == 0 and passed == len(static_results):
+                overall = "passed"
+            elif passed > 0:
+                overall = "partial"
+            else:
+                overall = "blocked" if blocked_count else "failed"
+            finished = datetime.now(timezone.utc)
+            return AutopilotSuiteResult(
+                job_id=job_id,
+                status=overall,
+                target_kind=target_kind,
+                target_url=job.get("target_url"),
+                provider=request.provider,
+                started_at=started.isoformat(),
+                finished_at=finished.isoformat(),
+                duration_seconds=round(time.perf_counter() - start_perf, 2),
+                device_name=request.device_name,
+                selected_count=len(selected),
+                executed_count=len(static_results),
+                deferred_count=len(deferred),
+                passed_count=passed,
+                failed_count=failed,
+                skipped_count=skipped + blocked_count,
+                promoted_count=sum(test.promoted_by_discovery for test in static_candidates),
+                bucket_counts=self._bucket_counts(selected),
+                tests=ordered_results,
+            )
+
         apk_path = Path(job.get("apk_path") or "")
         app_reference = request.appium_app or str(apk_path)
         browserstack_options: Dict[str, Any] | None = None
@@ -205,7 +254,7 @@ class AutopilotSuiteService:
                     appium_url,
                     app_reference,
                     request,
-                    candidates,
+                    runtime_candidates,
                     analysis.package_name,
                     browserstack_options,
                     self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
@@ -240,11 +289,18 @@ class AutopilotSuiteService:
                     page_label=test.page_label,
                     page_url=test.page_url,
                 )
-                for test in candidates
+                for test in runtime_candidates
+            ]
+            failure_map = {item.test_id: item for item in [*static_results, *failure_results]}
+            deferred_map = {item.test_id: item for item in deferred_results}
+            ordered_failure_results = [
+                item
+                for test in selected
+                if (item := failure_map.get(test.test_id) or deferred_map.get(test.test_id)) is not None
             ]
             return AutopilotSuiteResult(
                 job_id=job_id,
-                status="blocked" if blocked else "failed",
+                status="partial" if static_results else ("blocked" if blocked else "failed"),
                 target_kind=target_kind,
                 target_url=job.get("target_url"),
                 provider=request.provider,
@@ -253,16 +309,19 @@ class AutopilotSuiteService:
                 duration_seconds=round(time.perf_counter() - start_perf, 2),
                 device_name=request.device_name,
                 selected_count=len(selected),
-                executed_count=0,
+                executed_count=len(static_results),
                 deferred_count=len(deferred),
+                passed_count=sum(item.status == "passed" for item in static_results),
+                failed_count=sum(item.status == "failed" for item in static_results),
                 skipped_count=len(deferred_results) + len(failure_results),
                 bucket_counts=self._bucket_counts(selected),
                 error=connector_error,
-                tests=failure_results + deferred_results,
+                tests=ordered_failure_results,
             )
         finally:
             await self.prototype._stop_device_farm_session(device_farm_service, device_farm_session)
 
+        results = static_results + results
         result_map = {item.test_id: item for item in results}
         deferred_map = {item.test_id: item for item in deferred_results}
         ordered_results: list[AutopilotSuiteTestResult] = []
@@ -397,7 +456,110 @@ class AutopilotSuiteService:
         ]
 
     def _supported(self, test: QTXTestIR) -> bool:
-        return bool(test.steps) and all(step.action in self.SUPPORTED_ACTIONS for step in test.steps)
+        if not test.steps:
+            return False
+        if any(step.action == "static_assertion" for step in test.steps):
+            return all(step.action == "static_assertion" for step in test.steps)
+        return all(step.action in self.SUPPORTED_ACTIONS for step in test.steps)
+
+    @staticmethod
+    def _execute_static_test(
+        test: QTXTestIR,
+        analysis: AutopilotAnalysis,
+    ) -> AutopilotSuiteTestResult:
+        """Evaluate APK manifest checks without opening a device session."""
+        started = time.perf_counter()
+        metadata = {
+            "source": "bounded_android_manifest",
+            "manifest_metadata_complete": bool(analysis.manifest_metadata_complete),
+            "package_name": analysis.package_name,
+            "target_sdk": analysis.target_sdk,
+            "debuggable": analysis.debuggable,
+            "permissions": sorted(set(analysis.permissions or [])),
+            "components": list(analysis.manifest_components or []),
+        }
+        if analysis.target_kind != "android":
+            status = "blocked"
+            reason = "Static mobile manifest checks currently require Android APK metadata."
+            findings: list[str] = []
+        elif not metadata["manifest_metadata_complete"] or not analysis.package_name:
+            status = "blocked"
+            reason = "A complete Android manifest was not available; rerun analysis after uploading the APK."
+            findings = []
+        elif analysis.debuggable is None:
+            status = "blocked"
+            reason = "The manifest was read, but the application debug flag could not be determined."
+            findings = []
+        else:
+            findings = []
+            if analysis.debuggable:
+                findings.append("android:debuggable is true")
+            if test.test_id != "QT-AUTO-SEC-DEBUG":
+                for component in metadata["components"]:
+                    exported = component.get("exported")
+                    exported = exported is True or str(exported).casefold() == "true"
+                    if exported and not component.get("permission"):
+                        findings.append(
+                            f"Exported {component.get('kind', 'component')} "
+                            f"{component.get('name', '(unnamed)')} has no manifest permission"
+                        )
+                high_risk_permissions = {
+                    "android.permission.ACCESS_COARSE_LOCATION",
+                    "android.permission.ACCESS_FINE_LOCATION",
+                    "android.permission.CAMERA",
+                    "android.permission.RECORD_AUDIO",
+                    "android.permission.READ_CONTACTS",
+                    "android.permission.WRITE_CONTACTS",
+                    "android.permission.READ_CALL_LOG",
+                    "android.permission.WRITE_CALL_LOG",
+                    "android.permission.READ_PHONE_STATE",
+                    "android.permission.CALL_PHONE",
+                    "android.permission.READ_SMS",
+                    "android.permission.RECEIVE_SMS",
+                    "android.permission.SEND_SMS",
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                    "android.permission.WRITE_EXTERNAL_STORAGE",
+                    "android.permission.MANAGE_EXTERNAL_STORAGE",
+                }
+                findings.extend(
+                    f"High-risk permission requires review: {permission}"
+                    for permission in metadata["permissions"]
+                    if permission in high_risk_permissions
+                )
+            status = "failed" if findings else "passed"
+            reason = (
+                "Manifest findings require review; they are configuration flags, not proof of an exploitable issue."
+                if findings
+                else None
+            )
+
+        outcomes = []
+        for index, step in enumerate(test.steps):
+            step_status = status
+            if status in {"passed", "failed"} and test.test_id != "QT-AUTO-SEC-DEBUG":
+                step_status = "failed" if findings and index == len(test.steps) - 1 else "passed"
+            outcomes.append(
+                {
+                    "action": step.action,
+                    "description": step.description,
+                    "status": step_status,
+                    "finding_count": len(findings) if step_status == "failed" else 0,
+                }
+            )
+        return AutopilotSuiteTestResult(
+            test_id=test.test_id,
+            title=test.title,
+            status=status,
+            bucket=test.bucket,
+            readiness=test.readiness,
+            dependency=reason if status == "blocked" else test.dependency,
+            duration_seconds=round(time.perf_counter() - started, 4),
+            error=reason,
+            evidence={**metadata, "assertions": outcomes, "findings": findings},
+            journey=test.journey,
+            page_label=test.page_label,
+            page_url=test.page_url,
+        )
 
     @classmethod
     def _is_video_case(cls, test: QTXTestIR) -> bool:

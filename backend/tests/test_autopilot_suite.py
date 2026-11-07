@@ -6,6 +6,7 @@ import pytest
 from app.config import Settings
 from app.services.appium_compat import ProviderLifecycleUnavailable, validate_target_surface
 from app.schemas.autopilot import (
+    AutopilotAnalysis,
     AutopilotDiscoveryResult,
     DiscoveredControl,
     DiscoveredScreen,
@@ -153,6 +154,98 @@ def _test_ir(actions):
         promoted_by_discovery=True,
         steps=actions,
     )
+
+
+def test_static_manifest_security_case_runs_without_device_ui():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    analysis = AutopilotAnalysis(
+        job_id="manifest-security",
+        filename="investnation.apk",
+        sha256="b" * 64,
+        target_kind="android",
+        package_name="com.example.investnation",
+        target_sdk="34",
+        permissions=["android.permission.INTERNET"],
+        debuggable=False,
+        manifest_metadata_complete=True,
+        manifest_components=[
+            {
+                "kind": "activity",
+                "name": "com.example.investnation.MainActivity",
+                "exported": False,
+                "permission": None,
+                "has_intent_filter": True,
+            }
+        ],
+    )
+    test = _test_ir([
+        QTXIRStep(action="static_assertion", description="Inspect Android application metadata"),
+        QTXIRStep(action="static_assertion", description="Inventory permissions and exported components"),
+        QTXIRStep(action="static_assertion", description="Flag high-risk configuration for review"),
+    ]).model_copy(update={"test_id": "QT-AUTO-SEC-001", "bucket": "security"})
+
+    assert service._supported(test)
+    result = service._execute_static_test(test, analysis)
+
+    assert result.status == "passed"
+    assert result.evidence["source"] == "bounded_android_manifest"
+    assert result.evidence["assertions"][-1]["status"] == "passed"
+
+
+def test_static_manifest_security_case_flags_risky_configuration():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    analysis = AutopilotAnalysis(
+        job_id="manifest-risk",
+        filename="investnation.apk",
+        sha256="c" * 64,
+        target_kind="android",
+        package_name="com.example.investnation",
+        target_sdk="34",
+        permissions=["android.permission.ACCESS_FINE_LOCATION"],
+        debuggable=True,
+        manifest_metadata_complete=True,
+        manifest_components=[
+            {
+                "kind": "activity",
+                "name": "com.example.investnation.MainActivity",
+                "exported": True,
+                "permission": None,
+                "has_intent_filter": True,
+            }
+        ],
+    )
+    test = _test_ir([
+        QTXIRStep(action="static_assertion", description="Inspect Android application metadata"),
+        QTXIRStep(action="static_assertion", description="Inventory permissions and exported components"),
+        QTXIRStep(action="static_assertion", description="Flag high-risk configuration for review"),
+    ]).model_copy(update={"test_id": "QT-AUTO-SEC-001", "bucket": "security"})
+
+    result = service._execute_static_test(test, analysis)
+
+    assert result.status == "failed"
+    assert "debuggable" in result.evidence["findings"][0]
+    assert any("Exported activity" in item for item in result.evidence["findings"])
+    assert any("ACCESS_FINE_LOCATION" in item for item in result.evidence["findings"])
+
+
+def test_static_manifest_security_case_blocks_when_manifest_is_incomplete():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    analysis = AutopilotAnalysis(
+        job_id="manifest-missing",
+        filename="investnation.apk",
+        sha256="d" * 64,
+        target_kind="android",
+        package_name="com.example.investnation",
+        manifest_metadata_complete=False,
+    )
+    test = _test_ir([
+        QTXIRStep(action="static_assertion", description="Inspect Android application metadata"),
+    ]).model_copy(update={"test_id": "QT-AUTO-SEC-001", "bucket": "security"})
+
+    result = service._execute_static_test(test, analysis)
+
+    assert result.status == "blocked"
+    assert result.dependency
 
 
 def test_prompt_only_filter_keeps_only_observed_prompt_choice_cases():

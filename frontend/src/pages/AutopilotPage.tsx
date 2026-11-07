@@ -442,17 +442,6 @@ function formatBytes(value: number) {
   if (value < 1024 * 1024) return `${Math.max(1, value / 1024).toFixed(0)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
-function isLoopbackAppiumUrl(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return true;
-  try {
-    const hostname = new URL(trimmed).hostname.toLowerCase();
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
-  } catch {
-    return true;
-  }
-}
-
 function readableError(error: unknown, fallback: string) {
   const candidate = error as { response?: { data?: { detail?: unknown } }; message?: unknown };
   if (typeof candidate?.response?.data?.detail === "string") return candidate.response.data.detail;
@@ -1069,23 +1058,9 @@ export default function AutopilotPage() {
   useEffect(() => {
     apiClient.get<ProviderStatus>("/autopilot/providers").then((response) => {
       setProviderStatus(response.data);
-      const preferred = response.data.recommended_provider === "devicefarm" && response.data.device_farm_configured
-        ? "devicefarm"
-        : response.data.recommended_provider === "browserstack" && response.data.browserstack_configured
-          ? "browserstack"
-          : response.data.custom_appium_available
-            ? "appium"
-            : response.data.device_farm_configured
-              ? "devicefarm"
-              : "browserstack";
-      setProvider(preferred);
-      if (preferred === "appium") {
-        setDeviceName("Android Emulator");
-        setAppiumUrl(response.data.custom_appium_url || "");
-      } else if (preferred === "devicefarm") {
-        setDeviceName(response.data.device_farm_device_name || "Google Pixel 8");
-        setAppiumUrl("");
-      }
+      setProvider("browserstack");
+      setDeviceName("Google Pixel 8");
+      setAppiumUrl("");
     }).catch(() => setProviderStatus(null));
   }, []);
   useEffect(() => {
@@ -2287,12 +2262,8 @@ export default function AutopilotPage() {
   const activeTargetKind = analysis?.target_kind || targetKind;
   const activeProvider: Provider = activeTargetKind === "web" ? "playwright" : provider;
   const browserStackUnavailable = activeProvider === "browserstack" && providerStatus !== null && !providerStatus.browserstack_configured;
-  const deviceFarmUnavailable = activeProvider === "devicefarm" && activeTargetKind !== "android";
-  const deviceFarmNotConfigured = activeProvider === "devicefarm" && providerStatus !== null && !providerStatus.device_farm_configured;
-  const customAppiumUnavailable = activeProvider === "appium" && providerStatus !== null && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
   const providerStatusPending = activeTargetKind !== "web" && providerStatus === null;
-  const noExecutionProvider = activeTargetKind !== "web" && providerStatus !== null && !providerStatus.browserstack_configured && !providerStatus.device_farm_configured && !providerStatus.custom_appium_available && isLoopbackAppiumUrl(appiumUrl);
-  const executionUnavailable = suiteBusy || resumeBusy || discoveryBusy || providerStatusPending || browserStackUnavailable || deviceFarmUnavailable || deviceFarmNotConfigured || customAppiumUnavailable || !artifactAvailable;
+  const executionUnavailable = suiteBusy || resumeBusy || discoveryBusy || providerStatusPending || browserStackUnavailable || !artifactAvailable;
   const reportPending = report?.recommendation === "PENDING";
   const effectivePlan = generationPlan || analysis?.generation_plan || null;
   const effectiveApplicationMap = applicationMap || analysis?.application_map || null;
@@ -2677,8 +2648,7 @@ export default function AutopilotPage() {
                // previously loaded APK/URL context into this run.
                setContext(contextForTarget(selectedProfile, next, null, next === "web" ? targetUrl : null));
                setContextSource("default");
-               if (next === "web") setProvider("playwright");
-              else if (provider === "playwright") setProvider(providerStatus?.device_farm_configured ? "devicefarm" : providerStatus?.browserstack_configured ? "browserstack" : "appium");
+              setProvider(next === "web" ? "playwright" : "browserstack");
             }}>
               <MenuItem value="web">Web</MenuItem>
               <MenuItem value="android">Android</MenuItem>
@@ -3096,7 +3066,7 @@ export default function AutopilotPage() {
 
        <ResultSection id="autopilot-runtime-discovery" title="Runtime discovery" description={"Observed screens, controls and navigation evidence."} icon={<TravelExploreOutlinedIcon fontSize="small" />} action={discovery && <Chip size="small" label={discovery.status.toUpperCase()} color={discovery.status === "completed" ? "success" : discovery.status === "failed" || discovery.status === "blocked" ? "warning" : "default"} variant="outlined" />} expanded={resultSections["autopilot-runtime-discovery"] || false} onExpandedChange={(expanded) => setResultSections((current) => ({ ...current, ["autopilot-runtime-discovery"]: expanded }))}><CardContent sx={{ p: 0, "&:last-child": { pb: 0 } }}>
         <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2} alignItems={{ md: "center" }}><Box><Stack direction="row" spacing={1} alignItems="center"><TravelExploreOutlinedIcon color="primary" /><Typography variant="h6" fontWeight={800}>Runtime discovery</Typography></Stack><Typography variant="body2" color="text.secondary" sx={{ mt: .5 }}>{activeTargetKind === "web" ? "Map same-origin website pages and semantic controls with bounded, read-only browser navigation." : `Map screens and semantic controls from the running ${activeTargetKind === "ios" ? "iOS" : "Android"} app.`} Payments, transfers, destructive submits, confirmations and OTP actions remain blocked.</Typography></Box><Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }}><FormControlLabel sx={{ mr: 0 }} control={<Switch size="small" checked={includeTransactionJourneys && activeTargetKind !== "web"} disabled={activeTargetKind === "web" || discoveryBusy} onChange={(event) => setIncludeTransactionJourneys(event.target.checked)} />} label={<Typography variant="caption">Map transaction screens (no submit)</Typography>} /><FormControl size="small" sx={{ minWidth: 145 }}><InputLabel id="discovery-mode-label">Mode</InputLabel><Select labelId="discovery-mode-label" label="Mode" value={discoveryMode} onChange={(event) => setDiscoveryMode(event.target.value as "safe" | "observe")}><MenuItem value="safe">Safe navigation</MenuItem><MenuItem value="observe">Observe only</MenuItem></Select></FormControl><Button variant="contained" startIcon={discoveryBusy ? <CircularProgress size={16} color="inherit" /> : <TravelExploreOutlinedIcon />} disabled={discoveryBusy || executionUnavailable || planAwaitingApproval} onClick={runDiscovery}>{discoveryBusy ? "Discovering…" : planAwaitingApproval ? "Approve plan first" : "Run discovery"}</Button></Stack></Stack>
-        {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose a reachable custom Appium endpoint or configure BrowserStack.</Alert>}
+        {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured on the backend. Add BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY to enable mobile runs.</Alert>}
         {discovery && <><Grid container spacing={1.5} sx={{ mt: 1 }}>{[["Controls", discovery.control_count], ["Safe controls", discovery.safe_control_count], ["Blocked", discovery.blocked_control_count], ["Actions", discovery.actions_attempted]].map(([label, value]) => <Grid item xs={6} sm={4} md key={String(label)}><Button fullWidth onClick={() => scrollToSection(label === "Screens" ? "autopilot-runtime-screens" : "autopilot-runtime-controls")} disabled={label === "Screens" ? discovery.screens.length === 0 : discoveredRows.length === 0} title={`Open discovered ${String(label).toLowerCase()}`} sx={{ p: 1.25, minHeight: 62, bgcolor: "action.hover", borderRadius: 2, display: "flex", flexDirection: "column", alignItems: "flex-start", textTransform: "none", color: "text.primary", "&:hover .autopilot-metric-value": { textDecoration: "underline" } }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography className="autopilot-metric-value" variant="h6" fontWeight={800}>{value}</Typography></Button></Grid>)}</Grid><Alert severity={discovery.status === "completed" ? "success" : discovery.status === "blocked" ? "warning" : discovery.status === "failed" ? "error" : "info"} sx={{ mt: 2 }}>Discovery: <b>{discovery.status.toUpperCase()}</b> · {discovery.stop_reason}{discovery.error ? ` · ${discovery.error}` : ""}</Alert>{discovery.target_ready === false && <Alert severity="warning" sx={{ mt: 1.25 }}><b>Target not attached.</b> The provider did not expose the uploaded application, so no new coverage was generated. {discovery.target_identity_reason || discovery.error || "Check the app package/activity or the device session and retry."}</Alert>}{discovery.target_ready === true && discovery.interactive_surface_ready === false && <Alert severity="warning" action={<Button color="inherit" size="small" disabled={discoveryBusy} onClick={() => void runDiscovery()}>Retry discovery</Button>} sx={{ mt: 1.25 }}><b>Operator checkpoint.</b> {discovery.checkpoint_message || "The app is attached but has not reached an interactive page. Check the app startup/device state, then retry. No functional journeys were inferred."}</Alert>}{discovery.last_attempt_status && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>The previous evidence map is retained. Latest Runtime Discovery attempt: {discovery.last_attempt_status}{discovery.last_attempt_reason ? ` · ${discovery.last_attempt_reason}` : ""}</Typography>}{(discovery.runtime_prompts || []).length > 0 && <Alert severity="info" sx={{ mt: 1.25 }}>
           <b>Observed prompt branches.</b>{" "}
           {(discovery.runtime_prompts || []).map((prompt) =>
@@ -3158,23 +3128,15 @@ export default function AutopilotPage() {
       {suite && <><Alert id="autopilot-suite-results" sx={{ mt: 2, scrollMarginTop: 16 }} severity={suite.status === "passed" ? "success" : suite.status === "blocked" ? "warning" : suite.status === "partial" ? "info" : "error"}>{suite.execution_mode === "full_uat" ? "Full UAT transaction run:" : "Safe-navigation run:"} <b>{suite.status.toUpperCase()}</b> · {suite.duration_seconds}s{suite.error ? ` · ${suite.error}` : ""}</Alert><Typography variant="caption" color="text.secondary" display="block" sx={{ mt: .75 }}>{suite.execution_mode === "full_uat" ? "The full UAT run selected every generated case and attempted each case eligible for this environment; setup-gated or unsupported cases remain visible and never count as passed." : `The plan includes every evidence-scoped case. This safe batch runs up to ${suiteMaxTests} eligible cases; setup-gated or unsupported cases remain visible and never count as passed.`} Functional and UAT cases request a short, size-capped video when the device provider supports it; recordings with sensitive inputs are suppressed and only a bounded number of videos is retained per run.</Typography>{suiteDefects.length > 0 && <Alert severity="info" sx={{ mt: 1.5 }}>Defects were logged from this suite. <Button size="small" onClick={() => scrollToSection("autopilot-suite-results")}>Review failed cases</Button></Alert>}{suite.tests.length > 0 && <TableContainer sx={{ mt: 1.5, maxHeight: 360 }}><Table stickyHeader size="small"><TableHead><TableRow><TableCell>Test</TableCell><TableCell>Bucket</TableCell><TableCell>Status</TableCell><TableCell>Dependency / evidence</TableCell><TableCell align="right">Action</TableCell></TableRow></TableHead><TableBody>{suite.tests.map((test) => { const assets = suiteEvidenceAssets(test); const videoStatus = typeof test.evidence?.video_status === "string" ? test.evidence.video_status.replaceAll("_", " ") : ""; const logged = suiteDefects.some((defect) => defect.autopilot_test_id === test.test_id); return <TableRow key={test.test_id}><TableCell><Typography variant="body2" fontWeight={700}>{test.title}</Typography><Typography variant="caption" color="text.secondary">{[test.journey, test.page_label, test.test_id].filter(Boolean).join(" · ")}</Typography></TableCell><TableCell>{test.bucket ? testBucketLabel[test.bucket] : "—"}</TableCell><TableCell><Chip size="small" label={test.status.toUpperCase()} color={test.status === "passed" ? "success" : test.status === "failed" ? "error" : "warning"} variant="outlined" /></TableCell><TableCell><Typography variant="caption" color={test.error ? "error" : "text.secondary"}>{test.error || test.dependency || videoStatus || (assets.length ? "Evidence captured" : "No evidence")}</Typography>{assets.length > 0 && <Stack direction="row" spacing={.5} useFlexGap flexWrap="wrap" sx={{ mt: .5 }}>{assets.map((asset) => <Button key={asset.asset_id} size="small" variant="text" startIcon={<DownloadOutlinedIcon />} onClick={() => { void downloadSuiteEvidence(asset); }}>{evidenceAssetLabel(asset.kind)}</Button>)}</Stack>}</TableCell><TableCell align="right">{test.status === "failed" && <Button size="small" color="error" variant="outlined" startIcon={<BugReportOutlinedIcon />} onClick={() => { setDefectError(""); setDefectTarget(test); }} disabled={logged}>{logged ? "Logged" : "Log defect"}</Button>}</TableCell></TableRow>; })}</TableBody></Table></TableContainer>}</>}
       </CardContent></ResultSection>
 
-      <ResultSection id="autopilot-smoke" title="Execution target & smoke test" description="Provider, device and bounded smoke-run settings." icon={<PlayArrowRoundedIcon fontSize="small" />} expanded={resultSections["autopilot-smoke"] || false} onExpandedChange={(expanded) => setResultSections((current) => ({ ...current, "autopilot-smoke": expanded }))}><CardContent sx={{ p: 0, "&:last-child": { pb: 0 } }}>
+      <ResultSection id="autopilot-smoke" title="Execution target & smoke test" description="BrowserStack device and bounded smoke-run settings." icon={<PlayArrowRoundedIcon fontSize="small" />} expanded={resultSections["autopilot-smoke"] || false} onExpandedChange={(expanded) => setResultSections((current) => ({ ...current, "autopilot-smoke": expanded }))}><CardContent sx={{ p: 0, "&:last-child": { pb: 0 } }}>
       {providerStatusPending && <Alert severity="info" sx={{ mt: 2 }}>Checking execution providers…</Alert>}
       {activeTargetKind === "web" && <Alert severity="info" sx={{ mt: 2 }}>Website execution uses bounded, read-only Playwright checks. Authenticated, transactional and destructive journeys remain pending until approved setup is supplied.</Alert>}
-      {noExecutionProvider && <Alert severity="warning" sx={{ mt: 2 }}>No hosted mobile execution provider is configured. Configure AWS Device Farm, BrowserStack credentials, or enter a reachable HTTPS Appium endpoint before running.</Alert>}
-      {deviceFarmNotConfigured && activeTargetKind === "android" && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus?.device_farm_reason || "AWS Device Farm is not configured for this backend."}</Alert>}
-      {deviceFarmUnavailable && <Alert severity="warning" sx={{ mt: 2 }}>AWS Device Farm is configured for Android first. Choose BrowserStack or Custom Appium for an iOS target.</Alert>}
-      {activeProvider === "devicefarm" && providerStatus?.device_farm_trial_minutes_remaining != null && <Alert severity={providerStatus.device_farm_trial_minutes_remaining <= 100 ? "warning" : "info"} sx={{ mt: 1 }}>AWS free device minutes: <b>{providerStatus.device_farm_trial_minutes_remaining.toFixed(1)}</b>{providerStatus.device_farm_trial_minutes_checked_at ? ` · Verified ${new Date(providerStatus.device_farm_trial_minutes_checked_at).toLocaleString()}` : ""}. This balance is not a billing cap.</Alert>}
-      {activeProvider === "devicefarm" && providerStatus?.device_farm_trial_minutes_error && <Alert severity="warning" sx={{ mt: 1 }}>{providerStatus.device_farm_trial_minutes_error}</Alert>}
-      {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack credentials are not configured. Choose AWS Device Farm, Custom / local Appium, or configure BrowserStack.</Alert>}
-      {activeProvider === "appium" && providerStatus?.custom_appium_reason && <Alert severity="warning" sx={{ mt: 2 }}>{providerStatus.custom_appium_reason}</Alert>}
+      {browserStackUnavailable && activeTargetKind !== "web" && <Alert severity="warning" sx={{ mt: 2 }}>BrowserStack is the mobile execution provider, but its credentials are not configured on the backend. Add BROWSERSTACK_USERNAME and BROWSERSTACK_ACCESS_KEY to the execution service before running.</Alert>}
       <Grid container spacing={2} sx={{ mt: .5 }}>
-        {activeTargetKind === "web" ? <Grid item xs={12} md={4}><TextField fullWidth size="small" label="Website target" value={analysis?.target_url || targetUrl} InputProps={{ readOnly: true }} /></Grid> : <Grid item xs={12} md={3}><FormControl fullWidth size="small"><InputLabel id="autopilot-provider-label">Execution provider</InputLabel><Select labelId="autopilot-provider-label" label="Execution provider" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}><MenuItem value="devicefarm" disabled={(providerStatus !== null && !providerStatus.device_farm_configured) || activeTargetKind !== "android"}>AWS Device Farm (Android)</MenuItem><MenuItem value="browserstack" disabled={providerStatus !== null && !providerStatus.browserstack_configured}>BrowserStack real device</MenuItem><MenuItem value="appium">Custom / local Appium</MenuItem></Select></FormControl></Grid>}
+        {activeTargetKind === "web" ? <Grid item xs={12} md={4}><TextField fullWidth size="small" label="Website target" value={analysis?.target_url || targetUrl} InputProps={{ readOnly: true }} /></Grid> : <Grid item xs={12} md={3}><TextField fullWidth size="small" label="Execution provider" value="BrowserStack App Automate" InputProps={{ readOnly: true }} /></Grid>}
         {activeTargetKind !== "web" && <Grid item xs={12} md={3}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></Grid>}
         {activeTargetKind !== "web" && <Grid item xs={12} md={2}><TextField fullWidth size="small" label={`${activeTargetKind === "ios" ? "iOS" : "Android"} version`} value={platformVersion} onChange={(event) => setPlatformVersion(event.target.value)} /></Grid>}
         <Grid item xs={12} md={activeTargetKind === "web" ? 8 : 4}><Button fullWidth sx={{ height: 40 }} variant="outlined" disabled={smokeBusy || executionUnavailable} onClick={runSmoke} startIcon={smokeBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />}>{smokeBusy ? "Running…" : "Run safe smoke only"}</Button></Grid>
-        {activeTargetKind !== "web" && provider === "devicefarm" && <Grid item xs={12}><Alert severity="info">QTXpert will upload this APK to the configured AWS Device Farm project, start a temporary metered Android Appium session in {providerStatus?.device_farm_region || "us-west-2"}, run the bounded flow, and close the session.</Alert></Grid>}
-        {activeTargetKind !== "web" && provider === "appium" && <><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Appium server URL" value={appiumUrl} onChange={(event) => setAppiumUrl(event.target.value)} helperText="Hosted runs require a reachable HTTPS endpoint; leave blank only when the backend has one configured." /></Grid><Grid item xs={12} md={6}><TextField fullWidth size="small" label="Optional remote app reference" value={appiumApp} onChange={(event) => setAppiumApp(event.target.value)} /></Grid></>}
         {activeTargetKind !== "web" && <Grid item xs={12}><FormControlLabel control={<Switch checked={autoGrantPermissions} onChange={(event) => setAutoGrantPermissions(event.target.checked)} />} label="Auto-grant runtime permissions" /><Typography variant="caption" color="text.secondary" display="block">Prevents unattended runs from stalling on platform permission dialogs; grant/deny behavior remains covered by generated tests.</Typography></Grid>}
       </Grid>
       {execution && <Alert sx={{ mt: 2 }} severity={execution.status === "passed" ? "success" : execution.status === "blocked" ? "warning" : "error"}>Smoke: <b>{execution.status.toUpperCase()}</b> · {execution.provider} · {execution.duration_seconds}s{execution.current_package ? ` · ${execution.current_package}` : ""}{execution.error ? ` · ${execution.error}` : ""}</Alert>}

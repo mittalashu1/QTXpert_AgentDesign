@@ -1133,15 +1133,27 @@ async def _refresh_mobile_analysis_identity(
     """
     if analysis is None or not artifact_path.is_file():
         return analysis
-    if analysis.target_kind == "web" or (analysis.package_name and analysis.main_activity):
+    if analysis.target_kind == "web":
+        return analysis
+    needs_manifest_facts = (
+        analysis.target_kind == "android"
+        and not analysis.manifest_metadata_complete
+    )
+    if analysis.package_name and analysis.main_activity and not needs_manifest_facts:
         return analysis
 
     try:
-        analyzer = (
-            service._analyze_ipa_sync
-            if artifact_path.suffix.lower() == ".ipa"
-            else service._analyze_apk_sync
-        )
+        if needs_manifest_facts and analysis.package_name and analysis.main_activity:
+            # Reuse only the bounded manifest reader for an already-identified
+            # APK; refreshing security facts must not trigger the large
+            # resource-table parser again.
+            analyzer = service._bounded_apk_manifest_metadata
+        else:
+            analyzer = (
+                service._analyze_ipa_sync
+                if artifact_path.suffix.lower() == ".ipa"
+                else service._analyze_apk_sync
+            )
         metadata = await asyncio.to_thread(analyzer, artifact_path)
     except Exception as exc:  # pragma: no cover - corrupt/removed repository asset
         logger.warning(
@@ -1179,6 +1191,16 @@ async def _refresh_mobile_analysis_identity(
             continue
         if current in (None, "", []):
             updates[field] = value
+    if metadata.get("manifest_metadata_complete") and not analysis.manifest_metadata_complete:
+        updates["manifest_metadata_complete"] = True
+        updates["manifest_components"] = metadata.get("manifest_components", [])
+        # A previously stored large-APK analysis may have only launch
+        # identity. Replace those manifest-derived fields with facts from the
+        # bounded parser while keeping all generated tests and provenance.
+        if "permissions" in metadata:
+            updates["permissions"] = metadata["permissions"]
+        if "debuggable" in metadata:
+            updates["debuggable"] = metadata["debuggable"]
     metadata_warnings = [str(item) for item in (metadata.get("warnings") or []) if str(item).strip()]
     if metadata_warnings:
         merged_warnings = list(dict.fromkeys([*(analysis.warnings or []), *metadata_warnings]))
@@ -3371,9 +3393,10 @@ async def get_autopilot_providers(
             "AWS Device Farm is not enabled for this backend. Set DEVICE_FARM_ENABLED=true "
             "and provide the existing Device Farm project ARN."
         )
-    recommended: AutopilotProvider = (
-        "devicefarm" if device_farm_configured else "browserstack" if configured else "appium"
-    )
+    # BrowserStack is the standard mobile execution provider. Keep the legacy
+    # provider fields in the response for older clients, but never recommend
+    # AWS Device Farm or a custom Appium endpoint for the primary workflow.
+    recommended = _primary_execution_provider("android")
 
     return AutopilotProviderStatus(
         full_uat_sandbox_verified=settings.AUTOPILOT_FULL_UAT_SANDBOX_VERIFIED,
@@ -3388,6 +3411,10 @@ async def get_autopilot_providers(
         custom_appium_url=configured_appium_url,
         recommended_provider=recommended,
     )
+
+
+def _primary_execution_provider(target_kind: str) -> AutopilotProvider:
+    return "playwright" if target_kind == "web" else "browserstack"
 
 
 @router.post("/context/generate", response_model=AutopilotContextResponse)
@@ -6568,9 +6595,11 @@ async def rerun_autopilot_smoke(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ):
-    """Repeat a previous safe smoke with the exact same target settings."""
+    """Repeat a previous smoke, routing mobile targets through BrowserStack."""
     service = _service(settings)
-    await _require_owned_job(service, job_id, user)
+    job = await _require_owned_job(service, job_id, user)
+    target_kind = str(job.get("target_kind") or "android")
+    provider = _primary_execution_provider(target_kind)
     job_record = await _safe_job_record(db, job_id, user.id)
     stored = None
     if job_record is not None:
@@ -6591,11 +6620,11 @@ async def rerun_autopilot_smoke(
 
     if stored is not None:
         request = AutopilotExecutionRequest(
-            provider=stored.provider,
-            appium_url=stored.appium_url,
+            target_kind=target_kind,
+            target_url=str(job.get("target_url")) if job.get("target_url") else None,
+            provider=provider,
             device_name=stored.device_name,
             platform_version=stored.platform_version,
-            appium_app=stored.appium_app,
             no_reset=stored.no_reset,
             auto_grant_permissions=stored.auto_grant_permissions,
         )
@@ -6613,7 +6642,9 @@ async def rerun_autopilot_smoke(
         )
         if fallback_record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot execution not found")
-        request = fallback_record.request
+        request = fallback_record.request.model_copy(
+            update={"target_kind": target_kind, "provider": provider}
+        )
     return await _execute_and_persist(
         service=service,
         db=db,

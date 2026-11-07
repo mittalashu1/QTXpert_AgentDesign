@@ -1940,6 +1940,8 @@ class AutopilotPrototypeService:
             size_bytes=metadata.get("size_bytes", 0),
             sha256=metadata["sha256"],
             debuggable=metadata.get("debuggable"),
+            manifest_metadata_complete=bool(metadata.get("manifest_metadata_complete", False)),
+            manifest_components=metadata.get("manifest_components", []),
             inferred_domain=enrichment.get("inferred_domain") or self._infer_domain(metadata, context_text),
             app_summary=enrichment.get("app_summary") or self._fallback_summary(metadata),
             critical_journeys=list(dict.fromkeys([
@@ -2291,6 +2293,7 @@ class AutopilotPrototypeService:
         services: set[str] = set()
         receivers: set[str] = set()
         activities: set[str] = set()
+        manifest_components: list[dict[str, Any]] = []
 
         def string_at(index: int) -> str:
             return strings[index] if 0 <= index < len(strings) else ""
@@ -2381,34 +2384,50 @@ class AutopilotPrototypeService:
                         version_code = attrs.get("versionCode") or version_code
                     elif name == "application":
                         app_name = attrs.get("label") or app_name
-                        if "debuggable" in attrs:
-                            debuggable = attrs["debuggable"].casefold() == "true"
+                        # android:debuggable defaults to false when omitted.
+                        debuggable = attrs.get("debuggable", "false").casefold() == "true"
                     elif name == "uses-sdk":
                         min_sdk = attrs.get("minSdkVersion") or min_sdk
                         target_sdk = attrs.get("targetSdkVersion") or target_sdk
-                    elif name == "uses-permission":
+                    elif name in {"uses-permission", "uses-permission-sdk-23"}:
                         permission = attrs.get("name")
                         if permission:
                             permissions.add(permission)
-                    elif name in {"activity", "activity-alias"}:
+                    elif name in {"activity", "activity-alias", "service", "receiver", "provider"}:
                         component = qualify_component(attrs.get("name"))
                         if component:
-                            activities.add(component)
-                            record["component"] = component
-                            activity_records.append(record)
-                    elif name == "service":
-                        component = qualify_component(attrs.get("name"))
-                        if component:
-                            services.add(component)
-                    elif name == "receiver":
-                        component = qualify_component(attrs.get("name"))
-                        if component:
-                            receivers.add(component)
+                            if name in {"activity", "activity-alias"}:
+                                activities.add(component)
+                                record["component"] = component
+                                activity_records.append(record)
+                            elif name == "service":
+                                services.add(component)
+                            elif name == "receiver":
+                                receivers.add(component)
+                            manifest_component = {
+                                "kind": name,
+                                "name": component,
+                                "exported": (
+                                    attrs.get("exported", "").casefold() == "true"
+                                    if "exported" in attrs
+                                    else None
+                                ),
+                                "permission": attrs.get("permission") or None,
+                                "has_intent_filter": False,
+                            }
+                            manifest_components.append(manifest_component)
+                            record["manifest_component"] = manifest_component
 
                     # ``action`` and ``category`` belong to the nearest
                     # activity's intent-filter; mark the launch activity while
                     # walking the nested element stack.
-                    if name == "action" and attrs.get("name") == "android.intent.action.MAIN":
+                    if name == "intent-filter":
+                        for parent in reversed(stack):
+                            component_metadata = parent.get("manifest_component")
+                            if component_metadata is not None:
+                                component_metadata["has_intent_filter"] = True
+                                break
+                    elif name == "action" and attrs.get("name") == "android.intent.action.MAIN":
                         for parent in reversed(stack):
                             if parent.get("name") in {"activity", "activity-alias"}:
                                 parent["main"] = True
@@ -2443,6 +2462,11 @@ class AutopilotPrototypeService:
             "receivers": sorted(receivers),
             "permissions": sorted(permissions),
             "debuggable": debuggable,
+            "manifest_metadata_complete": bool(package_name),
+            "manifest_components": sorted(
+                manifest_components,
+                key=lambda item: (item["kind"], item["name"]),
+            ),
         }
         return {key: value for key, value in result.items() if value not in (None, [], "")}
 
@@ -2597,8 +2621,13 @@ class AutopilotPrototypeService:
             manifest_metadata = {**lightweight, **bounded_manifest}
             if manifest_metadata:
                 result.update(manifest_metadata)
+            if bounded_manifest.get("manifest_metadata_complete"):
                 result["warnings"].append(
-                    "Manifest identity was recovered with a bounded binary/XML metadata reader; deep resource parsing remains skipped."
+                    "Manifest identity and component-security facts were recovered with a bounded binary/XML reader; deep resource parsing remains skipped."
+                )
+            elif lightweight.get("package_name"):
+                result["warnings"].append(
+                    "APK launch identity was recovered with a lightweight metadata reader; complete manifest security facts remain unavailable."
                 )
             return result
         # Inspect the central directory before invoking Androguard. This is
@@ -2642,6 +2671,9 @@ class AutopilotPrototypeService:
             )
             debuggable = apk.get_attribute_value("application", "debuggable")
             result["debuggable"] = str(debuggable).lower() == "true" if debuggable is not None else None
+            bounded_manifest = self._bounded_apk_manifest_metadata(apk_path)
+            if bounded_manifest.get("manifest_metadata_complete"):
+                result.update(bounded_manifest)
         except Exception as exc:
             result["warnings"].append(f"Deep APK parsing was partial: {type(exc).__name__}: {exc}")
             file_count, _ = self._safe_zip_inventory(apk_path, "APK")
