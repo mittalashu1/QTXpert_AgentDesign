@@ -1724,7 +1724,9 @@ export default function AutopilotPage() {
       setSetupOpen(true);
       return;
     }
+    const authenticationApprovalSubmitted = approvalCheckpointPending && setupDraft.safe_authentication_approved;
     setSetupBusy(true); setError("");
+    const stopKeepalive = startAutopilotKeepalive();
     try {
       // Submit only inputs the checkpoint currently exposes. Hidden saved
       // inputs can carry stale "reuse" drafts and otherwise make a valid
@@ -1771,7 +1773,7 @@ export default function AutopilotPage() {
           ...(draft.decision === "random" ? { random_spec: draft.random_spec } : {}),
         })),
       };
-      const response = await apiClient.put<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", payload, { timeout: 20000 });
+      const response = await apiClient.put<SetupProfile>("/autopilot/" + analysis.job_id + "/setup", payload, { timeout: 120000 });
       // Keep the pre-save checkpoint in a local value. React state updates
       // below are asynchronous, but this flag tells the resume request that a
       // prior discovery stopped on sign-in and must be replayed with the newly
@@ -1839,10 +1841,9 @@ export default function AutopilotPage() {
       setSetupOpen(false);
       await refreshAutomation(analysis.job_id);
       setResumeBusy(true);
-      const stopKeepalive = startAutopilotKeepalive();
       try {
         const pendingAuthCheckpoint = priorAuthCheckpoint || responsePendingAuth;
-        const runRuntimeDiscovery = !discovery || pendingAuthCheckpoint || (
+        const runRuntimeDiscovery = !discovery || pendingAuthCheckpoint || authenticationApprovalSubmitted || (
           discovery.status === "partial" && /auth|sign-in|credentials/i.test(discovery.stop_reason)
         );
         if (runRuntimeDiscovery) setDiscoveryBusy(true);
@@ -1869,7 +1870,7 @@ export default function AutopilotPage() {
             discovery_appium_url: provider === "appium" ? appiumUrl || null : null,
             discovery_appium_app: provider === "appium" ? appiumApp || null : null,
           },
-          { timeout: 20000 },
+          { timeout: 120000 },
         );
         applyJob(resumeResponse.data);
         if (resumeResponse.data.status === "waiting_for_input") {
@@ -1933,12 +1934,11 @@ export default function AutopilotPage() {
         }
         if (!discoveryReady && !latestPending) setContextNotice("Setup validated. Runtime Discovery is continuing in the background; refresh this tab to see its evidence.");
       } finally {
-        stopKeepalive();
         setResumeBusy(false);
         setDiscoveryBusy(false);
       }
     } catch (err) { setError(readableError(err, "Test setup could not be saved")); }
-    finally { setSetupBusy(false); }
+    finally { stopKeepalive(); setSetupBusy(false); }
   };
   const updateSetup = (field: keyof SetupProfile, value: string | boolean) => setSetupDraft((current) => ({ ...current, [field]: value }));
   const updateRuntimeReference = (key: string, value: string) => setSetupDraft((current) => ({
