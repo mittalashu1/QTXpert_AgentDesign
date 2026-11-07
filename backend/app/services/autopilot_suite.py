@@ -1240,7 +1240,7 @@ class AutopilotSuiteService:
                                 force_launch=True,
                                 preserve_known_system_prompt=True,
                             )
-                    elif test_index > 0:
+                    elif test_index > 0 and not (is_browserstack and has_prompt_step):
                         self._reset_to_application(
                             driver,
                             package,
