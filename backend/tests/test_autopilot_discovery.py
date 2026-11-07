@@ -66,6 +66,40 @@ def test_runtime_prompt_parser_captures_observed_location_choices(tmp_path):
     assert prompt.page_source_path
 
 
+def test_runtime_prompt_parser_captures_yes_no_app_confirmation_dialog(tmp_path):
+    class Driver:
+        current_activity = "com.qtx.demo.MainActivity"
+
+        def get_screenshot_as_file(self, path):
+            from pathlib import Path
+
+            Path(path).write_bytes(b"png")
+            return True
+
+    source = (
+        '<hierarchy><node package="com.qtx.demo" class="android.widget.FrameLayout">'
+        '<node package="com.qtx.demo" class="android.app.AlertDialog">'
+        '<node package="com.qtx.demo" text="Continue with location?" class="android.widget.TextView" />'
+        '<node package="com.qtx.demo" text="Yes" resource-id="com.qtx.demo:id/yes" '
+        'class="android.widget.Button" clickable="true" enabled="true" />'
+        '<node package="com.qtx.demo" text="No" resource-id="com.qtx.demo:id/no" '
+        'class="android.widget.Button" clickable="true" enabled="true" />'
+        '</node></node></hierarchy>'
+    )
+
+    prompt = AutopilotDiscoveryService._runtime_prompt_observation(
+        Driver(), source, tmp_path, "android"
+    )
+
+    assert prompt is not None
+    assert prompt.kind == "app_confirmation"
+    assert prompt.surface == "application"
+    assert [(choice.label, choice.decision) for choice in prompt.choices] == [
+        ("Yes", "allow"),
+        ("No", "deny"),
+    ]
+
+
 
 def test_prompt_discovery_grants_runtime_permission_and_declines_location_settings():
     class AppiumBy:

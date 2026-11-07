@@ -433,6 +433,151 @@ class AutopilotIRCompiler:
             cursor = source_prompt.prompt_id
         return [], "The observed prompt path exceeds the safe replay limit."
 
+    @staticmethod
+    def _route_to_discovered_screen(discovery, target_screen_id: str):
+        """Return the observed safe route from the entry screen to a checkpoint."""
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        screens = {item.screen_id: item for item in discovery.screens}
+        root = AutopilotDiscoveryService.select_entry_screen(discovery.screens)
+        if root is None or target_screen_id not in screens:
+            return None, "The prompt's source screen is no longer in Runtime Discovery."
+        if root.screen_id == target_screen_id:
+            return [], None
+
+        pending: list[tuple[str, list]] = [(root.screen_id, [])]
+        visited = {root.screen_id}
+        while pending:
+            screen_id, path = pending.pop(0)
+            source = screens.get(screen_id)
+            for transition in discovery.transitions:
+                if (
+                    transition.from_screen_id != screen_id
+                    or transition.action not in {"tap", "scroll"}
+                    or transition.to_screen_id not in screens
+                    or transition.duplicate_state
+                ):
+                    continue
+                if transition.action == "tap":
+                    control = next(
+                        (item for item in (source.controls if source else []) if item.control_id == transition.control_id),
+                        None,
+                    )
+                    if (
+                        control is None
+                        or not control.enabled
+                        or not control.clickable
+                        or control.input_capable
+                        or control.risk != "safe"
+                    ):
+                        continue
+                route = [*path, transition]
+                if transition.to_screen_id == target_screen_id:
+                    return route, None
+                if transition.to_screen_id not in visited:
+                    visited.add(transition.to_screen_id)
+                    pending.append((transition.to_screen_id, route))
+        return None, "No observed safe navigation route reaches the prompt's source screen."
+
+    def _authentication_fill_steps(
+        self,
+        screen: DiscoveredScreen,
+        submit_control: DiscoveredControl,
+        input_values: Optional[Mapping[str, str]],
+    ) -> tuple[list[QTXIRStep], Optional[str]]:
+        """Compile encrypted runtime references for an observed sign-in handoff."""
+        resolved: list[QTXIRStep] = []
+        values = input_values or {}
+        credential_controls = [
+            item for item in screen.controls
+            if item.enabled and item.input_capable and item.input_kind == "credential"
+        ]
+        for control in credential_controls:
+            hint = self._credential_hint(control)
+            if hint == "otp":
+                return [], "One-time verification remains a human checkpoint before this prompt can be reached."
+            input_key = self._runtime_input_key(screen.screen_id, control.control_id, control.input_kind or "credential")
+            value = values.get(input_key) or values.get(f"__{hint}")
+            if value is None or not str(value).strip():
+                return [], f"The saved {hint} input is unavailable for the observed sign-in screen."
+            locator = self._best_locator(control, interaction=False)
+            if locator is None:
+                return [], f"No deterministic locator is available for the {hint} field."
+            resolved.append(
+                QTXIRStep(
+                    action="fill",
+                    description=f"Enter the saved {hint} into {control.semantic_label}.",
+                    target=control.semantic_label,
+                    screen_id=screen.screen_id,
+                    input_key=input_key,
+                    locator_strategy=locator.strategy,
+                    locator_value=locator.value,
+                    locator_confidence=locator.confidence,
+                    locator_fallbacks=self._locator_fallbacks(control, locator, interaction=False),
+                )
+            )
+        return resolved, None
+
+    def _append_prompt_path(self, steps: list[QTXIRStep], discovery, path) -> Optional[str]:
+        prompts = {item.prompt_id: item for item in discovery.runtime_prompts}
+        for branch in path or []:
+            prompt = prompts.get(branch.prompt_id)
+            choice = next(
+                (item for item in (prompt.choices if prompt else []) if item.key == branch.choice_key),
+                None,
+            )
+            if prompt is None or choice is None:
+                return "The observed prompt route is missing one of its recorded choices."
+            if not choice.locators:
+                return "The observed prompt route contains a choice without a deterministic locator."
+            steps.append(self._runtime_prompt_choice_step(prompt, choice))
+        return None
+
+    def _append_screen_route(self, steps: list[QTXIRStep], discovery, route, input_values) -> Optional[str]:
+        screens = {item.screen_id: item for item in discovery.screens}
+        prompts = {item.prompt_id: item for item in discovery.runtime_prompts}
+        for transition in route or []:
+            source = screens.get(transition.from_screen_id)
+            if source is None:
+                return "An observed route screen is missing from Runtime Discovery."
+            if transition.action == "scroll":
+                steps.append(
+                    QTXIRStep(
+                        action="scroll",
+                        description=f"Scroll to the observed prompt route from {source.page_label or source.screen_id}.",
+                        screen_id=source.screen_id,
+                    )
+                )
+            else:
+                control = next(
+                    (item for item in source.controls if item.control_id == transition.control_id),
+                    None,
+                )
+                locator = self._best_locator(control, interaction=True) if control else None
+                if control is None or locator is None:
+                    return "An observed route action no longer has a deterministic locator."
+                if self._is_auth_submit_control(control, source.controls):
+                    auth_steps, auth_error = self._authentication_fill_steps(source, control, input_values)
+                    if auth_error:
+                        return auth_error
+                    steps.extend(auth_steps)
+                steps.append(
+                    QTXIRStep(
+                        action="tap",
+                        description=f"Tap the observed {control.semantic_label} route control.",
+                        target=control.semantic_label,
+                        screen_id=source.screen_id,
+                        locator_strategy=locator.strategy,
+                        locator_value=locator.value,
+                        locator_confidence=locator.confidence,
+                        locator_fallbacks=self._locator_fallbacks(control, locator, interaction=True),
+                    )
+                )
+            path_error = self._append_prompt_path(steps, discovery, transition.prompt_path)
+            if path_error:
+                return path_error
+        return None
+
     def compile_test(
         self,
         test: AutopilotTest,
@@ -497,7 +642,94 @@ class AutopilotIRCompiler:
                         observation_ref=prompt.observation_ref,
                     ),
                 ]
+                prompt_route_error = None
+                route_root_prompt = prompt_prefix[0][0] if prompt_prefix else prompt
+                if route_root_prompt.source_screen_id:
+                    prompt_route_error = self._append_prompt_path(
+                        resolved_steps,
+                        discovery,
+                        discovery.entry_prompt_path,
+                    )
+                    route, route_error = self._route_to_discovered_screen(
+                        discovery,
+                        route_root_prompt.source_screen_id,
+                    )
+                    prompt_route_error = prompt_route_error or route_error
+                    if not prompt_route_error:
+                        prompt_route_error = self._append_screen_route(
+                            resolved_steps,
+                            discovery,
+                            route,
+                            input_values,
+                        )
+                    source_screen = next(
+                        (
+                            item for item in discovery.screens
+                            if item.screen_id == route_root_prompt.source_screen_id
+                        ),
+                        None,
+                    )
+                    trigger_id = route_root_prompt.trigger_control_id
+                    if not prompt_route_error and source_screen is not None:
+                        if trigger_id and trigger_id.startswith("__scroll__"):
+                            resolved_steps.append(
+                                QTXIRStep(
+                                    action="scroll",
+                                    description="Scroll to the observed native prompt trigger.",
+                                    screen_id=source_screen.screen_id,
+                                )
+                            )
+                        else:
+                            trigger_control = next(
+                                (
+                                    item for item in source_screen.controls
+                                    if item.control_id == trigger_id
+                                ),
+                                None,
+                            )
+                            trigger_locator = (
+                                self._best_locator(trigger_control, interaction=True)
+                                if trigger_control is not None
+                                else None
+                            )
+                            if trigger_control is None or trigger_locator is None:
+                                prompt_route_error = (
+                                    "The prompt's observed trigger no longer has a deterministic app control locator."
+                                )
+                            else:
+                                if self._is_auth_submit_control(trigger_control, source_screen.controls):
+                                    auth_steps, auth_error = self._authentication_fill_steps(
+                                        source_screen,
+                                        trigger_control,
+                                        input_values,
+                                    )
+                                    prompt_route_error = prompt_route_error or auth_error
+                                    resolved_steps.extend(auth_steps)
+                                if not prompt_route_error:
+                                    resolved_steps.append(
+                                        QTXIRStep(
+                                            action="tap",
+                                            description=(
+                                                f"Tap the observed {trigger_control.semantic_label} control "
+                                                "to open the native prompt."
+                                            ),
+                                            target=trigger_control.semantic_label,
+                                            screen_id=source_screen.screen_id,
+                                            locator_strategy=trigger_locator.strategy,
+                                            locator_value=trigger_locator.value,
+                                            locator_confidence=trigger_locator.confidence,
+                                            locator_fallbacks=self._locator_fallbacks(
+                                                trigger_control,
+                                                trigger_locator,
+                                                interaction=True,
+                                            ),
+                                        )
+                                    )
+                    elif not prompt_route_error:
+                        prompt_route_error = "The prompt's observed source screen is missing from Runtime Discovery."
                 for prefix_prompt, prefix_choice in prompt_prefix:
+                    if prompt_route_error:
+                        break
                     resolved_steps.append(
                         self._runtime_prompt_choice_step(
                             prefix_prompt,
@@ -508,22 +740,27 @@ class AutopilotIRCompiler:
                             ),
                         )
                     )
-                resolved_steps.append(self._runtime_prompt_choice_step(prompt, choice))
-                resolved_steps.extend([
-                    QTXIRStep(
-                        action="inspect_ui",
-                        description="Verify the app or a new native prompt appears after the observed choice.",
-                        observation_ref=prompt.observation_ref,
-                    ),
-                    QTXIRStep(
-                        action="capture_evidence",
-                        description="Capture the app or native prompt state after applying the choice.",
-                        observation_ref=prompt.observation_ref,
-                    ),
-                ])
-                readiness = "executable"
-                promoted = True
-                readiness_reason = "The prompt option and its observed replay path have deterministic locators."
+                if not prompt_route_error:
+                    resolved_steps.append(self._runtime_prompt_choice_step(prompt, choice))
+                    resolved_steps.extend([
+                        QTXIRStep(
+                            action="inspect_ui",
+                            description="Verify the app or a new native prompt appears after the observed choice.",
+                            observation_ref=prompt.observation_ref,
+                        ),
+                        QTXIRStep(
+                            action="capture_evidence",
+                            description="Capture the app or native prompt state after applying the choice.",
+                            observation_ref=prompt.observation_ref,
+                        ),
+                    ])
+                    readiness = "executable"
+                    promoted = True
+                    readiness_reason = "The prompt option and its observed replay path have deterministic locators."
+                else:
+                    resolved_steps = None
+                    readiness = "discovery_required"
+                    readiness_reason = prompt_route_error
             else:
                 readiness = "discovery_required"
                 if discovery is not None and discovery.target_ready is not True:
@@ -1455,13 +1692,14 @@ class AutopilotIRCompiler:
                 "    from pathlib import Path",
                 "    import time",
                 "    from appium.webdriver.common.appiumby import AppiumBy",
-                "    from app.services.appium_compat import known_native_prompt_kind",
-                "    from app.services.appium_compat import safe_app_identity, safe_page_source",
+                "    from app.services.appium_compat import safe_app_identity, safe_page_source, validate_target_surface",
                 "    from app.services.autopilot_discovery import AutopilotDiscoveryService",
                 "",
                 "    evidence_dir = Path(evidence_dir)",
                 "    evidence_dir.mkdir(parents=True, exist_ok=True)",
                 "    runtime_inputs = runtime_inputs or {}",
+                "    observed_runtime_prompts = []",
+                "    observed_external_surfaces = []",
                 "    locator_map = {'accessibility_id': AppiumBy.ACCESSIBILITY_ID, 'id': AppiumBy.ID, 'xpath': AppiumBy.XPATH}",
             ]
             for index, step in enumerate(generated.steps, start=1):
@@ -1488,12 +1726,18 @@ class AutopilotIRCompiler:
                 elif step.action == "prompt_choice":
                     lines.extend([
                         f"    # {index}. {step.description}",
-                        f"    assert known_native_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) == {step.target!r}, 'Observed prompt is not active'",
+                        f"    assert AutopilotDiscoveryService._runtime_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) == {step.target!r}, 'Observed prompt is not active'",
+                        f"    initial_prompt_id = AutopilotDiscoveryService._runtime_prompt_fingerprint(driver, safe_page_source(driver), {analysis.target_kind!r})",
                         f"    element = driver.find_element(locator_map[{step.locator_strategy!r}], {step.locator_value!r})",
                         "    assert element.is_enabled(), 'Observed prompt choice is disabled'",
                         "    element.click()",
                         "    time.sleep(1)",
-                        f"    assert known_native_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r}) is None, 'Prompt did not close after choosing {step.assertion or 'the observed option'}'"
+                        f"    resulting_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(driver, safe_page_source(driver), {analysis.target_kind!r})",
+                        f"    resulting_prompt = AutopilotDiscoveryService._runtime_prompt_observation(driver, safe_page_source(driver), evidence_dir, {analysis.target_kind!r}, persist_evidence=False) if resulting_prompt_kind else None",
+                        "    if resulting_prompt is not None:",
+                        "        if resulting_prompt.prompt_id == initial_prompt_id: raise AssertionError('The selected prompt choice left the same prompt active')",
+                        "        observed_runtime_prompts.append(resulting_prompt.model_dump(mode='json'))",
+                        f"    else:\n        resulting_source = safe_page_source(driver)\n        resulting_surface = AutopilotDiscoveryService._external_prompt_surface(driver, resulting_source, target_kind={analysis.target_kind!r}, expected_package={analysis.package_name!r}, prompt_kind={step.target!r}, decision={step.assertion!r})\n        if resulting_surface is not None:\n            observed_external_surfaces.append(resulting_surface)\n        else:\n            target_ready, target_reason, _ = validate_target_surface(driver, expected_package={analysis.package_name!r}, page_source=resulting_source)\n            if not target_ready: raise AssertionError(f'Prompt choice did not reach the app, a new prompt, or an observed external surface: {{target_reason}}')",
                     ])
                 elif step.action in {"tap", "assert_visible"}:
                     lines.extend([
@@ -1523,7 +1767,7 @@ class AutopilotIRCompiler:
                     ])
             lines.extend([
                 "    identity = safe_app_identity(driver, page_source=safe_page_source(driver))",
-                "    return {'package': identity['package'], 'activity': identity['activity']}",
+                "    return {'package': identity['package'], 'activity': identity['activity'], 'observed_runtime_prompts': observed_runtime_prompts, 'observed_external_surfaces': observed_external_surfaces}",
             ])
             return "\n".join(lines)
 

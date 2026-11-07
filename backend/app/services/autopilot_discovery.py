@@ -26,6 +26,7 @@ from app.schemas.autopilot import (
     DiscoveredScreen,
     DiscoveredTransition,
     DiscoveryLocator,
+    RuntimePromptBranchRef,
     RuntimePromptChoice,
     RuntimePromptObservation,
 )
@@ -35,6 +36,7 @@ from app.services.appium_compat import (
     enter_observed_text,
     known_native_prompt_kind,
     native_prompt_fingerprint,
+    observed_app_identity,
     safe_app_identity,
     safe_current_activity,
     safe_page_source,
@@ -160,19 +162,171 @@ class AutopilotDiscoveryService:
         return re.sub(r"\s+", " ", (value or "").strip()).lower()
 
     @classmethod
+    def _runtime_prompt_kind(cls, driver: Any, page_source: str, target_kind: str = "android") -> Optional[str]:
+        """Recognize native prompts and explicit yes/no app confirmation dialogs."""
+        kind = known_native_prompt_kind(driver, page_source, target_kind)
+        if kind:
+            return kind
+        if str(target_kind or "").casefold() != "android":
+            return None
+        try:
+            root = ET.fromstring(page_source or "")
+        except ET.ParseError:
+            return None
+        is_dialog = False
+        decisions: set[str] = set()
+        for node in root.iter():
+            attrs = {str(key): str(value) for key, value in node.attrib.items()}
+            class_name = attrs.get("class", "").casefold()
+            resource_id = attrs.get("resource-id", "").casefold()
+            if "dialog" in class_name or "alert" in class_name or "alerttitle" in resource_id:
+                is_dialog = True
+            actionable = (
+                attrs.get("clickable", "false").casefold() == "true"
+                or class_name.endswith("button")
+            )
+            label = cls._normalize(cls._semantic_label(attrs))
+            if actionable and label:
+                decision = cls._prompt_choice_decision(label)
+                if decision:
+                    decisions.add(decision)
+        return "app_confirmation" if is_dialog and {"allow", "deny"}.issubset(decisions) else None
+
+    @classmethod
+    def _runtime_prompt_fingerprint(
+        cls,
+        driver: Any,
+        page_source: str,
+        target_kind: str = "android",
+    ) -> Optional[str]:
+        """Return a stable opaque identity for native and app confirmation prompts."""
+        kind = cls._runtime_prompt_kind(driver, page_source, target_kind)
+        if not kind:
+            return None
+        native_id = native_prompt_fingerprint(driver, page_source, target_kind)
+        if native_id:
+            return native_id
+        choice_keys: list[str] = []
+        try:
+            root = ET.fromstring(page_source or "")
+            for node in root.iter():
+                attrs = {str(key): str(value) for key, value in node.attrib.items()}
+                label = cls._normalize(cls._semantic_label(attrs))
+                class_name = attrs.get("class", "").casefold()
+                actionable = (
+                    attrs.get("clickable", "false").casefold() == "true"
+                    or class_name.endswith("button")
+                )
+                decision = cls._prompt_choice_decision(label) if actionable and label else None
+                key = re.sub(r"[^a-z0-9]+", "-", label).strip("-") if decision else ""
+                if key and key not in choice_keys:
+                    choice_keys.append(key[:48])
+        except ET.ParseError:
+            pass
+        return hashlib.sha1(
+            f"{kind}|{safe_current_activity(driver)}|{'|'.join(choice_keys)}".encode(
+                "utf-8", errors="ignore"
+            )
+        ).hexdigest()[:16]
+
+    @staticmethod
+    def _external_prompt_surface(
+        driver: Any,
+        page_source: str,
+        *,
+        target_kind: str,
+        expected_package: Optional[str],
+        prompt_kind: Optional[str],
+        decision: Optional[str],
+    ) -> Optional[dict[str, str]]:
+        """Recognize a prompt branch that intentionally opens another surface."""
+        platform = str(target_kind or "").casefold()
+        if platform == "ios":
+            try:
+                root = ET.fromstring(page_source or "")
+            except ET.ParseError:
+                return None
+            active_app_name = None
+            for node in root.iter():
+                attrs = {str(key).casefold(): str(value) for key, value in node.attrib.items()}
+                element_type = attrs.get("type", attrs.get("class", "")).casefold()
+                if "xcuielementtypeapplication" in element_type:
+                    active_app_name = attrs.get("name") or attrs.get("label")
+                    break
+            context = " ".join([str(active_app_name or ""), page_source or ""]).casefold()
+            if active_app_name and "settings" in active_app_name.casefold() and "location" in context:
+                return {
+                    "kind": "system_settings",
+                    "label": "iOS Location settings",
+                    "package": active_app_name,
+                    "activity": safe_current_activity(driver),
+                }
+            return None
+        if platform != "android":
+            return None
+        identity = observed_app_identity(driver, page_source=page_source)
+        expected = str(expected_package or "").casefold()
+        system_packages = {
+            "android",
+            "com.android.systemui",
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+            "com.android.packageinstaller",
+            "com.android.intentresolver",
+            "com.google.android.gms",
+            "io.appium.settings",
+            "io.appium.uiautomator2.server",
+            "io.appium.uiautomator2.server.test",
+            "com.google.android.apps.nexuslauncher",
+            "com.android.launcher3",
+            "com.sec.android.app.launcher",
+            "com.miui.home",
+        }
+        packages = [str(item or "").strip() for item in identity.get("hierarchy_packages", [])]
+        actual_package = next(
+            (
+                item for item in packages
+                if item and (not expected or item.casefold() != expected)
+                and item.casefold() not in system_packages
+            ),
+            None,
+        )
+        if not actual_package:
+            return None
+        activity = safe_current_activity(driver)
+        context = " ".join([actual_package, activity, page_source or ""]).casefold()
+        if ("settings" in actual_package.casefold() or "settings" in activity.casefold()) and "location" in context:
+            return {
+                "kind": "system_settings",
+                "label": "Android Location settings",
+                "package": actual_package,
+                "activity": activity,
+            }
+        if prompt_kind == "app_confirmation" and decision == "allow":
+            return {
+                "kind": "external_app",
+                "label": f"External app {actual_package}",
+                "package": actual_package,
+                "activity": activity,
+            }
+        return None
+
+    @classmethod
     def _runtime_prompt_observation(
         cls,
         driver: Any,
         page_source: str,
         evidence_dir: Path,
         target_kind: str = "android",
+        *,
+        persist_evidence: bool = True,
     ) -> Optional[RuntimePromptObservation]:
         """Capture a supported Android system prompt as a branch artifact.
 
         Prompt controls bypass parse_controls so system UI is never mistaken
         for product navigation. Keep only observed option labels and locators.
         """
-        kind = known_native_prompt_kind(driver, page_source, target_kind)
+        kind = cls._runtime_prompt_kind(driver, page_source, target_kind)
         if not kind:
             return None
         try:
@@ -211,27 +365,28 @@ class AutopilotDiscoveryService:
                     )
                 )
 
-        prompt_id = native_prompt_fingerprint(driver, page_source, target_kind) or hashlib.sha1(
+        prompt_id = cls._runtime_prompt_fingerprint(driver, page_source, target_kind) or hashlib.sha1(
             f"{kind}|{safe_current_activity(driver)}|{'|'.join(choice.key for choice in choices)}".encode(
                 "utf-8", errors="ignore"
             )
         ).hexdigest()[:16]
-        screenshot_path = evidence_dir / f"prompt-{prompt_id}.png"
-        source_path = evidence_dir / f"prompt-{prompt_id}.xml"
-        try:
-            driver.get_screenshot_as_file(str(screenshot_path))
-        except Exception:
-            screenshot_path = None
-        try:
-            source_path.write_text(cls._redact_page_source(page_source), encoding="utf-8")
-        except Exception:
-            source_path = None
+        screenshot_path = evidence_dir / f"prompt-{prompt_id}.png" if persist_evidence else None
+        source_path = evidence_dir / f"prompt-{prompt_id}.xml" if persist_evidence else None
+        if persist_evidence:
+            try:
+                driver.get_screenshot_as_file(str(screenshot_path))
+            except Exception:
+                screenshot_path = None
+            try:
+                source_path.write_text(cls._redact_page_source(page_source), encoding="utf-8")
+            except Exception:
+                source_path = None
         return RuntimePromptObservation(
             prompt_id=prompt_id,
             kind=kind,
             surface=(
                 "ios_system" if target_kind == "ios" and kind == "runtime_permission"
-                else "application" if target_kind == "ios"
+                else "application" if kind == "app_confirmation" or target_kind == "ios"
                 else "android_system"
             ),
             title={
@@ -1603,6 +1758,7 @@ class AutopilotDiscoveryService:
             screens=screens,
             transitions=payload["transitions"],
             runtime_prompts=payload.get("runtime_prompts") or [],
+            entry_prompt_path=payload.get("entry_prompt_path") or [],
             input_requests=self.runtime_input_requests(screens),
             warnings=payload["warnings"],
             error=error,
@@ -1713,6 +1869,8 @@ class AutopilotDiscoveryService:
         transitions: list[DiscoveredTransition] = []
         seen_fingerprints: dict[str, str] = {}
         runtime_prompts: list[RuntimePromptObservation] = []
+        entry_prompt_path: list[RuntimePromptBranchRef] = []
+        last_capture_prompt_path: list[RuntimePromptBranchRef] = []
         pending_prompt_outcomes: list[tuple[RuntimePromptObservation, str]] = []
         pending_prompt_links: list[tuple[RuntimePromptObservation, str]] = []
         visited_edges: set[tuple[str, str]] = set()
@@ -1731,17 +1889,54 @@ class AutopilotDiscoveryService:
             *,
             persist_evidence: bool = True,
             require_target: bool = False,
+            source_screen: Optional[DiscoveredScreen] = None,
+            trigger_control: Optional[DiscoveredControl] = None,
+            trigger_control_id: Optional[str] = None,
         ) -> tuple[DiscoveredScreen, bool]:
-            nonlocal actions_attempted
+            nonlocal actions_attempted, last_capture_prompt_path
             index = len(screens) + 1
+            last_capture_prompt_path = []
+            first_prompt_in_capture = True
+            prompt_source_screen_id = source_screen.screen_id if source_screen else None
+            prompt_trigger_control_id = (
+                trigger_control.control_id if trigger_control else trigger_control_id
+            )
             page_source = safe_page_source(driver)
             for _prompt_index in range(8):
-                prompt = self._runtime_prompt_observation(driver, page_source, evidence_dir, request.target_kind)
+                prompt = self._runtime_prompt_observation(
+                    driver,
+                    page_source,
+                    evidence_dir,
+                    request.target_kind,
+                    persist_evidence=persist_evidence,
+                )
                 if prompt is None:
                     break
-                initial_prompt_id = native_prompt_fingerprint(driver, page_source, request.target_kind)
-                if not any(item.prompt_id == prompt.prompt_id for item in runtime_prompts):
+                if first_prompt_in_capture and (prompt_source_screen_id or prompt_trigger_control_id):
+                    prompt = prompt.model_copy(update={
+                        "source_screen_id": prompt_source_screen_id,
+                        "trigger_control_id": prompt_trigger_control_id,
+                    })
+                initial_prompt_id = prompt.prompt_id
+                existing_prompt_index = next(
+                    (i for i, item in enumerate(runtime_prompts) if item.prompt_id == prompt.prompt_id),
+                    None,
+                )
+                if existing_prompt_index is None:
                     runtime_prompts.append(prompt)
+                elif (
+                    first_prompt_in_capture
+                    and not runtime_prompts[existing_prompt_index].source_screen_id
+                    and prompt_source_screen_id
+                ):
+                    runtime_prompts[existing_prompt_index] = runtime_prompts[existing_prompt_index].model_copy(
+                        update={
+                            "source_screen_id": prompt_source_screen_id,
+                            "trigger_control_id": prompt_trigger_control_id,
+                        }
+                    )
+                    prompt = runtime_prompts[existing_prompt_index]
+                first_prompt_in_capture = False
                 if pending_prompt_links:
                     for source_prompt, choice_key in pending_prompt_links:
                         source_prompt.choices = [
@@ -1778,9 +1973,13 @@ class AutopilotDiscoveryService:
                 followup_prompt_kind: Optional[str] = None
                 while time.monotonic() < prompt_deadline:
                     page_source = safe_page_source(driver)
-                    active_prompt_kind = known_native_prompt_kind(driver, page_source, request.target_kind)
+                    active_prompt_kind = self._runtime_prompt_kind(driver, page_source, request.target_kind)
                     if active_prompt_kind:
-                        active_prompt_id = native_prompt_fingerprint(driver, page_source, request.target_kind)
+                        active_prompt_id = self._runtime_prompt_fingerprint(
+                            driver,
+                            page_source,
+                            request.target_kind,
+                        )
                         if active_prompt_kind != prompt.kind or (
                             active_prompt_id and initial_prompt_id and active_prompt_id != initial_prompt_id
                         ):
@@ -1811,13 +2010,21 @@ class AutopilotDiscoveryService:
                     ]
                     if clicked and decline_returned_to_app:
                         pending_prompt_outcomes.append((prompt, selected_key))
+                        last_capture_prompt_path.append(
+                            RuntimePromptBranchRef(prompt_id=prompt.prompt_id, choice_key=selected_key)
+                        )
                     elif clicked and followup_prompt_kind:
                         pending_prompt_links.append((prompt, selected_key))
+                        last_capture_prompt_path.append(
+                            RuntimePromptBranchRef(prompt_id=prompt.prompt_id, choice_key=selected_key)
+                        )
                 if followup_prompt_kind:
                     # A different observed native prompt is a valid outcome of
                     # this branch. Capture it on the next loop iteration and
                     # continue through its own safe decline branch.
                     page_source = safe_page_source(driver)
+                    prompt_source_screen_id = None
+                    prompt_trigger_control_id = None
                     continue
                 returned_to_app = decline_returned_to_app
                 if not returned_to_app:
@@ -1825,7 +2032,7 @@ class AutopilotDiscoveryService:
                     # Dismiss only a recognized Android system prompt, then
                     # verify the uploaded app before resuming; recovery is not
                     # evidence of the selected branch's outcome.
-                    prompt_kind = known_native_prompt_kind(
+                    prompt_kind = self._runtime_prompt_kind(
                         driver,
                         safe_page_source(driver),
                         request.target_kind,
@@ -1839,7 +2046,7 @@ class AutopilotDiscoveryService:
                             recovery_deadline = time.monotonic() + 5.0
                             while time.monotonic() < recovery_deadline:
                                 recovery_source = safe_page_source(driver)
-                                if known_native_prompt_kind(
+                                if self._runtime_prompt_kind(
                                     driver,
                                     recovery_source,
                                     request.target_kind,
@@ -2011,11 +2218,14 @@ class AutopilotDiscoveryService:
             # been checked. If the provider left Android Home foreground, it
             # must never be persisted as an InvestNation product screen.
             current, _ = capture(persist_evidence=False)
+            entry_prompt_path = list(last_capture_prompt_path)
             retries = 0
             while self._looks_like_loading_screen(current) and retries < retry_limit:
                 retries += 1
                 time.sleep(retry_wait)
                 candidate, duplicate = capture(persist_evidence=False)
+                if last_capture_prompt_path:
+                    entry_prompt_path = list(last_capture_prompt_path)
                 current_score = sum(1 for item in current.controls if item.enabled and (item.clickable or item.input_capable))
                 candidate_score = sum(1 for item in candidate.controls if item.enabled and (item.clickable or item.input_capable))
                 if not duplicate or candidate_score >= current_score:
@@ -2115,6 +2325,7 @@ class AutopilotDiscoveryService:
                     "screens": [],
                     "transitions": [],
                     "runtime_prompts": runtime_prompts,
+                    "entry_prompt_path": entry_prompt_path,
                     "actions_attempted": actions_attempted,
                     "stop_reason": target_identity_reason,
                     "warnings": warnings,
@@ -2137,6 +2348,7 @@ class AutopilotDiscoveryService:
                     "screens": screens,
                     "transitions": [],
                     "runtime_prompts": runtime_prompts,
+                    "entry_prompt_path": entry_prompt_path,
                     "actions_attempted": actions_attempted,
                     "stop_reason": stop_reason,
                     "warnings": warnings,
@@ -2163,6 +2375,7 @@ class AutopilotDiscoveryService:
                     "screens": screens,
                     "transitions": transitions,
                     "runtime_prompts": runtime_prompts,
+                    "entry_prompt_path": entry_prompt_path,
                     "actions_attempted": actions_attempted,
                     "stop_reason": stop_reason,
                     "warnings": warnings,
@@ -2289,6 +2502,7 @@ class AutopilotDiscoveryService:
                         pre_submit_feedback = self._auth_feedback_code(pre_submit_source)
                         submit_element.click()
                         actions_attempted += 1
+                        transition_prompt_path: list[RuntimePromptBranchRef] = []
                         # A staged native login may take several seconds to
                         # render its next form. Observe a bounded series of
                         # credential-safe frames before calling the tap a
@@ -2305,7 +2519,11 @@ class AutopilotDiscoveryService:
                             next_screen, duplicate = capture(
                                 persist_evidence=False,
                                 require_target=True,
+                                source_screen=screen,
+                                trigger_control=submit,
                             )
+                            if last_capture_prompt_path:
+                                transition_prompt_path = list(last_capture_prompt_path)
                             if not duplicate:
                                 break
                         # A validation message is often static text and does
@@ -2367,7 +2585,11 @@ class AutopilotDiscoveryService:
                                     next_screen, duplicate = capture(
                                         persist_evidence=False,
                                         require_target=True,
+                                        source_screen=screen,
+                                        trigger_control=submit,
                                     )
+                                    if last_capture_prompt_path:
+                                        transition_prompt_path = list(last_capture_prompt_path)
                                     if not duplicate:
                                         break
                             except Exception as gesture_error:
@@ -2380,7 +2602,11 @@ class AutopilotDiscoveryService:
                             next_screen, _ = capture(
                                 persist_evidence=True,
                                 require_target=True,
+                                source_screen=screen,
+                                trigger_control=submit,
                             )
+                            if last_capture_prompt_path:
+                                transition_prompt_path = list(last_capture_prompt_path)
                         transitions.append(
                             DiscoveredTransition(
                                 from_screen_id=screen.screen_id,
@@ -2388,6 +2614,7 @@ class AutopilotDiscoveryService:
                                 control_id=submit.control_id,
                                 control_label=submit.semantic_label,
                                 duplicate_state=duplicate,
+                                prompt_path=transition_prompt_path,
                             )
                         )
                         if duplicate:
@@ -2466,7 +2693,11 @@ class AutopilotDiscoveryService:
                             if self._scroll_forward(driver):
                                 actions_attempted += 1
                                 try:
-                                    next_screen, duplicate = capture(require_target=True)
+                                    next_screen, duplicate = capture(
+                                        require_target=True,
+                                        source_screen=current,
+                                        trigger_control_id=f"__scroll__{rounds + 1}",
+                                    )
                                 except _UnexpectedTargetSurface as exc:
                                     warnings.append(
                                         f"Stopped before counting a screen outside the uploaded app after scrolling: {exc}"
@@ -2483,6 +2714,7 @@ class AutopilotDiscoveryService:
                                         control_label="Scroll down",
                                         action="scroll",
                                         duplicate_state=duplicate,
+                                        prompt_path=list(last_capture_prompt_path),
                                     )
                                 )
                                 if not duplicate:
@@ -2522,7 +2754,11 @@ class AutopilotDiscoveryService:
                         element.click()
                         actions_attempted += 1
                         time.sleep(1.2)
-                        next_screen, duplicate = capture(require_target=True)
+                        next_screen, duplicate = capture(
+                            require_target=True,
+                            source_screen=current,
+                            trigger_control=control,
+                        )
                         if (
                             current.screen_id in transaction_screen_ids
                             or request.include_transaction_journeys
@@ -2536,6 +2772,7 @@ class AutopilotDiscoveryService:
                                 control_id=control.control_id,
                                 control_label=control.semantic_label,
                                 duplicate_state=duplicate,
+                                prompt_path=list(last_capture_prompt_path),
                             )
                         )
                         if duplicate:
@@ -2629,6 +2866,7 @@ class AutopilotDiscoveryService:
                 "screens": screens,
                 "transitions": transitions,
                 "runtime_prompts": runtime_prompts,
+                "entry_prompt_path": entry_prompt_path,
                 "actions_attempted": actions_attempted,
                 "stop_reason": stop_reason,
                 "warnings": warnings,

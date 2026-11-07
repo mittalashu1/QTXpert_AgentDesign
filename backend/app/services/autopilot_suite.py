@@ -25,13 +25,12 @@ from app.schemas.autopilot import (
     AutopilotSuiteTestResult,
     QTXIRStep,
     QTXTestIR,
+    RuntimePromptObservation,
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
     activate_verified_target_surface,
     enter_observed_text,
-    known_native_prompt_kind,
-    native_prompt_fingerprint,
     ProviderLifecycleUnavailable,
     expected_package_state,
     safe_app_identity,
@@ -117,7 +116,15 @@ class AutopilotSuiteService:
             and (not requested_buckets or test.bucket in requested_buckets)
         ]
         selected.sort(key=lambda test: self._selection_priority(test, discovery))
-        if not request.run_all_eligible:
+        selection_remaining_count = 0
+        if request.prompt_only:
+            # Permission and confirmation permutations must not be silently
+            # cut off by the ordinary 20-case suite default. Keep a hard upper
+            # bound for one remote run and report any remaining branches.
+            prompt_branch_limit = 64
+            selection_remaining_count = max(0, len(selected) - prompt_branch_limit)
+            selected = selected[:prompt_branch_limit]
+        elif not request.run_all_eligible:
             selected = selected[: request.max_tests]
         candidates = [
             test
@@ -129,6 +136,8 @@ class AutopilotSuiteService:
 
         started = datetime.now(timezone.utc)
         start_perf = time.perf_counter()
+        discovery_update: AutopilotDiscoveryResult | None = None
+        remaining_count = selection_remaining_count
         if not selected:
             finished = datetime.now(timezone.utc)
             return AutopilotSuiteResult(
@@ -163,6 +172,7 @@ class AutopilotSuiteService:
                 bucket_counts=self._bucket_counts(selected),
                 error="No safe deterministic executable tests are available; deferred cases list their dependencies.",
                 tests=deferred_results,
+                remaining_count=remaining_count,
             )
 
         static_candidates = [
@@ -247,27 +257,140 @@ class AutopilotSuiteService:
                 app_reference = device_farm_session.app_arn
             else:
                 appium_url = self.prototype.resolve_appium_url(request)
-            results = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._run_sync,
-                    job_id,
-                    appium_url,
-                    app_reference,
-                    request,
-                    runtime_candidates,
-                    analysis.package_name,
-                    browserstack_options,
-                    self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
-                    self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
-                    self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
-                    input_values=input_values or {},
-                    sensitive_input_keys=sensitive_input_keys or set(),
-                    discovery=discovery,
-                    device_farm_service=device_farm_service,
-                    device_farm_session=device_farm_session,
-                ),
-                timeout=self.settings.AUTOPILOT_SUITE_TIMEOUT_SECONDS,
-            )
+            if request.prompt_only:
+                current_discovery = discovery.model_copy(deep=True) if discovery is not None else None
+                pending_tests = list(runtime_candidates)
+                queued_ids = {item.test_id for item in pending_tests}
+                executed_ids: set[str] = set()
+                all_prompt_results: list[AutopilotSuiteTestResult] = []
+                changed_discovery = False
+                prompt_limit = 64
+                while pending_tests and len(executed_ids) < prompt_limit:
+                    wave = pending_tests[: prompt_limit - len(executed_ids)]
+                    unrun = pending_tests[len(wave):]
+                    wave_results = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._run_sync,
+                            job_id,
+                            appium_url,
+                            app_reference,
+                            request,
+                            wave,
+                            analysis.package_name,
+                            browserstack_options,
+                            self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
+                            self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
+                            self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
+                            input_values=input_values or {},
+                            sensitive_input_keys=sensitive_input_keys or set(),
+                            discovery=current_discovery,
+                            device_farm_service=device_farm_service,
+                            device_farm_session=device_farm_session,
+                        ),
+                        timeout=self.settings.AUTOPILOT_SUITE_TIMEOUT_SECONDS,
+                    )
+                    all_prompt_results.extend(wave_results)
+                    wave_ids = {item.test_id for item in wave}
+                    executed_ids.update(wave_ids)
+                    if current_discovery is not None:
+                        current_discovery, changed = self._merge_prompt_branch_observations(
+                            current_discovery,
+                            wave_results,
+                        )
+                        changed_discovery = changed_discovery or changed
+                    next_tests = list(unrun)
+                    if current_discovery is not None:
+                        expanded_analysis = self.prototype.expand_discovered_coverage(
+                            analysis,
+                            current_discovery,
+                        )
+                        expanded_bundle = AutopilotIRCompiler().compile_bundle(
+                            expanded_analysis,
+                            current_discovery,
+                            setup,
+                            input_values=input_values,
+                            full_uat=request.execution_mode == "full_uat",
+                        )
+                        discovered_cases = self._prompt_only_cases(expanded_bundle.tests)
+                        discovered_cases = [
+                            item for item in discovered_cases
+                            if (not requested_ids or item.test_id in requested_ids)
+                            and (not requested_buckets or item.bucket in requested_buckets)
+                            and item.test_id not in queued_ids
+                            and item.test_id not in executed_ids
+                        ]
+                        discovered_cases.sort(
+                            key=lambda item: self._selection_priority(item, current_discovery)
+                        )
+                        executable_new = [
+                            item for item in discovered_cases
+                            if item.readiness == "executable" and self._supported(item)
+                        ]
+                        room = max(0, prompt_limit - len(executed_ids) - len(next_tests))
+                        next_tests.extend(executable_new[:room])
+                        queued_ids.update(item.test_id for item in executable_new[:room])
+                        remaining_count = max(
+                            remaining_count,
+                            len(executable_new) - room,
+                        )
+                    pending_tests = next_tests
+                results = all_prompt_results
+                if current_discovery is not None and changed_discovery:
+                    discovery_update = current_discovery
+                    expanded_analysis = self.prototype.expand_discovered_coverage(
+                        analysis,
+                        current_discovery,
+                    )
+                    expanded_bundle = AutopilotIRCompiler().compile_bundle(
+                        expanded_analysis,
+                        current_discovery,
+                        setup,
+                        input_values=input_values,
+                        full_uat=request.execution_mode == "full_uat",
+                    )
+                    all_cases = self._prompt_only_cases(expanded_bundle.tests)
+                    all_cases = [
+                        item for item in all_cases
+                        if (not requested_ids or item.test_id in requested_ids)
+                        and (not requested_buckets or item.bucket in requested_buckets)
+                    ]
+                    all_cases.sort(key=lambda item: self._selection_priority(item, current_discovery))
+                    selection_remaining_count = max(
+                        selection_remaining_count,
+                        len(all_cases) - prompt_limit,
+                    )
+                    selected = all_cases[:prompt_limit]
+                    candidates = [
+                        item for item in selected
+                        if item.readiness == "executable" and self._supported(item)
+                    ]
+                    deferred = [item for item in selected if item not in candidates]
+                    deferred_results = self._deferred_results(deferred) if request.include_deferred else []
+                if pending_tests:
+                    remaining_count = max(remaining_count, len(pending_tests))
+                remaining_count = max(remaining_count, selection_remaining_count)
+            else:
+                results = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._run_sync,
+                        job_id,
+                        appium_url,
+                        app_reference,
+                        request,
+                        runtime_candidates,
+                        analysis.package_name,
+                        browserstack_options,
+                        self.settings.AUTOPILOT_APPIUM_INSTALL_TIMEOUT_SECONDS * 1000,
+                        self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
+                        self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
+                        input_values=input_values or {},
+                        sensitive_input_keys=sensitive_input_keys or set(),
+                        discovery=discovery,
+                        device_farm_service=device_farm_service,
+                        device_farm_session=device_farm_session,
+                    ),
+                    timeout=self.settings.AUTOPILOT_SUITE_TIMEOUT_SECONDS,
+                )
         except Exception as exc:
             finished = datetime.now(timezone.utc)
             # A session that is connected to the provider but showing system
@@ -361,6 +484,8 @@ class AutopilotSuiteService:
             bucket_counts=self._bucket_counts(selected),
             error=None,
             tests=ordered_results,
+            discovery_update=discovery_update,
+            remaining_count=remaining_count,
         )
 
     @staticmethod
@@ -372,6 +497,117 @@ class AutopilotSuiteService:
             if test.runtime_prompt_id
             and any(step.action == "prompt_choice" for step in test.steps)
         ]
+
+    @staticmethod
+    def _merge_prompt_branch_observations(
+        discovery: AutopilotDiscoveryResult,
+        results: list[AutopilotSuiteTestResult],
+    ) -> tuple[AutopilotDiscoveryResult, bool]:
+        """Merge outcomes and newly reached prompts into the branch graph."""
+        prompts = {item.prompt_id: item.model_copy(deep=True) for item in discovery.runtime_prompts}
+        changed = False
+
+        def update_choice(prompt_id: str, choice_key: str, **updates: Any) -> None:
+            nonlocal changed
+            prompt = prompts.get(prompt_id)
+            if prompt is None:
+                return
+            updated_choices = []
+            for choice in prompt.choices:
+                if choice.key == choice_key:
+                    values = {key: value for key, value in updates.items() if value is not None}
+                    if values and any(getattr(choice, key) != value for key, value in values.items()):
+                        choice = choice.model_copy(update=values)
+                        changed = True
+                updated_choices.append(choice)
+            prompt.choices = updated_choices
+
+        for result in results:
+            for action in (result.evidence or {}).get("actions", []):
+                if action.get("action") != "prompt_choice":
+                    continue
+                prompt_id = action.get("prompt_id")
+                choice_key = action.get("choice_key")
+                if not prompt_id or not choice_key:
+                    continue
+                update_choice(
+                    str(prompt_id),
+                    str(choice_key),
+                    outcome_status="observed",
+                    resulting_prompt_id=action.get("resulting_prompt_id"),
+                    resulting_screen_id=action.get("resulting_screen_id"),
+                )
+                resulting_surface = action.get("resulting_surface")
+                if isinstance(resulting_surface, dict):
+                    update_choice(
+                        str(prompt_id),
+                        str(choice_key),
+                        outcome_status="observed",
+                        resulting_surface_kind=resulting_surface.get("kind"),
+                        resulting_surface_label=resulting_surface.get("label"),
+                    )
+            for observation in result.observed_runtime_prompts:
+                if observation.source_prompt_id and observation.source_choice_key:
+                    update_choice(
+                        observation.source_prompt_id,
+                        observation.source_choice_key,
+                        outcome_status="observed",
+                        resulting_prompt_id=observation.prompt_id,
+                    )
+                existing = prompts.get(observation.prompt_id)
+                if existing is None:
+                    prompts[observation.prompt_id] = observation.model_copy(deep=True)
+                    changed = True
+                    continue
+                choices = {item.key: item for item in existing.choices}
+                for observed_choice in observation.choices:
+                    previous_choice = choices.get(observed_choice.key)
+                    if previous_choice is None:
+                        choices[observed_choice.key] = observed_choice
+                        continue
+                    locators = list(previous_choice.locators)
+                    for locator in observed_choice.locators:
+                        if not any(
+                            item.strategy == locator.strategy and item.value == locator.value
+                            for item in locators
+                        ):
+                            locators.append(locator)
+                    choices[observed_choice.key] = observed_choice.model_copy(update={
+                        "locators": locators,
+                        "outcome_status": (
+                            observed_choice.outcome_status
+                            if observed_choice.outcome_status != "planned"
+                            else previous_choice.outcome_status
+                        ),
+                        "resulting_screen_id": (
+                            observed_choice.resulting_screen_id or previous_choice.resulting_screen_id
+                        ),
+                        "resulting_prompt_id": (
+                            observed_choice.resulting_prompt_id or previous_choice.resulting_prompt_id
+                        ),
+                        "resulting_surface_kind": (
+                            observed_choice.resulting_surface_kind or previous_choice.resulting_surface_kind
+                        ),
+                        "resulting_surface_label": (
+                            observed_choice.resulting_surface_label or previous_choice.resulting_surface_label
+                        ),
+                    })
+                updates: dict[str, Any] = {"choices": list(choices.values())}
+                for key in (
+                    "source_screen_id",
+                    "trigger_control_id",
+                    "source_prompt_id",
+                    "source_choice_key",
+                ):
+                    if not getattr(existing, key) and getattr(observation, key):
+                        updates[key] = getattr(observation, key)
+                if any(getattr(existing, key) != value for key, value in updates.items()):
+                    prompts[observation.prompt_id] = existing.model_copy(update=updates)
+                    changed = True
+
+        if not changed:
+            return discovery, False
+        return discovery.model_copy(update={"runtime_prompts": list(prompts.values())}), True
 
     def _selection_priority(
         self,
@@ -684,6 +920,7 @@ class AutopilotSuiteService:
     ) -> list[AutopilotSuiteTestResult]:
         from appium import webdriver
         from appium.webdriver.client_config import AppiumClientConfig
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
 
         input_values = input_values or {}
         sensitive_input_keys = sensitive_input_keys or set()
@@ -796,7 +1033,7 @@ class AutopilotSuiteService:
         try:
             time.sleep(2)
             initial_source = safe_page_source(driver)
-            initial_prompt_kind = known_native_prompt_kind(
+            initial_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
                 driver, initial_source, request.target_kind
             )
             initial_prompt_test_index = next(
@@ -911,7 +1148,7 @@ class AutopilotSuiteService:
                         (step.target for step in test.steps if step.action == "prompt_choice"),
                         None,
                     )
-                    current_prompt_kind = known_native_prompt_kind(
+                    current_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
                         driver, safe_page_source(driver), request.target_kind
                     )
                     if has_prompt_step and (
@@ -980,7 +1217,9 @@ class AutopilotSuiteService:
                         # video begins on the reinstalled app.
                         video_started, video_status = self._start_video_recording(driver)
                     case_source = safe_page_source(driver)
-                    if expected_prompt_kind and known_native_prompt_kind(driver, case_source, request.target_kind) == expected_prompt_kind:
+                    if expected_prompt_kind and AutopilotDiscoveryService._runtime_prompt_kind(
+                        driver, case_source, request.target_kind
+                    ) == expected_prompt_kind:
                         case_target_ready, case_target_reason = True, "The observed system prompt is active for its recorded branch."
                     else:
                         case_target_ready, case_target_reason, _ = validate_target_surface(
@@ -1092,6 +1331,7 @@ class AutopilotSuiteService:
                     duration_seconds=round(time.perf_counter() - test_started, 2),
                     error=error,
                     evidence=evidence,
+                    observed_runtime_prompts=evidence.pop("observed_runtime_prompts", []),
                     journey=test.journey,
                     page_label=test.page_label,
                     page_url=test.page_url,
@@ -1814,6 +2054,21 @@ class AutopilotSuiteService:
     ) -> list[dict[str, str]]:
         if not discovery or not discovery.screens:
             return []
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        expected_prompt_kind = next(
+            (step.target for step in test.steps if step.action == "prompt_choice"),
+            None,
+        )
+        if expected_prompt_kind and AutopilotDiscoveryService._runtime_prompt_kind(
+            driver,
+            safe_page_source(driver),
+            target_kind,
+        ) == expected_prompt_kind:
+            # Prompt branch IR includes its own screen route. Do not make the
+            # discovery-screen guard reject a valid native/app dialog before
+            # that explicit route can choose the checkpoint.
+            return []
         entry_step = next(
             (
                 step for step in test.steps
@@ -1912,7 +2167,7 @@ class AutopilotSuiteService:
                 return []
 
             if self._is_transient_launch_surface(current):
-                prompt_kind = known_native_prompt_kind(
+                prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
                     driver, safe_page_source(driver), target_kind
                 )
                 should_relaunch = (
@@ -2255,6 +2510,7 @@ class AutopilotSuiteService:
         discovery: AutopilotDiscoveryResult | None = None,
     ) -> Dict[str, Any]:
         from appium.webdriver.common.appiumby import AppiumBy
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
 
         locator_map = {
             "accessibility_id": AppiumBy.ACCESSIBILITY_ID,
@@ -2262,21 +2518,95 @@ class AutopilotSuiteService:
             "xpath": AppiumBy.XPATH,
         }
         actions: list[dict[str, Any]] = []
+        observed_runtime_prompts: list[RuntimePromptObservation] = []
         input_values = input_values or {}
         sensitive_input_keys = sensitive_input_keys or set()
         sensitive_input_touched = False
         previous_surface_fingerprint: str | None = None
+
+        def capture_runtime_prompt(
+            source: str,
+            *,
+            screen_id: str | None = None,
+            trigger_step: QTXIRStep | None = None,
+            source_prompt_id: str | None = None,
+            source_choice_key: str | None = None,
+        ) -> RuntimePromptObservation | None:
+            from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+            prompt = AutopilotDiscoveryService._runtime_prompt_observation(
+                driver,
+                source,
+                evidence_dir,
+                target_kind,
+                persist_evidence=not sensitive_input_touched,
+            )
+            if prompt is None:
+                return None
+            trigger_control_id = None
+            if trigger_step is not None and discovery is not None and screen_id:
+                source_screen = next(
+                    (item for item in discovery.screens if item.screen_id == screen_id),
+                    None,
+                )
+                candidates = [
+                    (trigger_step.locator_strategy, trigger_step.locator_value),
+                    *[
+                        (item.strategy, item.value)
+                        for item in trigger_step.locator_fallbacks
+                    ],
+                ]
+                control = next(
+                    (
+                        item for item in (source_screen.controls if source_screen else [])
+                        if item.semantic_label == trigger_step.target
+                        or any(
+                            (locator.strategy, locator.value) in candidates
+                            for locator in item.locators
+                        )
+                    ),
+                    None,
+                )
+                trigger_control_id = control.control_id if control else None
+            prompt = prompt.model_copy(update={
+                "source_screen_id": screen_id,
+                "trigger_control_id": trigger_control_id,
+                "source_prompt_id": source_prompt_id,
+                "source_choice_key": source_choice_key,
+            })
+            if not any(item.prompt_id == prompt.prompt_id for item in observed_runtime_prompts):
+                observed_runtime_prompts.append(prompt)
+            return prompt
+
+        def prompt_choice_follows(step_index: int, prompt_kind: str) -> bool:
+            """Continue when this prompt is the explicit next branch target."""
+            expected_kind = next(
+                (
+                    candidate.target
+                    for candidate in test.steps[step_index:]
+                    if candidate.action == "prompt_choice"
+                ),
+                None,
+            )
+            return expected_kind == prompt_kind
+
         for index, step in enumerate(test.steps, start=1):
             mechanism: str | None = None
             resulting_prompt_kind: str | None = None
             resulting_prompt_id: str | None = None
             resulting_screen_id: str | None = None
+            resulting_surface: dict[str, str] | None = None
+            prompt_source_id: str | None = None
+            prompt_choice_key: str | None = None
+            stop_after_observed_prompt = False
             if step.action == "launch_app":
                 expected_prompt_kind = next(
                     (item.target for item in test.steps if item.action == "prompt_choice"),
                     None,
                 )
-                current_prompt_kind = known_native_prompt_kind(driver, safe_page_source(driver), target_kind)
+                current_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+                    driver, safe_page_source(driver), target_kind
+                )
                 if (
                     current_prompt_kind != expected_prompt_kind
                     and package
@@ -2286,14 +2616,20 @@ class AutopilotSuiteService:
                     time.sleep(1)
             elif step.action == "prompt_choice":
                 current_source = safe_page_source(driver)
-                actual_kind = known_native_prompt_kind(driver, current_source, target_kind)
+                actual_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+                    driver, current_source, target_kind
+                )
                 if actual_kind != step.target:
                     raise AssertionError(
                         f"Expected the observed {step.target or 'system'} prompt, but it was not active."
                     )
                 if not step.locator_strategy or not step.locator_value:
                     raise AssertionError("Observed prompt choice has no deterministic locator")
-                initial_prompt_id = native_prompt_fingerprint(driver, current_source, target_kind)
+                initial_prompt_id = AutopilotDiscoveryService._runtime_prompt_fingerprint(
+                    driver,
+                    current_source,
+                    target_kind,
+                )
                 candidates = [(step.locator_strategy, step.locator_value)]
                 candidates.extend(
                     (locator.strategy, locator.value)
@@ -2329,9 +2665,15 @@ class AutopilotSuiteService:
                 returned_to_app = False
                 while time.monotonic() < deadline:
                     current_source = safe_page_source(driver)
-                    next_prompt_kind = known_native_prompt_kind(driver, current_source, target_kind)
+                    next_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+                        driver, current_source, target_kind
+                    )
                     if next_prompt_kind:
-                        next_prompt_id = native_prompt_fingerprint(driver, current_source, target_kind)
+                        next_prompt_id = AutopilotDiscoveryService._runtime_prompt_fingerprint(
+                            driver,
+                            current_source,
+                            target_kind,
+                        )
                         if next_prompt_kind != actual_kind or (
                             next_prompt_id and initial_prompt_id and next_prompt_id != initial_prompt_id
                         ):
@@ -2340,6 +2682,17 @@ class AutopilotSuiteService:
                             returned_to_app = True
                             break
                     else:
+                        resulting_surface = AutopilotDiscoveryService._external_prompt_surface(
+                            driver,
+                            current_source,
+                            target_kind=target_kind,
+                            expected_package=package,
+                            prompt_kind=actual_kind,
+                            decision=step.assertion,
+                        )
+                        if resulting_surface is not None:
+                            returned_to_app = True
+                            break
                         returned_to_app, _, _ = validate_target_surface(
                             driver,
                             expected_package=package,
@@ -2350,30 +2703,29 @@ class AutopilotSuiteService:
                     time.sleep(0.25)
                 if not returned_to_app:
                     raise AssertionError("The selected prompt choice did not reach the app or a new observed system prompt")
-                if step.expected_resulting_prompt_id:
-                    if resulting_prompt_id != step.expected_resulting_prompt_id:
-                        raise AssertionError(
-                            "The selected prompt choice did not reach its observed follow-up system prompt."
-                        )
-                elif step.expected_resulting_screen_id:
-                    if resulting_prompt_kind:
-                        raise AssertionError(
-                            "The selected prompt choice reached a system prompt instead of its observed app screen."
-                        )
+                prompt_source_id = initial_prompt_id
+                prompt_choice_key = step.value
+                if resulting_prompt_kind:
+                    prompt_observation = capture_runtime_prompt(
+                        current_source,
+                        source_prompt_id=initial_prompt_id,
+                        source_choice_key=step.value,
+                    )
+                    if prompt_observation is not None:
+                        resulting_prompt_id = prompt_observation.prompt_id
+                    stop_after_observed_prompt = True
+                if not resulting_prompt_kind:
                     reached_screen = (
                         self._identify_discovered_screen(driver, discovery, package)
                         if discovery is not None
                         else None
                     )
-                    if reached_screen is None or reached_screen.screen_id != step.expected_resulting_screen_id:
-                        raise AssertionError(
-                            "The selected prompt choice did not reach its observed app screen."
-                        )
-                    resulting_screen_id = reached_screen.screen_id
-                elif not resulting_prompt_kind and discovery is not None:
-                    reached_screen = self._identify_discovered_screen(driver, discovery, package)
                     resulting_screen_id = reached_screen.screen_id if reached_screen is not None else None
-                mechanism = f"observed_prompt_choice:{step.assertion or step.value or 'selected'}"
+                mechanism = (
+                    "observed_external_surface"
+                    if resulting_surface is not None
+                    else f"observed_prompt_choice:{step.assertion or step.value or 'selected'}"
+                )
             elif step.action == "inspect_ui":
                 source = driver.page_source or ""
                 if not source.strip():
@@ -2523,11 +2875,26 @@ class AutopilotSuiteService:
                             else:
                                 raise
                     time.sleep(0.9)
-                    if package:
+                    post_action_source = safe_page_source(driver)
+                    prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+                        driver, post_action_source, target_kind
+                    )
+                    if prompt_kind:
+                        prompt_observation = capture_runtime_prompt(
+                            post_action_source,
+                            screen_id=step.screen_id,
+                            trigger_step=step,
+                        )
+                        if prompt_observation is not None:
+                            resulting_prompt_kind = prompt_observation.kind
+                            resulting_prompt_id = prompt_observation.prompt_id
+                            mechanism = "observed_runtime_prompt_trigger"
+                            stop_after_observed_prompt = not prompt_choice_follows(index, prompt_kind)
+                    if not stop_after_observed_prompt and package:
                         target_ready, target_reason, _ = validate_target_surface(
                             driver,
                             expected_package=package,
-                            page_source=safe_page_source(driver),
+                            page_source=post_action_source,
                         )
                         if not target_ready:
                             raise ProviderLifecycleUnavailable(
@@ -2632,6 +2999,22 @@ class AutopilotSuiteService:
                     )
             else:
                 raise RuntimeError(f"IR action is not permitted by the safe suite runner: {step.action}")
+            if not stop_after_observed_prompt and step.action in {"select", "press"}:
+                post_action_source = safe_page_source(driver)
+                prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+                    driver, post_action_source, target_kind
+                )
+                if prompt_kind:
+                    prompt_observation = capture_runtime_prompt(
+                        post_action_source,
+                        screen_id=step.screen_id,
+                        trigger_step=step,
+                    )
+                    if prompt_observation is not None:
+                        resulting_prompt_kind = prompt_observation.kind
+                        resulting_prompt_id = prompt_observation.prompt_id
+                        mechanism = "observed_runtime_prompt_trigger"
+                        stop_after_observed_prompt = not prompt_choice_follows(index, prompt_kind)
             action_evidence = {
                 "action": step.action,
                 "target": step.target,
@@ -2641,11 +3024,20 @@ class AutopilotSuiteService:
             if resulting_prompt_kind:
                 action_evidence["resulting_prompt_kind"] = resulting_prompt_kind
                 action_evidence["resulting_prompt_id"] = resulting_prompt_id
+            if prompt_source_id:
+                action_evidence["prompt_id"] = prompt_source_id
+                action_evidence["choice_key"] = prompt_choice_key
+            if step.action == "prompt_choice":
+                action_evidence["choice_key"] = step.value
             if resulting_screen_id:
                 action_evidence["resulting_screen_id"] = resulting_screen_id
+            if resulting_surface is not None:
+                action_evidence["resulting_surface"] = resulting_surface
             if mechanism:
                 action_evidence["mechanism"] = mechanism
             actions.append(action_evidence)
+            if stop_after_observed_prompt:
+                break
 
         identity = safe_app_identity(
             driver,
@@ -2659,6 +3051,7 @@ class AutopilotSuiteService:
             "actions": actions,
             "evidence_dir": str(evidence_dir),
             "sensitive_input_evidence_suppressed": sensitive_input_touched,
+            "observed_runtime_prompts": observed_runtime_prompts,
         }
 
     @staticmethod

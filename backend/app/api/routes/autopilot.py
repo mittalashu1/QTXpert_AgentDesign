@@ -5493,7 +5493,20 @@ def _strip_suite_evidence_paths(result: AutopilotSuiteResult) -> AutopilotSuiteR
             if path_key in evidence:
                 evidence.pop(path_key, None)
                 changed = True
-        sanitized.append(test.model_copy(update={"evidence": evidence}))
+        observed_prompts = []
+        for prompt in test.observed_runtime_prompts:
+            prompt_update = {}
+            if prompt.screenshot_path:
+                prompt_update["screenshot_path"] = None
+                changed = True
+            if prompt.page_source_path:
+                prompt_update["page_source_path"] = None
+                changed = True
+            observed_prompts.append(prompt.model_copy(update=prompt_update))
+        sanitized.append(test.model_copy(update={
+            "evidence": evidence,
+            "observed_runtime_prompts": observed_prompts,
+        }))
     return result.model_copy(update={"tests": sanitized}) if changed else result
 
 
@@ -5546,6 +5559,48 @@ async def _persist_suite_evidence(
                 candidates = []
         seen_paths: set[str] = set()
         persistence_failed = False
+        observed_prompts = []
+        for prompt in test.observed_runtime_prompts:
+            prompt_updates: dict[str, Any] = {
+                "screenshot_path": None,
+                "page_source_path": None,
+            }
+            for path_key, asset_key, kind, content_type in (
+                ("screenshot_path", "screenshot_asset_id", "screenshot", "image/png"),
+                ("page_source_path", "page_source_asset_id", "page_source", "application/xml"),
+            ):
+                raw_path = getattr(prompt, path_key, None)
+                path = Path(str(raw_path)) if raw_path else None
+                if path is None or not path.is_file():
+                    continue
+                resolved_path = str(path.resolve())
+                seen_paths.add(resolved_path)
+                prompt_updates[path_key] = None
+                if total_assets >= max_assets:
+                    continue
+                asset_id = await _persist_evidence_asset(
+                    db,
+                    user,
+                    job_record,
+                    settings,
+                    str(path),
+                    filename=f"suite-{result.job_id[:8]}-{test.test_id}-prompt-{prompt.prompt_id}-{path.name}",
+                    content_type=content_type,
+                    repository_asset_id=repository_asset_id,
+                    owner_id=owner_id,
+                )
+                if asset_id is not None:
+                    prompt_updates[asset_key] = asset_id
+                    prompt_updates[path_key] = None
+                    assets.append({
+                        "asset_id": str(asset_id),
+                        "filename": path.name,
+                        "kind": kind,
+                    })
+                    total_assets += 1
+                else:
+                    persistence_failed = True
+            observed_prompts.append(prompt.model_copy(update=prompt_updates))
         for path in [*direct_paths, *candidates[:8]]:
             if total_assets >= max_assets or not path.is_file():
                 break
@@ -5614,7 +5669,10 @@ async def _persist_suite_evidence(
                 await asyncio.to_thread(shutil.rmtree, directory)
             except OSError:
                 logger.debug("Autopilot suite evidence cleanup skipped path=%s", directory)
-        updated = test.model_copy(update={"evidence": evidence})
+        updated = test.model_copy(update={
+            "evidence": evidence,
+            "observed_runtime_prompts": observed_prompts,
+        })
         persisted.append(updated)
     if not persisted:
         return result
@@ -5904,6 +5962,67 @@ async def execute_autopilot_suite(
         # Never expose the temporary worker directory if the durable job row
         # is unavailable (for example during a transient database outage).
         result = _strip_suite_evidence_paths(result)
+    if record is not None and result.discovery_update is not None:
+        try:
+            discovery_update = result.discovery_update.model_copy(deep=True)
+            observed_assets = {
+                prompt.prompt_id: prompt
+                for test in result.tests
+                for prompt in test.observed_runtime_prompts
+            }
+            discovery_prompts = []
+            for prompt in discovery_update.runtime_prompts:
+                observed = observed_assets.get(prompt.prompt_id)
+                updates: dict[str, Any] = {
+                    "screenshot_path": None,
+                    "page_source_path": None,
+                }
+                if observed is not None:
+                    updates["screenshot_asset_id"] = observed.screenshot_asset_id or prompt.screenshot_asset_id
+                    updates["page_source_asset_id"] = observed.page_source_asset_id or prompt.page_source_asset_id
+                discovery_prompts.append(prompt.model_copy(update=updates))
+            discovery_update.runtime_prompts = discovery_prompts
+            discovery_update = _merge_discovery_snapshot(
+                _record_discovery(record, job),
+                discovery_update,
+            )
+            analysis = await service.load_analysis(job_id)
+            expanded_analysis = service.expand_discovered_coverage(analysis, discovery_update)
+            previous_map = job.get("application_map")
+            map_version = int(previous_map.get("version") or 0) + 1 if isinstance(previous_map, dict) else 1
+            application_map = build_application_map(
+                job_id=job_id,
+                target_kind=discovery_update.target_kind,
+                target_identity=discovery_update.target_identity or job.get("surface_identity"),
+                screens=discovery_update.screens,
+                transitions=discovery_update.transitions,
+                login_observed=bool(any(item.category == "credential" for item in discovery_update.input_requests)),
+                version=map_version,
+            )
+            expanded_analysis = expanded_analysis.model_copy(update={"application_map": application_map})
+            profile = await _setup_with_input_metadata(
+                db,
+                record,
+                job_id,
+                expanded_analysis,
+                discovery_update,
+            )
+            record.discovery = discovery_update.model_dump(mode="json")
+            record.analysis = expanded_analysis.model_dump(mode="json")
+            record.setup_profile = profile.model_dump(mode="json")
+            await db.commit()
+            await service.update_job(
+                job_id,
+                discovery=record.discovery,
+                application_map=application_map.model_dump(mode="json"),
+                analysis=record.analysis,
+                setup_profile=record.setup_profile,
+            )
+            result = result.model_copy(update={"discovery_update": None})
+        except Exception:
+            await db.rollback()
+            logger.warning("Autopilot suite prompt discovery update skipped job_id=%s", job_id, exc_info=True)
+            result = result.model_copy(update={"discovery_update": None})
     if record is not None:
         try:
             record.suite_execution = result.model_dump(mode="json")
