@@ -501,27 +501,38 @@ function discoveryVerifiedForExecution(discovery: Discovery | null | undefined) 
   );
 }
 
-function discoverySupportsPromptReplay(discovery: Discovery | null | undefined) {
-  // A verified native prompt is itself replayable even when the app shell stays
-  // on a splash. Require a deterministic allow/deny locator so the safe runner
-  // never treats a merely detected dialog as an executable choice.
+function hasExecutableAppConfirmationBranches(tests: TestCase[] | undefined) {
+  return Boolean(tests?.some((test) => (
+    test.id.startsWith("QT-RUNTIME-CHECKPOINT-")
+    && test.autonomous_candidate === true
+    && !test.destructive
+  )));
+}
+
+function discoverySupportsPromptReplay(discovery: Discovery | null | undefined, tests?: TestCase[]) {
+  // Replay any observed prompt branch, including deterministic app-level
+  // confirmation cases. A native permission dialog can be replayed even when
+  // the app shell remains on a splash screen.
   return Boolean(
     discovery
     && discovery.target_ready === true
     && (discovery.status === "completed" || discovery.status === "partial")
     && discovery.last_attempt_status !== "blocked"
     && discovery.last_attempt_status !== "failed"
-    && discovery.runtime_prompts?.some((prompt) => prompt.choices.some((choice) => (
-      choice.decision !== "other"
-      && choice.outcome_status !== "unavailable"
-      && (choice.locators?.length || 0) > 0
-    )))
+    && (
+      discovery.runtime_prompts?.some((prompt) => prompt.choices.some((choice) => (
+        choice.decision !== "other"
+        && choice.outcome_status !== "unavailable"
+        && (choice.locators?.length || 0) > 0
+      )))
+      || hasExecutableAppConfirmationBranches(tests)
+    )
   );
 }
 
-function discoveryAllowsSuiteSelection(discovery: Discovery | null | undefined, bucket: string) {
+function discoveryAllowsSuiteSelection(discovery: Discovery | null | undefined, bucket: string, tests?: TestCase[]) {
   return discoveryVerifiedForExecution(discovery)
-    || (bucket === "permissions" && discoverySupportsPromptReplay(discovery));
+    || (bucket === "permissions" && discoverySupportsPromptReplay(discovery, tests));
 }
 
 function isBlockingCheckpoint(request: AutopilotInputRequest) {
@@ -1962,7 +1973,7 @@ export default function AutopilotPage() {
       await refreshReport(jobId);
       await refreshWorkflow(jobId);
       const verifiedDiscovery = discoveryVerifiedForExecution(response.data);
-      const promptReplayAvailable = discoverySupportsPromptReplay(response.data);
+      const promptReplayAvailable = discoverySupportsPromptReplay(response.data, latestJob.analysis?.tests);
       const latestPhase = latestJob.phase || latestJob.analysis?.phase;
       if ((!verifiedDiscovery && !promptReplayAvailable) || latestPhase === "blocked" || latestJob.status === "failed") {
         const reason = response.data.checkpoint_message
@@ -2116,8 +2127,7 @@ export default function AutopilotPage() {
       const latestDiscoveryReady = discoveryVerifiedForExecution(latestDiscovery);
       const promptOnly = executionMode === "safe_navigation"
         && executionBucket === "permissions"
-        && !latestDiscoveryReady
-        && discoverySupportsPromptReplay(latestDiscovery);
+        && discoverySupportsPromptReplay(latestDiscovery, latestJob.analysis?.tests);
       if ((!latestDiscoveryReady && !promptOnly) || latestJob.phase === "blocked" || latestJob.analysis?.phase === "blocked") {
         const reason = latestDiscovery?.last_attempt_reason
           || latestDiscovery?.target_identity_reason
@@ -2144,7 +2154,7 @@ export default function AutopilotPage() {
         ...executionPayload(),
         max_tests: suiteMaxTests,
         test_ids: [],
-        buckets: executionMode === "full_uat" || executionBucket === "all" ? [] : [executionBucket],
+        buckets: promptOnly || executionMode === "full_uat" || executionBucket === "all" ? [] : [executionBucket],
         include_deferred: true,
         prompt_only: promptOnly,
         execution_mode: executionMode,
@@ -2281,7 +2291,7 @@ export default function AutopilotPage() {
     && !planAwaitingApproval
     && !executionUnavailable
     && suiteExecutableCount > 0
-    && discoveryAllowsSuiteSelection(discovery, suiteBucket)
+    && discoveryAllowsSuiteSelection(discovery, suiteBucket, analysis?.tests)
   );
   const safeCasesNeedInteractiveSurface = Boolean(
     discovery?.target_ready === true && discovery.interactive_surface_ready === false
@@ -2598,8 +2608,8 @@ export default function AutopilotPage() {
               <Button size="small" variant="outlined" onClick={openScopeSetup} startIcon={<AutoAwesomeIcon />}>{analysis ? "Refine scope" : "Choose target"}</Button>
               {analysis && planAwaitingApproval && <Button size="small" variant="contained" onClick={() => { void approvePlanAndDiscover(); }} disabled={workflowBusy || discoveryBusy || executionUnavailable} startIcon={<TravelExploreOutlinedIcon />}>Approve &amp; discover</Button>}
               {analysis && !planAwaitingApproval && <>
-                <Button size="small" variant="contained" onClick={() => void runSuite(analysis.job_id, "safe_navigation")} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryAllowsSuiteSelection(discovery, suiteBucket)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>
-                {discoverySupportsPromptReplay(discovery) && <Button size="small" variant="outlined" onClick={() => void runSuite(analysis.job_id, "safe_navigation", "permissions")} disabled={suiteBusy || executionUnavailable} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run permission prompts</Button>}
+                <Button size="small" variant="contained" onClick={() => void runSuite(analysis.job_id, "safe_navigation")} disabled={suiteBusy || executionUnavailable || suiteExecutableCount === 0 || !discoveryAllowsSuiteSelection(discovery, suiteBucket, analysis?.tests)} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run safe cases</Button>
+                {discoverySupportsPromptReplay(discovery, analysis.tests) && <Button size="small" variant="outlined" onClick={() => void runSuite(analysis.job_id, "safe_navigation", "permissions")} disabled={suiteBusy || executionUnavailable} startIcon={suiteBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>Run prompt branches</Button>}
               </>}
             </Stack>
           </CardContent>
@@ -2986,8 +2996,8 @@ export default function AutopilotPage() {
                 : safeCasesRunnable
                   ? " Safe deterministic cases can be run now."
                   : safeCasesNeedInteractiveSurface
-                    ? discoverySupportsPromptReplay(discovery)
-                      ? " The app screen is noninteractive. Run permission prompt cases to replay observed native dialog choices; screen-based cases remain blocked."
+                    ? discoverySupportsPromptReplay(discovery, analysis?.tests)
+                      ? " The app screen is noninteractive. Run prompt branches to replay observed system and app confirmation choices; other screen-based cases remain blocked."
                       : " Runtime Discovery needs an interactive app surface before screen-based safe cases can run."
                     : " Safe execution is waiting for target, provider or case readiness."
               }
@@ -3114,7 +3124,7 @@ export default function AutopilotPage() {
                 </Select>
               </FormControl>
             </>}
-            <Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || !(suiteMode === "safe_navigation" ? discoveryAllowsSuiteSelection(discovery, suiteBucket) : discoveryVerifiedForExecution(discovery)) || (suiteMode === "full_uat" ? (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified || !analysis?.tests?.length) : suiteExecutableCount === 0)} onClick={runSuite}>
+            <Button variant="contained" startIcon={suiteBusy ? <CircularProgress size={16} color="inherit" /> : <PlayArrowRoundedIcon />} disabled={suiteBusy || executionUnavailable || !(suiteMode === "safe_navigation" ? discoveryAllowsSuiteSelection(discovery, suiteBucket, analysis?.tests) : discoveryVerifiedForExecution(discovery)) || (suiteMode === "full_uat" ? (!fullUatConfirmed || !providerStatus?.full_uat_sandbox_verified || !analysis?.tests?.length) : suiteExecutableCount === 0)} onClick={runSuite}>
               {suiteBusy ? "Running suite…" : suiteMode === "full_uat" ? "Run all eligible UAT cases" : suiteBucket === "all" ? `Run safe batch (${suiteMaxTests})` : `Run ${testBucketLabel[suiteBucket]} (${suiteMaxTests})`}
             </Button>
           </Stack>
