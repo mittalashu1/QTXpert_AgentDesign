@@ -16,6 +16,7 @@ from app.schemas.autopilot import (
     DiscoveryLocator,
     QTXIRStep,
     QTXTestIR,
+    RuntimePromptBranchRef,
     RuntimePromptChoice,
     RuntimePromptObservation,
 )
@@ -158,6 +159,100 @@ def _test_ir(actions):
         promoted_by_discovery=True,
         steps=actions,
     )
+
+
+def test_app_confirmation_replays_observed_startup_prompt_path(monkeypatch, tmp_path):
+    from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _SystemUiForegroundDriver()
+    driver.current_package = "com.android.permissioncontroller"
+    driver.page_source = (
+        '<hierarchy><node package="com.android.permissioncontroller" text="Allow location" /></hierarchy>'
+    )
+    permission = RuntimePromptObservation(
+        prompt_id="startup-location",
+        kind="runtime_permission",
+        choices=[
+            RuntimePromptChoice(
+                key="while-using",
+                label="Allow while using",
+                decision="allow",
+                locators=[DiscoveryLocator(strategy="id", value="permission_allow", confidence=0.99)],
+            ),
+            RuntimePromptChoice(
+                key="deny",
+                label="Don’t allow",
+                decision="deny",
+                locators=[DiscoveryLocator(strategy="id", value="permission_deny", confidence=0.99)],
+            ),
+        ],
+    )
+    discovery = AutopilotDiscoveryResult(
+        job_id="prompt-entry-bootstrap",
+        status="completed",
+        provider="browserstack",
+        started_at="2026-11-07T00:00:00+00:00",
+        finished_at="2026-11-07T00:00:01+00:00",
+        duration_seconds=1,
+        device_name="Google Pixel 8",
+        target_ready=True,
+        runtime_prompts=[permission],
+        entry_prompt_path=[
+            RuntimePromptBranchRef(prompt_id="startup-location", choice_key="while-using")
+        ],
+    )
+    monkeypatch.setattr(
+        AutopilotDiscoveryService,
+        "_runtime_prompt_kind",
+        staticmethod(lambda _driver, source, _target_kind="android": (
+            "runtime_permission" if "permissioncontroller" in source else None
+        )),
+    )
+    monkeypatch.setattr(
+        AutopilotDiscoveryService,
+        "_runtime_prompt_fingerprint",
+        staticmethod(lambda _driver, source, _target_kind="android": (
+            "startup-location" if "permissioncontroller" in source else None
+        )),
+    )
+    executed = []
+
+    def execute_setup(driver_arg, setup_test, _evidence_dir, package, _target_kind,
+                      _input_values, _sensitive_keys, _launch_activity, _discovery):
+        step = setup_test.steps[0]
+        assert step.action == "prompt_choice"
+        assert step.value == "while-using"
+        executed.append(step.value)
+        driver_arg.current_package = package
+        driver_arg.page_source = f'<hierarchy package="{package}"><node text="Home" /></hierarchy>'
+        return {"actions": [{"action": "prompt_choice", "choice_key": step.value}]}
+
+    monkeypatch.setattr(service, "_execute_test", execute_setup)
+    checkpoint = _test_ir([
+        QTXIRStep(action="tap", description="Choose Proceed", target="Verify session"),
+    ]).model_copy(update={
+        "test_id": "QT-RUNTIME-CHECKPOINT-PROCEED",
+        "bucket": "functional_positive",
+    })
+
+    evidence = service._replay_observed_entry_prompt_path(
+        driver,
+        checkpoint,
+        discovery,
+        "com.qtx.demo",
+        "android",
+        tmp_path / "confirmation",
+    )
+
+    assert executed == ["while-using"]
+    assert evidence == [{
+        "prompt_kind": "runtime_permission",
+        "choice": "while-using",
+        "decision": "allow",
+        "status": "passed",
+    }]
+    assert driver.current_package == "com.qtx.demo"
 
 
 def test_static_manifest_security_case_runs_without_device_ui():
