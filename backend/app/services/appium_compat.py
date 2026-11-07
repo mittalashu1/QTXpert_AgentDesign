@@ -8,10 +8,15 @@ helpers derive identity from negotiated capabilities and the UI hierarchy only.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Optional
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 _PACKAGE_RE = re.compile(r'\bpackage="([^"]+)"')
@@ -688,12 +693,45 @@ def enter_observed_text(
         raise ProviderLifecycleUnavailable("The observed input could not be entered through this device provider.") from None
 
 
-def safe_quit(driver: Any) -> None:
-    """Best-effort session cleanup that cannot mask the recorded result."""
-    try:
-        driver.quit()
-    except Exception:
-        pass
+def safe_quit(driver: Any, *, timeout_seconds: float = 10.0) -> bool:
+    """Best-effort, bounded session cleanup that cannot mask a recorded result.
+
+    Hosted Appium providers can leave ``quit()`` waiting on a remote DELETE
+    response after the last test has already finished. Run that call in a
+    daemon thread so teardown can never keep the suite request open forever.
+    A timed-out remote session is left for the provider's session timeout to
+    reap; the caller can continue to persist the result immediately.
+    """
+    quit_method = getattr(driver, "quit", None) if driver is not None else None
+    if not callable(quit_method):
+        return True
+
+    failures: list[Exception] = []
+
+    def quit_remote_session() -> None:
+        try:
+            quit_method()
+        except Exception as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(
+        target=quit_remote_session,
+        name="appium-session-cleanup",
+        daemon=True,
+    )
+    worker.start()
+    timeout = max(0.0, float(timeout_seconds))
+    worker.join(timeout)
+    if worker.is_alive():
+        _LOGGER.warning(
+            "Appium session cleanup timed out after %.1fs; continuing result persistence",
+            timeout,
+        )
+        return False
+    if failures:
+        _LOGGER.debug("Appium session cleanup failed: %s", type(failures[0]).__name__)
+        return False
+    return True
 
 
 def safe_background_application(
