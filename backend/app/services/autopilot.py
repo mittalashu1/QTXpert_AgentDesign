@@ -3094,6 +3094,14 @@ class AutopilotPrototypeService:
             r"will be logged out|logged out from|cannot be undone|discard|remove|delete|sign out|log out)\b",
             re.I,
         )
+        high_impact_confirmation_copy = re.compile(
+            r"\b(?:money|payment|pay|transfer|withdraw|deposit|purchase|buy|sell|trade|transaction|funds|"
+            r"delete|remove|erase|clear\s+(?:all\s+)?data|close\s+(?:the\s+)?account|"
+            r"terminate\s+(?:the\s+)?account|permanently|cannot\s+be\s+undone|irreversible|"
+            r"reset\s+(?:the\s+)?password|change\s+(?:the\s+)?password|revoke\s+access|"
+            r"disable\s+(?:(?:two|2)\s*[- ]?factor|mfa))\b",
+            re.I,
+        )
 
         def normalized_checkpoint_label(value: str | None) -> str:
             return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold())).strip()
@@ -3210,7 +3218,16 @@ class AutopilotPrototypeService:
                                         if decision == "confirm"
                                         else []
                                     ),
-                                    destructive=decision == "confirm",
+                                    # Reversible session confirmations such as
+                                    # "log out other devices" are prompt
+                                    # branches the user explicitly asked
+                                    # Autopilot to explore. Keep actual money,
+                                    # deletion, account closure and security
+                                    # changes behind the existing UAT gate.
+                                    destructive=(
+                                        decision == "confirm"
+                                        and high_impact_confirmation_copy.search(visible_confirmation_copy) is not None
+                                    ),
                                     requires_auth=auth_observed,
                                     autonomous_candidate=reachable,
                                     dependency=(

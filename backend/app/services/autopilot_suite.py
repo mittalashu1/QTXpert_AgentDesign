@@ -927,6 +927,7 @@ class AutopilotSuiteService:
 
         is_ios = request.target_kind == "ios"
         is_device_farm = request.provider == "devicefarm"
+        is_browserstack = request.provider == "browserstack"
         has_prompt_cases = any(
             any(step.action == "prompt_choice" for step in test.steps)
             for test in tests
@@ -984,9 +985,10 @@ class AutopilotSuiteService:
                 }
             )
         if has_prompt_cases and not is_device_farm:
-            # Local Appium can re-arm the prompt with a full uninstall/install.
-            # Device Farm prompt replay uses its remote-access install API below;
-            # fastReset is not reliable on the managed endpoint.
+            # Local Appium can re-arm a prompt in-session with a full
+            # uninstall/install. BrowserStack cannot revoke Android permission
+            # grants, so each prompt choice gets a fresh Appium session.
+            # Device Farm has its own remote-access reinstall path below.
             capabilities["appium:fullReset"] = True
         if request.platform_version and not is_device_farm:
             capabilities["appium:platformVersion"] = request.platform_version
@@ -1124,6 +1126,44 @@ class AutopilotSuiteService:
                     test_index,
                 )
                 try:
+                    has_prompt_step = any(step.action == "prompt_choice" for step in test.steps)
+                    has_discovery_screen = any(step.screen_id for step in test.steps)
+                    if is_browserstack and has_prompt_step and test_index > 0:
+                        # BrowserStack cannot revoke Android permissions in a
+                        # running session. A fresh Appium session is the
+                        # provider-supported reset boundary, so close the
+                        # previous session before replaying each sibling
+                        # choice. The same isolation also resets iOS privacy
+                        # prompts without unsupported in-session commands.
+                        safe_quit(driver)
+                        driver = None
+                        try:
+                            driver = create_driver()
+                        except Exception as exc:
+                            raise ProviderLifecycleUnavailable(
+                                "BrowserStack could not start a fresh app session for this prompt choice "
+                                f"({type(exc).__name__})."
+                            ) from None
+                        time.sleep(2)
+                        fresh_source = safe_page_source(driver)
+                        fresh_ready, fresh_reason, _ = self._activate_verified_target(
+                            driver,
+                            package_hint,
+                            activity_hint=activity_hint,
+                            timeout_seconds=15.0,
+                            poll_interval=0.5,
+                            page_source=fresh_source,
+                            preserve_known_system_prompt=True,
+                        )
+                        if not fresh_ready:
+                            raise ProviderLifecycleUnavailable(
+                                "BrowserStack started a fresh session but did not restore the observed app "
+                                f"or prompt surface ({fresh_reason[:500]})."
+                            )
+                        _LOGGER.info(
+                            "autopilot_stage=prompt_fresh_session outcome=ready test_id=%s",
+                            test.test_id,
+                        )
                     # The newly created session was just launched and its target foreground verified above.
                     # Do not immediately force-stop that known-good first surface; hosted providers may
                     # switch to Android system UI when restarting the attached app.
@@ -1133,8 +1173,6 @@ class AutopilotSuiteService:
                             or device_farm_prompt_reset_failure
                             or "The Appium session is unavailable; remaining cases cannot be executed."
                         )
-                    has_prompt_step = any(step.action == "prompt_choice" for step in test.steps)
-                    has_discovery_screen = any(step.screen_id for step in test.steps)
                     if has_prompt_step and device_farm_prompt_reset_failure:
                         raise ProviderLifecycleUnavailable(device_farm_prompt_reset_failure)
                     if (
@@ -1153,7 +1191,7 @@ class AutopilotSuiteService:
                     )
                     if has_prompt_step and (
                         prompt_case_count > 0 or current_prompt_kind != expected_prompt_kind
-                    ):
+                    ) and not is_browserstack:
                         if is_device_farm:
                             # Keep the current Appium session alive. Remote-access
                             # endpoints may not accept a second Appium session after
@@ -1202,7 +1240,7 @@ class AutopilotSuiteService:
                                 force_launch=True,
                                 preserve_known_system_prompt=True,
                             )
-                    elif test_index > 0:
+                    elif test_index > 0 and not (is_browserstack and has_prompt_step):
                         self._reset_to_application(
                             driver,
                             package,

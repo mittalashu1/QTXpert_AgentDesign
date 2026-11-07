@@ -1107,22 +1107,16 @@ class AutopilotIRCompiler:
 
             tap_match = self._TAP_RE.match(step)
             if tap_match:
-                checkpoint_choice = re.sub(
-                    r"[^a-z0-9]+", " ", str(tap_match.group(1)).casefold()
-                ).strip()
-                observed_cancel_branch = (
+                observed_confirmation_branch = (
                     test.id.startswith("QT-RUNTIME-CHECKPOINT-")
                     and not test.destructive
-                    and test.bucket == "functional_negative"
-                    and checkpoint_choice in {
-                        "cancel", "no", "not now", "no thanks", "decline", "reject", "back", "stay",
-                    }
+                    and test.bucket in {"functional_positive", "functional_negative"}
                 )
                 control = self._best_control(
                     current,
                     tap_match.group(1),
                     interaction=True,
-                    allow_full_uat=full_uat or observed_cancel_branch,
+                    allow_full_uat=full_uat or observed_confirmation_branch,
                 )
                 if control is None:
                     return None, f"No high-confidence safe control matched step: {raw_step}"

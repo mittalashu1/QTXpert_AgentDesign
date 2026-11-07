@@ -2137,6 +2137,126 @@ def test_suite_does_not_retry_failed_device_farm_prompt_reset(tmp_path, monkeypa
     assert driver.quit_calls == 1
 
 
+def test_browserstack_prompt_choices_use_fresh_sessions_and_continue_siblings(tmp_path, monkeypatch):
+    import appium
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    class PromptDriver(_Driver):
+        def __init__(self, session_number):
+            super().__init__()
+            self.session_number = session_number
+            self.prompt_active = True
+            self.current_activity = "com.android.permissioncontroller.permission.ui.GrantPermissionsActivity"
+            self.page_source = (
+                '<hierarchy><node package="com.android.permissioncontroller">'
+                '<node text="Location permission" />'
+                '<node text="Allow" class="android.widget.Button" clickable="true" />'
+                '</node></hierarchy>'
+            )
+            self.choice_calls = []
+            self.terminate_calls = []
+            self.quit_calls = 0
+
+        def find_element(self, by, value):
+            self.locators.append((by, value))
+            self.choice_calls.append(value)
+            driver = self
+
+            class Choice(_Element):
+                def click(self):
+                    super().click()
+                    driver.prompt_active = False
+                    driver.current_activity = "com.qtx.demo.MainActivity"
+                    driver.page_source = '<hierarchy><node package="com.qtx.demo" text="Home" /></hierarchy>'
+
+            return Choice()
+
+        def terminate_app(self, package):
+            self.terminate_calls.append(package)
+            raise RuntimeError("UnknownMethodException")
+
+        def quit(self):
+            self.quit_calls += 1
+
+    drivers = []
+    capabilities = []
+
+    def remote(_url, options, **_kwargs):
+        capabilities.append(options.to_capabilities())
+        attempt = len(capabilities)
+        if attempt == 2:
+            raise RuntimeError("UnknownMethodException while starting remote session")
+        driver = PromptDriver(attempt)
+        drivers.append(driver)
+        return driver
+
+    monkeypatch.setattr(appium.webdriver, "Remote", remote)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "app.services.autopilot_discovery.AutopilotDiscoveryService._runtime_prompt_kind",
+        lambda current, _source, _target: "runtime_permission" if current.prompt_active else None,
+    )
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotSuiteService(Settings(), prototype=Prototype())
+    service._activate_verified_target = lambda current, package, **_kwargs: (
+        True,
+        "ready",
+        {"package": package},
+    )
+    request = AutopilotSuiteRequest(
+        target_kind="android",
+        provider="browserstack",
+        device_name="Google Pixel 8",
+        platform_version="14.0",
+        max_tests=3,
+    )
+    prompt_tests = [
+        _test_ir([
+            QTXIRStep(
+                action="prompt_choice",
+                description=f"Choose {choice} on the observed permission prompt",
+                target="runtime_permission",
+                value=choice,
+                locator_strategy="accessibility_id",
+                locator_value=choice,
+                locator_confidence=0.99,
+            ),
+        ]).model_copy(update={
+            "test_id": f"browserstack-prompt-{index}",
+            "title": f"BrowserStack prompt choice {choice}",
+            "bucket": "permissions",
+        })
+        for index, choice in enumerate(("While using the app", "Only this time", "Don’t allow"), start=1)
+    ]
+
+    results = service._run_sync(
+        "job-browserstack-prompt-sessions",
+        "https://hub-cloud.browserstack.com/wd/hub",
+        "bs://uploaded-app",
+        request,
+        prompt_tests,
+        "com.qtx.demo",
+        {"deviceName": "Google Pixel 8", "osVersion": "14"},
+        None,
+        1000,
+        1000,
+        1000,
+    )
+
+    assert [result.status for result in results] == ["passed", "blocked", "passed"]
+    assert len(capabilities) == 3
+    assert all(capability["appium:noReset"] is False for capability in capabilities)
+    assert all(capability["appium:fullReset"] is True for capability in capabilities)
+    assert [driver.choice_calls for driver in drivers] == [["While using the app"], ["Don’t allow"]]
+    assert all(not driver.terminate_calls for driver in drivers)
+    assert all(driver.quit_calls == 1 for driver in drivers)
+
+
 def test_identify_discovered_screen_uses_unique_observed_token_for_sparse_hierarchy():
     service = AutopilotSuiteService(Settings(), prototype=object())
     discovery = _navigation_discovery()
