@@ -1399,7 +1399,9 @@ class AutopilotSuiteService:
                             poll_interval=0.5,
                             page_source=fresh_source,
                             preserve_known_system_prompt=(
-                                has_prompt_step or test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
+                                has_prompt_step
+                                or test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
+                                or discovery is not None
                             ),
                         )
                         if not fresh_ready:
@@ -1433,6 +1435,30 @@ class AutopilotSuiteService:
                         test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
                         and discovery is not None
                     ):
+                        startup_source = safe_page_source(driver)
+                        startup_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+                            driver, startup_source, request.target_kind
+                        )
+                        if startup_prompt_kind and startup_prompt_kind != "app_confirmation":
+                            setup_prompt_choices = self._replay_observed_entry_prompt_path(
+                                driver,
+                                test,
+                                discovery,
+                                package,
+                                request.target_kind,
+                                evidence_dir,
+                                input_values=input_values,
+                                sensitive_input_keys=sensitive_input_keys,
+                                launch_activity=activity_hint,
+                            )
+                    elif (
+                        fresh_browserstack_session
+                        and not has_prompt_step
+                        and discovery is not None
+                    ):
+                        # A fullReset session can reopen on Android's startup
+                        # permission UI. Replay only the recorded entry path for
+                        # ordinary screen cases, then verify the app is visible.
                         startup_source = safe_page_source(driver)
                         startup_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
                             driver, startup_source, request.target_kind
