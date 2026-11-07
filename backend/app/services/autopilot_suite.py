@@ -473,6 +473,205 @@ class AutopilotSuiteService:
             remaining_count=remaining_count,
         )
 
+    def _replay_observed_entry_prompt_path(
+        self,
+        driver,
+        test: QTXTestIR,
+        discovery: AutopilotDiscoveryResult,
+        package: str | None,
+        target_kind: str,
+        evidence_dir: Path,
+        *,
+        input_values: Dict[str, str] | None = None,
+        sensitive_input_keys: set[str] | None = None,
+        launch_activity: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Replay observed app-entry prompt choices to reach an app checkpoint.
+
+        Each app confirmation case owns its BrowserStack session. When a cold
+        session opens on Android/iOS startup permissions, replay only the
+        already observed entry path (or a deterministic observed fallback)
+        before navigating to the app confirmation being tested.
+        """
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        if discovery is None:
+            raise ProviderLifecycleUnavailable(
+                "The observed startup prompt route is unavailable; rerun Runtime Discovery before testing this confirmation."
+            )
+
+        prompts_by_id = {item.prompt_id: item for item in discovery.runtime_prompts}
+        entry_refs = list(discovery.entry_prompt_path or [])
+        consumed_refs: set[tuple[str, str]] = set()
+        setup_choices: list[dict[str, str]] = []
+        input_values = input_values or {}
+        sensitive_input_keys = sensitive_input_keys or set()
+
+        def reference_value(reference, field: str) -> str:
+            if isinstance(reference, dict):
+                return str(reference.get(field) or "")
+            return str(getattr(reference, field, "") or "")
+
+        for attempt in range(6):
+            source = safe_page_source(driver)
+            prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+                driver, source, target_kind
+            )
+            if not prompt_kind or prompt_kind == "app_confirmation":
+                break
+            prompt_id = AutopilotDiscoveryService._runtime_prompt_fingerprint(
+                driver, source, target_kind
+            ) or ""
+
+            matching_ref = next(
+                (
+                    reference for reference in entry_refs
+                    if (reference_id := reference_value(reference, "prompt_id"))
+                    and (reference_key := reference_value(reference, "choice_key"))
+                    and (reference_id, reference_key) not in consumed_refs
+                    and reference_id == prompt_id
+                ),
+                None,
+            )
+            if matching_ref is None:
+                matching_ref = next(
+                    (
+                        reference for reference in entry_refs
+                        if (reference_id := reference_value(reference, "prompt_id"))
+                        and (reference_key := reference_value(reference, "choice_key"))
+                        and (reference_id, reference_key) not in consumed_refs
+                        and (
+                            (observed_prompt := prompts_by_id.get(reference_id)) is not None
+                            and observed_prompt.kind == prompt_kind
+                        )
+                    ),
+                    None,
+                )
+
+            observed_prompt = None
+            selected_choice_key = ""
+            if matching_ref is not None:
+                reference_id = reference_value(matching_ref, "prompt_id")
+                selected_choice_key = reference_value(matching_ref, "choice_key")
+                observed_prompt = prompts_by_id.get(reference_id)
+            if observed_prompt is None:
+                observed_prompt = prompts_by_id.get(prompt_id)
+            if observed_prompt is None:
+                observed_prompt = next(
+                    (item for item in discovery.runtime_prompts if item.kind == prompt_kind),
+                    None,
+                )
+            if observed_prompt is None or observed_prompt.kind != prompt_kind:
+                raise ProviderLifecycleUnavailable(
+                    f"The startup {prompt_kind.replace('_', ' ')} prompt was not part of the observed discovery map. "
+                    "No unobserved choice was taken."
+                )
+
+            supported_strategies = {"accessibility_id", "id", "xpath"}
+            selected_choice = next(
+                (
+                    choice for choice in observed_prompt.choices
+                    if selected_choice_key and choice.key == selected_choice_key
+                    and choice.outcome_status != "unavailable"
+                    and any(locator.strategy in supported_strategies for locator in choice.locators)
+                ),
+                None,
+            )
+            if selected_choice is None:
+                preferred_decision = (
+                    "deny" if prompt_kind in {"location_settings", "other"} else "allow"
+                )
+                ordered_choices = sorted(
+                    observed_prompt.choices,
+                    key=lambda choice: (
+                        choice.decision != preferred_decision,
+                        choice.outcome_status == "unavailable",
+                    ),
+                )
+                selected_choice = next(
+                    (
+                        choice for choice in ordered_choices
+                        if choice.decision in {"allow", "deny"}
+                        and choice.outcome_status != "unavailable"
+                        and any(locator.strategy in supported_strategies for locator in choice.locators)
+                    ),
+                    None,
+                )
+            if selected_choice is None:
+                raise ProviderLifecycleUnavailable(
+                    f"The observed startup {prompt_kind.replace('_', ' ')} prompt has no usable recorded choice. "
+                    "No guessed control was tapped."
+                )
+
+            locators = [
+                locator for locator in selected_choice.locators
+                if locator.strategy in supported_strategies
+            ]
+            locators.sort(key=lambda locator: -locator.confidence)
+            step = QTXIRStep(
+                action="prompt_choice",
+                description=f"Replay the observed startup {prompt_kind.replace('_', ' ')} choice",
+                target=prompt_kind,
+                value=selected_choice.key,
+                locator_strategy=locators[0].strategy,
+                locator_value=locators[0].value,
+                locator_confidence=locators[0].confidence,
+                locator_fallbacks=locators[1:],
+                observation_ref=observed_prompt.observation_ref,
+                assertion=selected_choice.decision,
+                expected_resulting_prompt_id=selected_choice.resulting_prompt_id,
+                expected_resulting_screen_id=selected_choice.resulting_screen_id,
+            )
+            setup_test = test.model_copy(update={
+                "test_id": f"QT-SETUP-ENTRY-PROMPT-{attempt + 1}",
+                "title": "Replay an observed startup prompt choice",
+                "steps": [step],
+                "assertions": [],
+                "runtime_prompt_id": observed_prompt.prompt_id,
+                "runtime_prompt_choice": selected_choice.key,
+            })
+            setup_case_dir = evidence_dir / "entry-prompt-setup" / f"{attempt + 1:02d}"
+            setup_case_dir.mkdir(parents=True, exist_ok=True)
+            self._execute_test(
+                driver,
+                setup_test,
+                setup_case_dir,
+                package,
+                target_kind,
+                input_values,
+                sensitive_input_keys,
+                launch_activity,
+                discovery,
+            )
+            consumed_refs.add((observed_prompt.prompt_id, selected_choice.key))
+            setup_choices.append({
+                "prompt_kind": prompt_kind,
+                "choice": selected_choice.key,
+                "decision": selected_choice.decision,
+                "status": "passed",
+            })
+
+        final_source = safe_page_source(driver)
+        final_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+            driver, final_source, target_kind
+        )
+        if final_prompt_kind and final_prompt_kind != "app_confirmation":
+            raise ProviderLifecycleUnavailable(
+                f"The observed startup path still stops at a {final_prompt_kind.replace('_', ' ')} prompt "
+                "after six bounded setup choices; the app confirmation was not attempted."
+            )
+        target_ready, target_reason, _ = validate_target_surface(
+            driver,
+            expected_package=package,
+            page_source=final_source,
+        )
+        if not target_ready:
+            raise ProviderLifecycleUnavailable(
+                "The observed startup prompt path did not return to the uploaded app before its confirmation case: "
+                f"{target_reason}"
+            )
+        return setup_choices
+
     @staticmethod
     def _prompt_only_cases(tests: list[QTXTestIR]) -> list[QTXTestIR]:
         """Keep observed native prompt choices and executable app confirmations."""
@@ -941,6 +1140,10 @@ class AutopilotSuiteService:
             any(step.action == "prompt_choice" for step in test.steps)
             for test in tests
         )
+        has_app_confirmation_cases = any(
+            test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
+            for test in tests
+        )
         capabilities: Dict[str, Any] = {
             "platformName": "iOS" if is_ios else "Android",
             "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
@@ -1069,11 +1272,12 @@ class AutopilotSuiteService:
                     timeout_seconds=15.0,
                     poll_interval=0.5,
                     page_source=initial_source,
-                    # Preserve only a startup prompt with an observed choice case.
-                    # Otherwise use the provider-safe recovery path (for example,
-                    # Back from Google's location-settings checker) instead of
-                    # treating arbitrary Android system UI as a ready app surface.
-                    preserve_known_system_prompt=initial_prompt_test_index is not None,
+                    # A prompt-only app confirmation can start on an observed
+                    # native entry prompt. Preserve that known prompt so its
+                    # observed entry path can be replayed before the app case.
+                    preserve_known_system_prompt=(
+                        initial_prompt_test_index is not None or has_app_confirmation_cases
+                    ),
                 )
             except Exception as exc:
                 _LOGGER.warning(
@@ -1171,7 +1375,9 @@ class AutopilotSuiteService:
                             timeout_seconds=15.0,
                             poll_interval=0.5,
                             page_source=fresh_source,
-                            preserve_known_system_prompt=has_prompt_step,
+                            preserve_known_system_prompt=(
+                                has_prompt_step or test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
+                            ),
                         )
                         if not fresh_ready:
                             raise ProviderLifecycleUnavailable(
@@ -1199,6 +1405,27 @@ class AutopilotSuiteService:
                         and target_foreground_failure
                     ):
                         raise ProviderLifecycleUnavailable(target_foreground_failure)
+
+                    if (
+                        test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
+                        and discovery is not None
+                    ):
+                        startup_source = safe_page_source(driver)
+                        startup_prompt_kind = AutopilotDiscoveryService._runtime_prompt_kind(
+                            driver, startup_source, request.target_kind
+                        )
+                        if startup_prompt_kind and startup_prompt_kind != "app_confirmation":
+                            evidence["setup_prompt_choices"] = self._replay_observed_entry_prompt_path(
+                                driver,
+                                test,
+                                discovery,
+                                package,
+                                request.target_kind,
+                                evidence_dir,
+                                input_values=input_values,
+                                sensitive_input_keys=sensitive_input_keys,
+                                launch_activity=activity_hint,
+                            )
 
                     expected_prompt_kind = next(
                         (step.target for step in test.steps if step.action == "prompt_choice"),
