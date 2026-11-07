@@ -31,6 +31,33 @@ import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repo
 import DefectLogDialog, { type DefectSubmission } from "@/components/DefectLogDialog";
 import type { Defect } from "@/types/domain";
 
+const AUTOPILOT_KEEPALIVE_INTERVAL_MS = 60_000;
+let activeAutopilotKeepaliveRuns = 0;
+let autopilotKeepaliveTimer: number | null = null;
+
+function startAutopilotKeepalive(): () => void {
+  activeAutopilotKeepaliveRuns += 1;
+  if (autopilotKeepaliveTimer === null) {
+    autopilotKeepaliveTimer = window.setInterval(() => {
+      if (activeAutopilotKeepaliveRuns === 0) return;
+      // Keep free Render instances awake while a long Autopilot request is in flight.
+      void apiClient.get("/health/live", { timeout: 10_000 }).catch(() => undefined);
+    }, AUTOPILOT_KEEPALIVE_INTERVAL_MS);
+  }
+
+  let stopped = false;
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    activeAutopilotKeepaliveRuns = Math.max(0, activeAutopilotKeepaliveRuns - 1);
+    if (activeAutopilotKeepaliveRuns === 0 && autopilotKeepaliveTimer !== null) {
+      window.clearInterval(autopilotKeepaliveTimer);
+      autopilotKeepaliveTimer = null;
+    }
+  };
+}
+
+
 type TestBucket =
   | "installation" | "page_level" | "functional" | "functional_positive" | "functional_negative"
   | "uat" | "ui" | "ui_positive" | "ui_negative" | "accessibility" | "integration" | "sit" | "performance" | "security" | "compatibility" | "resilience"
@@ -1519,6 +1546,7 @@ export default function AutopilotPage() {
     // background job was still being queued/read.
     setAnalysisProgress(3); setAnalysisStage("queued");
     setBusy(true); setError(""); setContextNotice(""); setSetupOpen(false); setExecution(null); setExecutionHistory([]); setDiscovery(null); setAutomation(null); setSuite(null); setReport(null);
+    const stopKeepalive = startAutopilotKeepalive();
     try {
       let response;
       if (selectedUploadId && !isWebsite) {
@@ -1577,7 +1605,7 @@ export default function AutopilotPage() {
         setError(readableError(err, "Autopilot analysis failed"));
       }
     }
-    finally { setBusy(false); }
+    finally { stopKeepalive(); setBusy(false); }
   };
 
   const selectReportTab = async (reportTab: ReportTab) => {
@@ -1811,6 +1839,7 @@ export default function AutopilotPage() {
       setSetupOpen(false);
       await refreshAutomation(analysis.job_id);
       setResumeBusy(true);
+      const stopKeepalive = startAutopilotKeepalive();
       try {
         const pendingAuthCheckpoint = priorAuthCheckpoint || responsePendingAuth;
         const runRuntimeDiscovery = !discovery || pendingAuthCheckpoint || (
@@ -1857,10 +1886,9 @@ export default function AutopilotPage() {
         if (resumeResponse.data.status === "uploaded" || resumeResponse.data.status === "analyzing") {
           await pollAnalysis(analysis.job_id);
         }
-        // The server continues discovery in the background. Give it a short
-        // foreground window so the user gets the map immediately when the
-        // provider is warm, then leave slower runs safely resumable.
-        const discoveryDeadline = Date.now() + 60000;
+        // Keep the foreground poll and heartbeat alive for the bounded discovery window.
+        // This lets the user see the map as soon as it completes.
+        const discoveryDeadline = Date.now() + 660000;
         let discoveryReady = false;
         while (Date.now() < discoveryDeadline) {
           try {
@@ -1877,7 +1905,7 @@ export default function AutopilotPage() {
               break;
             }
           } catch { /* background job is still running; retry */ }
-          await new Promise((resolve) => window.setTimeout(resolve, 3000));
+          await new Promise((resolve) => window.setTimeout(resolve, 10000));
         }
         let latestPending = false;
         try {
@@ -1905,6 +1933,7 @@ export default function AutopilotPage() {
         }
         if (!discoveryReady && !latestPending) setContextNotice("Setup validated. Runtime Discovery is continuing in the background; refresh this tab to see its evidence.");
       } finally {
+        stopKeepalive();
         setResumeBusy(false);
         setDiscoveryBusy(false);
       }
@@ -1929,6 +1958,7 @@ export default function AutopilotPage() {
       return;
     }
     setDiscoveryBusy(true); setError("");
+    const stopKeepalive = startAutopilotKeepalive();
     try {
       const response = await apiClient.post<Discovery>(`/autopilot/${jobId}/discover`, {
         ...executionPayload(),
@@ -2036,7 +2066,7 @@ export default function AutopilotPage() {
         );
       }
     } catch (err) { setError(readableError(err, "Runtime discovery failed")); }
-    finally { setDiscoveryBusy(false); }
+    finally { stopKeepalive(); setDiscoveryBusy(false); }
   };
   const approvePlanAndDiscover = async (requestedJobId?: unknown) => {
     const jobId = typeof requestedJobId === "string" ? requestedJobId : analysis?.job_id;
@@ -2120,6 +2150,7 @@ export default function AutopilotPage() {
       return;
     }
     setSuiteBusy(true); setError("");
+    const stopKeepalive = startAutopilotKeepalive();
     try {
       const [jobResponse, discoveryResponse] = await Promise.all([
         apiClient.get<AnalysisJob>(`/autopilot/jobs/${jobId}`, { timeout: 15000 }),
@@ -2170,7 +2201,7 @@ export default function AutopilotPage() {
       await refreshReport(jobId);
       await refreshWorkflow(jobId);
     } catch (err) { setError(readableError(err, "Autopilot suite execution failed")); }
-    finally { setSuiteBusy(false); }
+    finally { stopKeepalive(); setSuiteBusy(false); }
   };
   const downloadSuiteEvidence = async (asset: SuiteEvidenceAsset) => {
     try {
@@ -2210,18 +2241,20 @@ export default function AutopilotPage() {
     const jobId = requestedJobId || analysis?.job_id;
     if (!jobId || !runSafeSmokeOnly) return;
     setSmokeBusy(true); setError("");
+    const stopKeepalive = startAutopilotKeepalive();
     try {
       setExecution((await apiClient.post<Execution>(`/autopilot/${jobId}/smoke`, executionPayload(), { timeout: 660000 })).data);
       await refreshExecutionHistory(jobId);
       await refreshReport(jobId);
     }
     catch (err) { setError(readableError(err, "Smoke execution failed")); }
-    finally { setSmokeBusy(false); }
+    finally { stopKeepalive(); setSmokeBusy(false); }
   };
 
   const rerunSmoke = async (executionId: string) => {
     if (!analysis || !runSafeSmokeOnly) return;
     setSmokeBusy(true); setError("");
+    const stopKeepalive = startAutopilotKeepalive();
     try {
       const response = await apiClient.post<Execution>(
         `/autopilot/${analysis.job_id}/executions/${executionId}/rerun`,
@@ -2232,13 +2265,14 @@ export default function AutopilotPage() {
       await refreshExecutionHistory(analysis.job_id);
       await refreshReport(analysis.job_id);
     } catch (err) { setError(readableError(err, "Smoke rerun failed")); }
-    finally { setSmokeBusy(false); }
+    finally { stopKeepalive(); setSmokeBusy(false); }
   };
 
   const rerunAnalysis = async (setupAction: "reuse" | "fresh" = "fresh") => {
     if (!analysis || !selectedProjectId) return;
     setAnalysisProgress(3); setAnalysisStage("queued");
     setBusy(true); setError(""); setSetupOpen(false); setExecution(null); setExecutionHistory([]); setReport(null);
+    const stopKeepalive = startAutopilotKeepalive();
     try {
       const response = await apiClient.post<AnalysisJob>(
         `/autopilot/${analysis.job_id}/rerun-analysis`,
@@ -2253,7 +2287,7 @@ export default function AutopilotPage() {
       await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshWorkflow(response.data.job_id);
       await refreshReportTabs(selectedProjectId);
     } catch (err) { setError(readableError(err, "Autopilot rerun failed")); }
-    finally { setBusy(false); }
+    finally { stopKeepalive(); setBusy(false); }
   };
 
   const startRerun = () => {
