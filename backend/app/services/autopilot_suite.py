@@ -937,7 +937,7 @@ class AutopilotSuiteService:
         is_ios = request.target_kind == "ios"
         is_device_farm = request.provider == "devicefarm"
         is_browserstack = request.provider == "browserstack"
-        has_prompt_cases = any(
+        has_prompt_cases = request.prompt_only or any(
             any(step.action == "prompt_choice" for step in test.steps)
             for test in tests
         )
@@ -1137,13 +1137,22 @@ class AutopilotSuiteService:
                 try:
                     has_prompt_step = any(step.action == "prompt_choice" for step in test.steps)
                     has_discovery_screen = any(step.screen_id for step in test.steps)
-                    if is_browserstack and has_prompt_step and test_index > 0:
-                        # BrowserStack cannot revoke Android permissions in a
-                        # running session. A fresh Appium session is the
-                        # provider-supported reset boundary, so close the
-                        # previous session before replaying each sibling
-                        # choice. The same isolation also resets iOS privacy
-                        # prompts without unsupported in-session commands.
+                    isolate_browserstack_branch = (
+                        is_browserstack
+                        and test_index > 0
+                        and (
+                            has_prompt_step
+                            or (
+                                request.prompt_only
+                                and test.test_id.startswith("QT-RUNTIME-CHECKPOINT-")
+                            )
+                        )
+                    )
+                    if isolate_browserstack_branch:
+                        # BrowserStack cannot revoke Android permission grants in
+                        # a running session. Each sibling system choice and each
+                        # observed app confirmation gets a fresh session, so a
+                        # preceding deny path cannot strand later branches in OS UI.
                         safe_quit(driver)
                         driver = None
                         try:
@@ -1162,7 +1171,7 @@ class AutopilotSuiteService:
                             timeout_seconds=15.0,
                             poll_interval=0.5,
                             page_source=fresh_source,
-                            preserve_known_system_prompt=True,
+                            preserve_known_system_prompt=has_prompt_step,
                         )
                         if not fresh_ready:
                             raise ProviderLifecycleUnavailable(
@@ -1249,7 +1258,7 @@ class AutopilotSuiteService:
                                 force_launch=True,
                                 preserve_known_system_prompt=True,
                             )
-                    elif test_index > 0 and not (is_browserstack and has_prompt_step):
+                    elif test_index > 0 and not isolate_browserstack_branch:
                         self._reset_to_application(
                             driver,
                             package,
