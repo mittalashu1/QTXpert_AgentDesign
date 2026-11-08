@@ -1197,15 +1197,37 @@ class AutopilotDiscoveryService:
         return bool(re.fullmatch(r"(?:login|log\s+in|sign\s+in|unlock|authenticate|continue\s+to\s+account)", label))
 
     @staticmethod
-    def _scroll_forward(driver: Any) -> bool:
+    def _scroll_directions(screen: DiscoveredScreen) -> list[str]:
+        """Return bounded forward directions for scrollable controls on a screen.
+
+        Keep the historical vertical probe for screens whose accessibility
+        tree does not expose a scroll container. When a native horizontal
+        container is observed, explore it explicitly instead of sending a
+        vertical gesture that cannot reveal its content.
+        """
+        scrollable = [control for control in screen.controls if control.scrollable]
+        if not scrollable:
+            return ["down"]
+
+        directions: list[str] = []
+        if any("horizontal" not in control.class_name.lower() for control in scrollable):
+            directions.append("down")
+        if any("horizontal" in control.class_name.lower() for control in scrollable):
+            directions.append("right")
+        return directions or ["down"]
+
+    @staticmethod
+    def _scroll_forward(driver: Any, direction: str = "down") -> bool:
         """Scroll the current native surface using provider-safe gestures.
 
         Appium providers differ on which mobile extension they expose. Try the
         Android UiAutomator2 scroll gesture first, then the portable swipe
         extension and finally the legacy client method. An unsupported method
         is treated as an unavailable exploration capability; it never becomes
-        an ``UnknownMethodException`` in the generated test result.
+        an unsupported-method error in the generated test result.
         """
+        direction = "right" if direction in {"right", "horizontal"} else "down"
+        swipe_direction = "left" if direction == "right" else "up"
         width, height = 1080, 1920
         try:
             size = driver.get_window_size()
@@ -1215,23 +1237,30 @@ class AutopilotDiscoveryService:
             pass
         execute_script = getattr(driver, "execute_script", None)
         if callable(execute_script):
+            if direction == "right":
+                gesture_bounds = {
+                    "left": max(0, int(width * 0.12)),
+                    "top": 0,
+                    "width": max(200, int(width * 0.78)),
+                    "height": height,
+                }
+            else:
+                gesture_bounds = {
+                    "left": 0,
+                    "top": max(0, int(height * 0.12)),
+                    "width": width,
+                    "height": max(200, int(height * 0.78)),
+                }
             for command, arguments in (
                 (
                     "mobile: scrollGesture",
-                    {
-                        "left": 0,
-                        "top": max(0, int(height * 0.12)),
-                        "width": width,
-                        "height": max(200, int(height * 0.78)),
-                        "direction": "down",
-                        "percent": 0.75,
-                    },
+                    {**gesture_bounds, "direction": direction, "percent": 0.75},
                 ),
-                ("mobile: swipe", {"direction": "up", "percent": 0.75}),
+                ("mobile: swipe", {"direction": swipe_direction, "percent": 0.75}),
             ):
                 try:
                     result = execute_script(command, arguments)
-                    # ``scrollGesture`` returns False when the list is already
+                    # The scroll gesture returns False when the list is already
                     # at its end; preserve that signal so the graph walker can
                     # move to another branch instead of repeating forever.
                     return result is not False
@@ -1239,24 +1268,18 @@ class AutopilotDiscoveryService:
                     continue
         swipe = getattr(driver, "swipe", None)
         if callable(swipe):
+            if direction == "right":
+                start_x, end_x = int(width * 0.82), int(width * 0.22)
+                start_y = end_y = int(height * 0.5)
+            else:
+                start_x = end_x = int(width * 0.5)
+                start_y, end_y = int(height * 0.82), int(height * 0.22)
             try:
-                swipe(
-                    int(width * 0.5),
-                    int(height * 0.82),
-                    int(width * 0.5),
-                    int(height * 0.22),
-                    duration=700,
-                )
+                swipe(start_x, start_y, end_x, end_y, duration=700)
                 return True
             except TypeError:
                 try:
-                    swipe(
-                        int(width * 0.5),
-                        int(height * 0.82),
-                        int(width * 0.5),
-                        int(height * 0.22),
-                        700,
-                    )
+                    swipe(start_x, start_y, end_x, end_y, 700)
                     return True
                 except Exception:
                     pass
@@ -1891,7 +1914,7 @@ class AutopilotDiscoveryService:
         pending_prompt_links: list[tuple[RuntimePromptObservation, str]] = []
         visited_edges: set[tuple[str, str]] = set()
         transaction_screen_ids: set[str] = set()
-        scroll_rounds: dict[str, int] = {}
+        scroll_rounds: dict[tuple[str, str], int] = {}
         warnings: list[str] = []
         actions_attempted = 0
         stop_reason = "Discovery bounds reached"
@@ -2742,40 +2765,54 @@ class AutopilotDiscoveryService:
                         # before backtracking to its parent. The scroll itself
                         # is recorded in the graph so generated cases replay
                         # the same route.
-                        rounds = scroll_rounds.get(current.screen_id, 0)
-                        if rounds < 3 and actions_attempted < request.max_actions:
-                            scroll_rounds[current.screen_id] = rounds + 1
-                            if self._scroll_forward(driver):
-                                actions_attempted += 1
-                                try:
-                                    next_screen, duplicate = capture(
-                                        require_target=True,
-                                        source_screen=current,
-                                        trigger_control_id=f"__scroll__{rounds + 1}",
-                                    )
-                                except _UnexpectedTargetSurface as exc:
-                                    warnings.append(
-                                        f"Stopped before counting a screen outside the uploaded app after scrolling: {exc}"
-                                    )
-                                    stop_reason = "Discovery stopped at the uploaded-app boundary."
-                                    break
-                                if current.screen_id in transaction_screen_ids:
-                                    transaction_screen_ids.add(next_screen.screen_id)
-                                transitions.append(
-                                    DiscoveredTransition(
-                                        from_screen_id=current.screen_id,
-                                        to_screen_id=next_screen.screen_id,
-                                        control_id=f"__scroll__{rounds + 1}",
-                                        control_label="Scroll down",
-                                        action="scroll",
-                                        duplicate_state=duplicate,
-                                        prompt_path=list(last_capture_prompt_path),
-                                    )
-                                )
-                                if not duplicate:
-                                    stack.append(current)
-                                    current = next_screen
+                        direction = next(
+                            (
+                                candidate
+                                for candidate in self._scroll_directions(current)
+                                if scroll_rounds.get((current.screen_id, candidate), 0) < 3
+                            ),
+                            None,
+                        )
+                        if direction is not None and actions_attempted < request.max_actions:
+                            round_key = (current.screen_id, direction)
+                            rounds = scroll_rounds.get(round_key, 0)
+                            if not self._scroll_forward(driver, direction=direction):
+                                # A provider's False result means this axis is
+                                # already at its end. Do not spend the remaining
+                                # per-screen budget repeating the same gesture.
+                                scroll_rounds[round_key] = 3
                                 continue
+                            scroll_rounds[round_key] = rounds + 1
+                            actions_attempted += 1
+                            try:
+                                next_screen, duplicate = capture(
+                                    require_target=True,
+                                    source_screen=current,
+                                    trigger_control_id=f"__scroll__{direction}__{rounds + 1}",
+                                )
+                            except _UnexpectedTargetSurface as exc:
+                                warnings.append(
+                                    f"Stopped before counting a screen outside the uploaded app after scrolling: {exc}"
+                                )
+                                stop_reason = "Discovery stopped at the uploaded-app boundary."
+                                break
+                            if current.screen_id in transaction_screen_ids:
+                                transaction_screen_ids.add(next_screen.screen_id)
+                            transitions.append(
+                                DiscoveredTransition(
+                                    from_screen_id=current.screen_id,
+                                    to_screen_id=next_screen.screen_id,
+                                    control_id=f"__scroll__{direction}__{rounds + 1}",
+                                    control_label=f"Scroll {direction}",
+                                    action="scroll",
+                                    duplicate_state=duplicate,
+                                    prompt_path=list(last_capture_prompt_path),
+                                )
+                            )
+                            if not duplicate:
+                                stack.append(current)
+                                current = next_screen
+                            continue
                         if not stack:
                             stop_reason = "No additional safe navigation controls were available"
                             break
