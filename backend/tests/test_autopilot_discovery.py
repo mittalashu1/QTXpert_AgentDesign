@@ -395,6 +395,71 @@ def test_parse_controls_marks_scrollable_surfaces_for_bounded_traversal():
     assert controls[0].risk == "review"
     assert controls[0].locators
 
+def test_discovery_scroll_directions_follow_observed_scroll_container_axes():
+    horizontal = SimpleNamespace(
+        controls=[SimpleNamespace(scrollable=True, class_name="android.widget.HorizontalScrollView")]
+    )
+    mixed_axes = SimpleNamespace(
+        controls=[
+            SimpleNamespace(scrollable=True, class_name="android.widget.ScrollView"),
+            SimpleNamespace(scrollable=True, class_name="android.widget.HorizontalScrollView"),
+        ]
+    )
+    unmarked_surface = SimpleNamespace(controls=[])
+
+    assert AutopilotDiscoveryService._scroll_directions(horizontal) == ["right"]
+    assert AutopilotDiscoveryService._scroll_directions(mixed_axes) == ["down", "right"]
+    # Preserve the previous bounded vertical probe when the hierarchy omits
+    # an explicit scroll container.
+    assert AutopilotDiscoveryService._scroll_directions(unmarked_surface) == ["down"]
+
+
+def test_scroll_forward_uses_horizontal_appium_gesture_for_horizontal_surface():
+    class Driver:
+        def __init__(self):
+            self.calls = []
+
+        def get_window_size(self):
+            return {"width": 400, "height": 800}
+
+        def execute_script(self, command, arguments):
+            self.calls.append((command, arguments))
+            return True
+
+    driver = Driver()
+
+    assert AutopilotDiscoveryService._scroll_forward(driver, direction="right") is True
+    assert driver.calls == [
+        (
+            "mobile: scrollGesture",
+            {
+                "left": 48,
+                "top": 0,
+                "width": 312,
+                "height": 800,
+                "direction": "right",
+                "percent": 0.75,
+            },
+        )
+    ]
+
+
+def test_scroll_forward_falls_back_to_horizontal_native_swipe():
+    class Driver:
+        def __init__(self):
+            self.swipes = []
+
+        def get_window_size(self):
+            return {"width": 400, "height": 800}
+
+        def swipe(self, *args, **kwargs):
+            self.swipes.append((args, kwargs))
+
+    driver = Driver()
+
+    assert AutopilotDiscoveryService._scroll_forward(driver, direction="right") is True
+    assert driver.swipes == [((328, 400, 88, 400), {"duration": 700})]
+
 
 def test_runtime_input_requests_are_reference_only():
     controls = AutopilotDiscoveryService.parse_controls(SAMPLE_XML)
