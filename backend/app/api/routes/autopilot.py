@@ -165,6 +165,24 @@ def _ensure_runtime_operation_available(
         )
 
 
+def _build_resumed_full_uat_suite_request(request: AutopilotDiscoveryRequest) -> AutopilotSuiteRequest:
+    """Convert approved discovery settings into a full-UAT suite request.
+
+    ``confirm_isolated_uat`` is present on the discovery request and is set
+    again here only after the resume worker has revalidated that confirmation.
+    Exclude it from copied values so Pydantic receives the keyword once.
+    """
+    discovery_values = request.model_dump(
+        exclude={"observe_only", "max_screens", "max_actions", "confirm_isolated_uat"}
+    )
+    return AutopilotSuiteRequest(
+        **discovery_values,
+        execution_mode="full_uat",
+        run_all_eligible=True,
+        confirm_isolated_uat=True,
+        include_deferred=True,
+    )
+
 def _repository_materialization_needs_initial_analysis(job: dict[str, Any]) -> bool:
     """Recover repository APKs only while their initial analysis is pending.
 
@@ -2928,13 +2946,7 @@ async def _resume_and_discover_background(
                 and result.screens
                 and not pending_auth
             ):
-                suite_request = AutopilotSuiteRequest(
-                    **request.model_dump(exclude={"observe_only", "max_screens", "max_actions"}),
-                    execution_mode="full_uat",
-                    run_all_eligible=True,
-                    confirm_isolated_uat=True,
-                    include_deferred=True,
-                )
+                suite_request = _build_resumed_full_uat_suite_request(request)
                 await execute_autopilot_suite(
                     job_id, suite_request, user, settings, db,
                 )
