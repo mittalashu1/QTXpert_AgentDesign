@@ -1270,6 +1270,93 @@ def test_discovery_preserves_incomplete_launch_status_instead_of_crawling_empty_
     assert result["interactive_surface_ready"] is False
     assert "retry discovery" in result["checkpoint_message"].lower()
 
+
+
+def test_discovery_rechecks_final_verified_capture_for_login_controls(tmp_path, monkeypatch):
+    import appium
+    from app.config import Settings
+    from app.schemas.autopilot import AutopilotDiscoveryRequest
+
+    class Driver:
+        capabilities = {
+            "appium:appPackage": "com.qtx.demo",
+            "appium:appActivity": "com.qtx.demo.MainActivity",
+        }
+        page_source = (
+            '<hierarchy><node package="com.qtx.demo" '
+            'class="android.view.View" text="" clickable="true" enabled="true" '
+            'bounds="[0,0][1080,1920]" /></hierarchy>'
+        )
+
+        def get_screenshot_as_file(self, path):
+            Path(path).write_bytes(b"screen")
+            return True
+
+        def quit(self):
+            return None
+
+    driver = Driver()
+    monkeypatch.setattr(appium.webdriver, "Remote", lambda *args, **kwargs: driver)
+    monkeypatch.setattr("app.services.autopilot_discovery.time.sleep", lambda _seconds: None)
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotDiscoveryService(
+        Settings(AUTOPILOT_DISCOVERY_SETTLE_SECONDS=1, AUTOPILOT_DISCOVERY_SETTLE_RETRIES=1),
+        Prototype(),
+    )
+    parse_calls = 0
+
+    def parse_controls(_page_source):
+        nonlocal parse_calls
+        parse_calls += 1
+        if parse_calls < 3:
+            return [DiscoveredControl(
+                control_id="root-view",
+                semantic_label="View",
+                class_name="android.view.View",
+                clickable=True,
+                enabled=True,
+            )]
+        return [DiscoveredControl(
+            control_id="sign-in",
+            semantic_label="Sign in",
+            class_name="android.widget.Button",
+            clickable=True,
+            enabled=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="accessibility_id", value="Sign in", confidence=0.99)],
+        )]
+
+    monkeypatch.setattr(service, "parse_controls", parse_controls)
+    result = service._run_sync(
+        "job-final-startup-capture",
+        "https://devicefarm.invalid/appium",
+        "arn:uploaded-app",
+        AutopilotDiscoveryRequest(
+            target_kind="android",
+            provider="devicefarm",
+            device_name="Google Pixel 8",
+            observe_only=True,
+        ),
+        "com.qtx.demo",
+        "com.qtx.demo.MainActivity",
+        None,
+        1000,
+        1000,
+        1000,
+    )
+
+    assert result["target_ready"] is True
+    assert result["interactive_surface_ready"] is True
+    assert result["screens"][0].controls[0].semantic_label == "Sign in"
+    assert "non-interactive launch screen" not in result["stop_reason"].lower()
+    assert any("final startup capture" in warning for warning in result["warnings"])
+    assert "retry discovery" not in result.get("checkpoint_message", "").lower()
+
 def test_loading_screen_ignores_generic_root_marked_as_input_capable():
     from app.schemas.autopilot import DiscoveredScreen
 
