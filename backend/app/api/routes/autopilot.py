@@ -183,7 +183,6 @@ def _build_resumed_full_uat_suite_request(request: AutopilotDiscoveryRequest) ->
         include_deferred=True,
     )
 
-
 def _repository_materialization_needs_initial_analysis(job: dict[str, Any]) -> bool:
     """Recover repository APKs only while their initial analysis is pending.
 
@@ -6835,4 +6834,3 @@ async def rerun_autopilot_smoke(
         job_id=job_id,
         request=request,
     )
-
