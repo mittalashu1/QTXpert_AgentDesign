@@ -2381,6 +2381,24 @@ class AutopilotDiscoveryService:
             # Persist only the now-verified target root. This also upgrades an
             # identical in-memory candidate if the session needed activation.
             current, _ = capture(persist_evidence=True, require_target=True)
+            if launch_surface_incomplete and not self._looks_like_loading_screen(current):
+                # The final package-verified capture can observe controls that
+                # appeared just after the last bounded settle sample. Recheck
+                # that exact frame before returning the earlier splash result;
+                # otherwise a slow Flutter start can leave a usable login or
+                # dashboard surface stranded behind a stale partial status.
+                launch_surface_incomplete = False
+                stop_reason = "Discovery recovered from startup surface"
+                warnings = [
+                    warning for warning in warnings
+                    if not warning.startswith("Initial app screen remained non-interactive")
+                ]
+                warnings.append(
+                    "The verified app became interactive in the final startup capture; discovery resumed."
+                )
+                screens[:] = [current]
+                seen_fingerprints.clear()
+                seen_fingerprints[current.fingerprint] = current.screen_id
             if launch_surface_incomplete:
                 diagnostic = self._startup_surface_diagnostic(driver, package_hint)
                 if diagnostic:
