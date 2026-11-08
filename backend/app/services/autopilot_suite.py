@@ -1575,6 +1575,7 @@ class AutopilotSuiteService:
                         request.target_kind,
                         transient_launch_settle_attempted=transient_launch_settle_attempted,
                         transient_launch_recovery_attempted=transient_launch_recovery_attempted,
+                        input_values=input_values,
                     )
                     evidence = self._execute_test(
                         driver,
@@ -1586,6 +1587,10 @@ class AutopilotSuiteService:
                         sensitive_input_keys=sensitive_input_keys,
                         launch_activity=activity_hint,
                         discovery=discovery,
+                        sensitive_context=any(
+                            item.get("authentication_replayed") == "true"
+                            for item in setup_navigation
+                        ),
                     )
                     if setup_prompt_choices:
                         evidence["setup_prompt_choices"] = setup_prompt_choices
@@ -2187,7 +2192,11 @@ class AutopilotSuiteService:
         discovery: AutopilotDiscoveryResult,
         start_screen_id: str,
         target_screen_id: str,
+        *,
+        allow_authentication: bool = False,
     ):
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
         if start_screen_id == target_screen_id:
             return []
         screens = {screen.screen_id: screen for screen in discovery.screens}
@@ -2198,11 +2207,11 @@ class AutopilotSuiteService:
         while queue:
             source_id, path = queue.pop(0)
             source = screens[source_id]
-            credential_screen = any(
-                control.input_capable
-                and control.input_kind == "credential"
-                and control.enabled
-                for control in source.controls
+            credential_screen = bool(AutopilotDiscoveryService._credential_controls(source))
+            auth_submit = (
+                AutopilotDiscoveryService._auth_submit_control(source.controls)
+                if credential_screen
+                else None
             )
             for transition in discovery.transitions:
                 if (
@@ -2217,15 +2226,22 @@ class AutopilotSuiteService:
                     (item for item in source.controls if item.control_id == transition.control_id),
                     None,
                 )
+                is_authentication_submit = bool(
+                    credential_screen
+                    and auth_submit is not None
+                    and control is not None
+                    and control.control_id == auth_submit.control_id
+                )
                 if (
                     control is None
-                    or not control.clickable
                     or not control.enabled
                     or control.input_capable
                     or control.risk != "safe"
+                    or credential_screen
+                    and not (allow_authentication and is_authentication_submit)
+                    or not credential_screen
+                    and not control.clickable
                 ):
-                    continue
-                if credential_screen and cls._auth_submit_label(transition.control_label):
                     continue
                 next_path = path + [(transition, control)]
                 if transition.to_screen_id == target_screen_id:
@@ -2385,6 +2401,7 @@ class AutopilotSuiteService:
         target_kind: str = "android",
         transient_launch_settle_attempted: set[str] | None = None,
         transient_launch_recovery_attempted: set[str] | None = None,
+        input_values: Dict[str, str] | None = None,
     ) -> list[dict[str, str]]:
         if not discovery or not discovery.screens:
             return []
@@ -2547,8 +2564,25 @@ class AutopilotSuiteService:
                         "No guessed control was tapped and no screen case was attempted."
                     )
 
-        path = self._safe_discovery_path(discovery, current.screen_id, target.screen_id)
+        input_values = input_values or {}
+        authentication_approved = str(input_values.get("__auth_approved") or "") == "1"
+        path = self._safe_discovery_path(
+            discovery,
+            current.screen_id,
+            target.screen_id,
+            allow_authentication=authentication_approved,
+        )
         if path is None:
+            if not authentication_approved and self._safe_discovery_path(
+                discovery,
+                current.screen_id,
+                target.screen_id,
+                allow_authentication=True,
+            ) is not None:
+                raise ProviderLifecycleUnavailable(
+                    "Reaching this observed screen requires the recorded sign-in flow, but approved saved credentials "
+                    "are unavailable for this run. Complete the authentication checkpoint before continuing."
+                )
             # The saved graph is evidence, not an execution dependency. If a
             # provider dropped one safe edge, recover it from the live app
             # using only controls already observed as reversible and safe.
@@ -2654,25 +2688,91 @@ class AutopilotSuiteService:
 
         navigation: list[dict[str, str]] = []
         for transition, control in path:
-            element = self._route_control_element(driver, control, locator_map)
+            source_screen = next(
+                screen for screen in discovery.screens
+                if screen.screen_id == transition.from_screen_id
+            )
+            credential_controls = AutopilotDiscoveryService._credential_controls(source_screen)
+            authentication_replayed = bool(credential_controls)
+            route_control = control
+            if authentication_replayed:
+                if not authentication_approved:
+                    raise ProviderLifecycleUnavailable(
+                        "The observed sign-in flow needs explicit credential approval before it can be replayed."
+                    )
+                checkpoint_reason = AutopilotDiscoveryService._authentication_checkpoint_reason(
+                    source_screen,
+                    input_values,
+                )
+                if checkpoint_reason:
+                    raise ProviderLifecycleUnavailable(checkpoint_reason)
+                for credential in credential_controls:
+                    value = AutopilotDiscoveryService._credential_value(
+                        source_screen.screen_id,
+                        credential,
+                        input_values,
+                    )
+                    if value is None:
+                        raise ProviderLifecycleUnavailable(
+                            f"The saved {AutopilotDiscoveryService._credential_hint(credential)} input is unavailable "
+                            "for the observed sign-in form."
+                        )
+                    field = AutopilotDiscoveryService._find_discovered_element(
+                        driver,
+                        credential,
+                        AppiumBy,
+                    )
+                    enter_observed_text(
+                        driver,
+                        field,
+                        value,
+                        target_kind="ios" if str(target_kind).casefold() == "ios" else "android",
+                        verify_text=AutopilotDiscoveryService._credential_hint(credential) == "username",
+                        prefer_element_entry=AutopilotDiscoveryService._credential_hint(credential) == "password",
+                    )
+                refreshed_submit = AutopilotDiscoveryService._refresh_auth_submit(
+                    driver,
+                    source_screen,
+                    package,
+                    discovery.target_activity,
+                )
+                if (
+                    refreshed_submit is None
+                    or refreshed_submit.control_id != control.control_id
+                    or not refreshed_submit.enabled
+                ):
+                    raise ProviderLifecycleUnavailable(
+                        "The observed sign-in action did not become enabled after entering the approved credentials. "
+                        "The sign-in was not submitted."
+                    )
+                route_control = refreshed_submit
+
+            element = self._route_control_element(driver, route_control, locator_map)
             if element is None:
                 raise ProviderLifecycleUnavailable(
-                    f"The observed navigation control {control.semantic_label} is no longer available. "
+                    f"The observed navigation control {route_control.semantic_label} is no longer available. "
                     "The case was not attempted."
                 )
             element.click()
-            time.sleep(0.6)
             target_screen = next(
                 screen for screen in discovery.screens if screen.screen_id == transition.to_screen_id
             )
             reached = None
-            step_deadline = time.monotonic() + 8.0
+            same_auth_screen_polls = 0
+            step_deadline = time.monotonic() + (60.0 if authentication_replayed else 8.0)
             while time.monotonic() < step_deadline:
+                page_source = safe_page_source(driver)
+                if authentication_replayed:
+                    feedback_code = AutopilotDiscoveryService._auth_feedback_code(page_source or "")
+                    if feedback_code:
+                        raise ProviderLifecycleUnavailable(
+                            AutopilotDiscoveryService._auth_feedback_reason(feedback_code)
+                        )
                 if package:
                     target_ready, target_reason, _ = validate_target_surface(
                         driver,
                         expected_package=package,
-                        page_source=safe_page_source(driver),
+                        page_source=page_source,
                     )
                     if not target_ready:
                         raise ProviderLifecycleUnavailable(
@@ -2681,19 +2781,31 @@ class AutopilotSuiteService:
                 reached = self._identify_discovered_screen(driver, discovery, package)
                 if reached is not None and reached.screen_id == target_screen.screen_id:
                     break
+                if authentication_replayed:
+                    if reached is not None and reached.screen_id == transition.from_screen_id:
+                        same_auth_screen_polls += 1
+                        if same_auth_screen_polls >= 30:
+                            raise ProviderLifecycleUnavailable(
+                                "The app remained on the observed sign-in screen after one submission. "
+                                "Check the saved test credentials or complete any additional verification; "
+                                "Autopilot did not submit again."
+                            )
+                    else:
+                        same_auth_screen_polls = 0
                 time.sleep(0.5)
             if reached is None or reached.screen_id != target_screen.screen_id:
                 raise ProviderLifecycleUnavailable(
-                    f"Observed navigation via {control.semantic_label} did not reach "
+                    f"Observed navigation via {route_control.semantic_label} did not reach "
                     f"{target_screen.page_label or target_screen.screen_id}. The case was stopped safely."
                 )
-            navigation.append(
-                {
-                    "from_screen": transition.from_screen_id,
-                    "to_screen": transition.to_screen_id,
-                    "control": control.semantic_label,
-                }
-            )
+            navigation_item = {
+                "from_screen": transition.from_screen_id,
+                "to_screen": transition.to_screen_id,
+                "control": route_control.semantic_label,
+            }
+            if authentication_replayed:
+                navigation_item["authentication_replayed"] = "true"
+            navigation.append(navigation_item)
         if has_locator and not self._step_locator_available(driver, entry_step, locator_map):
             raise ProviderLifecycleUnavailable(
                 f"Autopilot reached {target.page_label or target.screen_id}, but the case's observed "
@@ -2842,6 +2954,7 @@ class AutopilotSuiteService:
         sensitive_input_keys: set[str] | None = None,
         launch_activity: str | None = None,
         discovery: AutopilotDiscoveryResult | None = None,
+        sensitive_context: bool = False,
     ) -> Dict[str, Any]:
         from appium.webdriver.common.appiumby import AppiumBy
         from app.services.autopilot_discovery import AutopilotDiscoveryService
@@ -2855,7 +2968,7 @@ class AutopilotSuiteService:
         observed_runtime_prompts: list[RuntimePromptObservation] = []
         input_values = input_values or {}
         sensitive_input_keys = sensitive_input_keys or set()
-        sensitive_input_touched = False
+        sensitive_input_touched = sensitive_context
         previous_surface_fingerprint: str | None = None
 
         def capture_runtime_prompt(

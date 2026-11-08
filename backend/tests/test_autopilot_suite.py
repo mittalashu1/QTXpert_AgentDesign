@@ -1514,6 +1514,167 @@ def test_suite_safe_route_will_not_submit_authentication_controls():
     assert service._safe_discovery_path(discovery, auth.screen_id, landing.screen_id) is None
 
 
+def test_suite_can_include_observed_authentication_edge_only_when_enabled():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    auth = discovery.screens[1]
+    landing = _observed_screen("screen-home", [
+        DiscoveredControl(
+            control_id="home",
+            semantic_label="Home",
+            class_name="android.widget.Button",
+            text="Home",
+            resource_id="com.qtx.demo:id/home",
+            clickable=True,
+            enabled=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/home", confidence=0.98)],
+        )
+    ])
+    auth_transition = DiscoveredTransition(
+        from_screen_id=auth.screen_id,
+        to_screen_id=landing.screen_id,
+        control_id="login-submit",
+        control_label="Login",
+        action="tap",
+    )
+    discovery = discovery.model_copy(update={
+        "screens": [*discovery.screens, landing],
+        "transitions": [*discovery.transitions, auth_transition],
+    })
+
+    assert service._safe_discovery_path(discovery, auth.screen_id, landing.screen_id) is None
+    assert service._safe_discovery_path(
+        discovery,
+        auth.screen_id,
+        landing.screen_id,
+        allow_authentication=True,
+    ) == [(auth_transition, auth.controls[-1])]
+
+
+def test_suite_replays_approved_sign_in_once_to_reach_observed_post_login_screen(monkeypatch):
+    from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    auth = discovery.screens[1]
+    landing = _observed_screen("screen-home", [
+        DiscoveredControl(
+            control_id="home",
+            semantic_label="Home",
+            class_name="android.widget.Button",
+            text="Home",
+            resource_id="com.qtx.demo:id/home",
+            clickable=True,
+            enabled=True,
+            risk="safe",
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/home", confidence=0.98)],
+        )
+    ])
+    discovery = discovery.model_copy(update={
+        "screens": [*discovery.screens, landing],
+        "transitions": [
+            *discovery.transitions,
+            DiscoveredTransition(
+                from_screen_id=auth.screen_id,
+                to_screen_id=landing.screen_id,
+                control_id="login-submit",
+                control_label="Login",
+                action="tap",
+            ),
+        ],
+    })
+
+    class AuthenticatedRouteDriver(_RouteDriver):
+        def __init__(self):
+            super().__init__()
+            self.home_source = (
+                '<hierarchy><node package="com.qtx.demo" class="android.widget.Button" '
+                'resource-id="com.qtx.demo:id/home" text="Home" clickable="true" /></hierarchy>'
+            )
+
+        def find_element(self, by, value):
+            if value == "com.qtx.demo:id/login" and self.page_source == self.auth_source:
+                driver = self
+
+                class AuthSubmitElement(_Element):
+                    def click(inner_self):
+                        super(AuthSubmitElement, inner_self).click()
+                        driver.auth_submit_clicks += 1
+                        driver.page_source = driver.home_source
+
+                return AuthSubmitElement()
+            if value == "com.qtx.demo:id/home" and self.page_source == self.home_source:
+                return _Element()
+            return super().find_element(by, value)
+
+    driver = AuthenticatedRouteDriver()
+
+    def identify(_driver, _discovery, _package):
+        if driver.page_source == driver.root_source:
+            return discovery.screens[0]
+        if driver.page_source == driver.auth_source:
+            return auth
+        if driver.page_source == driver.home_source:
+            return landing
+        return None
+
+    monkeypatch.setattr(service, "_identify_discovered_screen", identify)
+    monkeypatch.setattr(
+        AutopilotDiscoveryService,
+        "_refresh_auth_submit",
+        lambda *_args: auth.controls[-1],
+    )
+    test = _test_ir([
+        QTXIRStep(
+            action="assert_visible",
+            description="Verify Home on the observed authenticated screen",
+            target="Home",
+            screen_id="screen-home",
+            locator_strategy="id",
+            locator_value="com.qtx.demo:id/home",
+            locator_confidence=0.98,
+        )
+    ])
+
+    navigation = service._prepare_test_screen(
+        driver,
+        test,
+        discovery,
+        "com.qtx.demo",
+        input_values={
+            "__auth_approved": "1",
+            "__username": "qa@example.test",
+            "__password": "test-only-password",
+        },
+    )
+
+    assert [item["control"] for item in navigation] == ["Get started", "Login"]
+    assert navigation[-1]["authentication_replayed"] == "true"
+    assert driver.navigation_clicks == 1
+    assert driver.auth_submit_clicks == 1
+    assert driver.page_source == driver.home_source
+    assert "qa@example.test" not in repr(navigation)
+    assert "test-only-password" not in repr(navigation)
+
+
+def test_suite_auth_replay_uses_sanitized_rejection_feedback():
+    from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+    page_source = (
+        '<hierarchy><node class="android.widget.EditText" resource-id="password" />'
+        '<node class="android.widget.TextView" text="Incorrect password" /></hierarchy>'
+    )
+
+    code = AutopilotDiscoveryService._auth_feedback_code(page_source)
+
+    assert code == "credential_rejected"
+    assert AutopilotDiscoveryService._auth_feedback_reason(code) == (
+        "The app rejected the saved UAT sign-in details; no further sign-in was attempted."
+    )
+
+
 def test_suite_treats_volatile_duplicate_surface_as_same_replay_page():
     service = AutopilotSuiteService(Settings(), prototype=object())
     first = _observed_screen("screen-001", [
