@@ -49,7 +49,6 @@ def test_checkpoint_resume_does_not_repeat_unrelated_or_unapproved_discovery():
     assert _resume_should_run_discovery(True, completed, None) is True
     assert _resume_should_run_discovery(False, None, None) is True
 
-
 def test_checkpoint_resume_builds_full_uat_suite_without_duplicate_confirmation():
     discovery_request = AutopilotDiscoveryRequest(
         confirm_isolated_uat=True,
@@ -99,4 +98,3 @@ def test_fh_money_single_username_step_remains_an_authentication_gate():
     assert request.category == "credential"
     assert request.input_hint == "username"
     assert request.status == "pending"
-
