@@ -3,8 +3,12 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from app.api.routes.autopilot import _ensure_runtime_operation_available, _resume_should_run_discovery
-from app.schemas.autopilot import DiscoveredControl, DiscoveredScreen, DiscoveryLocator
+from app.api.routes.autopilot import (
+    _build_resumed_full_uat_suite_request,
+    _ensure_runtime_operation_available,
+    _resume_should_run_discovery,
+)
+from app.schemas.autopilot import AutopilotDiscoveryRequest, DiscoveredControl, DiscoveredScreen, DiscoveryLocator
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_workflow import transition_phase
 
@@ -46,6 +50,22 @@ def test_checkpoint_resume_does_not_repeat_unrelated_or_unapproved_discovery():
     assert _resume_should_run_discovery(False, None, None) is True
 
 
+def test_checkpoint_resume_builds_full_uat_suite_without_duplicate_confirmation():
+    discovery_request = AutopilotDiscoveryRequest(
+        confirm_isolated_uat=True,
+        max_screens=42,
+        max_actions=77,
+    )
+
+    suite_request = _build_resumed_full_uat_suite_request(discovery_request)
+
+    assert suite_request.execution_mode == "full_uat"
+    assert suite_request.run_all_eligible is True
+    assert suite_request.confirm_isolated_uat is True
+    assert suite_request.include_deferred is True
+    assert suite_request.provider == discovery_request.provider
+
+
 def test_source_reanalysis_can_restart_from_exploring_phase():
     assert transition_phase("exploring", "preflight") == "preflight"
 
@@ -79,3 +99,4 @@ def test_fh_money_single_username_step_remains_an_authentication_gate():
     assert request.category == "credential"
     assert request.input_hint == "username"
     assert request.status == "pending"
+
