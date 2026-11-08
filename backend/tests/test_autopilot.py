@@ -1922,6 +1922,70 @@ def test_failed_retry_keeps_last_usable_discovery_snapshot():
     assert _discovery_target_is_verified(merged) is False
 
 
+def test_provider_quota_failure_after_partial_discovery_keeps_historical_map():
+    """A quota block must not erase screens retained from an earlier usable crawl."""
+    previous = AutopilotDiscoveryResult(
+        job_id="quota-retry-job",
+        status="completed",
+        provider="browserstack",
+        started_at="2026-11-08T03:00:00+00:00",
+        finished_at="2026-11-08T03:01:00+00:00",
+        duration_seconds=60,
+        device_name="Google Pixel 8",
+        target_ready=True,
+        interactive_surface_ready=True,
+        screen_count=1,
+        screens=[DiscoveredScreen(screen_id="login", fingerprint="observed-login")],
+    )
+    partial = AutopilotDiscoveryResult(
+        job_id=previous.job_id,
+        status="partial",
+        provider="browserstack",
+        started_at="2026-11-08T03:02:00+00:00",
+        finished_at="2026-11-08T03:03:00+00:00",
+        duration_seconds=60,
+        device_name="Google Pixel 8",
+        target_ready=True,
+        interactive_surface_ready=False,
+        screen_count=1,
+        screens=[DiscoveredScreen(screen_id="launch", fingerprint="sparse-launch")],
+        checkpoint_message="Only a non-interactive launch screen appeared.",
+    )
+    quota_failure = AutopilotDiscoveryResult(
+        job_id=previous.job_id,
+        status="blocked",
+        provider="browserstack",
+        started_at="2026-11-08T03:04:00+00:00",
+        finished_at="2026-11-08T03:04:01+00:00",
+        duration_seconds=1,
+        device_name="Google Pixel 8",
+        target_ready=False,
+        interactive_surface_ready=False,
+        screen_count=0,
+        screens=[],
+        target_identity_reason="App Automate testing time has expired; no device session was created.",
+    )
+
+    after_partial = _merge_discovery_snapshot(previous, partial)
+    after_quota_failure = _merge_discovery_snapshot(after_partial, quota_failure)
+
+    assert [screen.screen_id for screen in after_quota_failure.screens] == ["login"]
+    assert after_quota_failure.last_attempt_screens == []
+    assert after_quota_failure.last_attempt_status == "blocked"
+    assert "testing time has expired" in (after_quota_failure.last_attempt_reason or "")
+    assert _discovery_target_is_verified(after_quota_failure) is False
+    assert _discovery_is_ready_for_cases(after_quota_failure) is False
+
+
+def test_browserstack_app_automate_quota_expiration_is_a_provider_blocker():
+    error = Exception(
+        "WebDriverException: Message: App Automate testing time has expired. "
+        "Your free trial has 0 mins remaining."
+    )
+
+    assert AutopilotPrototypeService._looks_like_connector_problem(error) is True
+
+
 def test_discovery_must_be_verified_and_successful_before_suite_gate():
     valid = AutopilotDiscoveryResult(
         job_id="verified-job",

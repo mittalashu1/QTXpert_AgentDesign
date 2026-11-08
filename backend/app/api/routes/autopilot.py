@@ -183,6 +183,7 @@ def _build_resumed_full_uat_suite_request(request: AutopilotDiscoveryRequest) ->
         include_deferred=True,
     )
 
+
 def _repository_materialization_needs_initial_analysis(job: dict[str, Any]) -> bool:
     """Recover repository APKs only while their initial analysis is pending.
 
@@ -1510,7 +1511,12 @@ def _merge_discovery_snapshot(
         # Its prompt branches are authoritative; carrying prompt records from
         # an older crawl can resurrect choices the current app no longer shows.
         return latest
-    if previous.screen_count <= 0 or previous.interactive_surface_ready is False:
+    # ``interactive_surface_ready`` describes the latest attempt, not the
+    # usefulness of the historical screen graph. A partial launch attempt can
+    # set it to False while the prior graph still contains valid observed
+    # screens. Keep that graph as evidence; the last-attempt status below keeps
+    # it ineligible for execution until a later discovery verifies the target.
+    if previous.screen_count <= 0:
         return latest.model_copy(update={"runtime_prompts": merged_prompts})
     reason = (
         latest.checkpoint_message
