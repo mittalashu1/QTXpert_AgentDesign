@@ -770,7 +770,10 @@ class AutopilotDiscoveryService:
                 *(control.class_name for control in screen.controls),
             ]
         ).lower()
-        if any(term in marker_text for term in ("splash", "loading", "progressbar", "launchscreen", "please wait")):
+        if any(
+            term in marker_text
+            for term in ("splash", "loading", "progressbar", "launchscreen", "please wait", "skeleton", "shimmer")
+        ):
             return True
         generic_labels = {
             "view", "imageview", "textview", "unknown", "layout", "framelayout",
@@ -788,14 +791,15 @@ class AutopilotDiscoveryService:
             # input-capable View. That implementation flag is not evidence
             # of an end-user field; generic container nodes never open a path.
             is_generic_container = (
-                label in generic_labels or class_short in generic_root_classes
+                label in generic_labels
+                or not label and class_short in generic_root_classes
             ) and not safe_auth_entry
             if not control.enabled:
                 return False
             if is_generic_container:
                 # Flutter/Appium can mark a splash root as scrollable and
                 # provide a locator. A generic root is not a journey; only
-                # concrete child controls or real input widgets count.
+                # a real input, safe action, or meaningful labeled content counts.
                 return False
             real_input = control.input_capable
             # A clearly labeled Flutter login entry can be actionable even when
@@ -803,7 +807,10 @@ class AutopilotDiscoveryService:
             # deterministic locator keeps this exception narrowly scoped.
             safe_action = (control.clickable or safe_auth_entry) and bool(control.locators) and control.risk == "safe"
             scroll_surface = control.scrollable and bool(control.locators)
-            return real_input or safe_action or scroll_surface
+            meaningful_semantic_content = bool(
+                label and label not in generic_labels and class_short in generic_root_classes
+            )
+            return real_input or safe_action or scroll_surface or meaningful_semantic_content
 
         # Do not label a sparse, ungrounded splash/landing surface as a
         # completed crawl just because its root View has a locator or an

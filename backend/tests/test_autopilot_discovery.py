@@ -1699,6 +1699,24 @@ def test_loading_screen_recognizes_post_login_flutter_skeleton_placeholders():
     assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True
 
 
+def test_loading_screen_accepts_meaningful_text_from_generic_native_widget():
+    screen = DiscoveredScreen(
+        screen_id="screen-dashboard",
+        fingerprint="dashboard-heading",
+        package_name="com.qtx.demo",
+        activity_name="com.qtx.demo.MainActivity",
+        controls=[DiscoveredControl(
+            control_id="dashboard-heading",
+            semantic_label="Dashboard",
+            class_name="android.widget.TextView",
+            enabled=True,
+            locators=[DiscoveryLocator(strategy="id", value="dashboard", confidence=0.95)],
+        )],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is False
+
+
 def test_loading_screen_treats_many_generic_nodes_as_incomplete():
     from app.schemas.autopilot import DiscoveredScreen
 
