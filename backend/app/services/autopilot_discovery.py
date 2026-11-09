@@ -770,12 +770,16 @@ class AutopilotDiscoveryService:
                 *(control.class_name for control in screen.controls),
             ]
         ).lower()
-        if any(term in marker_text for term in ("splash", "loading", "progressbar", "launchscreen", "please wait")):
+        if any(
+            term in marker_text
+            for term in ("splash", "loading", "progressbar", "launchscreen", "please wait", "skeleton", "shimmer")
+        ):
             return True
         generic_labels = {
             "view", "imageview", "textview", "unknown", "layout", "framelayout",
             "linearlayout", "relativelayout", "constraintlayout", "scrollview",
-            "viewgroup", "flutterview", "fluttertextureview", "surfaceview",
+            "horizontalscrollview", "scrollable content", "viewgroup", "flutterview",
+            "fluttertextureview", "surfaceview",
         }
         generic_root_classes = generic_labels | {"decorview", "fluttercontainer"}
 
@@ -787,14 +791,15 @@ class AutopilotDiscoveryService:
             # input-capable View. That implementation flag is not evidence
             # of an end-user field; generic container nodes never open a path.
             is_generic_container = (
-                label in generic_labels or class_short in generic_root_classes
+                label in generic_labels
+                or not label and class_short in generic_root_classes
             ) and not safe_auth_entry
             if not control.enabled:
                 return False
             if is_generic_container:
                 # Flutter/Appium can mark a splash root as scrollable and
                 # provide a locator. A generic root is not a journey; only
-                # concrete child controls or real input widgets count.
+                # a real input, safe action, or meaningful labeled content counts.
                 return False
             real_input = control.input_capable
             # A clearly labeled Flutter login entry can be actionable even when
@@ -802,7 +807,10 @@ class AutopilotDiscoveryService:
             # deterministic locator keeps this exception narrowly scoped.
             safe_action = (control.clickable or safe_auth_entry) and bool(control.locators) and control.risk == "safe"
             scroll_surface = control.scrollable and bool(control.locators)
-            return real_input or safe_action or scroll_surface
+            meaningful_semantic_content = bool(
+                label and label not in generic_labels and class_short in generic_root_classes
+            )
+            return real_input or safe_action or scroll_surface or meaningful_semantic_content
 
         # Do not label a sparse, ungrounded splash/landing surface as a
         # completed crawl just because its root View has a locator or an
@@ -1725,7 +1733,11 @@ class AutopilotDiscoveryService:
                 timeout=self.settings.AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS,
             )
             checkpoint_stop = bool(payload.get("authentication_blocked")) or str(payload.get("stop_reason") or "").lower().startswith(
-                ("authentication", "sign-in", "credentials", "saved credentials", "the observed sign-in")
+                (
+                    "authentication", "sign-in", "credentials", "saved credentials",
+                    "the observed sign-in", "the app rejected", "the app reports",
+                    "the app reported", "otp checkpoint",
+                )
             )
             target_ready = payload.get("target_ready")
             interactive_surface_ready = payload.get("interactive_surface_ready")
@@ -1790,6 +1802,7 @@ class AutopilotDiscoveryService:
             stop_reason=str(payload["stop_reason"]),
             target_ready=payload.get("target_ready"),
             interactive_surface_ready=payload.get("interactive_surface_ready"),
+            authenticated_surface_observed=payload.get("authenticated_surface_observed"),
             checkpoint_message=checkpoint_message,
             target_identity=payload.get("target_identity"),
             target_activity=payload.get("target_activity"),
@@ -2453,13 +2466,14 @@ class AutopilotDiscoveryService:
             # the live session and suppress the immediate evidence snapshot.
             input_values = input_values or {}
             authentication_blocked = False
+            authenticated_surface_observed = False
             auth_rounds = 0
             stack: list[DiscoveredScreen] = []
 
             def process_authentication(
                 screen: DiscoveredScreen,
             ) -> tuple[DiscoveredScreen, bool, Optional[str]]:
-                nonlocal actions_attempted, auth_rounds
+                nonlocal actions_attempted, auth_rounds, authenticated_surface_observed
                 while screen is not None:
                     credential_controls = self._credential_controls(screen)
                     if not credential_controls:
@@ -2565,11 +2579,12 @@ class AutopilotDiscoveryService:
                         submit_element.click()
                         actions_attempted += 1
                         transition_prompt_path: list[RuntimePromptBranchRef] = []
-                        # A staged native login may take several seconds to
-                        # render its next form. Observe a bounded series of
-                        # credential-safe frames before calling the tap a
-                        # failure; none of these frames is persisted.
+                        # A changed fingerprint may be a transient Flutter
+                        # skeleton, not the authenticated landing. Observe a
+                        # bounded series of credential-safe frames and wait
+                        # for a usable surface before treating login as done.
                         next_screen, duplicate = screen, True
+                        transient_loading_screen_ids: set[str] = set()
                         password_stage = any(
                             self._credential_hint(control) == "password"
                             for control in credential_controls
@@ -2586,6 +2601,9 @@ class AutopilotDiscoveryService:
                             )
                             if last_capture_prompt_path:
                                 transition_prompt_path = list(last_capture_prompt_path)
+                            if self._looks_like_loading_screen(next_screen):
+                                transient_loading_screen_ids.add(next_screen.screen_id)
+                                continue
                             if not duplicate:
                                 break
                         # A validation message is often static text and does
@@ -2652,6 +2670,9 @@ class AutopilotDiscoveryService:
                                     )
                                     if last_capture_prompt_path:
                                         transition_prompt_path = list(last_capture_prompt_path)
+                                    if self._looks_like_loading_screen(next_screen):
+                                        transient_loading_screen_ids.add(next_screen.screen_id)
+                                        continue
                                     if not duplicate:
                                         break
                             except Exception as gesture_error:
@@ -2659,6 +2680,61 @@ class AutopilotDiscoveryService:
                                     "Observed sign-in gesture was unavailable: "
                                     f"{type(gesture_error).__name__}. No credential values were recorded."
                                 )
+                        # After the rapid poll, reuse the app-launch settle
+                        # budget for slow authenticated shells. This covers
+                        # apps that replace the login form with a generic
+                        # ImageView/HorizontalScrollView skeleton first.
+                        if self._looks_like_loading_screen(next_screen):
+                            for _settle_retry in range(retry_limit):
+                                time.sleep(retry_wait)
+                                candidate, candidate_duplicate = capture(
+                                    persist_evidence=False,
+                                    require_target=True,
+                                    source_screen=screen,
+                                    trigger_control=submit,
+                                )
+                                if last_capture_prompt_path:
+                                    transition_prompt_path = list(last_capture_prompt_path)
+                                next_screen = candidate
+                                duplicate = candidate_duplicate
+                                if self._looks_like_loading_screen(candidate):
+                                    transient_loading_screen_ids.add(candidate.screen_id)
+                                    continue
+                                break
+                            post_native_source = safe_page_source(driver)
+                            feedback_code = self._auth_feedback_code(post_native_source)
+                            if feedback_code and (
+                                feedback_code != pre_submit_feedback
+                                or feedback_code in {"credential_rejected", "account_locked", "service_unavailable"}
+                            ):
+                                warnings.append(
+                                    f"Sign-in feedback category: {feedback_code}. No credential values were recorded."
+                                )
+                                return screen, True, self._auth_feedback_reason(feedback_code)
+                        if self._looks_like_loading_screen(next_screen):
+                            # Exclude placeholders from the product map and
+                            # generated functional cases while retaining the
+                            # observed failure in the discovery warnings.
+                            transient_loading_screen_ids.add(next_screen.screen_id)
+                            for transient_id in transient_loading_screen_ids:
+                                transient_screen = next(
+                                    (item for item in screens if item.screen_id == transient_id),
+                                    None,
+                                )
+                                if transient_screen is not None and self._looks_like_loading_screen(transient_screen):
+                                    screens.remove(transient_screen)
+                                    if seen_fingerprints.get(transient_screen.fingerprint) == transient_id:
+                                        seen_fingerprints.pop(transient_screen.fingerprint, None)
+                            warnings.append(
+                                "Sign-in was submitted, but the app remained on a generic loading/skeleton surface "
+                                "after bounded settling. No authenticated landing or tabs were verified."
+                            )
+                            return (
+                                screen,
+                                True,
+                                "Sign-in did not reach a usable post-login screen after bounded settling; "
+                                "the authenticated journey remains incomplete.",
+                            )
                         next_has_sensitive_inputs = bool(self._credential_controls(next_screen))
                         if not duplicate and not next_has_sensitive_inputs:
                             next_screen, _ = capture(
@@ -2669,6 +2745,17 @@ class AutopilotDiscoveryService:
                             )
                             if last_capture_prompt_path:
                                 transition_prompt_path = list(last_capture_prompt_path)
+                        for transient_id in transient_loading_screen_ids:
+                            if transient_id == next_screen.screen_id:
+                                continue
+                            transient_screen = next(
+                                (item for item in screens if item.screen_id == transient_id),
+                                None,
+                            )
+                            if transient_screen is not None and self._looks_like_loading_screen(transient_screen):
+                                screens.remove(transient_screen)
+                                if seen_fingerprints.get(transient_screen.fingerprint) == transient_id:
+                                    seen_fingerprints.pop(transient_screen.fingerprint, None)
                         transitions.append(
                             DiscoveredTransition(
                                 from_screen_id=screen.screen_id,
@@ -2679,6 +2766,8 @@ class AutopilotDiscoveryService:
                                 prompt_path=transition_prompt_path,
                             )
                         )
+                        if not next_has_sensitive_inputs and not self._looks_like_loading_screen(next_screen):
+                            authenticated_surface_observed = True
                         if duplicate:
                             final_source = safe_page_source(driver)
                             feedback_code = self._auth_feedback_code(final_source)
@@ -2722,13 +2811,26 @@ class AutopilotDiscoveryService:
                         )
                 return screen, False, None
 
-            def recover_from_optional_otp(
+            def recover_from_authentication_checkpoint(
                 screen: DiscoveredScreen,
                 blocked: bool,
                 reason: Optional[str],
             ) -> tuple[DiscoveredScreen, bool, Optional[str], bool]:
-                """Back out of an OTP-only branch and keep exploring known siblings."""
-                if not blocked or not reason or not reason.casefold().startswith("otp checkpoint") or not stack:
+                """Return from an unresolved authentication branch to a known parent."""
+                reason_text = str(reason or "").casefold()
+                otp_checkpoint = reason_text.startswith("otp checkpoint")
+                submitted_sign_in_failed = any(
+                    phrase in reason_text
+                    for phrase in (
+                        "sign-in did not reach a usable post-login screen",
+                        "the app rejected the saved uat sign-in details",
+                        "the app reports that the uat account is locked",
+                        "the app reported a network or service error after sign-in",
+                        "the observed sign-in form stayed unchanged",
+                        "the app changed its sign-in display but still requests the same credentials",
+                    )
+                )
+                if not blocked or not reason or not stack or not (otp_checkpoint or submitted_sign_in_failed):
                     return screen, blocked, reason, False
                 ancestor_ids = [item.screen_id for item in stack]
                 for _ in range(min(6, max(1, len(screens) + 1))):
@@ -2738,24 +2840,30 @@ class AutopilotDiscoveryService:
                         recovered, _ = capture(persist_evidence=False, require_target=True)
                     except Exception as exc:
                         warnings.append(
-                            f"OTP branch recovery could not return to an observed app screen: {type(exc).__name__}."
+                            f"Authentication branch recovery could not return to an observed app screen: {type(exc).__name__}."
                         )
                         return screen, True, reason, False
                     if recovered.screen_id in ancestor_ids:
                         ancestor_index = ancestor_ids.index(recovered.screen_id)
                         stack[:] = stack[:ancestor_index]
-                        warnings.append(
-                            "The observed sign-in path requested an OTP. That branch remains incomplete; "
-                            "discovery returned to an observed parent screen and continued other app journeys."
-                        )
+                        if otp_checkpoint:
+                            warnings.append(
+                                "The observed sign-in path requested an OTP. That branch remains incomplete; "
+                                "discovery returned to an observed parent screen and continued other app journeys."
+                            )
+                        else:
+                            warnings.append(
+                                "The sign-in path did not reach a usable authenticated screen. "
+                                "Discovery returned to an observed parent and continued other safe journeys."
+                            )
                         return recovered, False, reason, True
                 warnings.append(
-                    "The OTP branch was not retried because no previously observed parent screen could be restored."
+                    "The authentication branch was not retried because no previously observed parent screen could be restored."
                 )
                 return screen, True, reason, False
 
             current, authentication_blocked, authentication_reason = process_authentication(current)
-            current, authentication_blocked, authentication_reason, _ = recover_from_optional_otp(
+            current, authentication_blocked, authentication_reason, _ = recover_from_authentication_checkpoint(
                 current, authentication_blocked, authentication_reason,
             )
             if authentication_reason:
@@ -2903,20 +3011,18 @@ class AutopilotDiscoveryService:
                             current, authentication_blocked, authentication_reason = process_authentication(current)
                             if authentication_reason:
                                 stop_reason = authentication_reason
-                            current, authentication_blocked, authentication_reason, otp_resumed = recover_from_optional_otp(
+                            current, authentication_blocked, authentication_reason, checkpoint_resumed = recover_from_authentication_checkpoint(
                                 current, authentication_blocked, authentication_reason,
                             )
                             if authentication_blocked:
                                 break
-                            if otp_resumed:
+                            if checkpoint_resumed:
                                 continue
-                            # After a successful sign-in, do not backtrack into
-                            # the unauthenticated landing/login stack and risk
-                            # replaying the same credential form.
+                            # Keep the observed parent stack so public sibling
+                            # journeys remain crawlable after authentication.
+                            # The login edge is already visited, so returning
+                            # to that parent will not submit the same form again.
                             if current.screen_id != auth_screen_id:
-                                stack.clear()
-                                visited_edges.clear()
-                                scroll_rounds.clear()
                                 continue
                     except _UnexpectedTargetSurface as exc:
                         warnings.append(
@@ -2977,6 +3083,13 @@ class AutopilotDiscoveryService:
                     elif actions_attempted >= request.max_actions:
                         stop_reason = f"Reached max_actions={request.max_actions}"
 
+            if authentication_reason and not authenticated_surface_observed:
+                crawl_stop_reason = stop_reason
+                stop_reason = (
+                    f"{authentication_reason} Safe sibling journeys were explored where available. "
+                    f"Crawl ended: {crawl_stop_reason}"
+                )
+
             return {
                 "screens": screens,
                 "transitions": transitions,
@@ -2986,6 +3099,7 @@ class AutopilotDiscoveryService:
                 "stop_reason": stop_reason,
                 "warnings": warnings,
                 "authentication_blocked": authentication_blocked,
+                "authenticated_surface_observed": authenticated_surface_observed,
                 "target_ready": target_ready,
                 "interactive_surface_ready": not launch_surface_incomplete,
                 "target_identity": target_identity,

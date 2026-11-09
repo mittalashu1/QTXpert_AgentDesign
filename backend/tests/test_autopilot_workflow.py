@@ -196,10 +196,13 @@ def test_application_map_projects_observed_controls_without_values():
         screens=[screen],
         transitions=[transition],
         login_observed=True,
+        authenticated_surface_observed=False,
     )
 
     assert application_map.controls_count == 2
     assert application_map.login_observed is True
+    assert application_map.authenticated_surface_observed is False
+    assert any("authenticated app surface was not verified" in note for note in application_map.coverage_notes)
     assert application_map.authentication_boundaries
     assert "Observed error message for" in application_map.validation_behaviors[0]
     assert {"obs-home", "obs-portfolio", "obs-transition"}.issubset(application_map.observation_refs)

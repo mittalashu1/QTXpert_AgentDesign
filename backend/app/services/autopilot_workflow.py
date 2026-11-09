@@ -294,6 +294,7 @@ def build_application_map(
     screens: Iterable[DiscoveredScreen],
     transitions: Iterable[DiscoveredTransition],
     login_observed: bool = False,
+    authenticated_surface_observed: bool | None = None,
     version: int = 1,
 ) -> AutopilotApplicationMap:
     """Project runtime discovery into a durable map without secret values."""
@@ -307,8 +308,15 @@ def build_application_map(
     observation_refs: list[str] = []
     confidence_values: list[float] = []
     if login_observed:
-        notes.append("A concrete sign-in field/control was observed; authenticated execution remains approval-gated.")
-        authentication_boundaries.append("Sign-in boundary observed; credentials remain encrypted and approval-gated.")
+        if authenticated_surface_observed is True:
+            notes.append("A sign-in form and a concrete post-login app surface were observed.")
+            authentication_boundaries.append("Post-login app surface observed; credential values are excluded from this map.")
+        elif authenticated_surface_observed is False:
+            notes.append("A sign-in form was observed, but the authenticated app surface was not verified.")
+            authentication_boundaries.append("Sign-in boundary observed; post-login navigation remains incomplete.")
+        else:
+            notes.append("A sign-in form was observed; post-login surface status is unavailable in this snapshot.")
+            authentication_boundaries.append("Sign-in boundary observed; credential values are excluded from this map.")
     if not screen_list:
         notes.append("No product screen was observed; retry the configured target session before generating deeper cases.")
     if transition_list:
@@ -336,6 +344,7 @@ def build_application_map(
         version=max(1, int(version)),
         generated_at=_now(),
         login_observed=bool(login_observed),
+        authenticated_surface_observed=authenticated_surface_observed,
         screens=screen_list,
         transitions=transition_list,
         controls_count=controls,
