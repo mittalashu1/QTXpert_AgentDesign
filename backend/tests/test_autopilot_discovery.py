@@ -1012,6 +1012,248 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
     assert len(result["transitions"]) == 1
     assert driver.quit_called is True
 
+@pytest.mark.parametrize(("post_login_frames", "expect_authenticated"), [(2, True), (50, False)])
+def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
+    tmp_path, monkeypatch, post_login_frames, expect_authenticated,
+):
+    from appium import webdriver
+
+    monkeypatch.setattr("app.services.autopilot_discovery.time.sleep", lambda _seconds: None)
+
+    class Element:
+        def __init__(self, driver, locator):
+            self.driver = driver
+            self.locator = locator
+
+        def is_enabled(self):
+            return True
+
+        def is_displayed(self):
+            return True
+
+        def clear(self):
+            self.driver.values[self.locator] = ""
+
+        def click(self):
+            if self.locator == "com.qtx.demo:id/login_entry":
+                self.driver.state = "authentication"
+            elif self.locator == "com.qtx.demo:id/guest_entry":
+                self.driver.state = "guest"
+            elif self.locator == "com.qtx.demo:id/login_submit":
+                if self.driver.values.get("com.qtx.demo:id/user_id") and self.driver.values.get(
+                    "com.qtx.demo:id/password"
+                ):
+                    self.driver.state = "post_login_loading"
+                    self.driver.post_login_frames = self.driver.configured_post_login_frames
+            elif self.locator == "com.qtx.demo:id/accounts":
+                self.driver.state = "accounts"
+            elif self.locator == "com.qtx.demo:id/activity":
+                self.driver.state = "activity"
+            elif self.locator == "com.qtx.demo:id/profile":
+                self.driver.state = "profile"
+
+        def send_keys(self, value):
+            self.driver.values[self.locator] = str(value)
+
+        def get_attribute(self, name):
+            if name in {"text", "value"}:
+                return self.driver.values.get(self.locator, "")
+            return None
+
+    class Driver:
+        capabilities = {
+            "appium:appPackage": "com.qtx.demo",
+            "appium:appActivity": "com.qtx.demo.MainActivity",
+        }
+
+        def __init__(self, configured_post_login_frames):
+            self.state = "welcome"
+            self.values = {}
+            self.configured_post_login_frames = configured_post_login_frames
+            self.post_login_frames = 0
+            self.quit_called = False
+            self.clicked = []
+
+        @property
+        def current_package(self):
+            return "com.qtx.demo"
+
+        @property
+        def current_activity(self):
+            return "com.qtx.demo.MainActivity"
+
+        @property
+        def page_source(self):
+            if self.state == "post_login_loading":
+                if self.post_login_frames <= 0:
+                    self.state = "home"
+                else:
+                    self.post_login_frames -= 1
+                    return (
+                        '<hierarchy><node package="com.qtx.demo" text="View" '
+                        'class="android.view.View" clickable="true" enabled="true" />'
+                        '<node package="com.qtx.demo" text="ImageView" '
+                        'class="android.widget.ImageView" enabled="true" />'
+                        '<node package="com.qtx.demo" text="Scrollable content" '
+                        'class="android.widget.HorizontalScrollView" scrollable="true" enabled="true" />'
+                        '</hierarchy>'
+                    )
+            shells = {
+                "welcome": (
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/login_entry" text="Login" clickable="true" enabled="true" />'
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/guest_entry" text="Explore as a Guest" clickable="true" enabled="true" />'
+                ),
+                "guest": (
+                    '<node package="com.qtx.demo" class="android.widget.TextView" '
+                    'resource-id="com.qtx.demo:id/guest_home" text="Guest home" enabled="true" />'
+                ),
+                "authentication": (
+                    '<node package="com.qtx.demo" text="User ID" class="android.widget.TextView" />'
+                    '<node package="com.qtx.demo" class="android.widget.EditText" '
+                    'resource-id="com.qtx.demo:id/user_id" hint="User ID" clickable="true" enabled="true" />'
+                    '<node package="com.qtx.demo" text="Password" class="android.widget.TextView" />'
+                    '<node package="com.qtx.demo" class="android.widget.EditText" '
+                    'resource-id="com.qtx.demo:id/password" hint="Password" clickable="true" enabled="true" />'
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/login_submit" text="Login" clickable="true" enabled="true" />'
+                ),
+                "home": (
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/accounts" text="Accounts" clickable="true" enabled="true" />'
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/profile" text="Profile" clickable="true" enabled="true" />'
+                ),
+                "accounts": (
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/activity" text="Activity" clickable="true" enabled="true" />'
+                ),
+                "activity": (
+                    '<node package="com.qtx.demo" class="android.widget.TextView" '
+                    'resource-id="com.qtx.demo:id/recent_activity" text="Recent activity" enabled="true" />'
+                ),
+                "profile": (
+                    '<node package="com.qtx.demo" class="android.widget.TextView" '
+                    'resource-id="com.qtx.demo:id/profile_details" text="Profile details" enabled="true" />'
+                ),
+            }
+            return f'<hierarchy>{shells[self.state]}</hierarchy>'
+
+        def find_element(self, _by, locator):
+            self.clicked.append(locator)
+            return Element(self, locator)
+
+        def hide_keyboard(self):
+            return None
+
+        def back(self):
+            self.state = {
+                "authentication": "welcome",
+                "accounts": "home",
+                "activity": "accounts",
+                "profile": "home",
+                "post_login_loading": "welcome",
+                "guest": "welcome",
+            }.get(self.state, "welcome")
+
+        def execute_script(self, _command, _arguments):
+            return False
+
+        def get_window_size(self):
+            return {"width": 400, "height": 800}
+
+        def get_screenshot_as_file(self, path):
+            Path(path).write_bytes(b"test-screen")
+            return True
+
+        def quit(self):
+            self.quit_called = True
+
+    driver = Driver(post_login_frames)
+    monkeypatch.setattr(webdriver, "Remote", lambda *_args, **_kwargs: driver)
+
+    class Prototype:
+        @staticmethod
+        def _job_dir(_job_id):
+            return tmp_path
+
+    service = AutopilotDiscoveryService(
+        SimpleNamespace(
+            AUTOPILOT_DISCOVERY_SETTLE_SECONDS=1,
+            AUTOPILOT_DISCOVERY_SETTLE_RETRIES=2,
+        ),
+        Prototype(),
+    )
+    result = service._run_sync(
+        "job-post-login-crawl",
+        "https://devicefarm.invalid/appium",
+        "arn:uploaded-app",
+        AutopilotDiscoveryRequest(
+            provider="devicefarm",
+            device_name="Google Pixel 8",
+            max_screens=12,
+            max_actions=24,
+            include_transaction_journeys=False,
+        ),
+        "com.qtx.demo",
+        "com.qtx.demo.MainActivity",
+        None,
+        1000,
+        1000,
+        1000,
+        {
+            "__auth_approved": "1",
+            "__username": "qa@example.test",
+            "__password": "test-only-password",
+        },
+    )
+
+    screen_controls = [
+        {control.semantic_label for control in screen.controls}
+        for screen in result["screens"]
+    ]
+    observed_labels = set().union(*screen_controls)
+    assert {"Login", "Explore as a Guest", "Guest home"}.issubset(observed_labels)
+    if expect_authenticated:
+        assert {
+            "Accounts", "Profile", "Activity", "Recent activity", "Profile details",
+        }.issubset(observed_labels)
+        home_screen = next(
+            screen
+            for screen in result["screens"]
+            if any(control.semantic_label == "Accounts" for control in screen.controls)
+        )
+        assert any(
+            transition.control_label == "Login"
+            and transition.to_screen_id == home_screen.screen_id
+            for transition in result["transitions"]
+        )
+        assert {"com.qtx.demo:id/accounts", "com.qtx.demo:id/activity", "com.qtx.demo:id/profile"}.issubset(
+            set(driver.clicked)
+        )
+        assert result["authenticated_surface_observed"] is True
+        assert not any(
+            AutopilotDiscoveryService._looks_like_loading_screen(screen)
+            for screen in result["screens"]
+        )
+    else:
+        assert "Accounts" not in observed_labels
+        assert result["authenticated_surface_observed"] is False
+        assert result["authentication_blocked"] is False
+        assert result["stop_reason"].lower().startswith("sign-in did not reach a usable post-login screen")
+        assert any("continued other safe journeys" in warning for warning in result["warnings"])
+        assert not any(
+            AutopilotDiscoveryService._looks_like_loading_screen(screen)
+            for screen in result["screens"]
+        )
+    assert "com.qtx.demo:id/guest_entry" in driver.clicked
+    assert driver.state == "welcome"
+    assert driver.quit_called is True
+    assert "qa@example.test" not in repr(result["screens"])
+    assert "test-only-password" not in repr(result["screens"])
+
+
 def test_auth_entry_login_is_prioritized_over_higher_confidence_guest_route():
     controls = [
         DiscoveredControl(
@@ -1417,6 +1659,41 @@ def test_loading_screen_keeps_a_scrollable_generic_flutter_root_incomplete():
             scrollable=True,
             locators=[DiscoveryLocator(strategy="id", value="content", confidence=0.95)],
         )],
+    )
+
+    assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True
+
+
+def test_loading_screen_recognizes_post_login_flutter_skeleton_placeholders():
+    screen = DiscoveredScreen(
+        screen_id="screen-post-login-skeleton",
+        fingerprint="post-login-skeleton",
+        package_name="com.fhc.InvestNation.uat",
+        activity_name="com.fhc.InvestNation.uat.MainActivity",
+        controls=[
+            DiscoveredControl(
+                control_id="view",
+                semantic_label="View",
+                class_name="android.view.View",
+                clickable=True,
+                locators=[DiscoveryLocator(strategy="id", value="view", confidence=0.9)],
+            ),
+            DiscoveredControl(
+                control_id="image",
+                semantic_label="ImageView",
+                class_name="android.widget.ImageView",
+                locators=[DiscoveryLocator(strategy="id", value="image", confidence=0.9)],
+            ),
+            DiscoveredControl(
+                control_id="horizontal-content",
+                semantic_label="Scrollable content",
+                class_name="android.widget.HorizontalScrollView",
+                enabled=True,
+                clickable=True,
+                scrollable=True,
+                locators=[DiscoveryLocator(strategy="id", value="horizontal-content", confidence=0.9)],
+            ),
+        ],
     )
 
     assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True

@@ -2760,6 +2760,7 @@ async def _resume_and_discover_background(
                     any(item.category == "credential" for item in persisted_discovery.input_requests)
                     or _pending_runtime_auth_requests(setup_for_discovery)
                 ),
+                authenticated_surface_observed=result.authenticated_surface_observed,
                 version=map_version,
             )
             if record is not None:
@@ -2826,6 +2827,7 @@ async def _resume_and_discover_background(
                         any(item.category == "credential" for item in persisted_discovery.input_requests)
                         or _pending_runtime_auth_requests(setup_for_discovery)
                     ),
+                    authenticated_surface_observed=result.authenticated_surface_observed,
                     version=map_version,
                 )
                 record = await _safe_job_record(db, job_id, owner_id)
@@ -3808,6 +3810,7 @@ async def get_autopilot_application_map(
         screens=discovery.screens,
         transitions=discovery.transitions,
         login_observed=bool(any(item.category == "credential" for item in discovery.input_requests)),
+        authenticated_surface_observed=discovery.authenticated_surface_observed,
     )
     await service.update_job(job_id, application_map=result.model_dump(mode="json"))
     return result
@@ -5370,6 +5373,7 @@ async def run_autopilot_discovery(
         screens=persisted_discovery.screens,
         transitions=persisted_discovery.transitions,
         login_observed=bool(any(item.category == "credential" for item in persisted_discovery.input_requests)),
+        authenticated_surface_observed=result.authenticated_surface_observed,
         version=map_version,
     )
     if record is not None and (result.screens or result.runtime_prompts):
@@ -5432,6 +5436,7 @@ async def run_autopilot_discovery(
             screens=persisted_discovery.screens,
             transitions=persisted_discovery.transitions,
             login_observed=bool(any(item.category == "credential" for item in persisted_discovery.input_requests)),
+            authenticated_surface_observed=result.authenticated_surface_observed,
             version=map_version,
         )
         record = await _safe_job_record(db, job_id, owner_id)
@@ -6066,6 +6071,7 @@ async def execute_autopilot_suite(
                 screens=discovery_update.screens,
                 transitions=discovery_update.transitions,
                 login_observed=bool(any(item.category == "credential" for item in discovery_update.input_requests)),
+                authenticated_surface_observed=discovery_update.authenticated_surface_observed,
                 version=map_version,
             )
             expanded_analysis = expanded_analysis.model_copy(update={"application_map": application_map})

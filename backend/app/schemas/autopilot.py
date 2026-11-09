@@ -316,6 +316,7 @@ class AutopilotApplicationMap(BaseModel):
     version: int = Field(default=1, ge=1)
     generated_at: str = ""
     login_observed: bool = False
+    authenticated_surface_observed: Optional[bool] = None
     screens: List["DiscoveredScreen"] = Field(default_factory=list)
     transitions: List["DiscoveredTransition"] = Field(default_factory=list)
     controls_count: int = Field(default=0, ge=0)
@@ -1103,6 +1104,9 @@ class AutopilotDiscoveryResult(BaseModel):
     # may prove the expected package while leaving the app on its splash or a
     # sparse launch surface, which is not enough evidence for functional cases.
     interactive_surface_ready: Optional[bool] = None
+    # True only when approved sign-in submission reached a concrete,
+    # non-loading app surface. Seeing a login form alone does not satisfy it.
+    authenticated_surface_observed: Optional[bool] = None
     checkpoint_message: Optional[str] = None
     target_identity: Optional[str] = None
     target_activity: Optional[str] = None
