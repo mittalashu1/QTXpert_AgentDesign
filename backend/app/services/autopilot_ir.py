@@ -546,6 +546,7 @@ class AutopilotIRCompiler:
                         action="scroll",
                         description=f"Scroll to the observed prompt route from {source.page_label or source.screen_id}.",
                         screen_id=source.screen_id,
+                        value="right" if transition.control_label.casefold() == "scroll right" else "down",
                     )
                 )
             else:
@@ -825,6 +826,10 @@ class AutopilotIRCompiler:
             promoted_by_discovery=promoted,
             readiness_reason=readiness_reason,
             steps=ir_steps,
+            sign_in_setup_count=(
+                self._sign_in_setup_count(test, ir_steps, discovery)
+                if full_uat and analysis.target_kind == "android" and resolved_steps else 0
+            ),
             assertions=list(test.expected),
             journey=test.journey,
             page_label=test.page_label,
@@ -835,6 +840,94 @@ class AutopilotIRCompiler:
         )
         generated.appium_python = self._appium_script(test, analysis, generated)
         return generated
+
+    @staticmethod
+    def _sign_in_setup_count(
+        test: AutopilotTest,
+        steps: list[QTXIRStep],
+        discovery: AutopilotDiscoveryResult | None,
+    ) -> int:
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        if (
+            discovery is None or not test.runtime_screen_id or test.runtime_prompt_id
+            or test.destructive or test.requires_test_data or test.safety_classification != "safe"
+        ):
+            return 0
+        screens = {screen.screen_id: screen for screen in discovery.screens}
+        credential_fills: set[str] = set()
+        for index, step in enumerate(steps):
+            origin = screens.get(step.screen_id or "")
+            if origin is None or origin.screen_id == test.runtime_screen_id:
+                return 0
+            if step.action == "launch_app":
+                continue
+            if step.action == "fill" and step.input_key and step.value is None:
+                credentials = AutopilotDiscoveryService._credential_controls(origin)
+                if not any(control.semantic_label == step.target for control in credentials):
+                    return 0
+                credential_fills.add(origin.screen_id)
+                continue
+            if step.action != "tap" or not AutopilotDiscoveryService._is_auth_entry_control(step.target or ""):
+                return 0
+            landing = screens.get(step.expected_resulting_screen_id or "")
+            if origin.screen_id not in credential_fills or landing is None:
+                continue
+            if not AutopilotDiscoveryService._active_tab_labels(landing.controls):
+                continue
+            remaining = steps[index + 1:]
+            if not remaining or remaining[0].screen_id != landing.screen_id:
+                return 0
+            if all(
+                AutopilotIRCompiler._can_share_session_step(item, next_step, screens)
+                for item, next_step in zip(remaining, [*remaining[1:], None])
+            ):
+                return index + 1
+            return 0
+        return 0
+
+    @staticmethod
+    def _can_share_session_step(
+        step: QTXIRStep, next_step: QTXIRStep | None, screens: Mapping[str, DiscoveredScreen],
+    ) -> bool:
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        if step.action in {"assert_visible", "assert_text", "scroll", "capture_evidence", "inspect_ui"}:
+            return True
+        if step.action != "tap":
+            return False
+        origin = screens.get(step.screen_id or "")
+        destination = screens.get(step.expected_resulting_screen_id or "")
+        if origin is None:
+            return False
+        if destination is not None and (
+            AutopilotDiscoveryService._credential_controls(destination)
+            or AutopilotDiscoveryService._is_session_timeout(destination)
+        ):
+            return False
+        label = AutopilotDiscoveryService._normalize(step.target or "")
+        verifies_tab_selection = bool(
+            next_step and next_step.action == "assert_visible" and next_step.assertion == "selected"
+            and label == AutopilotDiscoveryService._normalize(next_step.target or "")
+        )
+        selects_observed_tab = verifies_tab_selection or (
+            destination is not None and label in AutopilotDiscoveryService._active_tab_labels(destination.controls)
+        )
+        if not selects_observed_tab and (destination is None or origin.screen_id == destination.screen_id):
+            return False
+        if (
+            AutopilotDiscoveryService._is_auth_entry_control(label)
+            or (not selects_observed_tab and AutopilotDiscoveryService._is_transaction_navigation_entry(label))
+            or AutopilotDiscoveryService._is_transaction_progress_control(label)
+            or re.search(r"\b(?:log out|logout|sign out|signout)\b", label)
+        ):
+            return False
+        return any(
+            control.enabled and control.clickable and not control.input_capable and control.risk == "safe"
+            and control.semantic_label == step.target
+            and any(locator.strategy == step.locator_strategy and locator.value == step.locator_value for locator in control.locators)
+            for control in origin.controls
+        )
 
     @staticmethod
     def _missing_setup(
@@ -962,6 +1055,9 @@ class AutopilotIRCompiler:
         from app.services.autopilot_discovery import AutopilotDiscoveryService
 
         screens = {screen.screen_id: screen for screen in discovery.screens}
+        expired_sessions = {
+            screen.screen_id for screen in discovery.screens if AutopilotDiscoveryService._is_session_timeout(screen)
+        }
         root = AutopilotDiscoveryService.select_entry_screen(discovery.screens) or discovery.screens[0]
         current = root
         runtime_screen = screens.get(test.runtime_screen_id or "")
@@ -978,6 +1074,7 @@ class AutopilotIRCompiler:
                         transition.from_screen_id != source_id
                         or transition.action not in {"tap", "scroll"}
                         or transition.to_screen_id not in screens
+                        or transition.to_screen_id in expired_sessions
                         or transition.to_screen_id in reachable
                     ):
                         continue
@@ -995,7 +1092,11 @@ class AutopilotIRCompiler:
                             and not (
                                 full_uat
                                 and control.risk == "review"
-                                and self._is_transaction_navigation_entry(control.semantic_label)
+                                and (
+                                    self._is_transaction_navigation_entry(control.semantic_label)
+                                    or discovery.full_uat_exploration
+                                    and AutopilotDiscoveryService._is_named_uat_navigation_control(control)
+                                )
                             )
                         ):
                             continue
@@ -1004,11 +1105,19 @@ class AutopilotIRCompiler:
             if runtime_screen.screen_id not in reachable:
                 current = runtime_screen
 
-        transitions = {
-            (transition.from_screen_id, transition.control_id): transition
-            for transition in discovery.transitions
-            if transition.action == "tap"
-        }
+        transitions = {}
+        for transition in discovery.transitions:
+            if transition.action != "tap" or transition.to_screen_id not in screens or transition.to_screen_id in expired_sessions:
+                continue
+            key = (transition.from_screen_id, transition.control_id)
+            previous = transitions.get(key)
+            # A timed-out re-authentication can return to the same form.
+            # Its no-op edge must not replace an earlier observed success.
+            if previous is None or (
+                previous.to_screen_id == previous.from_screen_id
+                and transition.to_screen_id != transition.from_screen_id
+            ):
+                transitions[key] = transition
         resolved: list[QTXIRStep] = []
         assertion_count = 0
         # A generated journey often says only “Tap Sign in”. Keep track of
@@ -1080,12 +1189,14 @@ class AutopilotIRCompiler:
                 continue
 
             if self._SCROLL_RE.match(step):
+                direction = "right" if re.search(r"\bright\b", step, re.I) else "down"
                 resolved.append(
                     QTXIRStep(
                         action="scroll",
                         description=raw_step,
                         target="scrollable content",
                         screen_id=current.screen_id,
+                        value=direction,
                     )
                 )
                 # Discovery-generated routes record the destination of each
@@ -1097,7 +1208,9 @@ class AutopilotIRCompiler:
                         for item in discovery.transitions
                         if item.from_screen_id == current.screen_id
                         and item.action == "scroll"
+                        and (item.control_label.casefold() == "scroll right") == (direction == "right")
                         and item.to_screen_id in screens
+                        and item.to_screen_id != current.screen_id
                     ),
                     None,
                 )
@@ -1191,6 +1304,9 @@ class AutopilotIRCompiler:
                         locator_value=locator.value,
                         locator_confidence=locator.confidence,
                         locator_fallbacks=self._locator_fallbacks(control, locator, interaction=True),
+                        expected_resulting_screen_id=(
+                            transition.to_screen_id if transition and not transition.prompt_path else None
+                        ),
                     )
                 )
                 if transition and transition.to_screen_id in screens:
@@ -1228,6 +1344,26 @@ class AutopilotIRCompiler:
             assert_match = self._ASSERT_RE.match(step)
             if assert_match:
                 assertion_phrase = assert_match.group(1)
+                selected_tab = re.fullmatch(r"selected tab (.+\s+tab\s+\d+\s+of\s+\d+)", assertion_phrase, re.I)
+                if selected_tab:
+                    previous = resolved[-1] if resolved else None
+                    label = selected_tab.group(1)
+                    if (
+                        previous and previous.action == "tap"
+                        and self._normalize_phrase(previous.target or "") == self._normalize_phrase(label)
+                    ):
+                        resolved.append(previous.model_copy(update={
+                            "action": "assert_visible", "description": raw_step, "assertion": "selected",
+                        }))
+                    elif AutopilotDiscoveryService._normalize(label) in AutopilotDiscoveryService._active_tab_labels(current.controls):
+                        resolved.append(QTXIRStep(
+                            action="assert_visible", description=raw_step, assertion="selected",
+                            target=label, screen_id=current.screen_id,
+                        ))
+                    else:
+                        return None, "The selected tab assertion needs a recorded selected state or a preceding tap on that tab."
+                    assertion_count += 1
+                    continue
                 if re.search(r"\b(?:validation|error|invalid|rejection|feedback)\b", assertion_phrase, re.I):
                     resolved.append(
                         QTXIRStep(
@@ -1318,6 +1454,11 @@ class AutopilotIRCompiler:
     ) -> bool:
         if not control.enabled or not control.clickable or control.input_capable:
             return False
+        if controls:
+            from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+            if AutopilotDiscoveryService._is_password_change_form(item for item in controls if item.input_capable):
+                return False
         label = re.sub(r"\s+", " ", (control.semantic_label or "").strip().lower())
         auth_label = any(
             re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", label)
@@ -1700,21 +1841,11 @@ class AutopilotIRCompiler:
                 if step.action == "launch_app":
                     lines.extend([f"    # {index}. {step.description}", "    time.sleep(1)"])
                 elif step.action == "scroll":
+                    direction = "right" if step.value == "right" else "down"
                     lines.extend([
                         f"    # {index}. {step.description}",
-                        "    try:",
-                        "        driver.execute_script('mobile: scrollGesture', {'direction': 'down', 'percent': 0.75})",
-                        "    except Exception:",
-                        "        try:",
-                        "            driver.execute_script('mobile: swipe', {'direction': 'up', 'percent': 0.75})",
-                        "        except Exception:",
-                        "            width, height = 1080, 1920",
-                        "            try: size = driver.get_window_size(); width, height = int(size.get('width') or width), int(size.get('height') or height)",
-                        "            except Exception: pass",
-                        "            swipe = getattr(driver, 'swipe', None)",
-                        "            if not callable(swipe): raise RuntimeError('Provider does not expose a safe scroll gesture')",
-                        "            try: swipe(int(width * .5), int(height * .82), int(width * .5), int(height * .22), duration=700)",
-                        "            except TypeError: swipe(int(width * .5), int(height * .82), int(width * .5), int(height * .22), 700)",
+                        "    controls = AutopilotDiscoveryService.parse_controls(safe_page_source(driver))",
+                        f"    assert AutopilotDiscoveryService._scroll_forward(driver, direction={direction!r}, controls=controls) is not None, 'The device did not provide a scroll gesture'",
                         "    time.sleep(0.8)",
                     ])
                 elif step.action == "prompt_choice":
@@ -1732,6 +1863,11 @@ class AutopilotIRCompiler:
                         "        if resulting_prompt.prompt_id == initial_prompt_id: raise AssertionError('The selected prompt choice left the same prompt active')",
                         "        observed_runtime_prompts.append(resulting_prompt.model_dump(mode='json'))",
                         f"    else:\n        resulting_source = safe_page_source(driver)\n        resulting_surface = AutopilotDiscoveryService._external_prompt_surface(driver, resulting_source, target_kind={analysis.target_kind!r}, expected_package={analysis.package_name!r}, prompt_kind={step.target!r}, decision={step.assertion!r})\n        if resulting_surface is not None:\n            observed_external_surfaces.append(resulting_surface)\n        else:\n            target_ready, target_reason, _ = validate_target_surface(driver, expected_package={analysis.package_name!r}, page_source=resulting_source)\n            if not target_ready: raise AssertionError(f'Prompt choice did not reach the app, a new prompt, or an observed external surface: {{target_reason}}')",
+                    ])
+                elif step.action == "assert_visible" and step.assertion == "selected":
+                    lines.extend([
+                        f"    # {index}. {step.description}",
+                        f"    assert AutopilotDiscoveryService._wait_for_tab_selection(driver, {step.target!r}), 'The observed tab was not selected'",
                     ])
                 elif step.action in {"tap", "assert_visible"}:
                     lines.extend([

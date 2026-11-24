@@ -8,12 +8,15 @@ helpers derive identity from negotiated capabilities and the UI hierarchy only.
 from __future__ import annotations
 
 import hashlib
+from http.client import RemoteDisconnected
 import logging
 import re
 import threading
 import time
 import xml.etree.ElementTree as ET
 from typing import Any, Mapping, Optional
+
+from urllib3.exceptions import MaxRetryError, NewConnectionError, ProtocolError
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,6 +75,17 @@ _SYSTEM_SURFACE_MARKERS = (
 
 class ProviderLifecycleUnavailable(RuntimeError):
     """The connected device cloud cannot perform a lifecycle-only check safely."""
+
+
+class AndroidDeviceDisconnected(RuntimeError):
+    """The Android device or its Appium transport became unavailable."""
+
+
+_ADB_DISCONNECT = re.compile(
+    r"\badb(?:\.exe)?:\s*(?:device(?:\s+['\"][^'\"]+['\"])?\s+"
+    r"(?:not found|offline)|no devices(?:/emulators)? found)\b",
+    re.IGNORECASE,
+)
 
 
 def _is_system_package(value: Optional[str]) -> bool:
@@ -503,11 +517,22 @@ def activate_verified_target_surface(
     detail = "; ".join(attempts)
     return False, f"{reason} Launch attempts: {detail}.", identity
 
-def safe_page_source(driver: Any) -> str:
-    """Return the current hierarchy without allowing evidence lookup to fail a run."""
+def safe_page_source(driver: Any, *, detect_android_disconnect: bool = False) -> str:
+    """Read the hierarchy, optionally distinguishing transport loss from an empty surface."""
     try:
         return str(driver.page_source or "")
-    except Exception:
+    except Exception as exc:
+        if detect_android_disconnect:
+            if _ADB_DISCONNECT.search(str(exc)):
+                raise AndroidDeviceDisconnected(
+                    "ADB lost the selected Android device during discovery. Reconnect it to the Appium runner and retry."
+                ) from None
+            transport_error = exc.reason if isinstance(exc, MaxRetryError) else exc
+            causes = transport_error.args if isinstance(transport_error, ProtocolError) else (transport_error,)
+            if any(isinstance(cause, (NewConnectionError, ConnectionError, RemoteDisconnected)) for cause in causes):
+                raise AndroidDeviceDisconnected(
+                    "The Android Appium connection closed during discovery. Check the runner and connected device, then retry."
+                ) from None
         return ""
 
 

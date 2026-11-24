@@ -1,3 +1,5 @@
+import pytest
+
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
@@ -333,7 +335,8 @@ def test_generated_evidence_scripts_redact_runtime_values():
     compile(web_script, "<qtx-generated-web>", "exec")
 
 
-def test_authentication_steps_are_injected_before_observed_sign_in():
+@pytest.mark.parametrize("include_failed_retry", [False, True])
+def test_authentication_steps_are_injected_before_observed_sign_in(include_failed_retry):
     username = DiscoveredControl(
         control_id="user",
         semantic_label="User ID / email",
@@ -354,10 +357,12 @@ def test_authentication_steps_are_injected_before_observed_sign_in():
     )
     sign_in = _control("sign-in", "Sign in")
     dashboard = _control("dashboard", "Dashboard")
+    home_tab = _control("home", "Home Tab 1 of 4").model_copy(update={"selected": True})
+    cards_tab = _control("cards", "Cards Tab 3 of 4")
     discovery = _discovery().model_copy(update={
         "screens": [
             _discovery().screens[0].model_copy(update={"controls": [username, password, sign_in]}),
-            _discovery().screens[1].model_copy(update={"controls": [dashboard]}),
+            _discovery().screens[1].model_copy(update={"controls": [dashboard, home_tab, cards_tab]}),
         ],
         "transitions": [
             DiscoveredTransition(
@@ -368,6 +373,14 @@ def test_authentication_steps_are_injected_before_observed_sign_in():
             )
         ],
     })
+    if include_failed_retry:
+        discovery.transitions.append(DiscoveredTransition(
+            from_screen_id="screen-001",
+            to_screen_id="screen-001",
+            control_id="sign-in",
+            control_label="Sign in",
+            duplicate_state=True,
+        ))
     analysis = _analysis([
         AutopilotTest(
             id="QT-AI-AUTH-REPLAY",
@@ -402,6 +415,52 @@ def test_authentication_steps_are_injected_before_observed_sign_in():
     assert "not-a-real-secret" not in generated.model_dump_json()
     assert "not-a-real-secret" not in generated.appium_python
     compile(generated.appium_python, "<qtx-generated>", "exec")
+
+    navigation = analysis.tests[0].model_copy(update={
+        "runtime_screen_id": "screen-002",
+        "steps": ["Launch application", "Tap Sign in", "Verify selected tab Home Tab 1 of 4", "Verify Dashboard"],
+    })
+    values = {"__username": "qa@example.test", "__password": "not-a-real-secret"}
+    compiler = AutopilotIRCompiler()
+    grouped = compiler.compile_test(navigation, analysis, discovery, setup, values, full_uat=True)
+    assert grouped.sign_in_setup_count == 4
+    assert grouped.steps[4].assertion == "selected"
+    assert grouped.steps[4].screen_id == "screen-002"
+    assert [step.action for step in grouped.steps[:4]] == ["launch_app", "fill", "fill", "tap"]
+    compile(grouped.appium_python, "<qtx-generated>", "exec")
+
+    for override in ({"runtime_screen_id": "screen-001"}, {"requires_test_data": True}):
+        isolated = compiler.compile_test(navigation.model_copy(update=override), analysis, discovery, setup, values, full_uat=True)
+        assert isolated.sign_in_setup_count == 0
+
+    cards = navigation.model_copy(update={"steps": [
+        "Launch application", "Tap Sign in", "Tap Cards Tab 3 of 4", "Verify selected tab Cards Tab 3 of 4",
+    ]})
+    grouped_cards = compiler.compile_test(cards, analysis, discovery, setup, values, full_uat=True)
+    assert grouped_cards.sign_in_setup_count == 4
+    assert grouped_cards.steps[4].expected_resulting_screen_id is None
+    assert grouped_cards.steps[5].assertion == "selected"
+
+
+def test_tab_activation_asserts_its_selected_state_without_a_destination_edge():
+    label = "Investments Tab 2 of 4"
+    discovery = _discovery()
+    discovery.screens[0].controls.append(_control("investments", label))
+    analysis = _analysis([AutopilotTest(
+        id="QT-RUNTIME-INVESTMENTS-TAB", suite="Functional", title="Activate Investments",
+        objective="Verify the observed tab becomes selected.", priority="high",
+        steps=["Launch application", f"Tap {label}", f"Verify selected tab {label}"],
+        expected=[f"{label} is selected"],
+    )])
+
+    case = AutopilotIRCompiler().compile_bundle(analysis, discovery).tests[0]
+
+    assert case.readiness == "executable"
+    assertion = next(step for step in case.steps if step.action == "assert_visible")
+    assert assertion.target == label
+    assert assertion.assertion == "selected"
+    assert "_wait_for_tab_selection" in case.appium_python
+    compile(case.appium_python, "<qtx-generated>", "exec")
 
 
 def test_generic_submit_is_only_auth_safe_with_credential_controls():

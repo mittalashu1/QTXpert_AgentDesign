@@ -137,6 +137,54 @@ def test_runtime_prompt_parser_recognizes_proceed_cancel_confirmation(tmp_path):
     ]
 
 
+def test_actionable_notification_copy_is_not_a_confirmation_prompt():
+    source = (
+        '<hierarchy><node text="Notifications" clickable="true" />'
+        '<node text="Card Control Enabled. Online payments are enabled." clickable="true" />'
+        '</hierarchy>'
+    )
+
+    assert AutopilotDiscoveryService._runtime_prompt_kind(SimpleNamespace(), source) is None
+
+
+def test_password_change_fields_are_not_login_checkpoints():
+    source = (
+        '<hierarchy><node text="Change Password" class="android.widget.TextView" />'
+        '<node text="Current Password" class="android.widget.EditText" password="true" bounds="[10,40][80,60]" />'
+        '<node text="New Password" class="android.widget.EditText" password="true" bounds="[10,70][80,90]" />'
+        '<node text="Confirm New Password" class="android.widget.EditText" password="true" bounds="[10,100][80,120]" />'
+        '<node text="Update" class="android.widget.Button" clickable="true" />'
+        '</hierarchy>'
+    )
+    controls = AutopilotDiscoveryService.parse_controls(source)
+    screen = DiscoveredScreen(screen_id="change-password", fingerprint="change-password", controls=controls)
+
+    assert sum(control.input_kind == "credential" for control in screen.controls) == 3
+    assert AutopilotDiscoveryService._credential_controls(screen) == []
+    assert AutopilotDiscoveryService._authentication_checkpoint_reason(screen, {}) is None
+    requests = AutopilotDiscoveryService.runtime_input_requests([screen])
+    assert [request.category for request in requests] == ["test_data"] * 3
+    assert all(request.sensitive and request.status == "pending" for request in requests)
+
+
+def test_email_recovery_form_keeps_its_input_separate_from_sign_in():
+    source = (
+        '<hierarchy><node text="Enter Email Address" class="android.widget.TextView" />'
+        '<node text="Email Address" class="android.widget.EditText" />'
+        '<node text="Proceed" class="android.widget.Button" clickable="true" />'
+        '</hierarchy>'
+    )
+    screen = DiscoveredScreen(
+        screen_id="forgot-password", fingerprint="forgot-password",
+        controls=AutopilotDiscoveryService.parse_controls(source),
+    )
+
+    assert AutopilotDiscoveryService._credential_controls(screen) == []
+    [request] = AutopilotDiscoveryService.runtime_input_requests([screen])
+    assert request.category == "test_data"
+    assert request.sensitive
+
+
 def test_auth_checkpoint_marks_missing_otp_without_requiring_saved_credentials_again():
     otp = DiscoveredControl(
         control_id="verification-code",
@@ -459,6 +507,81 @@ def test_scroll_forward_falls_back_to_horizontal_native_swipe():
 
     assert AutopilotDiscoveryService._scroll_forward(driver, direction="right") is True
     assert driver.swipes == [((328, 400, 88, 400), {"duration": 700})]
+
+
+def test_scroll_forward_distinguishes_end_of_content_from_unsupported_gesture():
+    class Driver:
+        def execute_script(self, command, arguments):
+            return False
+
+    assert AutopilotDiscoveryService._scroll_forward(Driver()) is False
+    assert AutopilotDiscoveryService._scroll_forward(object()) is None
+
+
+def test_scroll_gesture_uses_observed_container_bounds():
+    driver = SimpleNamespace(
+        get_window_size=lambda: {"width": 720, "height": 1600},
+        execute_script=lambda command, arguments: observed.append((command, arguments)) or False,
+    )
+    observed = []
+    container = DiscoveredControl(
+        control_id="scroll", semantic_label="Scrollable content", class_name="android.widget.ScrollView",
+        bounds="[27,489][693,1476]", scrollable=True,
+    )
+
+    assert AutopilotDiscoveryService._scroll_forward(driver, controls=[container]) is False
+    assert observed == [("mobile: scrollGesture", {
+        "left": 27, "top": 489, "width": 666, "height": 987, "direction": "down", "percent": 0.75,
+    })]
+
+
+def test_scroll_viewport_preserves_new_clickable_controls():
+    first_view = [
+        DiscoveredControl(control_id=f"control-{index}", semantic_label=f"Item {name}", clickable=True)
+        for index, name in enumerate(("Alpha", "Bravo", "Charlie", "Delta", "Echo"))
+    ]
+    screen = DiscoveredScreen(screen_id="first", fingerprint="first", controls=first_view)
+    next_view = [*first_view, DiscoveredControl(control_id="next", semantic_label="More details", clickable=True)]
+
+    assert AutopilotDiscoveryService._screen_similarity(screen, None, None, next_view) > 0.78
+    assert AutopilotDiscoveryService._screen_similarity(
+        screen, None, None, next_view, require_matching_viewport=True,
+    ) == 0.0
+
+
+def test_refreshing_a_known_control_preserves_its_recorded_transition_id():
+    original = DiscoveredControl(
+        control_id="observed-update", semantic_label="Update", class_name="android.view.View",
+        bounds="[20,40][160,90]", enabled=True, clickable=True,
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Update", confidence=0.98)],
+    )
+    screen = DiscoveredScreen(screen_id="profile", fingerprint="profile", controls=[original])
+    refreshed = original.model_copy(update={
+        "control_id": "moved-update", "bounds": "[20,90][160,140]", "enabled": False,
+    })
+
+    AutopilotDiscoveryService._merge_screen_controls(screen, [refreshed])
+
+    [control] = screen.controls
+    assert control.control_id == original.control_id
+    assert control.bounds == refreshed.bounds
+    assert control.enabled is False
+
+
+def test_verified_uat_crawl_can_probe_named_navigation_controls():
+    controls = AutopilotDiscoveryService.parse_controls(
+        '<hierarchy><node class="android.widget.Button" enabled="true" clickable="true" content-desc="MF"/>'
+        '<node class="android.widget.Button" enabled="true" clickable="true" content-desc="Send Invite"/>'
+        '</hierarchy>'
+    )
+    avatar = next(control for control in controls if control.semantic_label == "MF")
+    assert AutopilotDiscoveryService._select_safe_control(controls, set()) is None
+    assert AutopilotDiscoveryService._select_safe_control(
+        controls, set(), explore_named_uat_controls=True,
+    ) == avatar
+    assert AutopilotDiscoveryService._select_safe_control(
+        controls, {avatar.control_id}, explore_named_uat_controls=True,
+    ) is None
 
 
 def test_runtime_input_requests_are_reference_only():
@@ -798,8 +921,13 @@ async def test_browserstack_upload_quota_is_returned_as_structured_blocker(tmp_p
     assert "testing time expired" in (result.error or "")
     assert "testing time expired" in (result.target_identity_reason or "")
 
-@pytest.mark.parametrize("deny_click_returns", [True, False])
-def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(tmp_path, monkeypatch, deny_click_returns):
+@pytest.mark.parametrize(
+    ("deny_click_returns", "disconnect_at_location"),
+    [(True, False), (False, False), (False, True)],
+)
+def test_runtime_discovery_crawls_followup_location_prompt(
+    tmp_path, monkeypatch, deny_click_returns, disconnect_at_location,
+):
     import sys
     import types
 
@@ -829,7 +957,10 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
             elif self.value == "com.android.permissioncontroller:id/deny_button":
                 self.driver.state = "landing"
             elif self.value == "com.google.android.gms:id/negative_button":
-                if self.driver.deny_click_returns:
+                if disconnect_at_location:
+                    self.driver.state = "disconnected"
+                    raise RuntimeError("adb.exe: device 'runner-test-serial' not found")
+                elif self.driver.deny_click_returns:
                     self.driver.state = "landing"
             elif self.value == "com.qtx.demo:id/login":
                 self.driver.state = "login"
@@ -853,6 +984,8 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
 
         @property
         def page_source(self):
+            if self.state == "disconnected":
+                raise RuntimeError("adb.exe: device 'runner-test-serial' not found")
             if self.state == "runtime_permission_prompt":
                 return (
                     '<hierarchy><node package="com.android.permissioncontroller" '
@@ -974,7 +1107,11 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
         SimpleNamespace(AUTOPILOT_DISCOVERY_SETTLE_SECONDS=1, AUTOPILOT_DISCOVERY_SETTLE_RETRIES=0),
         Prototype(),
     )
-    request = AutopilotDiscoveryRequest(provider="browserstack", max_screens=8, max_actions=12)
+    request = AutopilotDiscoveryRequest(
+        provider="appium" if disconnect_at_location else "browserstack",
+        max_screens=8,
+        max_actions=12,
+    )
 
     result = service._run_sync(
         "job-login-after-navigation",
@@ -989,17 +1126,29 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
         30_000,
     )
 
-    assert result["stop_reason"].startswith("Authentication checkpoint detected.")
-    assert result["actions_attempted"] == 3
-    assert driver.back_calls == (0 if deny_click_returns else 1)
     permission_prompt = next(item for item in result["runtime_prompts"] if item.kind == "runtime_permission")
     location_prompt = next(item for item in result["runtime_prompts"] if item.kind == "location_settings")
     permission_allowance = next(choice for choice in permission_prompt.choices if choice.decision == "allow")
-    permission_denial = next(choice for choice in permission_prompt.choices if choice.decision == "deny")
-    location_denial = next(choice for choice in location_prompt.choices if choice.decision == "deny")
     assert permission_allowance.outcome_status == "observed"
     assert permission_allowance.resulting_prompt_id == location_prompt.prompt_id
     assert permission_allowance.resulting_screen_id is None
+    assert driver.quit_called is True
+
+    if disconnect_at_location:
+        assert result["target_ready"] is False
+        assert result["interactive_surface_ready"] is False
+        assert result["actions_attempted"] == 1
+        assert result["provider_interruption"] == result["stop_reason"]
+        assert result["checkpoint_message"].startswith("ADB lost the selected Android device")
+        assert "runner-test-serial" not in result["checkpoint_message"]
+        assert result["transitions"] == []
+        return
+
+    assert result["stop_reason"].startswith("Authentication checkpoint detected.")
+    assert result["actions_attempted"] == 3
+    assert driver.back_calls == (0 if deny_click_returns else 1)
+    permission_denial = next(choice for choice in permission_prompt.choices if choice.decision == "deny")
+    location_denial = next(choice for choice in location_prompt.choices if choice.decision == "deny")
     assert permission_denial.outcome_status == "planned"
     assert location_denial.outcome_status == ("observed" if deny_click_returns else "unavailable")
     assert location_denial.resulting_screen_id == ("screen-001" if deny_click_returns else None)
@@ -1010,11 +1159,13 @@ def test_runtime_discovery_crawls_followup_location_prompt_then_stops_at_login(t
         "Password",
     }
     assert len(result["transitions"]) == 1
-    assert driver.quit_called is True
 
-@pytest.mark.parametrize(("post_login_frames", "expect_authenticated"), [(2, True), (50, False)])
+@pytest.mark.parametrize(
+    ("post_login_frames", "expect_authenticated", "expire_session"),
+    [(2, True, False), (2, True, True), (50, False, False)],
+)
 def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
-    tmp_path, monkeypatch, post_login_frames, expect_authenticated,
+    tmp_path, monkeypatch, post_login_frames, expect_authenticated, expire_session,
 ):
     from appium import webdriver
 
@@ -1045,11 +1196,18 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
                 ):
                     self.driver.state = "post_login_loading"
                     self.driver.post_login_frames = self.driver.configured_post_login_frames
-            elif self.locator == "com.qtx.demo:id/accounts":
+            elif self.locator == "Scrim":
+                self.driver.state = "tour"
+            elif self.locator == "com.qtx.demo:id/tour_skip":
+                self.driver.state = "home"
+            elif self.locator == "com.qtx.demo:id/about" and expire_session and not self.driver.expired:
+                self.driver.expired = True
+                self.driver.state = "timeout"
+            elif self.locator == "com.qtx.demo:id/accounts" and self.driver.state == "home":
                 self.driver.state = "accounts"
             elif self.locator == "com.qtx.demo:id/activity":
                 self.driver.state = "activity"
-            elif self.locator == "com.qtx.demo:id/profile":
+            elif self.locator == "com.qtx.demo:id/profile" and self.driver.state == "home":
                 self.driver.state = "profile"
 
         def send_keys(self, value):
@@ -1073,20 +1231,26 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
             self.post_login_frames = 0
             self.quit_called = False
             self.clicked = []
+            self.reopened = 0
+            self.expired = False
 
         @property
         def current_package(self):
+            if self.state == "launcher":
+                return "com.android.launcher3"
             return "com.qtx.demo"
 
         @property
         def current_activity(self):
+            if self.state == "launcher":
+                return "com.android.launcher3.Launcher"
             return "com.qtx.demo.MainActivity"
 
         @property
         def page_source(self):
             if self.state == "post_login_loading":
                 if self.post_login_frames <= 0:
-                    self.state = "home"
+                    self.state = "home" if self.expired else "promotion"
                 else:
                     self.post_login_frames -= 1
                     return (
@@ -1099,6 +1263,10 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
                         '</hierarchy>'
                     )
             shells = {
+                "launcher": (
+                    '<node package="com.android.launcher3" class="android.view.View" '
+                    'content-desc="All apps" enabled="true" />'
+                ),
                 "welcome": (
                     '<node package="com.qtx.demo" class="android.widget.Button" '
                     'resource-id="com.qtx.demo:id/login_entry" text="Login" clickable="true" enabled="true" />'
@@ -1119,7 +1287,30 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
                     '<node package="com.qtx.demo" class="android.widget.Button" '
                     'resource-id="com.qtx.demo:id/login_submit" text="Login" clickable="true" enabled="true" />'
                 ),
+                "timeout": (
+                    '<node package="com.qtx.demo" class="android.widget.TextView" text="Session Timeout" />'
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/login_entry" text="Login" clickable="true" enabled="true" />'
+                ),
+                "promotion": (
+                    '<node package="com.qtx.demo" class="android.view.View" '
+                    'content-desc="Share Your Referral Code" enabled="true" />'
+                    '<node package="com.qtx.demo" class="android.view.View" '
+                    'content-desc="Scrim" clickable="true" enabled="true" />'
+                ),
+                "tour": (
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/accounts" text="Accounts" clickable="true" enabled="true" />'
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/profile" text="Profile" clickable="true" enabled="true" />'
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/tour_next" text="Next" clickable="true" enabled="true" />'
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/tour_skip" text="Skip" clickable="true" enabled="true" />'
+                ),
                 "home": (
+                    '<node package="com.qtx.demo" class="android.widget.Button" '
+                    'resource-id="com.qtx.demo:id/about" text="About" clickable="true" enabled="true" />'
                     '<node package="com.qtx.demo" class="android.widget.Button" '
                     'resource-id="com.qtx.demo:id/accounts" text="Accounts" clickable="true" enabled="true" />'
                     '<node package="com.qtx.demo" class="android.widget.Button" '
@@ -1150,12 +1341,20 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
         def back(self):
             self.state = {
                 "authentication": "welcome",
+                "home": "launcher",
                 "accounts": "home",
                 "activity": "accounts",
                 "profile": "home",
                 "post_login_loading": "welcome",
                 "guest": "welcome",
             }.get(self.state, "welcome")
+
+        def start_activity(self, package, activity, **_kwargs):
+            assert package == "com.qtx.demo"
+            assert activity.endswith("MainActivity")
+            if self.state == "launcher":
+                self.state = "welcome"
+                self.reopened += 1
 
         def execute_script(self, _command, _arguments):
             return False
@@ -1219,16 +1418,36 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
         assert {
             "Accounts", "Profile", "Activity", "Recent activity", "Profile details",
         }.issubset(observed_labels)
-        home_screen = next(
+        promotion_screen = next(
             screen
             for screen in result["screens"]
-            if any(control.semantic_label == "Accounts" for control in screen.controls)
+            if any(control.semantic_label == "Scrim" for control in screen.controls)
         )
         assert any(
             transition.control_label == "Login"
-            and transition.to_screen_id == home_screen.screen_id
+            and transition.to_screen_id == promotion_screen.screen_id
             for transition in result["transitions"]
         )
+        if expire_session:
+            home_screen = next(screen for screen in result["screens"] if any(
+                control.semantic_label == "About" for control in screen.controls
+            ))
+            assert "Session Timeout" in observed_labels
+            assert any(
+                transition.control_label == "Login" and transition.duplicate_state
+                and transition.to_screen_id == home_screen.screen_id
+                for transition in result["transitions"]
+            )
+            assert result["authentication_blocked"] is False
+        else:
+            assert any(
+                transition.control_label == "About" and transition.duplicate_state
+                for transition in result["transitions"]
+            )
+        assert driver.clicked.index("Scrim") < driver.clicked.index("com.qtx.demo:id/tour_skip")
+        assert driver.clicked.index("com.qtx.demo:id/tour_skip") < driver.clicked.index("com.qtx.demo:id/accounts")
+        assert driver.reopened >= 1 if expire_session else driver.reopened == 1
+        assert len({screen.screen_id for screen in result["screens"]}) == len(result["screens"])
         assert {"com.qtx.demo:id/accounts", "com.qtx.demo:id/activity", "com.qtx.demo:id/profile"}.issubset(
             set(driver.clicked)
         )
@@ -1449,7 +1668,28 @@ def test_loading_screen_treats_unlabelled_root_view_as_incomplete():
     assert AutopilotDiscoveryService._looks_like_loading_screen(screen) is True
 
 
-def test_discovery_preserves_incomplete_launch_status_instead_of_crawling_empty_surface(tmp_path, monkeypatch):
+def test_discovery_keeps_distinct_selected_tabs_with_identical_controls():
+    service = AutopilotDiscoveryService
+    package = "com.qtx.demo"
+    activity = ".MainActivity"
+    xml = (
+        '<hierarchy><node package="com.qtx.demo" class="android.view.View" '
+        'content-desc="Home&#10;Tab 1 of 2" clickable="true" selected="{home}" />'
+        '<node package="com.qtx.demo" class="android.view.View" '
+        'content-desc="Investments&#10;Tab 2 of 2" clickable="true" selected="{investments}" /></hierarchy>'
+    )
+    home = service.parse_controls(xml.format(home="true", investments="false"))
+    investments = service.parse_controls(xml.format(home="false", investments="true"))
+    fingerprint = service.fingerprint(package, activity, home)
+    assert service.fingerprint(package, activity, investments) != fingerprint
+    screen = DiscoveredScreen(
+        screen_id="home", fingerprint=fingerprint, package_name=package, activity_name=activity, controls=home,
+    )
+    assert service._screen_similarity(screen, package, activity, investments) == 0.0
+
+
+@pytest.mark.parametrize("connectivity_dialog", [False, True])
+def test_discovery_preserves_incomplete_launch_status(tmp_path, monkeypatch, connectivity_dialog):
     import appium
     from app.config import Settings
     from app.schemas.autopilot import AutopilotDiscoveryRequest
@@ -1474,6 +1714,13 @@ def test_discovery_preserves_incomplete_launch_status_instead_of_crawling_empty_
             return None
 
     driver = Driver()
+    if connectivity_dialog:
+        driver.page_source = (
+            '<hierarchy><node package="com.qtx.demo" class="android.view.View" '
+            'enabled="true" content-desc="No Internet Connection" />'
+            '<node package="com.qtx.demo" class="android.view.View" '
+            'enabled="true" clickable="true" content-desc="Okay" /></hierarchy>'
+        )
     monkeypatch.setattr(appium.webdriver, "Remote", lambda *args, **kwargs: driver)
     monkeypatch.setattr("app.services.autopilot_discovery.time.sleep", lambda _seconds: None)
 
@@ -1505,7 +1752,9 @@ def test_discovery_preserves_incomplete_launch_status_instead_of_crawling_empty_
         1000,
     )
 
-    assert "non-interactive launch screen" in result["stop_reason"].lower()
+    assert ("no internet connection" if connectivity_dialog else "non-interactive launch screen") in (
+        result["stop_reason"].lower()
+    )
     assert result["actions_attempted"] == 0
     assert result["transitions"] == []
     assert result["target_ready"] is True

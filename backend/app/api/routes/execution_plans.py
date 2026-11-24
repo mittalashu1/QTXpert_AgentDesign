@@ -41,8 +41,16 @@ _AUTHENTICATION_TEXT = re.compile(
     r"\b(log[ -]?in|sign[ -]?in|authenticate|authentication|credential|username|password|passcode|mfa|otp|one[- ]time)\b",
     re.IGNORECASE,
 )
+_AUTHENTICATION_SURFACE = re.compile(
+    r"\b(?:log[ -]?in|sign[ -]?in)\s+(?:page|screen|form|button|link|dialog|prompt|heading)\b",
+    re.IGNORECASE,
+)
 _TEST_DATA_TEXT = re.compile(
     r"\b(test data|seeded|synthetic|customer|account|portfolio|beneficiar(?:y|ies)|cart|order|email|phone|amount|balance|investment)\b",
+    re.IGNORECASE,
+)
+_SYNTHETIC_APP_ARTIFACT = re.compile(
+    r"\b(?:synthetic|seeded)(?:\s+(?:test|fixture)){0,2}\s+(?:apk|ipa|app|application|build)\b",
     re.IGNORECASE,
 )
 _ENVIRONMENT_TEXT = re.compile(
@@ -111,6 +119,11 @@ def _case_has_test_data(case: ExecutionPlanCase) -> bool:
     return bool(case.test_data) and not _has_placeholder(case.test_data)
 
 
+def _case_requires_test_data(case: ExecutionPlanCase, text: str) -> bool:
+    descriptions = _SYNTHETIC_APP_ARTIFACT.sub(" ", text)
+    return not _case_has_test_data(case) and bool(_TEST_DATA_TEXT.search(descriptions))
+
+
 def _case_requires_authentication(case: ExecutionPlanCase) -> bool:
     """Detect an authenticated journey without treating a sign-in button as a credential need.
 
@@ -130,7 +143,7 @@ def _case_requires_authentication(case: ExecutionPlanCase) -> bool:
             *(f"{key} {value}" for key, value in (case.test_data or {}).items()),
         )
     )
-    if _AUTHENTICATION_TEXT.search(narrative):
+    if _AUTHENTICATION_TEXT.search(_AUTHENTICATION_SURFACE.sub(" ", narrative)):
         return True
     for raw in case.steps or []:
         step = str(raw or "").strip()
@@ -219,7 +232,7 @@ def _input_requirements(plan: ExecutionPlan) -> list[dict]:
                 "Use a non-production vault or credential reference (for example vault://qa/investor). Never enter a password, token, or OTP.",
                 case,
             )
-        if _TEST_DATA_TEXT.search(text) and not _case_has_test_data(case):
+        if _case_requires_test_data(case, text):
             add(
                 "test_data_reference",
                 "Synthetic test-data reference",
@@ -272,7 +285,7 @@ def _setup_blockers(plan: ExecutionPlan, case: ExecutionPlanCase, target_kind: s
     blockers: list[str] = []
     if _case_requires_authentication(case) and not str(refs.get("authentication_reference", "")).strip():
         blockers.append("Authentication setup is required; add a non-production credential reference in Guided setup")
-    if _TEST_DATA_TEXT.search(text) and not _case_has_test_data(case) and not str(refs.get("test_data_reference", "")).strip():
+    if _case_requires_test_data(case, text) and not str(refs.get("test_data_reference", "")).strip():
         blockers.append("Synthetic test data is required; add a dataset/account reference in Guided setup")
     if _ENVIRONMENT_TEXT.search(text) and not str(refs.get("environment_reference", "")).strip():
         blockers.append("Environment/reset details are required; add a non-production environment reference in Guided setup")

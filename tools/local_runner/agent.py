@@ -27,6 +27,7 @@ from urllib.parse import urlparse, urljoin
 
 LOG = logging.getLogger("qtxpert.local_runner")
 DEFAULT_APPIUM_URL = "http://127.0.0.1:4723"
+ANDROID_SERIAL_ENV = "QTXPERT_ANDROID_SERIAL"
 LEASE_HEARTBEAT_SECONDS = 25
 MAX_APK_BYTES = 1024 * 1024 * 1024
 MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
@@ -163,6 +164,13 @@ def inspect_local_stack(appium_url: str = DEFAULT_APPIUM_URL) -> dict[str, Any]:
             for line in completed.stdout.splitlines()[1:]
             if len(line.split()) >= 2 and line.split()[1] == "device"
         ]
+        pinned_serial = os.environ.get(ANDROID_SERIAL_ENV)
+        if pinned_serial:
+            result["online_devices"] = [
+                serial for serial in result["online_devices"] if serial == pinned_serial
+            ]
+            if not result["online_devices"]:
+                result["device_error"] = "The selected Android device is disconnected or its ADB authorization is missing."
         for device in result["online_devices"]:
             try:
                 boot = subprocess.run(
@@ -324,7 +332,7 @@ def _validate_startup_ui(source: str) -> None:
     if not source.strip():
         raise RuntimeError("The device returned an empty UI hierarchy; startup was not validated")
     if any(marker in source for marker in ("android:id/aerr_close", "android:id/aerr_wait", "android:id/aerr_restart")):
-        raise RuntimeError("An Android crash or application-not-responding dialog is blocking the test. Check the emulator's available memory and app logs.")
+        raise RuntimeError("An Android crash or application-not-responding dialog is blocking the test. Check the device logs.")
 
 
 def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, stop: threading.Event | None = None) -> dict[str, Any]:
@@ -334,8 +342,13 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
     if job.get("target_kind") != "android":
         raise RuntimeError("This Windows runner only accepts Android jobs. Pair a Mac runner for iOS.")
     configured_device = str(job.get("device_name") or "").strip()
+    pinned_serial = os.environ.get(ANDROID_SERIAL_ENV)
+    if pinned_serial and configured_device and configured_device != pinned_serial:
+        raise RuntimeError("This job requested a different Android device from the one selected on the runner.")
     devices = inspect_local_stack(appium_url).get("devices", [])
     if not devices:
+        if pinned_serial:
+            raise RuntimeError("The selected Android device is not ready in ADB. Reconnect it and allow USB debugging.")
         raise RuntimeError("No Android device or emulator is online in ADB")
     if configured_device and configured_device not in devices:
         # A friendly Android model name is accepted only when exactly one ADB
@@ -532,6 +545,7 @@ def run_agent(*, once: bool = False, poll_seconds: int = 5) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="QTXpert Windows Android runner (outbound HTTPS only)")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--device-serial", help="Use only this ADB device")
     subparsers = parser.add_subparsers(dest="command", required=True)
     pair_parser = subparsers.add_parser("pair", help="Pair this Windows machine with a one-time QTXpert token")
     pair_parser.add_argument("--api-url", required=True, help="QTXpert API origin or /api/v1 URL")
@@ -543,6 +557,8 @@ def main() -> int:
     run_parser.add_argument("--once", action="store_true", help="Claim at most one run and exit")
     run_parser.add_argument("--poll-seconds", type=int, default=5, choices=range(2, 31))
     args = parser.parse_args()
+    if args.device_serial:
+        os.environ[ANDROID_SERIAL_ENV] = args.device_serial
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",

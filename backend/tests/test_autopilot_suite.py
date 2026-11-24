@@ -595,6 +595,43 @@ def test_suite_interpreter_retries_a_settling_hierarchy(tmp_path):
     assert driver.element.clicked is True
 
 
+def test_validation_requires_feedback_beyond_the_invalid_input_value(tmp_path):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _Driver()
+    entered_value = '<node class="android.widget.EditText" text="invalid@example.test" />'
+    test = _test_ir([QTXIRStep(action="assert_validation_feedback", description="Check email feedback", target="Email")])
+
+    driver.page_source = f"<hierarchy>{entered_value}</hierarchy>"
+    with pytest.raises(AssertionError, match="No validation feedback"):
+        service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    driver.page_source = f'<hierarchy>{entered_value}<node text="Invalid email address" /></hierarchy>'
+    result = service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+    assert result["actions"][0]["action"] == "assert_validation_feedback"
+
+
+def test_sign_in_wait_ignores_rejection_already_visible_before_retry(monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    old_error = '<hierarchy><node class="android.widget.TextView" text="Incorrect password" /></hierarchy>'
+    driver = _Driver()
+    driver.page_source = (
+        '<hierarchy><node class="android.view.View" content-desc="Home Tab 1 of 4" '
+        'selected="true" clickable="true" /></hierarchy>'
+    )
+    transition = DiscoveredTransition(
+        from_screen_id="login", to_screen_id="home", control_id="login", control_label="Login",
+    )
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+
+    settled, choice = service._settle_authenticated_tabs(
+        driver, None, transition, old_error, ("home tab 1 of 4",), "android", {},
+        prior_feedback="credential_rejected",
+    )
+
+    assert settled == driver.page_source
+    assert choice is None
+
+
 def test_suite_interpreter_tries_only_observed_locator_fallbacks(tmp_path, monkeypatch):
     service = AutopilotSuiteService(Settings(), prototype=object())
 
@@ -1552,6 +1589,34 @@ def test_suite_can_include_observed_authentication_edge_only_when_enabled():
     ) == [(auth_transition, auth.controls[-1])]
 
 
+def test_suite_reuses_observed_transaction_entry_when_full_uat_is_enabled():
+    add_money = DiscoveredControl(
+        control_id="add-money",
+        semantic_label="Add Money",
+        clickable=True,
+        risk="review",
+        locators=[DiscoveryLocator(strategy="accessibility_id", value="Add Money", confidence=0.99)],
+    )
+    home = _observed_screen("home", [add_money])
+    payment = _observed_screen("add-money", [])
+    transition = DiscoveredTransition(
+        from_screen_id=home.screen_id,
+        to_screen_id=payment.screen_id,
+        control_id=add_money.control_id,
+        control_label=add_money.semantic_label,
+        action="tap",
+        duplicate_state=True,
+    )
+    discovery = _navigation_discovery().model_copy(
+        update={"screens": [home, payment], "transitions": [transition]},
+    )
+
+    assert AutopilotSuiteService._safe_discovery_path(discovery, home.screen_id, payment.screen_id) is None
+    assert AutopilotSuiteService._safe_discovery_path(
+        discovery, home.screen_id, payment.screen_id, allow_transaction_entries=True,
+    ) == [(transition, add_money)]
+
+
 def test_suite_replays_approved_sign_in_once_to_reach_observed_post_login_screen(monkeypatch):
     from app.services.autopilot_discovery import AutopilotDiscoveryService
 
@@ -1745,6 +1810,95 @@ def test_suite_does_not_force_restart_before_first_verified_case(tmp_path, monke
     assert results[0].status == "passed"
     assert driver.reset_calls == 0
     assert driver.terminate_calls == []
+
+
+@pytest.mark.parametrize("expiry", [None, "between_cases", "during_case"])
+def test_android_suite_shares_only_the_verified_sign_in(tmp_path, monkeypatch, expiry):
+    from appium import webdriver
+    from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+    driver = _Driver()
+    home_source = (
+        '<hierarchy><node package="com.qtx.demo" class="android.widget.Button" '
+        'content-desc="Home Tab 1 of 4" selected="true" clickable="true" /></hierarchy>'
+    )
+    timeout_source = (
+        '<hierarchy><node package="com.qtx.demo" class="android.view.View" text="Session Timeout" />'
+        '<node package="com.qtx.demo" class="android.view.View" text="Login" clickable="true" /></hierarchy>'
+    )
+    landing = _observed_screen("screen-home", AutopilotDiscoveryService.parse_controls(home_source))
+    discovery = _navigation_discovery().model_copy(update={
+        "screens": [landing], "target_identity": "com.qtx.demo",
+    })
+    settings = Settings(
+        AUTOPILOT_FULL_UAT_SANDBOX_VERIFIED=True,
+        AUTOPILOT_FULL_UAT_TARGET_ALLOWLIST="android:com.qtx.demo",
+    )
+    prototype = type("Prototype", (), {"_job_dir": lambda _self, _id: tmp_path})()
+    service = AutopilotSuiteService(settings, prototype)
+    monkeypatch.setattr(webdriver, "Remote", lambda *_args, **_kwargs: driver)
+    monkeypatch.setattr(service, "_activate_verified_target", lambda *_args, **_kwargs: (True, "ready", {}))
+    monkeypatch.setattr(service, "_prepare_test_screen", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    resets = []
+    monkeypatch.setattr(service, "_reset_to_application", lambda *_args, **_kwargs: resets.append("reset"))
+    history = []
+
+    def execute(_driver, test, *_args, reused_sign_in=False, **_kwargs):
+        history.append((test.test_id, reused_sign_in, [step.action for step in test.steps]))
+        if test.test_id == "navigation-1" and expiry:
+            driver.page_source = timeout_source
+            return {"session_timed_out": expiry == "during_case"}
+        driver.page_source = home_source
+        return {"signed_in_screen_id": "screen-home"} if not reused_sign_in else {}
+
+    monkeypatch.setattr(service, "_execute_test", execute)
+    prefix = QTXIRStep(action="launch_app", description="Cold sign-in setup")
+    check = QTXIRStep(
+        action="assert_visible", description="Verify Home tab", screen_id=landing.screen_id,
+        locator_strategy="accessibility_id", locator_value="Home Tab 1 of 4",
+    )
+    seed = _test_ir([prefix, check]).model_copy(update={"test_id": "sign-in"})
+    first = seed.model_copy(update={"test_id": "navigation-1", "sign_in_setup_count": 1})
+    second = first.model_copy(update={"test_id": "navigation-2"})
+    independent = seed.model_copy(update={"test_id": "independent"})
+    results = service._run_sync(
+        "test-job", "http://localhost:4723", "demo.apk",
+        AutopilotSuiteRequest(provider="appium", execution_mode="full_uat", confirm_isolated_uat=True),
+        [seed, first, independent, second], "com.qtx.demo", None, 1000, 1000, 1000,
+        discovery=discovery,
+    )
+
+    assert [item.test_id for item in results] == ["sign-in", "navigation-1", "independent", "navigation-2"]
+    assert history == [
+        ("sign-in", False, ["launch_app", "assert_visible"]),
+        ("navigation-1", True, ["assert_visible"]),
+        ("navigation-2", not expiry, ["launch_app", "assert_visible"] if expiry else ["assert_visible"]),
+        ("independent", False, ["launch_app", "assert_visible"]),
+    ]
+    assert len(resets) == 1 + bool(expiry)
+    assert results[1].status == ("blocked" if expiry == "during_case" else "passed")
+    assert results[1].evidence["authenticated_session_reused"] is True
+    assert results[-1].evidence.get("sign_in_recovered_after_timeout", False) == bool(expiry)
+
+
+def test_reused_case_stops_after_observing_an_expired_session(tmp_path):
+    driver = _Driver()
+    driver.page_source = (
+        '<hierarchy><node package="com.qtx.demo" class="android.view.View" text="Session Timeout" />'
+        '<node package="com.qtx.demo" class="android.view.View" text="Login" clickable="true" /></hierarchy>'
+    )
+    test = _test_ir([QTXIRStep(
+        action="tap", description="Tap an observed feature", target="Cards Tab 3 of 4",
+        locator_strategy="accessibility_id", locator_value="Cards Tab 3 of 4",
+    )])
+    service = AutopilotSuiteService(Settings(), prototype=object())
+
+    evidence = service._execute_test(driver, test, tmp_path, "com.qtx.demo", reused_sign_in=True)
+
+    assert evidence["session_timed_out"] is True
+    assert evidence["actions"] == []
+    assert driver.locators == []
 
 
 class _GuestReturnDriver(_RouteDriver):

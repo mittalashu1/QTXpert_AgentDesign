@@ -131,6 +131,20 @@ async def test_mobile_preflight_allows_target_validation_to_defer_step_support()
 
 
 @pytest.mark.asyncio
+async def test_preflight_does_not_require_setup_for_viewing_sign_in():
+    plan = ExecutionPlan(name="Public sign-in page", suite_type="smoke", status="draft")
+    case = _case(steps=["navigate /login", "assert-text Welcome back"])
+    case.preconditions = "The synthetic fixture APK is available."
+    case.expected_result = "The public sign-in page shows the Welcome back heading."
+    plan.cases.append(case)
+
+    await _preflight_plan(plan, "https://example.com")
+
+    assert case.readiness == "ready"
+    assert not _input_requirements(plan)
+
+
+@pytest.mark.asyncio
 async def test_preflight_surfaces_auth_and_data_setup_instead_of_a_dead_end():
     plan = ExecutionPlan(name="Authenticated flow", suite_type="feature", status="draft")
     plan.cases.append(_case(

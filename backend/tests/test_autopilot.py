@@ -1057,7 +1057,8 @@ def test_runtime_discovery_does_not_create_synthetic_test_data_cases_for_credent
     )
 
 
-def test_runtime_expansion_promotes_deterministic_observed_cases(tmp_path):
+@pytest.mark.parametrize("observed_destination", [None, "help", "timeout"])
+def test_runtime_expansion_promotes_deterministic_observed_cases(tmp_path, observed_destination):
     service = _service(tmp_path)
     analysis = AutopilotAnalysis(
         job_id="22222222-2222-2222-2222-222222222222",
@@ -1088,13 +1089,33 @@ def test_runtime_expansion_promotes_deterministic_observed_cases(tmp_path):
         safe_control_count=1,
         screens=[DiscoveredScreen(screen_id="home", fingerprint="b" * 64, controls=[help_control])],
     )
+    if observed_destination:
+        support_heading = help_control.model_copy(update={
+            "control_id": "support", "semantic_label": "Support topics", "clickable": False,
+            "locators": [DiscoveryLocator(strategy="id", value="com.example:id/support_topics", confidence=0.99)],
+        })
+        destination_controls = [support_heading]
+        if observed_destination == "timeout":
+            destination_controls = [
+                support_heading.model_copy(update={"semantic_label": "Session Timeout"}),
+                help_control.model_copy(update={"control_id": "login", "semantic_label": "Login"}),
+            ]
+        discovery.screens.append(DiscoveredScreen(
+            screen_id=observed_destination, fingerprint="c" * 64, controls=destination_controls,
+        ))
+        discovery.transitions.append(DiscoveredTransition(
+            from_screen_id="home", to_screen_id=observed_destination, control_id="help", control_label="Help",
+        ))
+        discovery.screen_count = 2
+        discovery.control_count = 1 + len(destination_controls)
 
     expanded = service.expand_discovered_coverage(analysis, discovery)
     bundle = AutopilotIRCompiler().compile_bundle(expanded, discovery)
 
     assert bundle.discovery_used is True
     assert bundle.promoted_count >= 2
-    assert any(item.bucket == "functional_positive" and item.readiness == "executable" for item in bundle.tests)
+    functional_case = next(item for item in bundle.tests if item.test_id.startswith("QT-RUNTIME-FUNC-POS-"))
+    assert (functional_case.readiness == "executable") is (observed_destination == "help")
     assert any(item.bucket == "accessibility" and item.readiness == "executable" for item in bundle.tests)
 
 
