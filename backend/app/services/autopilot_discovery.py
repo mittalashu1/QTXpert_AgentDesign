@@ -32,6 +32,7 @@ from app.schemas.autopilot import (
 )
 from app.services.autopilot import AutopilotPrototypeService
 from app.services.appium_compat import (
+    AndroidDeviceDisconnected,
     activate_verified_target_surface,
     enter_observed_text,
     known_native_prompt_kind,
@@ -52,7 +53,7 @@ _TRANSACTION_NAVIGATION_TERMS = {
     "pay", "payment", "payments", "transfer", "transfers", "send money", "send funds",
     "deposit", "deposits", "withdraw", "withdrawal", "withdrawals", "invest", "investment",
     "investments", "trade", "trading", "sell", "buy", "redeem", "beneficiary", "beneficiaries",
-    "bill pay", "bill payments", "top up", "top-up", "card payment", "cash transfer",
+    "bill pay", "bill payments", "top up", "top-up", "add money", "card payment", "cash transfer",
 }
 _BLOCKED_TERMS = {
     "pay", "payment", "payments", "transfer", "transfers", "send money", "send funds", "purchase", "buy",
@@ -63,6 +64,7 @@ _BLOCKED_TERMS = {
 }
 _SAFE_NAVIGATION_TERMS = {
     "menu", "more", "settings", "help", "about", "search", "skip", "back", "home",
+    "dismiss", "scrim",
     "login", "log in", "sign in", "register", "sign up", "forgot password",
     "continue", "next", "unlock", "authenticate",
     "forgot username", "privacy", "terms", "language", "profile",
@@ -79,6 +81,16 @@ _SAFE_NAVIGATION_TERMS = {
 _SAFE_NAVIGATION_PATTERNS = (
     re.compile(r"^(?:view details|learn more|help|about|privacy|terms)$", re.I),
     re.compile(r"^(?:open|view|go to|show)\s+(?:account|accounts|cards|portfolio|investments|transactions|activity|rewards|offers|benefits|support|notifications|documents|services|products|overview|insights|security)$", re.I),
+)
+_TAB_POSITION = re.compile(r"\s+tab\s+\d+\s+of\s+\d+$", re.I)
+_SUBMISSION_LABEL = re.compile(
+    r"^(?:send|share|invite|call|dial|submit|confirm|authori[sz]e|approve|"
+    r"delete|remove|erase|reset|sign out|log\s*out)\b",
+    re.I,
+)
+_PASSWORD_CHANGE_FIELD = re.compile(
+    r"\b(?:current|old|new|confirm|repeat|retype)\s+(?:new\s+)?password\b",
+    re.I,
 )
 _AUTH_SUBMIT_TERMS = (
     "sign in", "sign-in", "log in", "login", "continue to account", "continue",
@@ -184,7 +196,7 @@ class AutopilotDiscoveryService:
             )
             label = cls._normalize(cls._semantic_label(attrs))
             if actionable and label:
-                decision = cls._prompt_choice_decision(label)
+                decision = cls._prompt_choice_decision(label, exact=True)
                 if decision:
                     decisions.add(decision)
         # An explicit affirmative and negative choice is itself a branch
@@ -218,7 +230,7 @@ class AutopilotDiscoveryService:
                     attrs.get("clickable", "false").casefold() == "true"
                     or class_name.endswith("button")
                 )
-                decision = cls._prompt_choice_decision(label) if actionable and label else None
+                decision = cls._prompt_choice_decision(label, exact=True) if actionable and label else None
                 key = re.sub(r"[^a-z0-9]+", "-", label).strip("-") if decision else ""
                 if key and key not in choice_keys:
                     choice_keys.append(key[:48])
@@ -354,7 +366,7 @@ class AutopilotDiscoveryService:
                 normalized = cls._normalize(label)
                 if not actionable or not normalized or normalized in seen:
                     continue
-                decision = cls._prompt_choice_decision(normalized)
+                decision = cls._prompt_choice_decision(normalized, exact=kind == "app_confirmation")
                 if decision is None:
                     continue
                 locators = cls._locators(attrs)
@@ -407,15 +419,20 @@ class AutopilotDiscoveryService:
         )
 
     @classmethod
-    def _prompt_choice_decision(cls, normalized_label: str) -> Optional[str]:
+    def _prompt_choice_decision(cls, normalized_label: str, *, exact: bool = False) -> Optional[str]:
         allow = (
-            "allow", "yes", "ok", "turn on", "enable", "while using", "only this time",
+            "allow", "yes", "ok", "okay", "turn on", "enable", "while using", "only this time",
             "always allow", "proceed",
         )
         deny = (
             "deny", "no", "not now", "no thanks", "don't allow", "don’t allow",
             "never allow", "cancel", "decline", "do not proceed", "not proceed",
         )
+        if exact:
+            label = normalized_label.strip(" .!?…").replace("’", "'")
+            if label in deny:
+                return "deny"
+            return "allow" if label in allow else None
         # Decline labels can contain an allow token ("Don't allow"). Test
         # them first so a denial is never generated as a grant branch.
         if any(token in normalized_label for token in deny):
@@ -623,6 +640,14 @@ class AutopilotDiscoveryService:
         requests: list[AutopilotInputRequest] = []
         seen: set[str] = set()
         for screen in screens:
+            separate_form = cls._is_password_change_form(screen.controls) or (
+                not screen.url and not cls._credential_controls(screen)
+                and any(
+                    control.enabled and control.clickable
+                    and cls._normalize(control.semantic_label) in {"proceed", "update", "save", "reset password"}
+                    for control in screen.controls
+                )
+            )
             for control in screen.controls:
                 if not control.input_capable:
                     continue
@@ -631,7 +656,8 @@ class AutopilotDiscoveryService:
                 if key in seen:
                     continue
                 seen.add(key)
-                credential = field_type == "credential"
+                sensitive = field_type == "credential"
+                credential = sensitive and not separate_form
                 category = "credential" if credential else "test_data"
                 display_label = control.semantic_label or f"{field_type} field"
                 input_hint = cls._input_hint({}, display_label)
@@ -663,6 +689,9 @@ class AutopilotDiscoveryService:
                 elif credential and input_hint == "otp":
                     question = "What approved non-production one-time code should be used?"
                     placeholder = "e.g., 123456 (only when your test flow permits OTP)"
+                elif sensitive:
+                    question = f"What dedicated UAT value should this test use for {friendly_label}?"
+                    placeholder = "Enter a dedicated value for this test journey"
                 elif any(term in lower_label for term in ("address", "street", "city", "country", "postal", "zip")):
                     question = f"What synthetic {friendly_label.lower()} should the test enter?"
                     placeholder = "e.g., 12 Example Street, Dubai"
@@ -679,11 +708,13 @@ class AutopilotDiscoveryService:
                     "This live sign-in field may require a non-production credential. Enter it for this run, save it encrypted for reuse, or skip it. "
                     "Autopilot never returns the value or writes it to logs."
                     if credential
+                    else "This sensitive field belongs to a separate test journey and needs its own dedicated UAT value."
+                    if sensitive
                     else "Autopilot will use a bounded synthetic value for this non-sensitive field by default. Override it with a non-production value, save one encrypted for reuse, generate a different value, or skip the dependent check."
                 )
                 format_hint = (
                     "Password values are encrypted immediately and never included in context, reports or logs."
-                    if input_hint == "password"
+                    if sensitive
                     else "The first pass uses a deterministic, non-secret synthetic value matching this field. Any override is encrypted before persistence."
                 )
                 locator = control.locators[0].value if control.locators else None
@@ -693,7 +724,7 @@ class AutopilotDiscoveryService:
                 # so mark them as an automatic random candidate.  Credentials
                 # and OTPs remain pending and are the only fields that can
                 # pause the first authenticated journey.
-                autonomous_status = "pending" if credential else "random"
+                autonomous_status = "pending" if sensitive else "random"
                 requests.append(
                     AutopilotInputRequest(
                         key=key,
@@ -701,9 +732,9 @@ class AutopilotDiscoveryService:
                         category=category,
                         reason=reason,
                         required_for=[f"{screen.screen_id}: {display_label}"],
-                        sensitive=credential,
+                        sensitive=sensitive,
                         status=autonomous_status,
-                        reference_present=not credential,
+                        reference_present=not sensitive,
                         source="runtime",
                         screen_id=screen.screen_id,
                         control_id=control.control_id,
@@ -758,6 +789,22 @@ class AutopilotDiscoveryService:
         if re.search(r"(?:missingpluginexception|fluttererror|flutter initialization)", joined):
             return "Startup diagnostics: Flutter reported an initialization error."
         return None
+
+    @classmethod
+    def _has_blocking_connectivity_dialog(cls, screen: DiscoveredScreen) -> bool:
+        actions = [
+            control for control in screen.controls
+            if control.enabled and (control.clickable or control.input_capable)
+        ]
+        return (
+            any(cls._normalize(control.semantic_label) == "no internet connection" for control in screen.controls)
+            and bool(actions)
+            and all(
+                not control.input_capable
+                and cls._normalize(control.semantic_label) in {"ok", "okay", "dismiss", "retry", "try again"}
+                for control in actions
+            )
+        )
 
     @classmethod
     def _looks_like_loading_screen(cls, screen: DiscoveredScreen) -> bool:
@@ -835,7 +882,7 @@ class AutopilotDiscoveryService:
             [label, attrs.get("text", ""), attrs.get("label", ""), attrs.get("name", ""), attrs.get("content-desc", ""), attrs.get("resource-id", ""), attrs.get("identifier", "")]
         ).lower().replace("_", " ").replace("-", " ")
         normalized = cls._normalize(label)
-        normalized = re.sub(r"\s+tab\s+\d+\s+of\s+\d+$", "", normalized, flags=re.I).strip()
+        normalized = _TAB_POSITION.sub("", normalized).strip()
         # Section tabs such as Investments remain ordinary read-only navigation.
         # Exact transaction entry labels are review-only and traversed only when
         # the user asks Autopilot to map transaction journeys.
@@ -889,7 +936,7 @@ class AutopilotDiscoveryService:
         # Its presence can ground field semantics, but it is not executable
         # until a fresh, post-fill hierarchy reports it as enabled.
         submit = cls._auth_submit_control(controls, include_disabled=True)
-        if not inputs or submit is None:
+        if not inputs or submit is None or cls._is_password_change_form(inputs):
             return controls
         submit_label = cls._normalize(submit.semantic_label)
         explicit_auth_submit = any(
@@ -1041,6 +1088,7 @@ class AutopilotDiscoveryService:
                     bounds=attrs.get("bounds", "")[:100],
                     clickable=clickable,
                     enabled=enabled,
+                    selected=attrs.get("selected", "false").lower() in {"true", "1"},
                     scrollable=scrollable,
                     input_capable=input_capable,
                     input_kind=input_kind,
@@ -1051,13 +1099,32 @@ class AutopilotDiscoveryService:
             )
         return controls
 
-    @staticmethod
-    def fingerprint(package_name: Optional[str], activity_name: Optional[str], controls: Iterable[DiscoveredControl]) -> str:
+    @classmethod
+    def _active_tab_labels(cls, controls: Iterable[DiscoveredControl]) -> tuple[str, ...]:
+        labels = (cls._normalize(item.semantic_label) for item in controls if item.selected)
+        return tuple(sorted(label for label in labels if _TAB_POSITION.search(label)))
+
+    @classmethod
+    def _wait_for_tab_selection(cls, driver: Any, label: str, *, timeout_seconds: float = 8.0) -> bool:
+        expected = cls._normalize(label)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            controls = cls.parse_controls(safe_page_source(driver))
+            if expected in cls._active_tab_labels(controls):
+                return True
+            time.sleep(0.3)
+        return False
+
+    @classmethod
+    def fingerprint(
+        cls, package_name: Optional[str], activity_name: Optional[str], controls: Iterable[DiscoveredControl],
+    ) -> str:
+        controls = list(controls)
         semantic = sorted(
             f"{c.semantic_label.lower()}|{c.resource_id.lower()}|{c.class_name.lower()}"
             for c in controls
         )
-        material = "\n".join([package_name or "", activity_name or "", *semantic])
+        material = "\n".join([package_name or "", activity_name or "", *semantic, *cls._active_tab_labels(controls)])
         return hashlib.sha256(material.encode("utf-8", errors="ignore")).hexdigest()
 
     @classmethod
@@ -1067,6 +1134,8 @@ class AutopilotDiscoveryService:
         right_package: Optional[str],
         right_activity: Optional[str],
         right_controls: Iterable[DiscoveredControl],
+        *,
+        require_matching_viewport: bool = False,
     ) -> float:
         """Compare two observed screens without trusting volatile text.
 
@@ -1083,6 +1152,11 @@ class AutopilotDiscoveryService:
             return 0.0
         if (left.activity_name or "") != (right_activity or ""):
             return 0.0
+        right_controls = list(right_controls)
+        left_tabs = cls._active_tab_labels(left.controls)
+        right_tabs = cls._active_tab_labels(right_controls)
+        if left_tabs and right_tabs and left_tabs != right_tabs:
+            return 0.0
 
         def signature(control: DiscoveredControl) -> tuple[str, str, str, str]:
             label = re.sub(r"\d+", "<n>", cls._normalize(control.semantic_label or ""))
@@ -1096,6 +1170,15 @@ class AutopilotDiscoveryService:
 
         left_items = {signature(item) for item in left.controls if item.enabled}
         right_items = {signature(item) for item in right_controls if item.enabled}
+        if require_matching_viewport:
+            left_targets = {
+                signature(item) for item in left.controls if item.enabled and (item.clickable or item.input_capable)
+            }
+            right_targets = {
+                signature(item) for item in right_controls if item.enabled and (item.clickable or item.input_capable)
+            }
+            if left_targets != right_targets:
+                return 0.0
         if not left_items or not right_items:
             return 0.0
         left_inputs = sorted(item[3] for item in left_items if item[3])
@@ -1128,7 +1211,10 @@ class AutopilotDiscoveryService:
                 # Enabled/clickable state belongs to the latest frame. Keeping
                 # the old frame with equally good locators freezes Continue
                 # as disabled even after valid input has enabled it.
-                merged[key] = control.model_copy(update={"locators": control.locators or prior.locators})
+                merged[key] = control.model_copy(update={
+                    "control_id": prior.control_id,
+                    "locators": control.locators or prior.locators,
+                })
         existing.controls = list(merged.values())
 
     @staticmethod
@@ -1137,9 +1223,22 @@ class AutopilotDiscoveryService:
         return bool(re.search(r"\b(?:log in|login|sign in|authenticate)\b", normalized))
 
     @classmethod
+    def _is_session_timeout(cls, screen: DiscoveredScreen) -> bool:
+        return cls._is_session_timeout_controls(screen.controls)
+
+    @classmethod
+    def _is_session_timeout_controls(cls, controls: list[DiscoveredControl]) -> bool:
+        return (
+            not cls._active_tab_labels(controls)
+            and any(cls._normalize(control.semantic_label) == "session timeout" for control in controls)
+            and any(control.enabled and control.clickable and cls._is_auth_entry_control(control.semantic_label)
+                    for control in controls)
+        )
+
+    @classmethod
     def _is_transaction_navigation_entry(cls, label: str) -> bool:
         normalized = cls._normalize(label)
-        normalized = re.sub(r"\s+tab\s+\d+\s+of\s+\d+$", "", normalized, flags=re.I).strip()
+        normalized = _TAB_POSITION.sub("", normalized).strip()
         return normalized in _TRANSACTION_NAVIGATION_TERMS
 
     @classmethod
@@ -1150,15 +1249,27 @@ class AutopilotDiscoveryService:
         return normalized in {"continue", "next", "proceed", "done", "finish"}
 
     @classmethod
-    def _select_safe_control(
+    def _is_named_uat_navigation_control(cls, control: DiscoveredControl) -> bool:
+        label = cls._normalize(control.semantic_label)
+        return (
+            control.risk == "review"
+            and bool(label)
+            and label not in {"view", "image", "imageview", "button", "icon", "container"}
+            and not _SUBMISSION_LABEL.match(label)
+            and any(locator.confidence >= 0.90 for locator in control.locators)
+        )
+
+    @classmethod
+    def _eligible_navigation_controls(
         cls,
         controls: list[DiscoveredControl],
         visited: set[str],
         *,
         include_transaction_journeys: bool = False,
         transaction_context: bool = False,
-    ) -> Optional[DiscoveredControl]:
-        candidates = [
+        explore_named_uat_controls: bool = False,
+    ) -> list[DiscoveredControl]:
+        return [
             control for control in controls
             if control.enabled
             and (control.clickable or cls._is_auth_entry_control(control.semantic_label))
@@ -1168,21 +1279,68 @@ class AutopilotDiscoveryService:
                 or include_transaction_journeys
                 and control.risk == "review"
                 and cls._is_transaction_navigation_entry(control.semantic_label)
+                or explore_named_uat_controls
+                and cls._is_named_uat_navigation_control(control)
             )
             and not (transaction_context and cls._is_transaction_progress_control(control.semantic_label))
             and control.locators and control.control_id not in visited
             and cls._safe_locator_confidence(control)
         ]
+
+    @classmethod
+    def _select_safe_control(
+        cls,
+        controls: list[DiscoveredControl],
+        visited: set[str],
+        *,
+        include_transaction_journeys: bool = False,
+        transaction_context: bool = False,
+        explore_named_uat_controls: bool = False,
+        observed_tabs: Iterable[str] = (),
+    ) -> Optional[DiscoveredControl]:
+        candidates = cls._eligible_navigation_controls(
+            controls, visited, include_transaction_journeys=include_transaction_journeys,
+            transaction_context=transaction_context, explore_named_uat_controls=explore_named_uat_controls,
+        )
         if not candidates:
             return None
+        visited_tabs = set(observed_tabs)
+
+        def navigation_priority(control: DiscoveredControl) -> int:
+            if not explore_named_uat_controls:
+                return 0
+            label = cls._normalize(control.semantic_label)
+            if include_transaction_journeys and cls._is_transaction_navigation_entry(label):
+                return 0
+            if _TAB_POSITION.search(label):
+                return 3 if control.selected or label in visited_tabs else 1
+            return 2
+
         # At the app entry screen, observe a real sign-in gate before any
         # guest/demo route; confidence remains the tie-breaker within each group.
         candidates.sort(key=lambda item: (
             0 if cls._is_auth_entry_control(item.semantic_label) else 1,
+            0 if cls._normalize(item.semantic_label) == "scrim" else 1,
+            navigation_priority(item),
+            1 if explore_named_uat_controls and item.risk != "safe" else 0,
             -max(locator.confidence for locator in item.locators),
             item.semantic_label.lower(),
         ))
-        return candidates[0]
+        # Tour overlays can expose the underlying tabs in the hierarchy.
+        # Open the app by choosing the observed Skip/Next pair's Skip action.
+        first = candidates[0]
+        if (
+            not cls._is_auth_entry_control(first.semantic_label)
+            and cls._normalize(first.semantic_label) != "scrim"
+            and any(cls._normalize(control.semantic_label) == "next" for control in candidates)
+        ):
+            skip = next(
+                (control for control in candidates if cls._normalize(control.semantic_label) == "skip"),
+                None,
+            )
+            if skip is not None:
+                return skip
+        return first
 
     @classmethod
     def _safe_locator_confidence(cls, control: DiscoveredControl) -> bool:
@@ -1225,14 +1383,19 @@ class AutopilotDiscoveryService:
         return directions or ["down"]
 
     @staticmethod
-    def _scroll_forward(driver: Any, direction: str = "down") -> bool:
+    def _scroll_forward(
+        driver: Any,
+        direction: str = "down",
+        *,
+        controls: Iterable[DiscoveredControl] = (),
+    ) -> bool | None:
         """Scroll the current native surface using provider-safe gestures.
 
         Appium providers differ on which mobile extension they expose. Try the
         Android UiAutomator2 scroll gesture first, then the portable swipe
         extension and finally the legacy client method. An unsupported method
-        is treated as an unavailable exploration capability; it never becomes
-        an unsupported-method error in the generated test result.
+        returns None. False means the gesture ran and reached the end of
+        the scrollable area.
         """
         direction = "right" if direction in {"right", "horizontal"} else "down"
         swipe_direction = "left" if direction == "right" else "up"
@@ -1243,9 +1406,24 @@ class AutopilotDiscoveryService:
             height = max(480, int(size.get("height") or height))
         except Exception:
             pass
+        rectangles = []
+        for control in controls:
+            horizontal = "horizontal" in control.class_name.lower()
+            if not control.scrollable or horizontal != (direction == "right"):
+                continue
+            match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", control.bounds)
+            if match is None:
+                continue
+            left, top, right, bottom = map(int, match.groups())
+            right, bottom = min(width, right), min(height, bottom)
+            if right - left >= 32 and bottom - top >= 32:
+                rectangles.append((left, top, right - left, bottom - top))
         execute_script = getattr(driver, "execute_script", None)
         if callable(execute_script):
-            if direction == "right":
+            if rectangles:
+                left, top, area_width, area_height = max(rectangles, key=lambda rect: rect[2] * rect[3])
+                gesture_bounds = {"left": left, "top": top, "width": area_width, "height": area_height}
+            elif direction == "right":
                 gesture_bounds = {
                     "left": max(0, int(width * 0.12)),
                     "top": 0,
@@ -1268,9 +1446,6 @@ class AutopilotDiscoveryService:
             ):
                 try:
                     result = execute_script(command, arguments)
-                    # The scroll gesture returns False when the list is already
-                    # at its end; preserve that signal so the graph walker can
-                    # move to another branch instead of repeating forever.
                     return result is not False
                 except Exception:
                     continue
@@ -1293,7 +1468,7 @@ class AutopilotDiscoveryService:
                     pass
             except Exception:
                 pass
-        return False
+        return None
 
     @classmethod
     def _credential_hint(cls, control: DiscoveredControl) -> str:
@@ -1309,11 +1484,31 @@ class AutopilotDiscoveryService:
 
     @classmethod
     def _credential_controls(cls, screen: DiscoveredScreen) -> list[DiscoveredControl]:
-        return [
+        controls = [
             control
             for control in screen.controls
             if control.enabled and control.input_capable and control.input_kind == "credential"
         ]
+        if cls._is_password_change_form(controls):
+            return []
+        # A credential-shaped field can also occur on a recovery, profile,
+        # or transaction form. Only a sign-in submit or an observed OTP
+        # checkpoint makes it part of the authentication handoff.
+        if controls and (
+            any(cls._credential_hint(control) == "otp" for control in controls)
+            or cls._auth_submit_control(screen.controls, include_disabled=True) is not None
+        ):
+            return controls
+        return []
+
+    @classmethod
+    def _is_password_change_form(cls, controls: Iterable[DiscoveredControl]) -> bool:
+        for control in controls:
+            for label in (control.semantic_label, control.content_description, control.resource_id):
+                words = re.sub(r"([a-z])([A-Z])", r"\1 \2", label or "")
+                if _PASSWORD_CHANGE_FIELD.search(re.sub(r"[_-]+", " ", words)):
+                    return True
+        return False
 
     @classmethod
     def _authentication_checkpoint_reason(
@@ -1574,6 +1769,11 @@ class AutopilotDiscoveryService:
                             if clickable:
                                 matches = clickable
 
+                        if len(matches) > 1 and control.bounds:
+                            same_bounds = [element for element in matches if attribute(element, "bounds") == control.bounds]
+                            if len(same_bounds) == 1:
+                                matches = same_bounds
+
                         if len(matches) == 1:
                             return matches[0]
                         last_error = LookupError(
@@ -1603,7 +1803,7 @@ class AutopilotDiscoveryService:
         try:
             root = ET.fromstring(page_source)
             for node in root.iter():
-                class_name = str(node.attrib.get("class") or "")
+                class_name = str(node.attrib.get("class") or node.attrib.get("type") or node.tag)
                 if class_name in _INPUT_CLASSES or class_name in {
                     "XCUIElementTypeTextField", "XCUIElementTypeSecureTextField", "XCUIElementTypeSearchField",
                 }:
@@ -1750,14 +1950,16 @@ class AutopilotDiscoveryService:
                     "Resolve the startup state, then retry discovery. "
                     "No functional journeys were inferred."
                 )
+            provider_interruption = payload.get("provider_interruption")
+            navigation_interrupted = str(payload.get("stop_reason") or "").startswith(("Stopped ", "Discovery stopped "))
             status = (
                 "blocked"
                 if target_ready is False
-                else "partial" if checkpoint_stop or launch_wait_exhausted
+                else "partial" if provider_interruption or checkpoint_stop or launch_wait_exhausted or navigation_interrupted
                 else "completed" if payload["screens"]
                 else "partial"
             )
-            error = payload.get("target_identity_reason") if target_ready is False else None
+            error = provider_interruption or (payload.get("target_identity_reason") if target_ready is False else None)
         except Exception as exc:
             payload = {
                 "screens": [], "transitions": [], "actions_attempted": 0,
@@ -1794,6 +1996,7 @@ class AutopilotDiscoveryService:
             duration_seconds=round(time.perf_counter() - perf, 2),
             device_name=request.device_name,
             observe_only=request.observe_only,
+            full_uat_exploration=bool(payload.get("full_uat_exploration")),
             screen_count=len(screens),
             control_count=len(controls),
             safe_control_count=sum(control.risk == "safe" for control in controls),
@@ -1817,7 +2020,7 @@ class AutopilotDiscoveryService:
             exploration_cursor=cursor,
             can_continue=can_continue,
             visited_screen_count=len(screens),
-            unvisited_edge_count=max(0, len(controls) - len(payload.get("transitions") or [])),
+            unvisited_edge_count=int(payload.get("unvisited_edge_count", 0)),
         )
 
     def _run_sync(
@@ -1926,16 +2129,22 @@ class AutopilotDiscoveryService:
         pending_prompt_outcomes: list[tuple[RuntimePromptObservation, str]] = []
         pending_prompt_links: list[tuple[RuntimePromptObservation, str]] = []
         visited_edges: set[tuple[str, str]] = set()
+        renewed_backtracks: set[tuple[str, str]] = set()
         transaction_screen_ids: set[str] = set()
         scroll_rounds: dict[tuple[str, str], int] = {}
         warnings: list[str] = []
         actions_attempted = 0
+        next_screen_number = 1
         stop_reason = "Discovery bounds reached"
         launch_surface_incomplete = False
+        authenticated_surface_observed = False
         target_ready: Optional[bool] = None
         target_identity: Optional[str] = None
         target_activity: Optional[str] = None
         target_identity_reason: Optional[str] = None
+
+        def read_discovery_source() -> str:
+            return safe_page_source(driver, detect_android_disconnect=request.provider == "appium" and not is_ios)
 
         def capture(
             *,
@@ -1945,15 +2154,14 @@ class AutopilotDiscoveryService:
             trigger_control: Optional[DiscoveredControl] = None,
             trigger_control_id: Optional[str] = None,
         ) -> tuple[DiscoveredScreen, bool]:
-            nonlocal actions_attempted, last_capture_prompt_path
-            index = len(screens) + 1
+            nonlocal actions_attempted, last_capture_prompt_path, next_screen_number
             last_capture_prompt_path = []
             first_prompt_in_capture = True
             prompt_source_screen_id = source_screen.screen_id if source_screen else None
             prompt_trigger_control_id = (
                 trigger_control.control_id if trigger_control else trigger_control_id
             )
-            page_source = safe_page_source(driver)
+            page_source = read_discovery_source()
             for _prompt_index in range(8):
                 prompt = self._runtime_prompt_observation(
                     driver,
@@ -2000,6 +2208,11 @@ class AutopilotDiscoveryService:
                     pending_prompt_links.clear()
                 if request.observe_only:
                     break
+                from_sign_in = bool(
+                    source_screen and trigger_control
+                    and self._credential_controls(source_screen)
+                    and self._is_auth_entry_control(trigger_control.semantic_label)
+                )
                 selected_key, clicked = self._choose_system_prompt_branch(
                     driver,
                     prompt.choices,
@@ -2007,7 +2220,9 @@ class AutopilotDiscoveryService:
                     prompt_kind=prompt.kind,
                     allow_app_confirmation=(
                         request.full_uat_exploration
-                        and (source_screen is None or source_screen.screen_id not in transaction_screen_ids)
+                        and request.confirm_isolated_uat
+                        and self.settings.full_uat_target_is_allowed(request.target_kind, target_identity, package_hint)
+                        and (from_sign_in or source_screen is None or source_screen.screen_id not in transaction_screen_ids)
                     ),
                 )
                 if selected_key and clicked:
@@ -2028,7 +2243,7 @@ class AutopilotDiscoveryService:
                 decline_returned_to_app = False
                 followup_prompt_kind: Optional[str] = None
                 while time.monotonic() < prompt_deadline:
-                    page_source = safe_page_source(driver)
+                    page_source = read_discovery_source()
                     active_prompt_kind = self._runtime_prompt_kind(driver, page_source, request.target_kind)
                     if active_prompt_kind:
                         active_prompt_id = self._runtime_prompt_fingerprint(
@@ -2165,13 +2380,17 @@ class AutopilotDiscoveryService:
                             package_name,
                             activity_name,
                             controls,
+                            require_matching_viewport=bool(
+                                trigger_control_id and trigger_control_id.startswith("__scroll__")
+                            ),
                         ) >= 0.78
                     ),
                     None,
                 )
                 duplicate_screen_id = near_duplicate.screen_id if near_duplicate else None
             duplicate = duplicate_screen_id is not None
-            screen_id = duplicate_screen_id or f"screen-{index:03d}"
+            screen_number = next_screen_number
+            screen_id = duplicate_screen_id or f"screen-{screen_number:03d}"
             if duplicate:
                 existing = next(screen for screen in screens if screen.screen_id == screen_id)
                 # Keep one canonical replay root for a volatile-but-equivalent
@@ -2203,6 +2422,7 @@ class AutopilotDiscoveryService:
                     existing.screenshot_path = str(screenshot_path) if screenshot_path.exists() else None
                     existing.page_source_path = str(source_path)
                 return existing, True
+            next_screen_number += 1
             screenshot_path = evidence_dir / f"{screen_id}.png"
             source_path = evidence_dir / f"{screen_id}.xml"
             if persist_evidence:
@@ -2224,7 +2444,7 @@ class AutopilotDiscoveryService:
                         activity_name=activity_name,
                         controls=controls,
                     ),
-                    index,
+                    screen_number,
                 ),
                 page_label=observed_page_label(
                     DiscoveredScreen(
@@ -2234,7 +2454,7 @@ class AutopilotDiscoveryService:
                         activity_name=activity_name,
                         controls=controls,
                     ),
-                    index,
+                    screen_number,
                 ),
                 screenshot_path=str(screenshot_path) if persist_evidence and screenshot_path.exists() else None,
                 page_source_path=str(source_path) if persist_evidence else None,
@@ -2310,7 +2530,7 @@ class AutopilotDiscoveryService:
                 driver,
                 expected_package=package_hint,
                 expected_activity=activity_hint,
-                page_source=safe_page_source(driver),
+                page_source=read_discovery_source(),
                 control_labels=[control.semantic_label for control in current.controls],
             )
             target_identity = identity.get("package")
@@ -2329,7 +2549,7 @@ class AutopilotDiscoveryService:
                         expected_activity=activity_hint,
                         timeout_seconds=15.0,
                         poll_interval=0.5,
-                        page_source=safe_page_source(driver),
+                        page_source=read_discovery_source(),
                     )
                     if retry_ready:
                         candidate, _ = capture(persist_evidence=False)
@@ -2337,7 +2557,7 @@ class AutopilotDiscoveryService:
                             driver,
                             expected_package=package_hint,
                             expected_activity=activity_hint,
-                            page_source=safe_page_source(driver),
+                            page_source=read_discovery_source(),
                             control_labels=[control.semantic_label for control in candidate.controls],
                         )
                         if candidate_ready:
@@ -2369,6 +2589,8 @@ class AutopilotDiscoveryService:
                         target_activity = retry_identity.get("activity")
                         screens.clear()
                         seen_fingerprints.clear()
+                except AndroidDeviceDisconnected:
+                    raise
                 except Exception as exc:
                     screens.clear()
                     seen_fingerprints.clear()
@@ -2412,11 +2634,25 @@ class AutopilotDiscoveryService:
                 screens[:] = [current]
                 seen_fingerprints.clear()
                 seen_fingerprints[current.fingerprint] = current.screen_id
-            if launch_surface_incomplete:
-                diagnostic = self._startup_surface_diagnostic(driver, package_hint)
-                if diagnostic:
-                    warnings.append(diagnostic)
-                    stop_reason = f"{stop_reason} {diagnostic}"
+            connectivity_blocked = self._has_blocking_connectivity_dialog(current)
+            if launch_surface_incomplete or connectivity_blocked:
+                if connectivity_blocked:
+                    stop_reason = "The app reported No Internet Connection before it opened an interactive surface."
+                    checkpoint_message = (
+                        "The app reported No Internet Connection. Check that the test device can reach the app's "
+                        "UAT services, then retry discovery."
+                    )
+                else:
+                    diagnostic = self._startup_surface_diagnostic(driver, package_hint)
+                    if diagnostic:
+                        warnings.append(diagnostic)
+                        stop_reason = f"{stop_reason} {diagnostic}"
+                    checkpoint_message = (
+                        "The expected app was verified, but only a non-interactive launch or sparse screen appeared after bounded waits. "
+                        "Check whether the UAT build finished starting or is waiting on an app/device setup step. "
+                        "Resolve the startup state, then retry discovery. "
+                        "No functional journeys were inferred."
+                    )
                 # Keep the launch-state diagnosis authoritative. A verified package with no readable controls is not a completed app crawl.
                 return {
                     "screens": screens,
@@ -2429,12 +2665,7 @@ class AutopilotDiscoveryService:
                     "authentication_blocked": False,
                     "target_ready": target_ready,
                     "interactive_surface_ready": False,
-                    "checkpoint_message": (
-                        "The expected app was verified, but only a non-interactive launch or sparse screen appeared after bounded waits. "
-                        "Check whether the UAT build finished starting or is waiting on an app/device setup step. "
-                        "Resolve the startup state, then retry discovery. "
-                        "No functional journeys were inferred."
-                    ),
+                    "checkpoint_message": checkpoint_message,
                     "target_identity": target_identity,
                     "target_activity": target_activity,
                     "target_identity_reason": target_identity_reason,
@@ -2466,14 +2697,15 @@ class AutopilotDiscoveryService:
             # the live session and suppress the immediate evidence snapshot.
             input_values = input_values or {}
             authentication_blocked = False
-            authenticated_surface_observed = False
-            auth_rounds = 0
+            successful_authentications = 0
+            timeout_recovery_epochs: dict[str, int] = {}
             stack: list[DiscoveredScreen] = []
 
             def process_authentication(
                 screen: DiscoveredScreen,
             ) -> tuple[DiscoveredScreen, bool, Optional[str]]:
-                nonlocal actions_attempted, auth_rounds, authenticated_surface_observed
+                nonlocal actions_attempted, authenticated_surface_observed, successful_authentications
+                auth_rounds = 0
                 while screen is not None:
                     credential_controls = self._credential_controls(screen)
                     if not credential_controls:
@@ -2604,7 +2836,7 @@ class AutopilotDiscoveryService:
                             if self._looks_like_loading_screen(next_screen):
                                 transient_loading_screen_ids.add(next_screen.screen_id)
                                 continue
-                            if not duplicate:
+                            if next_screen.screen_id != screen.screen_id:
                                 break
                         # A validation message is often static text and does
                         # not change the actionable-control fingerprint. Never
@@ -2617,7 +2849,8 @@ class AutopilotDiscoveryService:
                         ):
                             warnings.append(f"Sign-in feedback category: {feedback_code}. No credential values were recorded.")
                             return screen, True, self._auth_feedback_reason(feedback_code)
-                        if not duplicate and self._credential_controls(next_screen):
+                        same_form = next_screen.screen_id == screen.screen_id
+                        if not same_form and self._credential_controls(next_screen):
                             prior_hints = {self._credential_hint(item) for item in credential_controls}
                             next_hints = {
                                 self._credential_hint(item)
@@ -2634,19 +2867,19 @@ class AutopilotDiscoveryService:
                                 )
                         # Flutter/Android can ignore WebDriver's native click
                         # even when the semantic button advertises clickable.
-                        # Retry once with an observed-element gesture only if
-                        # the form and its source stayed unchanged after the
-                        # bounded wait. A validation message, challenge, or
-                        # other visible source change must not be tapped again.
+                        # Retry once if the same actionable form remains after
+                        # the bounded wait. Unrelated hierarchy changes such as
+                        # rotating promotional copy do not identify a new form.
                         username_stage = any(
                             self._credential_hint(control) == "username"
                             for control in credential_controls
                         )
                         gesture_attempted = False
-                        current_submit = self._auth_submit_control(next_screen.controls) if duplicate else None
+                        current_submit = self._auth_submit_control(next_screen.controls) if same_form else None
                         if (
-                            duplicate and (username_stage or password_stage)
-                            and post_native_source == pre_submit_source
+                            same_form and (username_stage or password_stage)
+                            and not feedback_code
+                            and not self._runtime_prompt_kind(driver, post_native_source, request.target_kind)
                             and submit.enabled and not is_ios
                             and current_submit is not None
                             and current_submit.control_id == submit.control_id
@@ -2673,7 +2906,7 @@ class AutopilotDiscoveryService:
                                     if self._looks_like_loading_screen(next_screen):
                                         transient_loading_screen_ids.add(next_screen.screen_id)
                                         continue
-                                    if not duplicate:
+                                    if next_screen.screen_id != screen.screen_id:
                                         break
                             except Exception as gesture_error:
                                 warnings.append(
@@ -2766,9 +2999,13 @@ class AutopilotDiscoveryService:
                                 prompt_path=transition_prompt_path,
                             )
                         )
-                        if not next_has_sensitive_inputs and not self._looks_like_loading_screen(next_screen):
+                        if self._is_session_timeout(next_screen):
+                            return next_screen, True, "The app expired the session immediately after sign-in."
+                        same_form = next_screen.screen_id == screen.screen_id
+                        if not same_form and not next_has_sensitive_inputs and not self._looks_like_loading_screen(next_screen):
                             authenticated_surface_observed = True
-                        if duplicate:
+                            successful_authentications += 1
+                        if same_form:
                             final_source = safe_page_source(driver)
                             feedback_code = self._auth_feedback_code(final_source)
                             if feedback_code and (
@@ -2873,16 +3110,31 @@ class AutopilotDiscoveryService:
             # instead of following one path and stopping at the first leaf. Every
             # edge is attempted at most once per observed screen; all backtracking
             # is reversible and destructive controls remain excluded by risk.
+            explore_named_uat_controls = (
+                request.full_uat_exploration
+                and request.confirm_isolated_uat
+                and self.settings.full_uat_target_is_allowed(request.target_kind, target_identity, package_hint)
+            )
             if not authentication_blocked and current is not None and not launch_surface_incomplete:
                 while len(screens) < request.max_screens and actions_attempted < request.max_actions:
                     visited_for_screen = {
                         control_id for screen_id, control_id in visited_edges if screen_id == current.screen_id
                     }
+                    expired_session = self._is_session_timeout(current)
+                    if expired_session and successful_authentications > timeout_recovery_epochs.get(current.screen_id, 0):
+                        # A new successful session makes the same observed Login
+                        # entry usable again when that session subsequently expires.
+                        visited_for_screen.difference_update(
+                            control.control_id for control in current.controls
+                            if self._is_auth_entry_control(control.semantic_label)
+                        )
                     control = self._select_safe_control(
                         current.controls,
                         visited_for_screen,
                         include_transaction_journeys=request.include_transaction_journeys,
                         transaction_context=current.screen_id in transaction_screen_ids,
+                        explore_named_uat_controls=explore_named_uat_controls,
+                        observed_tabs={label for screen in screens for label in self._active_tab_labels(screen.controls)},
                     )
                     if control is None:
                         # A large portion of mobile navigation is hidden below
@@ -2902,13 +3154,11 @@ class AutopilotDiscoveryService:
                         if direction is not None and actions_attempted < request.max_actions:
                             round_key = (current.screen_id, direction)
                             rounds = scroll_rounds.get(round_key, 0)
-                            if not self._scroll_forward(driver, direction=direction):
-                                # A provider's False result means this axis is
-                                # already at its end. Do not spend the remaining
-                                # per-screen budget repeating the same gesture.
+                            can_scroll_more = self._scroll_forward(driver, direction=direction, controls=current.controls)
+                            if can_scroll_more is None:
                                 scroll_rounds[round_key] = 3
                                 continue
-                            scroll_rounds[round_key] = rounds + 1
+                            scroll_rounds[round_key] = rounds + 1 if can_scroll_more else 3
                             actions_attempted += 1
                             try:
                                 next_screen, duplicate = capture(
@@ -2935,9 +3185,9 @@ class AutopilotDiscoveryService:
                                     prompt_path=list(last_capture_prompt_path),
                                 )
                             )
-                            if not duplicate:
-                                stack.append(current)
-                                current = next_screen
+                            if not can_scroll_more:
+                                scroll_rounds[(next_screen.screen_id, direction)] = 3
+                            current = next_screen
                             continue
                         if not stack:
                             stop_reason = "No additional safe navigation controls were available"
@@ -2953,25 +3203,59 @@ class AutopilotDiscoveryService:
                             transitions.append(
                                 DiscoveredTransition(
                                     from_screen_id=current.screen_id,
-                                    to_screen_id=parent.screen_id,
+                                    to_screen_id=recovered.screen_id,
                                     control_id="__back__",
                                     control_label="Back",
                                     action="back",
                                     duplicate_state=recovered_duplicate,
                                 )
                             )
-                            current = parent if recovered.screen_id == parent.screen_id else recovered
+                            current = recovered
+                        except AndroidDeviceDisconnected:
+                            raise
                         except Exception as exc:
                             warnings.append(f"Could not backtrack safely: {type(exc).__name__}: {str(exc)[:180]}")
-                            stop_reason = "Stopped because safe backtracking was unavailable"
-                            break
+                            recovery_path = (current.screen_id, parent.screen_id)
+                            if recovery_path in renewed_backtracks:
+                                stop_reason = "Stopped because safe backtracking was unavailable"
+                                break
+                            renewed_backtracks.add(recovery_path)
+                            try:
+                                reopened, reason, _ = activate_verified_target_surface(
+                                    driver,
+                                    package_hint,
+                                    expected_activity=activity_hint,
+                                    page_source=read_discovery_source(),
+                                    force_launch=True,
+                                    preserve_known_system_prompt=True,
+                                )
+                                if not reopened:
+                                    raise _UnexpectedTargetSurface(reason)
+                                recovered, _ = capture(require_target=True)
+                            except AndroidDeviceDisconnected:
+                                raise
+                            except Exception as recovery_error:
+                                warnings.append(f"Could not reopen the uploaded app: {type(recovery_error).__name__}.")
+                                stop_reason = "Stopped because safe backtracking was unavailable"
+                                break
+                            stack.clear()
+                            warnings.append("Reopened the uploaded app after backtracking and resumed discovery.")
+                            current, authentication_blocked, authentication_reason = process_authentication(recovered)
+                            if authentication_blocked:
+                                stop_reason = authentication_reason or "Stopped at the authentication checkpoint after reopening the app"
+                                break
                         continue
                     visited_edges.add((current.screen_id, control.control_id))
+                    if expired_session and self._is_auth_entry_control(control.semantic_label):
+                        timeout_recovery_epochs[current.screen_id] = successful_authentications
                     try:
                         element = self._find_discovered_element(driver, control, AppiumBy)
                         element.click()
                         actions_attempted += 1
-                        time.sleep(1.2)
+                        if _TAB_POSITION.search(self._normalize(control.semantic_label)):
+                            self._wait_for_tab_selection(driver, control.semantic_label)
+                        else:
+                            time.sleep(1.2)
                         next_screen, duplicate = capture(
                             require_target=True,
                             source_screen=current,
@@ -2993,13 +3277,14 @@ class AutopilotDiscoveryService:
                                 prompt_path=list(last_capture_prompt_path),
                             )
                         )
-                        if duplicate:
-                            try:
-                                safe_navigate_back(driver, target_kind=request.target_kind)
-                                time.sleep(0.8)
-                            except Exception:
-                                pass
-                            current, _ = capture(persist_evidence=False, require_target=True)
+                        if duplicate and (
+                            current.screen_id == next_screen.screen_id
+                            or not self._credential_controls(next_screen)
+                        ):
+                            # Stay on the observed screen after a duplicate tap.
+                            # An Android Back action can leave the tab or app
+                            # before the remaining sibling controls are tried.
+                            current = next_screen
                             continue
                         stack.append(current)
                         current = next_screen
@@ -3050,31 +3335,32 @@ class AutopilotDiscoveryService:
                             else:
                                 safe_navigate_back(driver, target_kind=request.target_kind)
                             time.sleep(1.2)
-                            recovered, duplicate = capture(
+                            recovered, _ = capture(
                                 persist_evidence=False,
                                 require_target=True,
                             )
-                            if not duplicate and recovered.fingerprint != current.fingerprint:
-                                # The reactivated app did not return to the
-                                # prior observed state. Discard the disconnected
-                                # snapshot and stop rather than fabricate a path.
-                                screens[:] = [item for item in screens if item.screen_id != recovered.screen_id]
-                                seen_fingerprints.pop(recovered.fingerprint, None)
-                                stop_reason = "Discovery stopped because the app could not return to the previous observed screen."
+                            if recovered.screen_id != current.screen_id:
+                                stack.clear()
+                            current, authentication_blocked, authentication_reason = process_authentication(recovered)
+                            if authentication_blocked:
+                                stop_reason = authentication_reason or "Stopped at the authentication checkpoint after reopening the app"
                                 break
-                            current = recovered
                             continue
+                        except AndroidDeviceDisconnected:
+                            raise
                         except Exception as recovery_exc:
                             warnings.append(
                                 f"Could not restore the uploaded app after leaving its boundary: {type(recovery_exc).__name__}"
                             )
                             stop_reason = "Discovery stopped because the uploaded app could not be safely restored."
                             break
+                    except AndroidDeviceDisconnected:
+                        raise
                     except Exception as exc:
                         warnings.append(
                             f"Could not safely interact with {control.semantic_label}: {type(exc).__name__}: {str(exc)[:180]}"
                         )
-                        if len(warnings) >= 5:
+                        if not explore_named_uat_controls and len(warnings) >= 5:
                             stop_reason = "Stopped after repeated safe-navigation interaction failures"
                             break
                 else:
@@ -3090,18 +3376,54 @@ class AutopilotDiscoveryService:
                     f"Crawl ended: {crawl_stop_reason}"
                 )
 
+            visited_by_screen: dict[str, set[str]] = {}
+            for screen_id, control_id in visited_edges:
+                visited_by_screen.setdefault(screen_id, set()).add(control_id)
+            for transition in transitions:
+                if transition.action == "tap":
+                    visited_by_screen.setdefault(transition.from_screen_id, set()).add(transition.control_id)
+            unvisited_edge_count = sum(
+                len(self._eligible_navigation_controls(
+                    screen.controls, visited_by_screen.get(screen.screen_id, set()),
+                    include_transaction_journeys=request.include_transaction_journeys,
+                    transaction_context=screen.screen_id in transaction_screen_ids,
+                    explore_named_uat_controls=explore_named_uat_controls,
+                ))
+                for screen in screens
+            )
             return {
                 "screens": screens,
                 "transitions": transitions,
                 "runtime_prompts": runtime_prompts,
                 "entry_prompt_path": entry_prompt_path,
                 "actions_attempted": actions_attempted,
+                "unvisited_edge_count": unvisited_edge_count,
                 "stop_reason": stop_reason,
                 "warnings": warnings,
                 "authentication_blocked": authentication_blocked,
                 "authenticated_surface_observed": authenticated_surface_observed,
+                "full_uat_exploration": explore_named_uat_controls,
                 "target_ready": target_ready,
                 "interactive_surface_ready": not launch_surface_incomplete,
+                "target_identity": target_identity,
+                "target_activity": target_activity,
+                "target_identity_reason": target_identity_reason,
+            }
+        except AndroidDeviceDisconnected as exc:
+            reason = str(exc)
+            return {
+                "screens": screens if target_ready else [],
+                "transitions": transitions if target_ready else [],
+                "runtime_prompts": runtime_prompts,
+                "entry_prompt_path": entry_prompt_path,
+                "actions_attempted": actions_attempted,
+                "stop_reason": reason,
+                "warnings": warnings,
+                "provider_interruption": reason,
+                "checkpoint_message": reason,
+                "target_ready": target_ready is True,
+                "interactive_surface_ready": bool(target_ready and screens and not launch_surface_incomplete),
+                "authenticated_surface_observed": authenticated_surface_observed,
                 "target_identity": target_identity,
                 "target_activity": target_activity,
                 "target_identity_reason": target_identity_reason,

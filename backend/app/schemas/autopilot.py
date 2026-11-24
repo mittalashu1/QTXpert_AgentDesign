@@ -867,6 +867,9 @@ class QTXTestIR(BaseModel):
     promoted_by_discovery: bool = False
     readiness_reason: Optional[str] = None
     steps: List[QTXIRStep] = Field(default_factory=list)
+    # Leading sign-in precondition for compatible in-session replays. The full
+    # steps are retained for standalone execution and exports.
+    sign_in_setup_count: int = Field(default=0, ge=0)
     assertions: List[str] = Field(default_factory=list)
     appium_python: str = ""
     journey: Optional[str] = None
@@ -991,6 +994,7 @@ class DiscoveredControl(BaseModel):
     bounds: str = ""
     clickable: bool = False
     enabled: bool = True
+    selected: bool = False
     scrollable: bool = False
     input_capable: bool = False
     input_kind: Optional[str] = None
@@ -1089,6 +1093,7 @@ class AutopilotDiscoveryResult(BaseModel):
     duration_seconds: float
     device_name: str
     observe_only: bool = False
+    full_uat_exploration: bool = False
     screen_count: int = 0
     control_count: int = 0
     safe_control_count: int = 0

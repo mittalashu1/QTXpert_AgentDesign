@@ -41,6 +41,10 @@ plaintext by this agent. Do not share the pairing command or copy the DPAPI file
 to another machine. Revoke a runner from the Test Execution page before
 retiring the laptop.
 
+If both an emulator and a USB phone are attached, insert `--device-serial SERIAL`
+before `pair` so QTXpert registers only the phone. Find the serial with
+`adb -d get-serialno`.
+
 Start the outbound worker in a terminal:
 
 ```powershell
@@ -53,8 +57,16 @@ To start the installed stack and runner in the background:
 powershell -ExecutionPolicy Bypass -File tools/local_runner/start.ps1
 ```
 
+For a physical phone, connect one USB Android device, unlock it, allow USB debugging,
+and start with `-UsbDevice`. This selects the phone for the runner even if an
+emulator is present. An Android job that specifies a device must use that phone's
+serial.
+
+Appium uses Java to verify APK signatures. If Java is installed in a custom
+directory, pass its JDK root as `-JavaHome` when starting Appium.
+
 Supply `-EmulatorName` with an existing Android virtual device name to start it
-when no device is online. The startup script reuses a running Appium server and
+when that emulator is not online. The startup script reuses a running Appium server and
 runner, keeps Appium on loopback, and writes logs under `tools/local_runner/logs`.
 It prefers the dedicated `QTXpert_Android14` AVD when installed. Android must
 finish booting before the doctor reports ready: an ADB connection alone is not
@@ -67,6 +79,8 @@ Run a real Android Settings smoke check and save its screenshot and result:
 ```powershell
 tools/local_runner/.venv/Scripts/python.exe tools/local_runner/smoke.py --output outputs/android-smoke
 ```
+
+If multiple devices are online, pass `--device-serial SERIAL` to the smoke check.
 
 Use `tools/local_runner/.venv/Scripts/python.exe tools/local_runner/agent.py run --once` to claim at most one run,
 or `tools/local_runner/.venv/Scripts/python.exe tools/local_runner/agent.py doctor` to diagnose the local stack. The

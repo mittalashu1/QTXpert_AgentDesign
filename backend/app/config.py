@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
+    ADMIN_BOOTSTRAP_TOKEN: Optional[str] = None
 
     ENTRA_TENANT_ID: Optional[str] = None
     ENTRA_CLIENT_ID: Optional[str] = None

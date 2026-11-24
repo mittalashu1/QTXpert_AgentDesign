@@ -68,6 +68,13 @@ def _meaningful(value: str | None) -> bool:
 def observed_journey_label(screen: DiscoveredScreen, index: int = 1) -> str:
     """Return a concise journey name supported by observed UI metadata."""
 
+    active_tabs = [
+        match.group(1) for control in screen.controls if control.selected
+        and (match := re.fullmatch(r"(.+?)\s+tab\s+\d+\s+of\s+\d+", _clean(control.semantic_label), re.I))
+    ]
+    if len(active_tabs) == 1:
+        return active_tabs[0]
+
     evidence: list[str] = [screen.title or "", screen.activity_name or ""]
     evidence.extend(control.semantic_label for control in screen.controls[:24])
     combined = _normalized(" ".join(evidence))

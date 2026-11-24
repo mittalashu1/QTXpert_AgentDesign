@@ -2941,23 +2941,66 @@ class AutopilotPrototypeService:
 
         screens = list(discovery.screens)
         screen_map = {screen.screen_id: screen for screen in screens}
+        expired_session_screens = {
+            screen.screen_id for screen in screens if AutopilotDiscoveryService._is_session_timeout(screen)
+        }
+        observed_uat_taps = {
+            (transition.from_screen_id, transition.control_id)
+            for transition in discovery.transitions
+            if transition.action == "tap"
+            and transition.from_screen_id != transition.to_screen_id
+            and transition.to_screen_id in screen_map
+            and transition.to_screen_id not in expired_session_screens
+        } if discovery.full_uat_exploration else set()
+
+        def is_observed_navigation(screen_id: str, control: DiscoveredControl) -> bool:
+            if control.input_capable:
+                return False
+            if control.risk == "safe":
+                return True
+            return (screen_id, control.control_id) in observed_uat_taps and control.risk == "review"
+
         # Ignore sparse startup/splash observations when grounding routes. A
         # case starts from the first settled screen with a real safe entry point.
         entry_screen = AutopilotDiscoveryService.select_entry_screen(screens)
         paths: dict[str, list[str]] = {entry_screen.screen_id: []} if entry_screen else {}
+        uat_paths = dict(paths)
         pending = [entry_screen.screen_id] if entry_screen else []
         while pending:
             source_id = pending.pop(0)
             for transition in discovery.transitions:
-                if transition.from_screen_id != source_id or transition.action not in {"tap", "scroll"} or transition.to_screen_id not in screen_map or transition.to_screen_id in paths:
+                if (
+                    transition.from_screen_id != source_id or transition.action not in {"tap", "scroll"}
+                    or transition.to_screen_id not in screen_map or transition.to_screen_id in paths
+                    or transition.to_screen_id in expired_session_screens
+                ):
                     continue
                 if transition.action == "scroll":
-                    paths[transition.to_screen_id] = [*paths[source_id], "Scroll down to reveal more content"]
+                    direction = "right" if transition.control_label.casefold() == "scroll right" else "down"
+                    step = f"Scroll {direction} to reveal more content"
+                    paths[transition.to_screen_id] = [*paths[source_id], step]
+                    uat_paths[transition.to_screen_id] = [*uat_paths[source_id], step]
                     pending.append(transition.to_screen_id)
                     continue
-                control = next((item for item in screen_map[source_id].controls if item.control_id == transition.control_id and item.risk == "safe" and not item.input_capable), None)
+                control = next(
+                    (item for item in screen_map[source_id].controls
+                     if item.control_id == transition.control_id and is_observed_navigation(source_id, item)),
+                    None,
+                )
                 if control and control.semantic_label:
-                    paths[transition.to_screen_id] = [*paths[source_id], f"Tap {control.semantic_label}"]
+                    step = f"Tap {control.semantic_label}"
+                    paths[transition.to_screen_id] = [*paths[source_id], step]
+                    milestones = [*uat_paths[source_id], step]
+                    if discovery.target_kind in {"android", "ios"}:
+                        before = AutopilotDiscoveryService._active_tab_labels(screen_map[source_id].controls)
+                        destination = screen_map[transition.to_screen_id]
+                        selected = set(AutopilotDiscoveryService._active_tab_labels(destination.controls)).difference(before)
+                        milestones.extend(
+                            f"Verify selected tab {item.semantic_label}"
+                            for item in destination.controls
+                            if item.selected and AutopilotDiscoveryService._normalize(item.semantic_label) in selected
+                        )
+                    uat_paths[transition.to_screen_id] = milestones
                     pending.append(transition.to_screen_id)
         prompt_tests: list[AutopilotTest] = []
         checkpoint_tests: list[AutopilotTest] = []
@@ -2971,7 +3014,9 @@ class AutopilotPrototypeService:
         for prompt in discovery.runtime_prompts:
             for choice in prompt.choices:
                 normalized_choice = re.sub(r"\s+", " ", str(choice.label or "")).strip().lower()
-                terminal_decision = AutopilotDiscoveryService._prompt_choice_decision(normalized_choice)
+                terminal_decision = AutopilotDiscoveryService._prompt_choice_decision(
+                    normalized_choice, exact=prompt.kind == "app_confirmation",
+                )
                 if (
                     choice.decision not in {"allow", "deny"}
                     or terminal_decision != choice.decision
@@ -3029,6 +3074,15 @@ class AutopilotPrototypeService:
             "sit_positive": [],
             "sit_negative": [],
         }
+        scroll_destinations: dict[tuple[str, str], DiscoveredScreen] = {}
+        for transition in discovery.transitions:
+            if (
+                transition.action == "scroll"
+                and transition.from_screen_id != transition.to_screen_id
+                and transition.to_screen_id in screen_map
+            ):
+                direction = "right" if transition.control_label.casefold() == "scroll right" else "down"
+                scroll_destinations.setdefault((transition.from_screen_id, direction), screen_map[transition.to_screen_id])
         # Business-acceptance and system-integration cases are a second-stage
         # expansion.  They are eligible only when discovery actually observes
         # a credential form; a public page with a contact/search field is not
@@ -3113,6 +3167,41 @@ class AutopilotPrototypeService:
             anchor = next((control for control in controls if control.semantic_label), None)
             anchor_label = anchor.semantic_label if anchor else None
             navigation = ["Launch application", *paths.get(screen.screen_id, [])]
+
+            visible_labels = {AutopilotDiscoveryService._normalize(item.semantic_label) for item in screen.controls}
+            source_tabs = AutopilotDiscoveryService._active_tab_labels(screen.controls)
+            for direction in ("down", "right"):
+                viewport = scroll_destinations.get((screen.screen_id, direction))
+                if viewport is None or AutopilotDiscoveryService._is_session_timeout(viewport) or AutopilotDiscoveryService._credential_controls(viewport):
+                    continue
+                destination_tabs = AutopilotDiscoveryService._active_tab_labels(viewport.controls)
+                if source_tabs and destination_tabs and source_tabs != destination_tabs:
+                    continue
+                revealed = next((item for item in viewport.controls if (
+                    item.enabled and not item.input_capable and not item.scrollable
+                    and AutopilotDiscoveryService._normalize(item.semantic_label) not in visible_labels | {"", "view", "imageview", "button", "control"}
+                    and any(locator.confidence >= 0.82 for locator in item.locators)
+                )), None)
+                if revealed is None:
+                    continue
+                label = re.sub(r"\s+", " ", revealed.semantic_label).strip()
+                queues["functional_positive"].append(AutopilotTest(
+                    id=cls._runtime_case_id("SCROLL", screen.screen_id, direction),
+                    suite="Functional · Positive",
+                    bucket="functional_positive",
+                    title=f"{journey_label} — Scroll {direction} to reveal {label}",
+                    priority="medium",
+                    objective="Verify the scroll reveals a specific control outside the starting viewport.",
+                    steps=[*navigation, f"Scroll {direction} to reveal more content", f"Verify {label}"],
+                    expected=[f"{label} is visible after scrolling {direction}"],
+                    autonomous_candidate=screen.screen_id in paths,
+                    dependency=None if screen.screen_id in paths else "An observed navigation route to this scroll is required.",
+                    evidence_required=["scroll action", "resulting UI hierarchy"],
+                    journey=journey_label,
+                    page_label=screen_label,
+                    page_url=screen.url,
+                    runtime_screen_id=screen.screen_id,
+                ))
 
             # App-level confirmations are ordinary discovered screens, not
             # native OS prompts. Generate both observed branches only when the
@@ -3299,7 +3388,7 @@ class AutopilotPrototypeService:
                         title=f"{journey_label} — UAT positive: reach {screen_label}",
                         priority="high",
                         objective="Replay the observed navigation journey and verify its destination. Business acceptance remains subject to approved criteria.",
-                        steps=[*navigation, f"Verify {anchor_label or screen_label}"] if screen.screen_id in paths else [f"Navigate to {screen_label}"],
+                        steps=["Launch application", *uat_paths[screen.screen_id], f"Verify {anchor_label or screen_label}"] if screen.screen_id in uat_paths else [f"Navigate to {screen_label}"],
                         expected=[f"The observed destination control {anchor_label or screen_label} is visible"],
                         requires_auth=True,
                         autonomous_candidate=bool(anchor_label and screen.screen_id in paths),
@@ -3378,7 +3467,7 @@ class AutopilotPrototypeService:
             safe_controls = [
                 control
                 for control in controls
-                if control.clickable and not control.input_capable and control.risk == "safe"
+                if control.clickable and is_observed_navigation(screen.screen_id, control)
             ]
             for control in safe_controls:
                 label = re.sub(r"\s+", " ", control.semantic_label).strip()[:120] or "safe control"
@@ -3389,11 +3478,15 @@ class AutopilotPrototypeService:
                         if item.from_screen_id == screen.screen_id
                         and item.control_id == control.control_id
                         and item.to_screen_id in screen_map
+                        and item.to_screen_id not in expired_session_screens
                         and item.action == "tap"
                     ),
                     None,
                 )
-                target_screen = screen_map.get(transition.to_screen_id) if transition else screen
+                target_screen = screen_map.get(transition.to_screen_id) if transition else None
+                is_tab_control = discovery.target_kind in {"android", "ios"} and bool(
+                    re.search(r"\s+tab\s+\d+\s+of\s+\d+$", label, re.I)
+                )
                 is_back_control = bool(
                     re.search(
                         r"(?<![a-z0-9])(?:back|go back|navigate back|close)(?![a-z0-9])",
@@ -3425,7 +3518,7 @@ class AutopilotPrototypeService:
                     None,
                 )
                 assertion_label = target_anchor.semantic_label if target_anchor else label
-                destination_observed = target_screen is not None
+                destination_observed = target_screen is not None or is_tab_control
                 destination_dependency = (
                     None if destination_observed else
                     f"Runtime Discovery has not observed where {label} leads; safely map its destination before executing this case."
@@ -3438,9 +3531,15 @@ class AutopilotPrototypeService:
                         title=f"{journey_label} — Functional positive: activate {label} on {screen_label}",
                         priority="high",
                         objective="Exercise one observed safe control and verify the resulting evidence-backed state.",
-                        steps=[*navigation, f"Tap {label}", *([f"Verify {assertion_label}"] if destination_observed else [])],
+                        steps=[
+                            *navigation,
+                            f"Tap {label}",
+                            *([f"Verify selected tab {label}"] if is_tab_control
+                              else [f"Verify {assertion_label}"] if destination_observed else []),
+                        ],
                         expected=(
-                            [f"Activating {label} reaches a stable state with {assertion_label} visible"]
+                            [f"{label} is selected"] if is_tab_control
+                            else [f"Activating {label} reaches a stable state with {assertion_label} visible"]
                             if destination_observed else [f"The destination of {label} requires runtime observation"]
                         ),
                         autonomous_candidate=destination_observed,
