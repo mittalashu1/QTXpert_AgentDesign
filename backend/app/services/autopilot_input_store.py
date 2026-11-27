@@ -42,12 +42,11 @@ def _checkpoint_label_identity(label: str) -> str:
 
 def _reusable_runtime_record(record: Optional[AutopilotInputRecord]) -> bool:
     """Return whether a stored runtime value is safe to reuse or remap."""
-    if (
-        record is None
-        or record.source not in {"runtime", "user"}
-        or not record.save_for_reuse
-        or not record.encrypted_value
-    ):
+    return bool(record is not None and record.source in {"runtime", "user"} and _available_for_reuse(record))
+
+
+def _available_for_reuse(record: AutopilotInputRecord) -> bool:
+    if not record.save_for_reuse or not record.encrypted_value:
         return False
     expires_at = record.expires_at
     if expires_at is None:
@@ -112,7 +111,7 @@ def _reconcile_runtime_reuse_submissions(
                         and _reusable_runtime_record(row)
                         and _runtime_record_matches_request(row, request)
                     ]
-                    if len(aliases) == 1:
+                    if aliases and all(row.encrypted_value == aliases[0].encrypted_value for row in aliases):
                         reusable_rows[item.key] = aliases[0]
             continue
 
@@ -260,6 +259,8 @@ async def list_metadata(
     owner_id: UUID,
     project_id: Optional[UUID],
     surface_key: str,
+    *,
+    job_id: Optional[str] = None,
 ) -> list[AutopilotSavedInput]:
     query = select(AutopilotInputRecord).where(
         AutopilotInputRecord.owner_id == owner_id,
@@ -270,8 +271,19 @@ async def list_metadata(
         query = query.where(AutopilotInputRecord.project_id.is_(None))
     else:
         query = query.where(AutopilotInputRecord.project_id == project_id)
-    rows = (await db.scalars(query.order_by(AutopilotInputRecord.updated_at.desc()))).all()
-    return [_metadata(row) for row in rows]
+    rows = (await db.scalars(query.order_by(
+        AutopilotInputRecord.updated_at.desc(), AutopilotInputRecord.id.desc(),
+    ))).all()
+    latest: dict[str, AutopilotInputRecord] = {}
+    reusable: dict[str, AutopilotInputRecord] = {}
+    current: dict[str, AutopilotInputRecord] = {}
+    for row in rows:
+        latest.setdefault(row.input_key, row)
+        if _available_for_reuse(row):
+            reusable.setdefault(row.input_key, row)
+        if row.job_id == job_id:
+            current.setdefault(row.input_key, row)
+    return [_metadata(row) for row in {**latest, **reusable, **current}.values()]
 
 
 async def apply_submissions(
@@ -287,7 +299,11 @@ async def apply_submissions(
         raise AutopilotInputStoreError("At most 50 checkpoint inputs can be submitted at once.")
     scope = _scope_key(job)
     if not submissions:
-        return {}, await list_metadata(db, job.owner_id, job.project_id, scope)
+        return {}, await list_metadata(db, job.owner_id, job.project_id, scope, job_id=job.job_id)
+
+    # Concurrent checkpoint submissions for this job share one binding per
+    # key. Other jobs can copy the saved ciphertext without moving its row.
+    await db.scalar(select(AutopilotJob.id).where(AutopilotJob.id == job.id).with_for_update())
 
     key_set = {str(key).strip() for key in requests}
     submitted_keys = {str(item.key).strip() for item in submissions}
@@ -330,24 +346,35 @@ async def apply_submissions(
                 project_scope,
                 AutopilotInputRecord.surface_key == scope,
                 or_(*row_filters),
-            )
+            ).order_by(AutopilotInputRecord.updated_at.desc(), AutopilotInputRecord.id.desc())
         )
     ).all()
-    existing = {row.input_key: row for row in existing_rows}
+    current: dict[str, AutopilotInputRecord] = {}
+    available: dict[str, AutopilotInputRecord] = {}
+    for row in existing_rows:
+        if row.job_id == job.job_id:
+            current.setdefault(row.input_key, row)
+        if _available_for_reuse(row):
+            available.setdefault(row.input_key, row)
+    candidates = {**available, **{key: row for key, row in current.items() if _available_for_reuse(row)}}
     submissions, reusable_rows = _reconcile_runtime_reuse_submissions(
         submissions,
         requests,
-        existing_rows,
+        candidates.values(),
     )
     submissions = _current_submissions(submissions, requests)
     if not submissions:
-        return {}, await list_metadata(db, job.owner_id, job.project_id, scope)
+        return {}, await list_metadata(db, job.owner_id, job.project_id, scope, job_id=job.job_id)
 
     cipher = _fernet(settings)
     decisions: dict[str, AutopilotInputDecision] = {}
     for item in submissions:
         request = requests[item.key]
         decision = item.decision
+        source = reusable_rows.get(item.key) or candidates.get(item.key)
+        one_time_code = request.input_hint == "otp"
+        if one_time_code and decision in {"random", "reuse"}:
+            raise AutopilotInputStoreError(f"Enter a fresh verification code for {request.label}, or choose Skip.")
         if decision == "provide":
             # Approval is a boolean checkpoint, not a data field.  The UI can
             # submit the decision without inventing a placeholder value; the
@@ -383,24 +410,29 @@ async def apply_submissions(
             encrypted = cipher.encrypt(generate_synthetic_value(spec).encode("utf-8")).decode("ascii")
             generator_spec = spec.model_dump(mode="json")
         elif decision == "reuse":
-            row = reusable_rows.get(item.key) or existing.get(item.key)
             if (
-                row is None
-                or not row.save_for_reuse
-                or (row.expires_at and row.expires_at <= _now())
-                or not row.encrypted_value
-                or row.category != request.category
-                or _checkpoint_label_identity(row.label) != _checkpoint_label_identity(request.label)
-                or (request.source == "runtime" and row.source not in {"runtime", "user"})
+                source is None
+                or not _available_for_reuse(source)
+                or source.category != request.category
+                or _checkpoint_label_identity(source.label) != _checkpoint_label_identity(request.label)
+                or (
+                    request.source == "runtime"
+                    and source.source not in {"runtime", "user"}
+                    and not request.credential_bundle
+                )
             ):
                 raise AutopilotInputStoreError(f"No saved value is available for {request.label}. Choose Enter, Random or Skip.")
-            encrypted = row.encrypted_value
-            generator_spec = row.generator_spec
+            encrypted = source.encrypted_value
+            generator_spec = source.generator_spec
         else:  # skip
             encrypted = None
             generator_spec = None
 
-        row = reusable_rows.get(item.key) or existing.get(item.key)
+        row = current.get(item.key)
+        if row is None and decision == "reuse" and source is not None and source.job_id == job.job_id:
+            # A control rediscovered with a new key can move its own binding.
+            current.pop(source.input_key, None)
+            row = source
         if row is None:
             row = AutopilotInputRecord(
                 owner_id=job.owner_id,
@@ -413,33 +445,27 @@ async def apply_submissions(
                 source=request.source or "user",
             )
             db.add(row)
-            existing[item.key] = row
-        elif row.project_id != job.project_id:
-            # Defensive guard for rows created before the project predicate
-            # was introduced.  Never mutate or reuse a cross-project record.
-            raise AutopilotInputStoreError(
-                "The saved input belongs to a different project. Choose Enter, Random or Skip."
-            )
-        if row.input_key != item.key:
-            # Move only the exact, uniquely matched encrypted runtime record
-            # after the user explicitly chose Reuse. The next checkpoint read
-            # and in-process runner will then resolve the current key directly.
-            row.input_key = item.key
-        row.job_id = job.job_id
+        now = _now()
+        if decision != "reuse" or row.encrypted_value != encrypted:
+            row.updated_at = now
+        row.input_key = item.key
         row.label = request.label[:240]
         row.category = request.category
         row.decision = decision
-        row.save_for_reuse = bool(item.save_for_reuse) if decision in {"provide", "random"} else bool(row.save_for_reuse and decision == "reuse")
+        row.save_for_reuse = decision == "reuse" or (decision in {"provide", "random"} and item.save_for_reuse)
+        if one_time_code:
+            row.save_for_reuse = False
         row.encrypted_value = encrypted
         row.generator_spec = generator_spec
         row.source = request.source or "user"
-        row.expires_at = _expiry(settings, row.save_for_reuse)
-        row.last_used_at = _now() if decision == "reuse" else row.last_used_at
-        existing[item.key] = row
+        row.expires_at = now + timedelta(minutes=5) if one_time_code else _expiry(settings, row.save_for_reuse)
+        if decision == "reuse":
+            row.last_used_at = now
+        current[item.key] = row
         decisions[item.key] = decision
 
     await db.flush()
-    return decisions, await list_metadata(db, job.owner_id, job.project_id, scope)
+    return decisions, await list_metadata(db, job.owner_id, job.project_id, scope, job_id=job.job_id)
 
 
 async def resolve_value(
@@ -450,6 +476,8 @@ async def resolve_value(
     surface_key: str,
     input_key: str,
     job_id: Optional[str] = None,
+    *,
+    consume: bool = False,
 ) -> Optional[str]:
     """Resolve one value inside a runner without ever returning it to HTTP.
 
@@ -470,7 +498,8 @@ async def resolve_value(
         query = query.where(AutopilotInputRecord.project_id == project_id)
     if job_id is not None:
         query = query.where(AutopilotInputRecord.job_id == job_id)
-    row = await db.scalar(query.order_by(AutopilotInputRecord.updated_at.desc()))
+    query = query.order_by(AutopilotInputRecord.updated_at.desc()).limit(1)
+    row = await db.scalar(query.with_for_update() if consume else query)
     if row is None or not row.encrypted_value:
         return None
     try:
@@ -478,6 +507,8 @@ async def resolve_value(
     except (InvalidToken, UnicodeError, ValueError):
         return None
     row.last_used_at = _now()
+    if consume:
+        row.encrypted_value = None
     return value
 
 

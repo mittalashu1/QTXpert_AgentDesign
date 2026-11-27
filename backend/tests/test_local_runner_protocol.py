@@ -92,15 +92,32 @@ async def test_expired_lease_cannot_upload_results():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("age,refresh", [(90, True), (5, False)])
+async def test_active_autopilot_poll_refreshes_runner_liveness(monkeypatch, age, refresh):
+    last_seen = datetime.now(timezone.utc) - timedelta(seconds=age)
+    runner = SimpleNamespace(last_seen_at=last_seen)
+    reservation = SimpleNamespace(command_id=None)
+    db = SimpleNamespace(commit=AsyncMock())
+    monkeypatch.setattr(local_runners, "_claimed_autopilot_session", AsyncMock(return_value=(runner, reservation)))
+
+    response = await local_runners.next_autopilot_command(uuid4(), uuid4(), db, uuid4())
+
+    assert response.status_code == 204
+    assert (runner.last_seen_at > last_seen) is refresh
+    assert db.commit.await_count == int(refresh)
+
+
+@pytest.mark.asyncio
 async def test_claim_preserves_preflight_blocks_and_returns_only_pending_cases(monkeypatch):
     runner = SimpleNamespace(id=uuid4(), owner_id=uuid4(), project_id=uuid4(), capabilities={"platforms": ["android"]})
     job = SimpleNamespace(status="queued", runner_id=None, attempt_count=0, lease_expires_at=None, execution_run_id=uuid4())
     case = SimpleNamespace(test_case_key="TC-login", scenario="Login screen is shown", steps=["assert-text Sign in"])
-    pending = SimpleNamespace(id=uuid4(), status=ResultStatus.PENDING, execution_plan_case=None, test_case=case)
+    pending = SimpleNamespace(id=uuid4(), status=ResultStatus.PENDING, execution_plan_case=None,
+                              test_case=case, execution_spec=None, evidence=None)
     blocked = SimpleNamespace(id=uuid4(), status=ResultStatus.BLOCKED)
     run = SimpleNamespace(id=job.execution_run_id, results=[pending, blocked], execution_plan=None, app_asset_id=uuid4(), project_id=runner.project_id, target_kind="android", device_name="emulator-5554", platform_version=None, target_metadata={}, started_at=None)
     asset = SimpleNamespace(id=run.app_asset_id, project_id=run.project_id, filename="app.apk", sha256="a" * 64, size_bytes=123)
-    db = SimpleNamespace(scalar=AsyncMock(side_effect=[job, run]), commit=AsyncMock())
+    db = SimpleNamespace(scalar=AsyncMock(side_effect=[job, run]), get=AsyncMock(return_value=None), commit=AsyncMock())
     monkeypatch.setattr(local_runners, "_authenticate_runner", AsyncMock(return_value=(runner, "secret")))
     monkeypatch.setattr(local_runners.UploadRepositoryService, "get_owned", AsyncMock(return_value=asset))
     result = await local_runners.claim_job(runner.id, db, "Bearer secret")
@@ -131,7 +148,7 @@ async def test_completion_requires_exact_pending_result_set(monkeypatch):
 async def test_completion_records_counts_and_invalidates_lease(monkeypatch):
     runner = SimpleNamespace(id=uuid4(), owner_id=uuid4())
     job = SimpleNamespace()
-    pending = SimpleNamespace(id=uuid4(), status=ResultStatus.PENDING)
+    pending = SimpleNamespace(id=uuid4(), status=ResultStatus.PENDING, evidence=None, execution_spec=None)
     blocked = SimpleNamespace(id=uuid4(), status=ResultStatus.BLOCKED)
     run = SimpleNamespace(id=uuid4(), results=[pending, blocked], execution_plan=None, project_id=uuid4(), device_name="emulator-5554", platform_version=None, target_metadata={})
     db = SimpleNamespace(scalar=AsyncMock(return_value=run), commit=AsyncMock())

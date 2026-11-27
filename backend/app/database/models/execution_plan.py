@@ -42,6 +42,7 @@ class ExecutionPlan(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # are identifiers for a vault entry, seeded dataset, environment, or
     # approval record; raw passwords, tokens, and OTPs are never persisted.
     runtime_inputs: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    fixture_bindings: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     cases: Mapped[List["ExecutionPlanCase"]] = relationship(
         back_populates="plan",
@@ -108,6 +109,7 @@ class ExecutionPlanCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     preconditions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     test_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     steps: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    automation: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     expected_result: Mapped[str] = mapped_column(Text, nullable=False)
     post_conditions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_automation_candidate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

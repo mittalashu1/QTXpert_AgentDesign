@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from app.schemas.autopilot import (
     AutopilotDiscoveryRequest,
+    AutopilotDiscoveryResult,
     DiscoveredControl,
     DiscoveredScreen,
     DiscoveryLocator,
@@ -1161,11 +1162,11 @@ def test_runtime_discovery_crawls_followup_location_prompt(
     assert len(result["transitions"]) == 1
 
 @pytest.mark.parametrize(
-    ("post_login_frames", "expect_authenticated", "expire_session"),
-    [(2, True, False), (2, True, True), (50, False, False)],
+    ("post_login_frames", "expect_authenticated", "expire_session", "resume_after_service_error"),
+    [(2, True, False, False), (2, True, True, False), (50, False, False, False), (2, True, False, True)],
 )
 def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
-    tmp_path, monkeypatch, post_login_frames, expect_authenticated, expire_session,
+    tmp_path, monkeypatch, post_login_frames, expect_authenticated, expire_session, resume_after_service_error,
 ):
     from appium import webdriver
 
@@ -1232,6 +1233,7 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
             self.quit_called = False
             self.clicked = []
             self.reopened = 0
+            self.service_restarts = 0
             self.expired = False
 
         @property
@@ -1266,6 +1268,10 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
                 "launcher": (
                     '<node package="com.android.launcher3" class="android.view.View" '
                     'content-desc="All apps" enabled="true" />'
+                ),
+                "service_error": (
+                    '<node package="com.qtx.demo" class="android.view.View" '
+                    'text="An unexpected technical error has occurred" enabled="true" />'
                 ),
                 "welcome": (
                     '<node package="com.qtx.demo" class="android.widget.Button" '
@@ -1356,6 +1362,12 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
                 self.state = "welcome"
                 self.reopened += 1
 
+        def terminate_app(self, package):
+            assert package == "com.qtx.demo"
+            assert self.state == "service_error"
+            self.service_restarts += 1
+            self.state = "launcher"
+
         def execute_script(self, _command, _arguments):
             return False
 
@@ -1370,6 +1382,22 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
             self.quit_called = True
 
     driver = Driver(post_login_frames)
+    previous = None
+    if resume_after_service_error:
+        driver.state = "home"
+        controls = AutopilotDiscoveryService.parse_controls(driver.page_source)
+        remembered_home = DiscoveredScreen(
+            screen_id="screen-001",
+            fingerprint=AutopilotDiscoveryService.fingerprint(driver.current_package, driver.current_activity, controls),
+            package_name=driver.current_package, activity_name=driver.current_activity, controls=controls,
+        )
+        previous = AutopilotDiscoveryResult(
+            job_id="job-post-login-crawl", status="partial", provider="appium",
+            started_at="2026-11-25T00:00:00Z", finished_at="2026-11-25T00:01:00Z",
+            device_name="Google Pixel 8", screen_count=1, screens=[remembered_home],
+            target_ready=True, duration_seconds=60,
+        )
+        driver.state = "service_error"
     monkeypatch.setattr(webdriver, "Remote", lambda *_args, **_kwargs: driver)
 
     class Prototype:
@@ -1389,7 +1417,7 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
         "https://devicefarm.invalid/appium",
         "arn:uploaded-app",
         AutopilotDiscoveryRequest(
-            provider="devicefarm",
+            provider="appium" if resume_after_service_error else "devicefarm",
             device_name="Google Pixel 8",
             max_screens=12,
             max_actions=24,
@@ -1406,6 +1434,7 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
             "__username": "qa@example.test",
             "__password": "test-only-password",
         },
+        previous_discovery=previous,
     )
 
     screen_controls = [
@@ -1414,6 +1443,11 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
     ]
     observed_labels = set().union(*screen_controls)
     assert {"Login", "Explore as a Guest", "Guest home"}.issubset(observed_labels)
+    if resume_after_service_error:
+        assert driver.service_restarts == 1
+        assert any("after its service error and resumed discovery" in warning for warning in result["warnings"])
+        assert any(edge.from_screen_id == remembered_home.screen_id and edge.control_label == "Profile"
+                   for edge in result["transitions"])
     if expect_authenticated:
         assert {
             "Accounts", "Profile", "Activity", "Recent activity", "Profile details",
@@ -1446,7 +1480,12 @@ def test_runtime_discovery_continues_across_authenticated_tabs_and_nested_pages(
             )
         assert driver.clicked.index("Scrim") < driver.clicked.index("com.qtx.demo:id/tour_skip")
         assert driver.clicked.index("com.qtx.demo:id/tour_skip") < driver.clicked.index("com.qtx.demo:id/accounts")
-        assert driver.reopened >= 1 if expire_session else driver.reopened == 1
+        if resume_after_service_error:
+            assert driver.reopened == 2
+        elif expire_session:
+            assert driver.reopened >= 1
+        else:
+            assert driver.reopened == 1
         assert len({screen.screen_id for screen in result["screens"]}) == len(result["screens"])
         assert {"com.qtx.demo:id/accounts", "com.qtx.demo:id/activity", "com.qtx.demo:id/profile"}.issubset(
             set(driver.clicked)

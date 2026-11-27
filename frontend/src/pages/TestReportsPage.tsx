@@ -50,6 +50,20 @@ type AutopilotSmokeExecution = {
   page_source_asset_id?: string | null;
 };
 
+function ledgerDetails(result: ExecutionResult): string | null {
+  const raw = result.evidence?.ledger;
+  if (!raw || typeof raw !== "object") return null;
+  const ledger = raw as Record<string, unknown>;
+  const details = [
+    typeof ledger.source_record === "string" ? `Ledger record ${ledger.source_record}` : null,
+    typeof ledger.decision === "string" ? ledger.decision : null,
+    typeof ledger.posted_count === "number" ? `${ledger.posted_count} postings` : null,
+    typeof ledger.amount_minor === "number" && typeof ledger.currency === "string"
+      ? `${ledger.amount_minor} minor units ${ledger.currency}` : null,
+  ];
+  return details.filter(Boolean).join(" · ") || null;
+}
+
 function statusColor(status: string): "success" | "error" | "warning" | "info" | "default" {
   if (status === "completed") return "success";
   if (status === "failed") return "error";
@@ -196,6 +210,7 @@ export default function TestReportsPage() {
   const [downloadError, setDownloadError] = useState("");
   const [defectTarget, setDefectTarget] = useState<{ run: ExecutionRun; result: ExecutionResult } | null>(null);
   const [defectError, setDefectError] = useState("");
+  const [ledgerError, setLedgerError] = useState("");
 
   const summary = useQuery({
     queryKey: ["dashboard", selectedProjectId],
@@ -217,6 +232,24 @@ export default function TestReportsPage() {
     queryKey: ["autopilot-executions", latestAutopilotJob.data?.job_id],
     queryFn: () => apiClient.get<AutopilotSmokeExecution[]>(`/autopilot/${latestAutopilotJob.data!.job_id}/executions`).then((response) => response.data),
     enabled: Boolean(latestAutopilotJob.data?.job_id),
+  });
+  const importLedger = useMutation({
+    mutationFn: async ({ resultId, file }: { resultId: string; file: File }) => {
+      if (file.size > 64_000) throw new Error("Select a signed ledger JSON file under 64 KB.");
+      const data: unknown = JSON.parse(await file.text());
+      if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("The ledger file must contain one signed JSON record.");
+      await executionsApi.importLedgerEvidence(resultId, data as Record<string, unknown>);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["executions", selectedProjectId] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard", selectedProjectId] });
+    },
+    onError: (reason: unknown) => {
+      const detail = (reason as AxiosError<{ detail?: unknown }>)?.response?.data?.detail;
+      setLedgerError(typeof detail === "string" ? detail
+        : detail ? "The ledger file does not match the signed evidence format."
+          : reason instanceof Error ? reason.message : "Ledger evidence could not be imported.");
+    },
   });
 
   const filteredRuns = useMemo(() => {
@@ -391,10 +424,40 @@ export default function TestReportsPage() {
               <Divider sx={{ my: 2 }} />
               <Grid container spacing={1} sx={{ mb: 2 }}>{[["Total", selectedCounts.total], ["Passed", selectedCounts.passed], ["Failed", selectedCounts.failed], ["Blocked", selectedCounts.blocked + selectedCounts.pending + selectedCounts.skipped]].map(([label, value]) => <Grid key={String(label)} size={{ xs: 6, sm: 3 }}><Box sx={{ p: 1.1, borderRadius: 1.75, bgcolor: "action.hover" }}><Typography variant="caption" color="text.secondary">{label}</Typography><Typography variant="h6" fontWeight={800}>{value}</Typography></Box></Grid>)}</Grid>
               <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mb: 1.25 }}><TextField size="small" fullWidth value={resultSearch} onChange={(event) => setResultSearch(event.target.value)} placeholder="Search cases or errors" InputProps={{ startAdornment: <SearchOutlinedIcon sx={{ mr: 0.75, color: "text.secondary" }} /> }} /><FormControl size="small" sx={{ minWidth: 170 }}><InputLabel id="report-result-filter">Result status</InputLabel><Select labelId="report-result-filter" label="Result status" value={resultFilter} onChange={(event) => setResultFilter(event.target.value as ResultFilter)}><MenuItem value="all">All results</MenuItem><MenuItem value="passed">Passed</MenuItem><MenuItem value="failed">Failed</MenuItem><MenuItem value="blocked">Blocked</MenuItem><MenuItem value="skipped">Skipped</MenuItem><MenuItem value="pending">Pending</MenuItem></Select></FormControl></Stack>
+              {ledgerError && <Alert severity="error" sx={{ mb: 1 }}>{ledgerError}</Alert>}
               {selectedRun.results.length === 0 ? <Alert severity="info">This run has no per-case results yet. Refresh while the worker is running.</Alert> : !selectedResults.length ? <Alert severity="info">No results match the current filter.</Alert> : <Stack spacing={0.9} sx={{ maxHeight: { lg: "calc(100vh - 520px)" }, overflowY: { lg: "auto" }, pr: { lg: 0.5 } }}>
                 {selectedResults.map((result) => <Box key={result.id} sx={{ p: 1.1, border: "1px solid", borderColor: result.status === "failed" ? "error.light" : "divider", borderRadius: 1.75 }}>
                   <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={0.75}><Box sx={{ minWidth: 0, flex: 1 }}><Typography variant="body2" fontWeight={800}>{result.test_case_key} · {result.scenario}</Typography><Typography variant="caption" color={result.status === "failed" ? "error.main" : "text.secondary"}>{result.error_message || durationLabel(result.duration_ms)}</Typography></Box><Stack direction="row" spacing={0.6} alignItems="center" flexWrap="wrap" useFlexGap><Chip size="small" label={displayStatus(result.status)} color={resultColor(result.status)} />{(result.defects ?? []).map((defect) => <Chip key={defect.id} size="small" label={defect.defect_key} variant="outlined" color="error" />)}{result.status === "failed" && <Button size="small" color="error" variant="outlined" onClick={(event) => { event.stopPropagation(); setDefectError(""); setDefectTarget({ run: selectedRun, result }); }}>Log defect</Button>}</Stack></Stack>
                   {result.evidence && <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap sx={{ mt: 0.8 }}>{typeof result.evidence.final_url === "string" && <Chip size="small" variant="outlined" label={`URL: ${result.evidence.final_url}`} />}{typeof result.evidence.current_package === "string" && <Chip size="small" variant="outlined" label={`Package: ${result.evidence.current_package}`} />}{typeof result.evidence.screenshot_asset_id === "string" && <Button size="small" startIcon={<DownloadOutlinedIcon />} onClick={() => downloadEvidence(result.evidence!.screenshot_asset_id as string, `${selectedRun.name}-launch.png`)}>Screenshot</Button>}{typeof result.evidence.page_source_asset_id === "string" && <Button size="small" startIcon={<DownloadOutlinedIcon />} onClick={() => downloadEvidence(result.evidence!.page_source_asset_id as string, `${selectedRun.name}-page-source.xml`)}>Page source</Button>}</Stack>}
+                  {result.traceability?.design_run_id && <Box component="details" sx={{ mt: 0.9 }}>
+                    <Typography component="summary" variant="body2" sx={{ cursor: "pointer" }}>Case traceability</Typography>
+                    <Stack spacing={0.4} sx={{ my: 0.75, overflowWrap: "anywhere" }}>
+                      <Typography variant="caption">Requirement {result.traceability.requirement_ref || result.traceability.requirement_id || "reference unavailable"}</Typography>
+                      {result.traceability.document_analysis_id && <Typography variant="caption">Document baseline {result.traceability.document_analysis_id}</Typography>}
+                      {result.traceability.app_sha256 && <Typography variant="caption">Build SHA-256 {result.traceability.app_sha256}</Typography>}
+                      {result.traceability.device_name && <Typography variant="caption">Device {result.traceability.device_name}</Typography>}
+                      {Object.keys(result.traceability.fixture_bindings ?? {}).length > 0 && <Typography variant="caption">Test Data {Object.keys(result.traceability.fixture_bindings ?? {}).join(", ")}</Typography>}
+                      <Typography variant="caption">Run {selectedRun.id}</Typography>
+                      <Typography variant="caption">Result {result.id}</Typography>
+                      <Box><Button size="small" onClick={() => navigate(`/design?run=${encodeURIComponent(result.traceability?.design_run_id || "")}`)}>Open source in Test Design</Button></Box>
+                    </Stack>
+                  </Box>}
+                  {typeof result.evidence?.business_reference === "string" && <Stack direction={{ xs: "column", sm: "row" }} spacing={0.8} sx={{ mt: 0.8 }} alignItems={{ sm: "center" }}>
+                    <Typography variant="caption">Reference {result.evidence.business_reference}</Typography>
+                    {result.evidence.business_verification === "awaiting_ledger" && <Button component="label" size="small" variant="outlined" disabled={importLedger.isPending}>
+                      {importLedger.isPending && importLedger.variables?.resultId === result.id ? "Importing…" : "Import signed ledger evidence"}
+                      <input hidden type="file" accept=".json,application/json" onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = "";
+                        if (!file) return;
+                        setLedgerError("");
+                        importLedger.mutate({ resultId: result.id, file });
+                      }} />
+                    </Button>}
+                    {result.evidence.business_verification === "verified" && <Chip size="small" color="success" label="Ledger verified" />}
+                    {result.evidence.business_verification === "mismatch" && <Chip size="small" color="error" label="Ledger mismatch" />}
+                  </Stack>}
+                  {ledgerDetails(result) && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>{ledgerDetails(result)}</Typography>}
                 </Box>)}
               </Stack>}
               {evidenceIds(selectedRun).length > 0 && <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1.5 }}>Evidence assets are linked to this report and intentionally excluded from the general Upload Repository list.</Typography>}

@@ -17,6 +17,7 @@ import logging
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,8 @@ import threading
 import time
 from typing import Any
 from urllib.parse import urlparse, urljoin
+from uuid import uuid4
+from xml.etree import ElementTree
 
 LOG = logging.getLogger("qtxpert.local_runner")
 DEFAULT_APPIUM_URL = "http://127.0.0.1:4723"
@@ -231,21 +234,25 @@ def _download_artifact(client: httpx.Client, credentials: dict[str, str], job: d
     if not relative.startswith(expected_prefix) or not relative.endswith("/artifact"):
         raise RuntimeError("QTXpert returned an invalid artifact route; refusing the download")
     url = urljoin(credentials["api_url"], relative)
+    with client.stream("GET", url, headers=_headers(credentials, lease), timeout=httpx.Timeout(1800, connect=15)) as response:
+        _write_verified_artifact(response, destination, str(job.get("app_sha256") or ""))
+
+
+def _write_verified_artifact(response: httpx.Response, destination: Path, expected: str) -> None:
+    response.raise_for_status()
+    length = int(response.headers.get("content-length", "0") or 0)
+    if length > MAX_APK_BYTES:
+        raise RuntimeError("The application package exceeds the local runner size limit")
     digest = hashlib.sha256()
     size = 0
-    with client.stream("GET", url, headers=_headers(credentials, lease), timeout=httpx.Timeout(1800, connect=15)) as response:
-        response.raise_for_status()
-        length = int(response.headers.get("content-length", "0") or 0)
-        if length > MAX_APK_BYTES:
-            raise RuntimeError("The application package exceeds the local runner safety limit")
-        with destination.open("wb") as handle:
-            for chunk in response.iter_bytes(1024 * 1024):
-                size += len(chunk)
-                if size > MAX_APK_BYTES:
-                    raise RuntimeError("The application package exceeded the local runner safety limit while downloading")
-                digest.update(chunk)
-                handle.write(chunk)
-    expected = str(job.get("app_sha256") or "").lower()
+    with destination.open("wb") as handle:
+        for chunk in response.iter_bytes(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_APK_BYTES:
+                raise RuntimeError("The application package exceeded the local runner size limit while downloading")
+            digest.update(chunk)
+            handle.write(chunk)
+    expected = expected.lower()
     if expected and not hmac.compare_digest(digest.hexdigest(), expected):
         raise RuntimeError("The downloaded application checksum does not match the project repository")
 
@@ -335,13 +342,29 @@ def _validate_startup_ui(source: str) -> None:
         raise RuntimeError("An Android crash or application-not-responding dialog is blocking the test. Check the device logs.")
 
 
+def _native_text_visible(source: str, expected: str) -> bool:
+    try:
+        root = ElementTree.fromstring(source)
+    except ElementTree.ParseError:
+        return False
+    return any(
+        node.get("displayed") != "false" and node.get("visible") != "false"
+        and node.get("password") != "true"
+        and expected in {node.get("text"), node.get("content-desc"), node.get("label")}
+        for node in root.iter()
+    )
+
+
 def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, stop: threading.Event | None = None) -> dict[str, Any]:
     from appium import webdriver
     from appium.options.android import UiAutomator2Options
+    from selenium.common.exceptions import NoSuchElementException
+    from selenium.webdriver.support.ui import WebDriverWait
 
     if job.get("target_kind") != "android":
         raise RuntimeError("This Windows runner only accepts Android jobs. Pair a Mac runner for iOS.")
     configured_device = str(job.get("device_name") or "").strip()
+    authored_cases = any(case.get("authored_steps") for case in job.get("cases", []))
     pinned_serial = os.environ.get(ANDROID_SERIAL_ENV)
     if pinned_serial and configured_device and configured_device != pinned_serial:
         raise RuntimeError("This job requested a different Android device from the one selected on the runner.")
@@ -351,6 +374,8 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
             raise RuntimeError("The selected Android device is not ready in ADB. Reconnect it and allow USB debugging.")
         raise RuntimeError("No Android device or emulator is online in ADB")
     if configured_device and configured_device not in devices:
+        if authored_cases:
+            raise RuntimeError("The selected execution device is no longer connected.")
         # A friendly Android model name is accepted only when exactly one ADB
         # device is connected. This prevents running on an unintended device.
         if len(devices) != 1:
@@ -384,23 +409,63 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
     try:
         driver.implicitly_wait(5)
         time.sleep(2)
-        screenshot = driver.get_screenshot_as_png()
-        if len(screenshot) > MAX_SCREENSHOT_BYTES:
-            raise RuntimeError("Startup screenshot exceeds the 5MB evidence cap")
         source = driver.page_source or ""
         _validate_startup_ui(source)
-        page_source = source.encode("utf-8")[:MAX_SOURCE_BYTES]
+        capture_startup = not any(case.get("uses_fixture") for case in job.get("cases", []))
+        screenshot = driver.get_screenshot_as_png() if capture_startup else b""
+        if len(screenshot) > MAX_SCREENSHOT_BYTES:
+            raise RuntimeError("Startup screenshot exceeds the 5MB evidence cap")
+        page_source = source.encode("utf-8")[:MAX_SOURCE_BYTES] if capture_startup else b""
         app_package = driver.current_package
         app_activity = driver.current_activity
         for case in job.get("cases", []):
             started = time.monotonic()
             outcome, error = "passed", None
+            reference = None
+            current_action = "start case"
             try:
                 if stop is not None and stop.is_set():
                     raise RuntimeError("Execution lease was revoked or lost; no further device actions are allowed")
-                if not case.get("steps"):
+                authored = case.get("authored_steps")
+                if case.get("ledger_identity") and driver.current_package != case["ledger_identity"]:
+                    raise ValueError("The allowlisted UAT app is outside the active device surface.")
+                if not authored and not case.get("steps"):
                     raise ValueError("This test has no executable steps; it has not been validated")
-                for action, strategy, value in compile_mobile_steps(case.get("steps") or []):
+                for step in authored or []:
+                    if stop is not None and stop.is_set():
+                        raise RuntimeError("The execution lease ended.")
+                    current_action = step["action"]
+                    if current_action == "back":
+                        driver.back()
+                        continue
+                    if current_action == "assert_text":
+                        WebDriverWait(driver, 10).until(
+                            lambda session: _native_text_visible(session.page_source, step["value"]),
+                            "The expected mobile UI text was absent.",
+                        )
+                        continue
+                    try:
+                        element = driver.find_element(_locator(step["strategy"]), step["locator"])
+                    except NoSuchElementException:
+                        if current_action == "capture_reference":
+                            continue
+                        raise
+                    if current_action == "tap":
+                        element.click()
+                    elif current_action == "fill":
+                        element.clear()
+                        element.send_keys(step["value"])
+                    elif current_action == "assert_visible":
+                        if not element.is_displayed():
+                            raise AssertionError("The expected mobile control was hidden.")
+                    elif current_action == "capture_reference":
+                        candidate = (element.text or "").strip() if element.is_displayed() else ""
+                        if re.fullmatch(r"[A-Za-z0-9_.:-]{4,128}", candidate):
+                            reference = candidate
+                    else:
+                        raise ValueError("Unknown authored mobile action.")
+                legacy = [] if authored else compile_mobile_steps(case.get("steps") or [])
+                for action, strategy, value in legacy:
                     if stop is not None and stop.is_set():
                         raise RuntimeError("Execution lease was revoked or lost; no further device actions are allowed")
                     if action == "back":
@@ -421,12 +486,16 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
             except ValueError as exc:
                 outcome, error = "blocked", _case_error(exc, case.get("steps") or [])
             except Exception as exc:
-                outcome, error = "failed", _case_error(exc, case.get("steps") or [])
+                outcome, error = "failed", (
+                    f"Authored mobile action {current_action} failed with {type(exc).__name__}."
+                    if case.get("uses_fixture") else _case_error(exc, case.get("steps") or [])
+                )
             results.append({
                 "result_id": case["result_id"],
                 "status": outcome,
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 "error_message": error,
+                "business_reference": reference,
             })
         return {
             "results": results,
@@ -434,8 +503,8 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
             "current_activity": app_activity,
             "device_name": configured_device,
             "platform_version": driver.capabilities.get("platformVersion") or driver.capabilities.get("appium:platformVersion"),
-            "screenshot_base64": base64.b64encode(screenshot).decode("ascii"),
-            "page_source_base64": base64.b64encode(page_source).decode("ascii"),
+            "screenshot_base64": base64.b64encode(screenshot).decode("ascii") if screenshot else None,
+            "page_source_base64": base64.b64encode(page_source).decode("ascii") if page_source else None,
         }
     finally:
         try:
@@ -505,12 +574,17 @@ def run_agent(*, once: bool = False, poll_seconds: int = 5) -> int:
     import httpx
 
     credentials = load_credentials()
-    stack = inspect_local_stack(credentials.get("appium_url", DEFAULT_APPIUM_URL))
-    if not stack["ready"]:
+    appium_url = credentials.get("appium_url", DEFAULT_APPIUM_URL)
+    stack = inspect_local_stack(appium_url)
+    if not stack["ready"] and (once or not (stack["appium_python"] and stack["adb"])):
         LOG.error("Local Android setup is not ready: %s", json.dumps(stack))
         return 2
     claim_url = f"{credentials['api_url']}/local-runners/{credentials['runner_id']}/jobs/claim"
     heartbeat_url = f"{credentials['api_url']}/local-runners/{credentials['runner_id']}/heartbeat"
+    autopilot_url = f"{credentials['api_url']}/local-runners/{credentials['runner_id']}/autopilot"
+    worker_id = str(uuid4())
+    headers = {**_headers(credentials), "X-QTXpert-Worker": worker_id}
+    refresh_devices_at = time.monotonic() + 15
     stop = threading.Event()
     with _http_client() as client:
         try:
@@ -518,6 +592,32 @@ def run_agent(*, once: bool = False, poll_seconds: int = 5) -> int:
             LOG.info("Runner online; device(s): %s", ", ".join(stack["devices"]))
             while not stop.is_set():
                 try:
+                    if time.monotonic() >= refresh_devices_at:
+                        stack = inspect_local_stack(appium_url)
+                        refresh_devices_at = time.monotonic() + 15
+                    discovery = client.post(f"{autopilot_url}/claim", headers=headers, json={
+                        "worker_id": worker_id, "devices": stack["devices"] if stack["ready"] else [],
+                    })
+                    if discovery.status_code == 200:
+                        if __package__:
+                            from .autopilot_android import run_session
+                        else:
+                            from autopilot_android import run_session
+
+                        run_session(
+                            client, autopilot_url, headers, discovery.json(), appium_url,
+                            lambda: inspect_local_stack(appium_url)["devices"], _write_verified_artifact,
+                            adb=_adb_executable(),
+                        )
+                        if once:
+                            return 0
+                        refresh_devices_at = 0
+                        continue
+                    if discovery.status_code != 404:
+                        discovery.raise_for_status()
+                    if not stack["ready"]:
+                        stop.wait(poll_seconds)
+                        continue
                     response = client.post(claim_url, headers=_headers(credentials))
                     if response.status_code == 204:
                         if once:

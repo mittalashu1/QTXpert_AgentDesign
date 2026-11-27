@@ -33,6 +33,9 @@ from app.database.models.user import User
 from app.database.repositories.requirement_repository import ProjectRepository
 from app.database.session import AsyncSessionLocal, get_db_session
 from app.schemas.autopilot import (
+    AutopilotBusinessAnswer,
+    AutopilotBusinessAnswerRequest,
+    AutopilotRepositoryInput,
     AutopilotAnalysis,
     AutopilotExecutionMode,
     AutopilotInitialInput,
@@ -92,6 +95,7 @@ from app.services.autopilot_ir import (
 from app.services.autopilot_report import build_test_audit_report
 from app.services.autopilot_suite import AutopilotSuiteService
 from app.services.device_farm import DeviceFarmService
+from app.services.local_autopilot import LocalAndroidTarget
 from app.services.autopilot_workflow import (
     build_application_map,
     build_execution_control_payload,
@@ -102,6 +106,8 @@ from app.services.autopilot_workflow import (
     SUITE_RUNNABLE_PHASES,
     transition_phase,
 )
+from app.services.autopilot_instructions import auth_binding_key, field_identity, parse_run_instructions
+from app.services.autopilot_progress import build_business_findings
 from app.services.autopilot_input_store import (
     AutopilotInputStoreError,
     apply_submissions,
@@ -1133,6 +1139,33 @@ async def _ensure_local_artifact(
     return target
 
 
+def _local_autopilot_options(
+    record: AutopilotJob | None, request: AutopilotExecutionRequest, analysis: AutopilotAnalysis | None,
+) -> dict:
+    if request.provider != "local_runner":
+        return {}
+    if (
+        record is None or record.target_kind != "android" or not record.project_id
+        or not record.repository_asset_id or not request.local_runner_id
+        or analysis is None or not analysis.package_name or not analysis.sha256
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Select a paired Android device and analyze an APK stored in this project's repository.",
+        )
+    if request.appium_url or request.appium_app:
+        raise HTTPException(status_code=400, detail="The paired runner uses the project APK and its configured local Appium.")
+    return {"local_target": LocalAndroidTarget(
+        runner_id=request.local_runner_id,
+        owner_id=record.owner_id,
+        project_id=record.project_id,
+        asset_id=record.repository_asset_id,
+        device_name=request.device_name,
+        package_name=analysis.package_name,
+        sha256=analysis.sha256,
+    )}
+
+
 async def _refresh_mobile_analysis_identity(
     service: AutopilotPrototypeService,
     job_id: str,
@@ -1303,10 +1336,47 @@ def _initial_input_identity(label: str) -> str:
 
 
 def _initial_input_key(item: AutopilotInitialInput) -> str:
-    if item.category == "credential":
+    if item.category == "credential" and not item.credential_field:
         return "credential_reference"
-    digest = hashlib.sha256(_initial_input_identity(item.label).encode("utf-8")).hexdigest()[:24]
-    return f"initial_data_{digest}"
+    digest = hashlib.sha256(field_identity(item.label).encode("utf-8")).hexdigest()[:24]
+    return f"{'initial_auth' if item.credential_field else 'initial_data'}_{digest}"
+
+
+def _starting_instructions(
+    raw: object,
+    context: str | None,
+    inputs: list[AutopilotInitialInput],
+    reuse: bool,
+    *,
+    inherited_modules: list[str] | None = None,
+) -> tuple[str | None, list[AutopilotInitialInput], bool, list[str] | None]:
+    if raw is None:
+        return context, inputs, reuse, None
+    try:
+        brief = parse_run_instructions(raw)
+    except ValueError as exc:
+        # Do not return submitted values even when validation rejects the brief.
+        detail = str(exc) if type(exc) is ValueError else "Check the labels and values in Run instructions."
+        raise HTTPException(status_code=400, detail=detail) from None
+    combined = {_initial_input_key(item): item for item in [*inputs, *brief.inputs]}
+    if len(combined) > 50:
+        raise HTTPException(status_code=400, detail="Use at most 50 starting inputs.")
+    modules = brief.modules if brief.module_directive or inherited_modules is None else inherited_modules
+    return brief.context or context, list(combined.values()), reuse if brief.reuse is None else brief.reuse, modules
+
+
+def _starting_field_for_request(saved_inputs, request):
+    """Match one encrypted starting value to the observed field in this run."""
+    if request.input_hint == "otp":
+        return None
+    identities = {field_identity(getattr(request, "field_label", None) or ""), field_identity(request.label)}
+    matches = [
+        item for item in saved_inputs
+        if item.has_value and item.category == request.category
+        and item.key.startswith(("initial_data_", "initial_auth_"))
+        and field_identity(item.label) in identities
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 async def _save_initial_autopilot_inputs(
@@ -1321,6 +1391,7 @@ async def _save_initial_autopilot_inputs(
     reuse_existing_test_data: bool,
     safe_authentication_approved: bool,
     execution_mode: AutopilotExecutionMode,
+    scope_modules: list[str] | None = None,
 ) -> None:
     """Encrypt supplied values before queueing analysis; persist safe metadata only."""
     record = await _safe_job_record(db, job_id, owner_id)
@@ -1336,6 +1407,8 @@ async def _save_initial_autopilot_inputs(
             "safe_authentication_approved": False,
             "saved_inputs": [],
             "input_decisions": {},
+            "scope_modules": scope_modules or [],
+            "progressive_intake": scope_modules is not None,
         })
         return
 
@@ -1345,7 +1418,7 @@ async def _save_initial_autopilot_inputs(
     credential_available = False
     for item in initial_inputs:
         key = _initial_input_key(item)
-        label = "UAT sign-in credentials" if item.category == "credential" else " ".join(item.label.split())
+        label = "UAT sign-in credentials" if key == "credential_reference" else " ".join(item.label.split())
         category = item.category
         requests[key] = AutopilotInputRequest(
             key=key,
@@ -1360,7 +1433,7 @@ async def _save_initial_autopilot_inputs(
                 else "Use this provided value only for a matching observed test-data field."
             ),
             format_hint="Encrypted at rest; excluded from analysis context, model prompts, logs and API responses.",
-            credential_bundle=category == "credential",
+            credential_bundle=key == "credential_reference",
         )
         submissions.append(AutopilotInputSubmission(
             key=key,
@@ -1369,7 +1442,7 @@ async def _save_initial_autopilot_inputs(
             save_for_reuse=save_for_reuse,
         ))
         credential_available = credential_available or category == "credential"
-        direct_identities.add((category, _initial_input_identity(label)))
+        direct_identities.add((category, field_identity(label)))
 
     if reuse_existing_test_data:
         try:
@@ -1386,7 +1459,8 @@ async def _save_initial_autopilot_inputs(
                 not item.save_for_reuse
                 or not item.has_value
                 or item.category == "approval"
-                or (item.category, _initial_input_identity(item.label)) in direct_identities
+                or item.key in requests
+                or (item.category, field_identity(item.label)) in direct_identities
             ):
                 continue
             requests[item.key] = AutopilotInputRequest(
@@ -1410,6 +1484,29 @@ async def _save_initial_autopilot_inputs(
     try:
         decisions, saved_metadata = await apply_submissions(db, settings, record, submissions, requests)
         profile = dict(record.setup_profile or {})
+        if scope_modules is not None:
+            profile["scope_modules"] = scope_modules
+            profile["progressive_intake"] = True
+            if record.surface_key:
+                past_answers = await db.scalars(
+                    select(AutopilotJob.setup_profile["business_answers"]).where(
+                        AutopilotJob.owner_id == record.owner_id,
+                        AutopilotJob.project_id == record.project_id,
+                        AutopilotJob.surface_key == record.surface_key,
+                        AutopilotJob.job_id != record.job_id,
+                    ).order_by(AutopilotJob.updated_at.desc()).limit(50)
+                )
+                answers = dict()
+                for history in [profile.get("business_answers"), *past_answers.all()]:
+                    for item in history or []:
+                        answer = AutopilotBusinessAnswer.model_validate(item)
+                        prior = answers.get(answer.finding_id)
+                        if prior is None or prior.saved_at < answer.saved_at:
+                            answers[answer.finding_id] = answer
+                profile["business_answers"] = [
+                    answer.model_dump(mode="json")
+                    for answer in sorted(answers.values(), key=lambda item: item.saved_at)[-50:]
+                ]
         profile.pop("input_submissions", None)
         prior_decisions = dict(profile.get("input_decisions") or {})
         prior_decisions.update(decisions)
@@ -1643,6 +1740,8 @@ def _runtime_discovery_checkpoint_message(
         return "Authentication checkpoint found. Enter the non-production User ID and Password before Autopilot continues."
     if pending_inputs:
         return "Runtime checkpoint found. Review the exact field or setup item observed on the target before dependent cases continue."
+    if discovery.target_kind == "android" and discovery.can_continue:
+        return "Runtime Discovery saved its progress. Continue from the saved Android crawl in the Runtime discovery panel."
     if discovery.screens:
         return completed_message
     return "Runtime Discovery did not expose an interactive screen; review the captured evidence and retry."
@@ -1802,7 +1901,10 @@ def _setup_profile(
         # already-persisted runtime requests; plan-level references are
         # re-hydrated after a screen is observed.
         discovered_requests_for_setup = (
-            AutopilotDiscoveryService.runtime_input_requests(discovery.screens)
+            [
+                item for item in AutopilotDiscoveryService.runtime_input_requests(discovery.screens)
+                if item.key not in discovery.verified_otp_fields
+            ]
             if discovery is not None
             else []
         )
@@ -1828,6 +1930,8 @@ def _setup_profile(
             for item in (normalized_setup.saved_inputs or [])
             if item.job_id == job_id
         }
+        saved_bundle = saved_by_key.get("credential_reference")
+        current_bundle_available = bool(saved_bundle and saved_bundle.has_value and is_credential_bundle_label(saved_bundle.label))
         saved_by_identity = {
             (item.category, _initial_input_identity(item.label)): item
             for item in saved_by_key.values()
@@ -1873,7 +1977,7 @@ def _setup_profile(
             # direct-input labels, password/OTP hints and safe actions.
             discovered_requests = discovered_requests_for_setup
             source_requests = discovered_requests or list(discovery.input_requests)
-            credential_bundle_available = credential_value_available(normalized_setup)
+            credential_bundle_available = current_bundle_available
             for item in source_requests:
                 runtime_hint = str(item.input_hint or "").strip().lower()
                 if runtime_hint not in {"username", "password", "otp", "text"}:
@@ -1887,11 +1991,13 @@ def _setup_profile(
                         if any(term in item_label for term in ("user id", "username", "email"))
                         else "text"
                     )
+                starting_value = _starting_field_for_request(saved_by_key.values(), item)
                 saved_runtime_value = saved_by_key.get(item.key) or saved_by_identity.get(
                     (item.category, _initial_input_identity(item.label))
                 )
                 runtime_reference_present = bool(
                     str(normalized_setup.runtime_input_references.get(item.key) or "").strip()
+                    or starting_value is not None
                     or (
                         decisions.get(item.key) in {"provide", "reuse", "random"}
                         and saved_runtime_value is not None
@@ -1909,6 +2015,8 @@ def _setup_profile(
                         item.category == "credential"
                         and credential_bundle_available
                         and runtime_hint in {"username", "password"}
+                        and (not normalized_setup.progressive_intake
+                             or field_identity(item.field_label or item.label) in {"username", "password"})
                     )
                 )
                 decision = decisions.get(item.key)
@@ -1924,6 +2032,7 @@ def _setup_profile(
                     item.category == "test_data"
                     and not item.sensitive
                     and not decision
+                    and not runtime_reference_present
                 )
                 reference_present = runtime_reference_present or auto_synthetic
                 runtime_requests.append(
@@ -1947,10 +2056,11 @@ def _setup_profile(
             # discovery payload yet. Recompute each field's status from the
             # current encrypted metadata instead of trusting a stale
             # ``provided``/``random`` flag in the old job snapshot.
-            credential_bundle_available = credential_value_available(normalized_setup)
+            credential_bundle_available = current_bundle_available
             runtime_requests = []
             for item in normalized_setup.runtime_input_requests:
                 decision = decisions.get(item.key)
+                starting_value = _starting_field_for_request(saved_by_key.values(), item)
                 saved_runtime_value = saved_by_key.get(item.key) or saved_by_identity.get(
                     (item.category, _initial_input_identity(item.label))
                 )
@@ -1971,6 +2081,7 @@ def _setup_profile(
                     )
                 runtime_reference_present = bool(
                     direct_reference
+                    or starting_value is not None
                     or (
                         decision in {"provide", "reuse", "random"}
                         and saved_runtime_value is not None
@@ -1983,12 +2094,15 @@ def _setup_profile(
                         item.category == "credential"
                         and credential_bundle_available
                         and runtime_hint in {"username", "password"}
+                        and (not normalized_setup.progressive_intake
+                             or field_identity(item.field_label or item.label) in {"username", "password"})
                     )
                 )
                 auto_synthetic = (
                     item.category == "test_data"
                     and not item.sensitive
                     and not decision
+                    and not runtime_reference_present
                 )
                 reference_present = runtime_reference_present or auto_synthetic
                 runtime_requests.append(
@@ -2013,7 +2127,18 @@ def _setup_profile(
         runtime_signin_credentials = [
             item for item in runtime_requests if item.category == "credential" and item.input_hint != "otp"
         ]
-        if runtime_signin_credentials and discovery is not None:
+        observed_auth_fields = {field_identity(item.field_label or item.label) for item in runtime_signin_credentials}
+        pending_auth = [item for item in runtime_signin_credentials if item.status == "pending"]
+        use_conventional_bundle = (
+            not normalized_setup.progressive_intake or observed_auth_fields == {"username", "password"}
+            and (len(pending_auth) == len(runtime_signin_credentials) or current_bundle_available)
+        )
+        if discovery is not None and runtime_auth_observed and not use_conventional_bundle:
+            normalized_requests = [item for item in normalized_requests
+                                   if item.key not in {"credential_reference", "safe_authentication_approved"}]
+            raw["input_requests"] = [item.model_dump(mode="json") for item in normalized_requests]
+            pending_requests = [item for item in normalized_requests if item.status == "pending"]
+        if runtime_signin_credentials and discovery is not None and use_conventional_bundle:
             # Login is the first checkpoint in a live journey. Keep unrelated
             # UAT/SIT/data references out of the dialog until the user has
             # supplied (or explicitly skipped) the concrete sign-in fields.
@@ -2038,7 +2163,7 @@ def _setup_profile(
             # can still return a field-level credential (especially after an
             # older job is resumed), so carry that durable decision onto the
             # compact user-facing bundle instead of recreating it as pending.
-            credential_bundle_available = credential_value_available(normalized_setup)
+            credential_bundle_available = current_bundle_available
             # Keep the single user-facing credential bundle, but carry the
             # location of the *observed* sign-in form onto it.  The compiler
             # intentionally creates ``credential_reference`` at plan level;
@@ -2124,12 +2249,13 @@ def _setup_profile(
             pending_requests = [item for item in normalized_requests if item.status == "pending"]
             runtime_requests = [
                 item.model_copy(update={"status": "skipped", "reference_present": False})
-                if credential_bundle_skipped and item.category == "credential"
+                if credential_bundle_skipped and item.category == "credential" and item.input_hint != "otp"
                 else item
                 for item in runtime_requests
                 if (
                     item.status != "pending"
                     or item.category != "credential"
+                    or item.input_hint == "otp"
                     or credential_bundle_request is None
                     or credential_bundle_skipped
                 )
@@ -2227,6 +2353,7 @@ async def _setup_with_input_metadata(
             record.owner_id,
             record.project_id,
             (record.surface_key or job_id)[:128],
+            job_id=job_id,
         )
     except Exception:
         # A degraded database must not hide the safe setup snapshot. The
@@ -2296,6 +2423,8 @@ async def _resolve_suite_input_values(
     surface_key = (record.surface_key or record.job_id or "autopilot")[:128]
     requests = [*(setup.input_requests or []), *(setup.runtime_input_requests or [])]
     by_key = {item.key: item for item in requests if item.key}
+    starting_values = [item for item in (getattr(setup, "saved_inputs", None) or [])
+                       if getattr(item, "job_id", None) == record.job_id]
     values: dict[str, str] = {}
     sensitive_keys: set[str] = set()
 
@@ -2320,6 +2449,12 @@ async def _resolve_suite_input_values(
                 job_id=record.job_id,
             )
             request = by_key.get(key)
+            starting_value = _starting_field_for_request(starting_values, request) if request is not None else None
+            if value is None and starting_value is not None:
+                value = await resolve_value(
+                    db, settings, record.owner_id, record.project_id, surface_key,
+                    starting_value.key, job_id=record.job_id,
+                )
             if value is None and request is not None and request.category == "test_data":
                 value = await resolve_value_by_label(
                     db,
@@ -2342,6 +2477,8 @@ async def _resolve_suite_input_values(
     # Direct field submissions (including generated random values) are keyed
     # by the stable runtime_* identifier produced by Runtime Discovery.
     for request in setup.runtime_input_requests or []:
+        if request.input_hint == "otp":
+            continue
         value = await read(request.key)
         if value is None or not value.strip():
             continue
@@ -2361,6 +2498,9 @@ async def _resolve_suite_input_values(
         if isinstance(parsed, dict):
             for request in setup.runtime_input_requests or []:
                 hint = str(request.input_hint or "").strip().lower()
+                identity = field_identity(getattr(request, "field_label", None) or request.label)
+                if identity not in {"username", "password"}:
+                    continue
                 if hint not in {"username", "password"}:
                     label = str(request.label or "").lower()
                     hint = "password" if "password" in label else "username" if any(term in label for term in ("user id", "username", "email")) else ""
@@ -2422,6 +2562,8 @@ def _saved_authentication_was_rejected(
 
     saved_times: dict[str, datetime] = {}
     for item in setup.saved_inputs or []:
+        if item.job_id != setup.job_id or not item.has_value:
+            continue
         try:
             stamp = datetime.fromisoformat(str(item.updated_at).replace("Z", "+00:00"))
             if stamp.tzinfo is None:
@@ -2451,8 +2593,10 @@ async def _resolve_discovery_input_values(
     record: Optional[AutopilotJob],
     setup: Optional[AutopilotSetupProfile],
     discovery: Optional[AutopilotDiscoveryResult] = None,
+    *,
+    consume_otp: bool = True,
 ) -> tuple[dict[str, str], set[str]]:
-    """Resolve approved checkpoint values for a live discovery session.
+    """Resolve approved checkpoint values for live discovery and mobile replay.
 
     Discovery accepts the values only as an in-memory mapping.  The special
     ``__username``/``__password`` keys are internal hand-off aliases used by
@@ -2477,6 +2621,43 @@ async def _resolve_discovery_input_values(
     if record is None or setup is None or not setup.safe_authentication_approved:
         return values, sensitive_keys
 
+    for item in getattr(setup, "saved_inputs", None) or []:
+        if (getattr(item, "job_id", None) != record.job_id or not item.has_value
+                or item.category != "credential" or not item.key.startswith("initial_auth_")):
+            continue
+        try:
+            supplied = await resolve_value(
+                db, settings, record.owner_id, record.project_id,
+                (record.surface_key or record.job_id)[:128], item.key, job_id=record.job_id,
+            )
+        except AutopilotInputStoreError:
+            continue
+        if supplied:
+            key = auth_binding_key(item.label)
+            values[key] = supplied
+            sensitive_keys.add(key)
+
+    consumed_otp = False
+    one_time_requests = (setup.runtime_input_requests or []) if consume_otp else []
+    for request in one_time_requests:
+        if request.input_hint != "otp" or request.category != "credential":
+            continue
+        try:
+            code = await resolve_value(
+                db, settings, record.owner_id, record.project_id,
+                (record.surface_key or record.job_id or "autopilot")[:128],
+                request.key, job_id=record.job_id, consume=True,
+            )
+        except AutopilotInputStoreError:
+            code = None
+        if code:
+            values[request.key] = code
+            sensitive_keys.add(request.key)
+            consumed_otp = True
+    if consumed_otp:
+        await db.commit()
+
+    credential_hints = ("username", "password", "otp") if consume_otp else ("username", "password")
     # Runtime requests are the preferred source because they remain stable when
     # a login screen is rediscovered. Map each saved field to a private hint so
     # an adapter can fill a form before its first authenticated page is stored.
@@ -2490,6 +2671,13 @@ async def _resolve_discovery_input_values(
         if hint not in {"username", "password", "otp"}:
             label = str(request.label or "").lower()
             hint = "password" if "password" in label else "username" if any(term in label for term in ("user id", "username", "email")) else "otp"
+        if hint not in credential_hints:
+            continue
+        label = getattr(request, "field_label", None) or request.label
+        if hint != "otp" and field_identity(label) != hint:
+            values.setdefault(auth_binding_key(label), value)
+            sensitive_keys.add(request.key)
+            continue
         values.setdefault(f"__{hint}", value)
         sensitive_keys.add(request.key)
 
@@ -2510,7 +2698,7 @@ async def _resolve_discovery_input_values(
         if credential_bundle and credential_bundle.lstrip().startswith("{"):
             parsed = json.loads(credential_bundle)
             if isinstance(parsed, dict):
-                for hint in ("username", "password", "otp"):
+                for hint in credential_hints:
                     value = parsed.get(hint)
                     if value is not None and str(value).strip():
                         values.setdefault(f"__{hint}", str(value))
@@ -2695,11 +2883,13 @@ async def _resume_and_discover_background(
                 target_kind=target_kind,
                 target_url=job.get("target_url"),
                 provider=provider,
+                local_runner_id=resume_payload.discovery_local_runner_id,
                 appium_url=resume_payload.discovery_appium_url,
                 appium_app=resume_payload.discovery_appium_app,
                 device_name=resume_payload.discovery_device_name or "Google Pixel 8",
                 platform_version=resume_payload.discovery_platform_version or "14.0",
                 observe_only=False,
+                scope_modules=setup_for_discovery.scope_modules,
                 # Traverse a broad app surface, not just a representative
                 # sample. The device-side safety policy still excludes
                 # transactional/destructive actions; the compiler retains all
@@ -2717,11 +2907,26 @@ async def _resume_and_discover_background(
                     input_values=discovery_input_values,
                 )
             else:
-                result = await AutopilotDiscoveryService(settings, service).run(
+                previous = (
+                    existing_discovery if target_kind == "android" and existing_discovery
+                    and existing_discovery.target_ready is True and existing_discovery.screens
+                    and existing_discovery.provider == request.provider
+                    and existing_discovery.device_name == request.device_name
+                    and existing_discovery.local_runner_id == request.local_runner_id
+                    and existing_discovery.full_uat_exploration == request.full_uat_exploration
+                    and existing_discovery.transaction_journey_mapping_requested == request.include_transaction_journeys
+                    else None
+                )
+                result = await _run_without_db_connection(
+                    db,
+                    AutopilotDiscoveryService(settings, service).run,
                     job_id,
                     request,
                     input_values=discovery_input_values,
+                    **({"previous_discovery": previous} if previous else {}),
+                    **_local_autopilot_options(record, request, analysis_for_discovery),
                 )
+                result = result.model_copy(update={"transaction_journey_mapping_requested": request.include_transaction_journeys})
             record = await _safe_job_record(db, job_id, owner_id)
             # Do not replace a real screen graph with an empty provider/system
             # UI response.  The latest attempt is still returned to the
@@ -2941,6 +3146,8 @@ async def _resume_and_discover_background(
                 result.screen_count,
                 len(result.input_requests),
             )
+            if result.target_kind == "android" and result.can_continue:
+                return
             # Plan-level UAT/SIT references (role, acceptance criteria, API
             # oracle or reset hook) are a second-stage checkpoint. They must
             # not hold up the safe, evidence-backed functional/UI subset once
@@ -2955,10 +3162,12 @@ async def _resume_and_discover_background(
                 and not pending_auth
             ):
                 suite_request = _build_resumed_full_uat_suite_request(request)
+                user = await db.get(User, owner_id)
                 await execute_autopilot_suite(
                     job_id, suite_request, user, settings, db,
                 )
             elif resume_payload.auto_run_safe_suite and latest_discovery_ready and result.screens and not pending_auth:
+                user = await db.get(User, owner_id)
                 await execute_autopilot_suite(
                     job_id,
                     AutopilotSuiteRequest(**request.model_dump(exclude={"observe_only", "max_screens", "max_actions"})),
@@ -3000,6 +3209,7 @@ async def _start_analysis_from_asset(
     reuse_existing_test_data: bool = True,
     safe_authentication_approved: bool = False,
     execution_mode: AutopilotExecutionMode = "full_uat",
+    scope_modules: list[str] | None = None,
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
 
@@ -3043,6 +3253,7 @@ async def _start_analysis_from_asset(
         reuse_existing_test_data=reuse_existing_test_data,
         safe_authentication_approved=safe_authentication_approved,
         execution_mode=execution_mode,
+        scope_modules=scope_modules,
     )
     _queue_repository_materialization(background_tasks, settings, job_id, asset.id, user.id)
     result = await service.get_job_status(job_id)
@@ -3072,6 +3283,7 @@ async def _start_analysis_from_local_path(
     reuse_existing_test_data: bool = True,
     safe_authentication_approved: bool = False,
     execution_mode: AutopilotExecutionMode = "full_uat",
+    scope_modules: list[str] | None = None,
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
     if not source_path.is_file():
@@ -3117,6 +3329,7 @@ async def _start_analysis_from_local_path(
         reuse_existing_test_data=reuse_existing_test_data,
         safe_authentication_approved=safe_authentication_approved,
         execution_mode=execution_mode,
+        scope_modules=scope_modules,
     )
     background_tasks.add_task(service.analyze_safely, job_id)
     return await service.get_job_status(job_id)
@@ -3159,8 +3372,8 @@ async def _persist_evidence_asset(
     path = Path(path_value)
     if not path.is_file():
         return None
-    project_id = None
     try:
+        project_id = getattr(job_record, "project_id", None)
         resolved_repository_asset_id = repository_asset_id
         if resolved_repository_asset_id is None:
             try:
@@ -3168,7 +3381,7 @@ async def _persist_evidence_asset(
             except Exception as exc:  # pragma: no cover - detached ORM row
                 logger.warning("Autopilot evidence metadata unavailable: %s", exc)
                 resolved_repository_asset_id = None
-        if resolved_repository_asset_id:
+        if resolved_repository_asset_id and project_id is None:
             source = await db.scalar(
                 select(UploadedAsset).where(UploadedAsset.id == resolved_repository_asset_id)
             )
@@ -3236,6 +3449,8 @@ async def _persist_execution(
         owner_id=owner_id,
     )
     evidence = dict(result.evidence or {})
+    if request.local_runner_id:
+        evidence["local_runner_id"] = str(request.local_runner_id)
     if screenshot_asset_id:
         evidence["screenshot_asset_id"] = str(screenshot_asset_id)
     if page_source_asset_id:
@@ -3295,6 +3510,7 @@ def _execution_record_from_db(row: AutopilotExecution, job_id: str) -> Autopilot
         target_kind=target_kind,
         target_url=str(target_url) if target_url else None,
         provider=row.provider,
+        local_runner_id=evidence.get("local_runner_id"),
         appium_url=row.appium_url,
         device_name=row.device_name,
         platform_version=row.platform_version,
@@ -3359,7 +3575,10 @@ async def _execute_and_persist(
     # ownership check/read in this request.
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
+    if (job.get("setup_profile") or {}).get("scope_modules"):
+        raise HTTPException(status_code=409, detail="Run a case from the selected module for a scoped smoke check.")
     target_kind = str(job.get("target_kind") or "android")
+    local_options = {}
     if target_kind == "web":
         request = request.model_copy(update={
             "target_kind": "web",
@@ -3374,13 +3593,16 @@ async def _execute_and_persist(
             analysis_for_smoke = await service.load_analysis(job_id)
         except FileNotFoundError:
             analysis_for_smoke = None
-        await _refresh_mobile_analysis_identity(
+        analysis_for_smoke = await _refresh_mobile_analysis_identity(
             service,
             job_id,
             analysis_for_smoke,
             artifact_path,
         )
-    result = await service.execute_smoke(job_id, request)
+        if request.provider == "local_runner":
+            record = await _safe_job_record(db, job_id, owner_id)
+            local_options = _local_autopilot_options(record, request, analysis_for_smoke)
+    result = await _run_without_db_connection(db, service.execute_smoke, job_id, request, **local_options)
     record = await _safe_job_record(db, job_id, owner_id)
     if record is not None:
         result = await _persist_execution(
@@ -4165,6 +4387,7 @@ async def analyze_autopilot_target(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     file: UploadFile | None = File(default=None),
     context: str = Form(default=""),
+    run_instructions: Annotated[str | None, Form()] = None,
     profile_id: str = Form(default="uae_fintech"),
     target_url: str = Form(default=""),
     surface_action: str = Form(default="ask"),
@@ -4181,6 +4404,9 @@ async def analyze_autopilot_target(
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     service = _service(settings)
     parsed_initial_inputs = _parse_initial_inputs(initial_inputs)
+    context, parsed_initial_inputs, reuse_existing_test_data, scope_modules = _starting_instructions(
+        run_instructions, context, parsed_initial_inputs, reuse_existing_test_data,
+    )
     safe_authentication_approved = bool(
         safe_authentication_approved
         or reuse_existing_test_data
@@ -4260,6 +4486,7 @@ async def analyze_autopilot_target(
             reuse_existing_test_data=reuse_existing_test_data,
             safe_authentication_approved=safe_authentication_approved,
             execution_mode=execution_mode,
+            scope_modules=scope_modules,
         )
         background_tasks.add_task(service.analyze_safely, job_id)
         result = await service.get_job_status(job_id)
@@ -4378,6 +4605,7 @@ async def analyze_autopilot_target(
         reuse_existing_test_data=reuse_existing_test_data,
         safe_authentication_approved=safe_authentication_approved,
         execution_mode=execution_mode,
+        scope_modules=scope_modules,
     )
     background_tasks.add_task(service.analyze_safely, job_id)
     result = await service.get_job_status(job_id)
@@ -4395,6 +4623,9 @@ async def analyze_existing_mobile_app(
 ):
     """Start a new mobile analysis from an APK or IPA in the active project."""
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    starting_context, initial_inputs, reuse_saved, scope_modules = _starting_instructions(
+        payload.run_instructions, payload.context, payload.initial_inputs, payload.reuse_existing_test_data,
+    )
     try:
         asset = await UploadRepositoryService.get_owned(db, payload.upload_id, user.id)
     except Exception as exc:  # pragma: no cover - exercised by an unavailable provider
@@ -4437,7 +4668,7 @@ async def analyze_existing_mobile_app(
         db, user, project_id, selected_document_ids, settings
     )
     analysis_context = _context_with_documents(
-        payload.context,
+        starting_context,
         canonical_profile,
         document_excerpt,
         target_kind="ios" if asset.extension == "ipa" else "android",
@@ -4460,15 +4691,16 @@ async def analyze_existing_mobile_app(
         surface_key=surface_key,
         surface_identity=surface_identity,
         surface_version=surface_version,
-        initial_inputs=payload.initial_inputs,
+        initial_inputs=initial_inputs,
         save_initial_inputs_for_reuse=payload.save_initial_inputs_for_reuse,
-        reuse_existing_test_data=payload.reuse_existing_test_data,
+        reuse_existing_test_data=reuse_saved,
         safe_authentication_approved=(
             payload.safe_authentication_approved
-            or payload.reuse_existing_test_data
-            or any(item.category == "credential" for item in payload.initial_inputs)
+            or reuse_saved
+            or any(item.category == "credential" for item in initial_inputs)
         ),
         execution_mode=payload.execution_mode,
+        scope_modules=scope_modules,
     )
 
 
@@ -4502,6 +4734,20 @@ async def rerun_autopilot_analysis(
     service = _service(settings)
     original = await _require_owned_job(service, job_id, user)
     original_record = await _safe_job_record(db, job_id, user.id)
+    original_setup = (getattr(original_record, "setup_profile", None) or original.get("setup_profile") or {})
+    starting_context, initial_inputs, reuse_saved, scope_modules = _starting_instructions(
+        payload.run_instructions, payload.context, payload.initial_inputs,
+        payload.reuse_existing_test_data or payload.setup_action == "reuse",
+        inherited_modules=list(original_setup.get("scope_modules") or []),
+    )
+    payload = payload.model_copy(update={
+        "context": starting_context,
+        "initial_inputs": initial_inputs,
+        "reuse_existing_test_data": reuse_saved,
+        "setup_action": payload.setup_action if reuse_saved else "fresh",
+    })
+    if scope_modules is None:
+        scope_modules = list(original_setup.get("scope_modules") or [])
     # Reusing setup is opt-in.  The default ``ask`` behaves like a fresh setup
     # for older clients, while the current UI presents the saved references and
     # sends ``reuse`` only after the user confirms them.
@@ -4529,6 +4775,14 @@ async def rerun_autopilot_analysis(
         setup_profile_to_copy["random_input_keys"] = []
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     effective_project_id = project_id or (UUID(str(original["project_id"])) if original.get("project_id") and _is_uuid(original.get("project_id")) else None)
+
+    def setup_for_rerun(target_scope: str) -> dict | None:
+        profile = dict(setup_profile_to_copy or {})
+        same_target = target_scope == (getattr(original_record, "surface_key", None) or original.get("surface_key"))
+        same_project = str(effective_project_id or "") == str(getattr(original_record, "project_id", None) or original.get("project_id") or "")
+        profile["business_answers"] = original_setup.get("business_answers", []) if same_target and same_project else []
+        return profile
+
     canonical_profile_id = _canonical_profile_id(payload.profile_id)
     original_target_kind = str(original.get("target_kind") or "android")
     effective_execution_mode = _resolve_rerun_execution_mode(
@@ -4610,8 +4864,7 @@ async def rerun_autopilot_analysis(
                 surface_identity=surface_identity,
                 surface_version=surface_version,
             )
-            if setup_profile_to_copy:
-                await service.update_job(new_job_id, setup_profile=setup_profile_to_copy)
+            await service.update_job(new_job_id, setup_profile=setup_for_rerun(surface_key))
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         await _save_initial_autopilot_inputs(
@@ -4630,6 +4883,7 @@ async def rerun_autopilot_analysis(
                 or any(item.category == "credential" for item in payload.initial_inputs)
             ),
             execution_mode=effective_execution_mode,
+            scope_modules=scope_modules,
         )
         background_tasks.add_task(service.analyze_safely, new_job_id)
         return await service.get_job_status(new_job_id)
@@ -4665,7 +4919,7 @@ async def rerun_autopilot_analysis(
             surface_key=surface_key,
             surface_identity=surface_identity,
             surface_version=surface_version,
-            setup_profile=setup_profile_to_copy,
+            setup_profile=setup_for_rerun(surface_key),
             initial_inputs=payload.initial_inputs,
             save_initial_inputs_for_reuse=payload.save_initial_inputs_for_reuse,
             reuse_existing_test_data=payload.reuse_existing_test_data or payload.setup_action == "reuse",
@@ -4676,6 +4930,7 @@ async def rerun_autopilot_analysis(
                 or any(item.category == "credential" for item in payload.initial_inputs)
             ),
             execution_mode=effective_execution_mode,
+            scope_modules=scope_modules,
         )
     asset_id = payload.upload_id
     if asset_id is None and original_record is not None:
@@ -4725,7 +4980,7 @@ async def rerun_autopilot_analysis(
         surface_key=surface_key,
         surface_identity=surface_identity,
         surface_version=surface_version,
-        setup_profile=setup_profile_to_copy,
+        setup_profile=setup_for_rerun(surface_key),
         initial_inputs=payload.initial_inputs,
         save_initial_inputs_for_reuse=payload.save_initial_inputs_for_reuse,
         reuse_existing_test_data=payload.reuse_existing_test_data or payload.setup_action == "reuse",
@@ -4736,6 +4991,7 @@ async def rerun_autopilot_analysis(
             or any(item.category == "credential" for item in payload.initial_inputs)
         ),
         execution_mode=effective_execution_mode,
+        scope_modules=scope_modules,
     )
 
 
@@ -4869,6 +5125,38 @@ async def get_autopilot_job_status(
     result = await service.get_job_status(job_id)
     result = _apply_durable_suite_phase(result, job, record)
     return await _mark_repository_available(db, result, user.id)
+
+
+@router.get("/test-data", response_model=list[AutopilotRepositoryInput])
+async def list_autopilot_test_data(
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
+):
+    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    if project_id is None:
+        return []
+    inputs = AutopilotInputRecord
+    jobs = AutopilotJob
+    rows = await db.execute(
+        select(inputs.id, inputs.label, inputs.category, inputs.updated_at,
+               jobs.filename, jobs.target_kind, jobs.surface_identity)
+        .join(jobs, jobs.job_id == inputs.job_id)
+        .where(
+            inputs.owner_id == user.id, inputs.project_id == project_id,
+            jobs.owner_id == user.id, jobs.project_id == project_id,
+            inputs.category.in_(("credential", "test_data")),
+            inputs.save_for_reuse.is_(True), inputs.encrypted_value.is_not(None),
+            or_(inputs.expires_at.is_(None), inputs.expires_at > datetime.now(timezone.utc)),
+        )
+        .distinct(inputs.surface_key, inputs.input_key)
+        .order_by(inputs.surface_key, inputs.input_key, inputs.updated_at.desc(), inputs.id.desc())
+    )
+    return [AutopilotRepositoryInput(
+        id=row.id, label=row.label, category=row.category, updated_at=row.updated_at,
+        application=row.surface_identity if row.target_kind == "web" and row.surface_identity else row.filename,
+    ) for row in sorted(rows.all(), key=lambda item: item.updated_at, reverse=True)]
 
 
 @router.get("/{job_id}", response_model=AutopilotAnalysis)
@@ -5018,6 +5306,9 @@ async def update_autopilot_setup(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     stored = payload.model_dump(exclude={"input_submissions"})
+    stored["scope_modules"] = current_profile.scope_modules
+    stored["progressive_intake"] = current_profile.progressive_intake
+    stored["business_answers"] = [answer.model_dump(mode="json") for answer in current_profile.business_answers]
     stored.update(normalized_references)
     stored["runtime_input_references"] = runtime_references
     prior_decisions = dict(current_profile.input_decisions or {})
@@ -5031,6 +5322,9 @@ async def update_autopilot_setup(
         stored["safe_authentication_approved"] = True
     elif approval_decision == "skip":
         stored["safe_authentication_approved"] = False
+    elif any(decision in {"provide", "reuse"} and request_map[key].category == "credential"
+             for key, decision in decisions.items()):
+        stored["safe_authentication_approved"] = True
     stored["saved_inputs"] = [item.model_dump(mode="json") for item in saved_inputs]
     stored["skipped_input_keys"] = sorted(key for key, value in prior_decisions.items() if value == "skip")
     stored["random_input_keys"] = sorted(key for key, value in prior_decisions.items() if value == "random")
@@ -5233,8 +5527,32 @@ async def run_autopilot_discovery(
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
     record = await _safe_job_record(db, job_id, owner_id)
+    stored_setup = getattr(record, "setup_profile", None) or job.get("setup_profile") or {}
+    payload = payload.model_copy(update={"scope_modules": list(stored_setup.get("scope_modules") or [])})
     _ensure_runtime_operation_available(job, record, "start Runtime Discovery")
     target_kind = str(job.get("target_kind") or "android")
+    continuation = None
+    if payload.continuation_token:
+        continuation = _record_discovery(record, job)
+        if target_kind != "android" or payload.observe_only:
+            raise HTTPException(status_code=409, detail="Saved crawl continuation requires Android navigation discovery.")
+        if (
+            continuation is None or not continuation.can_continue or not continuation.screens
+            or continuation.job_id != job_id or continuation.target_kind != "android"
+            or continuation.target_ready is not True or continuation.observe_only
+            or continuation.exploration_cursor != payload.continuation_token
+        ):
+            raise HTTPException(status_code=409, detail="The discovery checkpoint has changed. Refresh this run before continuing.")
+        if (
+            continuation.provider != payload.provider or continuation.device_name != payload.device_name
+            or continuation.local_runner_id != payload.local_runner_id
+            or continuation.full_uat_exploration != payload.full_uat_exploration
+            or continuation.transaction_journey_mapping_requested != payload.include_transaction_journeys
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Select the original provider, device, and discovery settings to continue this saved crawl.",
+            )
     if payload.include_transaction_journeys and target_kind == "web":
         raise HTTPException(status_code=409, detail="Transaction-module mapping is currently available for mobile app targets only.")
     if payload.full_uat_exploration:
@@ -5288,7 +5606,7 @@ async def run_autopilot_discovery(
         web_request = payload.model_copy(update={
             "target_kind": "web",
             "provider": "playwright",
-            "target_url": payload.target_url or job.get("target_url"),
+            "target_url": job.get("target_url") if stored_setup.get("progressive_intake") else payload.target_url or job.get("target_url"),
         })
         result = await _run_without_db_connection(
             db,
@@ -5340,8 +5658,15 @@ async def run_autopilot_discovery(
             job_id,
             payload,
             input_values=discovery_input_values,
+            **({"previous_discovery": continuation} if continuation is not None else {}),
+            **_local_autopilot_options(record, payload, analysis_for_discovery),
         )
     record = await _safe_job_record(db, job_id, owner_id)
+    if continuation is not None:
+        job = await service.load_job(job_id)
+        current_checkpoint = _record_discovery(record, job)
+        if current_checkpoint is None or current_checkpoint.exploration_cursor != continuation.exploration_cursor:
+            raise HTTPException(status_code=409, detail="A newer discovery pass was saved. Refresh this run to continue from it.")
     result = result.model_copy(update={"transaction_journey_mapping_requested": payload.include_transaction_journeys})
     # A transient provider failure (or a session stuck on Android system UI)
     # must not erase a previously successful screen graph. Keep the prior map
@@ -5389,7 +5714,7 @@ async def run_autopilot_discovery(
                 content_type="image/png",
                 repository_asset_id=repository_asset_id,
                 owner_id=owner_id,
-            )
+            ) or screen.screenshot_asset_id
             screen.page_source_asset_id = await _persist_evidence_asset(
                 db,
                 user,
@@ -5400,7 +5725,7 @@ async def run_autopilot_discovery(
                 content_type="text/html" if result.target_kind == "web" else "application/xml",
                 repository_asset_id=repository_asset_id,
                 owner_id=owner_id,
-            )
+            ) or screen.page_source_asset_id
             for prompt in result.runtime_prompts:
                 prompt.screenshot_asset_id = await _persist_evidence_asset(
                     db,
@@ -5412,7 +5737,7 @@ async def run_autopilot_discovery(
                     content_type="image/png",
                     repository_asset_id=repository_asset_id,
                     owner_id=owner_id,
-                )
+                ) or prompt.screenshot_asset_id
                 prompt.page_source_asset_id = await _persist_evidence_asset(
                     db,
                     user,
@@ -5423,7 +5748,7 @@ async def run_autopilot_discovery(
                     content_type="application/xml",
                     repository_asset_id=repository_asset_id,
                     owner_id=owner_id,
-                )
+                ) or prompt.page_source_asset_id
         if persisted_discovery is not result and result.interactive_surface_ready is False:
             persisted_discovery.last_attempt_screens = list(result.screens)
         # The evidence links are attached during persistence. Re-project the
@@ -5859,12 +6184,23 @@ async def execute_autopilot_suite(
         )
     record = await _safe_job_record(db, job_id, owner_id)
     phase = _resolved_autopilot_phase(job, record)
-    if phase not in SUITE_RUNNABLE_PHASES:
+    latest_discovery = _record_discovery(record, job)
+    prior_suite = getattr(record, "suite_execution", None) or job.get("suite_execution")
+    retrying_local_suite = (
+        phase == "blocked"
+        and payload.provider == "local_runner"
+        and payload.execution_mode == "safe_navigation"
+        and isinstance(prior_suite, dict)
+        and prior_suite.get("provider") == "local_runner"
+        and prior_suite.get("status") == "blocked"
+        and prior_suite.get("executed_count") == 0
+        and _discovery_is_ready_for_cases(latest_discovery)
+    )
+    if phase not in SUITE_RUNNABLE_PHASES and not retrying_local_suite:
         raise HTTPException(
             status_code=409,
             detail=f"Safe execution cannot start while Autopilot is in the {phase} phase.",
         )
-    latest_discovery = _record_discovery(record, job)
     prompt_only_discovery_ready = (
         payload.prompt_only
         and _discovery_supports_prompt_only_execution(latest_discovery)
@@ -5918,7 +6254,12 @@ async def execute_autopilot_suite(
         analysis = await service.load_analysis(job_id)
         discovery = _record_discovery(record, job)
         setup = await _setup_with_input_metadata(db, record, job_id, analysis, discovery)
-        input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
+        if setup.progressive_intake:
+            input_values, sensitive_input_keys = await _resolve_discovery_input_values(
+                db, settings, record, setup, discovery, consume_otp=False,
+            )
+        else:
+            input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
         bundle = AutopilotIRCompiler().compile_bundle(
             analysis,
             discovery,
@@ -5959,7 +6300,7 @@ async def execute_autopilot_suite(
             web_request = payload.model_copy(update={
                 "target_kind": "web",
                 "provider": "playwright",
-                "target_url": payload.target_url or job.get("target_url"),
+                "target_url": job.get("target_url") if setup.progressive_intake else payload.target_url or job.get("target_url"),
             })
             result = await _run_suite_without_db_connection(
                 db,
@@ -5969,6 +6310,7 @@ async def execute_autopilot_suite(
                 candidates,
                 input_values=input_values,
                 sensitive_input_keys=sensitive_input_keys,
+                discovery=discovery,
             )
             deferred_results = AutopilotSuiteService._deferred_results(deferred) if payload.include_deferred else []
             result = result.model_copy(update={
@@ -5997,7 +6339,12 @@ async def execute_autopilot_suite(
         )
         discovery = _record_discovery(record, job)
         setup = await _setup_with_input_metadata(db, record, job_id, analysis_for_setup, discovery)
-        input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
+        if payload.provider == "local_runner":
+            input_values, sensitive_input_keys = await _resolve_discovery_input_values(
+                db, settings, record, setup, discovery, consume_otp=False,
+            )
+        else:
+            input_values, sensitive_input_keys = await _resolve_suite_input_values(db, settings, record, setup)
         result = await _run_suite_without_db_connection(
             db,
             AutopilotSuiteService(settings, service).run,
@@ -6007,6 +6354,7 @@ async def execute_autopilot_suite(
             setup,
             input_values=input_values,
             sensitive_input_keys=sensitive_input_keys,
+            **_local_autopilot_options(record, payload, analysis_for_setup),
         )
     result = result.model_copy(update={"execution_mode": payload.execution_mode})
     # A remote run can outlive the database server's idle-connection window.
@@ -6521,7 +6869,7 @@ async def get_autopilot_report(
         except Exception as exc:  # pragma: no cover - migration/degraded DB fallback
             await db.rollback()
             logger.warning("Autopilot defect count unavailable job_id=%s: %s", job_id, exc)
-    return build_test_audit_report(
+    report = build_test_audit_report(
         analysis,
         str(job.get("context", "")),
         discovery=discovery,
@@ -6529,6 +6877,54 @@ async def get_autopilot_report(
         executions=executions,
         defect_count=defect_count,
     )
+    setup = _record_setup(record, job_id, analysis, discovery)
+    return report.model_copy(update={"business_findings": build_business_findings(
+        analysis, discovery, suite, setup.business_answers,
+        AutopilotPrototypeService._redact_context, report.evidence_assets,
+    )})
+
+
+@router.put("/{job_id}/findings/{finding_id}", response_model=AutopilotBusinessAnswer)
+async def save_autopilot_business_answer(
+    job_id: str,
+    finding_id: str,
+    payload: AutopilotBusinessAnswerRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    service = _service(settings)
+    job = await _require_owned_job(service, job_id, user)
+    record = await _safe_job_record(db, job_id, user.id)
+    _ensure_runtime_operation_available(job, record, "save a business answer")
+    if record is None:
+        raise HTTPException(status_code=503, detail="Business feedback storage is temporarily unavailable.")
+    report = await get_autopilot_report(job_id, user, settings, db)
+    finding = next((item for item in report.business_findings if item.id == finding_id), None)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="The finding was not found in this report.")
+    expected = AutopilotPrototypeService._redact_context(payload.expected_behavior).strip()
+    if not expected:
+        raise HTTPException(status_code=400, detail="Describe the expected behavior.")
+    answer = AutopilotBusinessAnswer(
+        finding_id=finding.id, title=finding.title, case_id=finding.case_id, case_title=finding.case_title,
+        expected_behavior=expected[:1500],
+        visible_text=AutopilotPrototypeService._redact_context(payload.visible_text).strip()[:240],
+        saved_at=datetime.now(timezone.utc).isoformat(),
+    )
+    locked = await db.scalar(
+        select(AutopilotJob).where(AutopilotJob.job_id == job_id, AutopilotJob.owner_id == user.id)
+        .execution_options(populate_existing=True).with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(status_code=404, detail="Autopilot job not found")
+    profile = dict(locked.setup_profile or {})
+    answers = [item for item in profile.get("business_answers", []) if item.get("finding_id") != finding_id]
+    profile["business_answers"] = [*answers, answer.model_dump(mode="json")]
+    locked.setup_profile = profile
+    await db.commit()
+    await service.update_job(job_id, setup_profile=profile)
+    return answer
 
 
 async def _remove_local_report_data(
@@ -6816,7 +7212,8 @@ async def rerun_autopilot_smoke(
         request = AutopilotExecutionRequest(
             target_kind=target_kind,
             target_url=str(job.get("target_url")) if job.get("target_url") else None,
-            provider=provider,
+            provider="local_runner" if stored.provider == "local_runner" else provider,
+            local_runner_id=(stored.evidence or {}).get("local_runner_id") if stored.provider == "local_runner" else None,
             device_name=stored.device_name,
             platform_version=stored.platform_version,
             no_reset=stored.no_reset,
@@ -6837,7 +7234,7 @@ async def rerun_autopilot_smoke(
         if fallback_record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Autopilot execution not found")
         request = fallback_record.request.model_copy(
-            update={"target_kind": target_kind, "provider": provider}
+            update={"target_kind": target_kind, "provider": "local_runner" if fallback_record.request.local_runner_id else provider}
         )
     return await _execute_and_persist(
         service=service,

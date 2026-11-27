@@ -41,6 +41,7 @@ from app.services.appium_compat import (
     safe_quit,
     validate_target_surface,
 )
+from app.services.local_autopilot import LocalAndroidTarget, LocalAutopilotTransport, LocalDeviceUnavailable
 from app.services.autopilot_ir import AutopilotIRCompiler
 
 
@@ -69,6 +70,7 @@ class AutopilotSuiteService:
         "reset",
         "assert_visible",
         "assert_text",
+        "assert_business_text",
         "assert_screen_changed",
         "assert_validation_feedback",
     }
@@ -125,6 +127,8 @@ class AutopilotSuiteService:
         setup: AutopilotSetupProfile | None = None,
         input_values: Dict[str, str] | None = None,
         sensitive_input_keys: set[str] | None = None,
+        *,
+        local_target: LocalAndroidTarget | None = None,
     ) -> AutopilotSuiteResult:
         job = await self.prototype.load_job(job_id)
         analysis = await self.prototype.load_analysis(job_id)
@@ -253,10 +257,17 @@ class AutopilotSuiteService:
         device_farm_service = None
         device_farm_session = None
         results: list[AutopilotSuiteTestResult]
+        transport = None
         try:
             if not apk_path.is_file() and not request.appium_app:
                 raise RuntimeError("Uploaded APK artifact is unavailable for autonomous suite execution")
-            if request.provider == "browserstack":
+            if request.provider == "local_runner":
+                if local_target is None:
+                    raise LocalDeviceUnavailable("Select a paired Android runner and repository APK.")
+                transport = await LocalAutopilotTransport.open(self.settings, local_target)
+                appium_url = transport
+                app_reference = ""
+            elif request.provider == "browserstack":
                 # BrowserStack owns the hub URL; do not resolve a local Appium
                 # endpoint first. That was the source of the hosted suite error.
                 app_reference = await self.prototype._browserstack_app_url(job_id, apk_path, analysis.sha256)
@@ -417,7 +428,7 @@ class AutopilotSuiteService:
             # UI is a lifecycle/target failure, not a test assertion failure.
             # Keep it blocked and expose the actionable provider diagnostic to
             # the report instead of counting any platform check as a pass.
-            blocked = isinstance(exc, ProviderLifecycleUnavailable) or self.prototype._looks_like_connector_problem(exc)
+            blocked = isinstance(exc, (ProviderLifecycleUnavailable, LocalDeviceUnavailable)) or self.prototype._looks_like_connector_problem(exc)
             connector_error = f"{type(exc).__name__}: {exc}"[:1200]
             failure_results = [
                 AutopilotSuiteTestResult(
@@ -462,6 +473,8 @@ class AutopilotSuiteService:
                 tests=ordered_failure_results,
             )
         finally:
+            if transport is not None:
+                await transport.close()
             await self.prototype._stop_device_farm_session(device_farm_service, device_farm_session)
 
         results = static_results + results
@@ -1146,7 +1159,7 @@ class AutopilotSuiteService:
     def _run_sync(
         self,
         job_id: str,
-        appium_url: str,
+        appium_url: str | LocalAutopilotTransport,
         app_reference: str,
         request: AutopilotSuiteRequest,
         tests: list[QTXTestIR],
@@ -1261,14 +1274,16 @@ class AutopilotSuiteService:
                 from appium.options.android import UiAutomator2Options
 
                 options = UiAutomator2Options().load_capabilities(capabilities)
-            client_config = AppiumClientConfig(remote_server_addr=appium_url)
+            local_connection = appium_url.connection() if isinstance(appium_url, LocalAutopilotTransport) else None
+            client_config = AppiumClientConfig(remote_server_addr=appium_url) if local_connection is None else None
             # newCommandTimeout is server-side idle protection; this also bounds
             # each client HTTP call when a remote-access session becomes stale.
-            client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
+            if client_config is not None:
+                client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
             started = time.monotonic()
             try:
                 created_driver = webdriver.Remote(
-                    appium_url,
+                    local_connection or appium_url,
                     options=options,
                     client_config=client_config,
                 )
@@ -1363,7 +1378,14 @@ class AutopilotSuiteService:
                 and discovery is not None
                 and self.settings.full_uat_target_is_allowed(request.target_kind, discovery.target_identity, package)
             )
-            share_sign_in = bool(full_uat_run and package and not is_ios and request.provider == "appium" and not request.prompt_only)
+            share_sign_in = bool(
+                full_uat_run and package and not is_ios
+                and request.provider in {"appium", "local_runner"} and not request.prompt_only
+            )
+            preserve_paired_state = (
+                request.provider == "local_runner" and request.no_reset
+                and not request.auto_grant_permissions and not full_uat_run
+            )
             if share_sign_in:
                 first_shared = next((i for i, item in enumerate(execution_tests) if item.sign_in_setup_count), None)
                 if first_shared is not None:
@@ -1573,7 +1595,10 @@ class AutopilotSuiteService:
                                 force_launch=True,
                                 preserve_known_system_prompt=True,
                             )
-                    elif test_index > 0 and not fresh_browserstack_session and not reused_sign_in:
+                    elif (
+                        test_index > 0 and not fresh_browserstack_session and not reused_sign_in
+                        and (has_prompt_step or not preserve_paired_state)
+                    ):
                         self._reset_to_application(
                             driver,
                             package,
@@ -1615,10 +1640,12 @@ class AutopilotSuiteService:
                             "sign_in_setup_count": 0,
                         })
                     else:
-                        case_to_execute = test
+                        case_to_execute = self._resume_at_visible_sign_in_form(
+                            driver, test, discovery, package, request.target_kind,
+                        )
                         setup_navigation = self._prepare_test_screen(
                             driver,
-                            test,
+                            case_to_execute,
                             discovery,
                             package,
                             request.target_kind,
@@ -1646,6 +1673,8 @@ class AutopilotSuiteService:
                     )
                     if setup_prompt_choices:
                         evidence["setup_prompt_choices"] = setup_prompt_choices
+                    if not reused_sign_in and case_to_execute is not test:
+                        evidence["sign_in_form_already_visible"] = True
                     if setup_navigation:
                         evidence["setup_navigation"] = setup_navigation
                     unfinished = int(evidence.get("unfinished_assertions") or 0)
@@ -1665,10 +1694,10 @@ class AutopilotSuiteService:
                     session_verified = bool(
                         share_sign_in and status == "passed" and (reused_sign_in or evidence.get("signed_in_screen_id"))
                     )
-                except ProviderLifecycleUnavailable as exc:
+                except (ProviderLifecycleUnavailable, LocalDeviceUnavailable) as exc:
                     session_verified = False
                     blocked_reason = str(exc)[:1200]
-                    if (
+                    if isinstance(exc, LocalDeviceUnavailable) or (
                         has_discovery_screen
                         and not has_prompt_step
                         and self._is_target_foreground_failure(blocked_reason)
@@ -2293,12 +2322,18 @@ class AutopilotSuiteService:
                     transition.from_screen_id != source_id
                     or transition.to_screen_id not in screens
                     or AutopilotDiscoveryService._is_session_timeout(screens[transition.to_screen_id])
-                    or transition.action not in {"tap", "scroll"}
+                    or transition.action not in {"tap", "scroll", "back"}
                     or transition.to_screen_id in visited
                 ):
                     continue
-                if transition.action == "scroll":
+                if transition.action in {"scroll", "back"}:
                     if credential_screen:
+                        continue
+                    if transition.action == "back" and (
+                        discovery.target_kind != "android"
+                        or transition.prompt_path
+                        or AutopilotDiscoveryService._credential_controls(screens[transition.to_screen_id])
+                    ):
                         continue
                     next_path = path + [(transition, None)]
                     if transition.to_screen_id == target_screen_id:
@@ -2623,6 +2658,35 @@ class AutopilotSuiteService:
 
         return walk(current, 0)
 
+    def _resume_at_visible_sign_in_form(
+        self, driver, test: QTXTestIR, discovery: AutopilotDiscoveryResult | None,
+        package: str | None, target_kind: str,
+    ) -> QTXTestIR:
+        """Omit a recorded entry tap when Android already displays its credential form."""
+        if target_kind != "android" or not discovery or test.runtime_prompt_id or len(test.steps) < 4:
+            return test
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        launch, enter, fill = test.steps[:3]
+        if (
+            launch.action != "launch_app" or enter.action != "tap"
+            or fill.action != "fill" or not fill.input_key or fill.value is not None
+            or not AutopilotDiscoveryService._is_auth_entry_control(enter.target or "")
+            or not enter.expected_resulting_screen_id or enter.expected_resulting_screen_id != fill.screen_id
+            or enter.screen_id == fill.screen_id
+        ):
+            return test
+        current = self._identify_discovered_screen(driver, discovery, package)
+        if (
+            not current or current.screen_id != fill.screen_id
+            or not any(control.semantic_label == fill.target for control in AutopilotDiscoveryService._credential_controls(current))
+        ):
+            return test
+        return test.model_copy(update={
+            "steps": test.steps[2:],
+            "sign_in_setup_count": max(0, test.sign_in_setup_count - 2),
+        })
+
     def _prepare_test_screen(
         self,
         driver,
@@ -2635,6 +2699,7 @@ class AutopilotSuiteService:
         input_values: Dict[str, str] | None = None,
         *,
         allow_transaction_entries: bool = False,
+        allow_recovery: bool = True,
     ) -> list[dict[str, str]]:
         if not discovery or not discovery.screens:
             return []
@@ -2678,6 +2743,37 @@ class AutopilotSuiteService:
             "id": AppiumBy.ID,
             "xpath": AppiumBy.XPATH,
         }
+        input_values = input_values or {}
+        authentication_approved = str(input_values.get("__auth_approved") or "") == "1"
+        can_recover_expiry = (
+            package and target_kind == "android" and discovery.provider == "local_runner" and allow_recovery
+            and AutopilotDiscoveryService._active_tab_labels(target.controls)
+        )
+
+        def recover_session_timeout(source: str | None = None) -> list[dict[str, str]] | None:
+            if not can_recover_expiry:
+                return None
+            expired_screen = self._open_login_after_timeout(
+                driver, discovery, package, authentication_approved, AppiumBy, page_source=source,
+            )
+            if expired_screen is None:
+                return None
+            resumed = self._prepare_test_screen(
+                driver, test, discovery, package, target_kind,
+                transient_launch_settle_attempted, transient_launch_recovery_attempted,
+                input_values, allow_transaction_entries=allow_transaction_entries,
+                allow_recovery=False,
+            )
+            reached = self._identify_discovered_screen(driver, discovery, package)
+            return [{
+                "from_screen": expired_screen,
+                "to_screen": resumed[0]["from_screen"] if resumed else (reached.screen_id if reached else ""),
+                "control": "Opened Login after session timeout",
+            }, *resumed]
+
+        recovered = recover_session_timeout()
+        if recovered is not None:
+            return recovered
         has_locator = bool(entry_step.locator_strategy and entry_step.locator_value)
         deadline = time.monotonic() + 10.0
         current = None
@@ -2703,6 +2799,29 @@ class AutopilotSuiteService:
                     "saved control locator is no longer present. No test action was taken."
                 )
             return []
+
+        if (
+            target_kind == "android" and package and allow_recovery
+            and AutopilotDiscoveryService._auth_feedback_code(safe_page_source(driver)) == "service_unavailable"
+        ):
+            # Recover setup once after an explicit app error. Keep app data so
+            # the prior signed-in state can be restored by the same package.
+            self._reset_to_application(driver, package, discovery.target_activity, use_provider_reset=False)
+            resumed = self._prepare_test_screen(
+                driver, test, discovery, package, target_kind,
+                transient_launch_settle_attempted, transient_launch_recovery_attempted,
+                input_values, allow_transaction_entries=allow_transaction_entries,
+                allow_recovery=False,
+            )
+            restarted = self._identify_discovered_screen(driver, discovery, package)
+            restart_destination = restarted.screen_id if restarted else ""
+            if resumed:
+                restart_destination = resumed[0]["from_screen"]
+            return [{
+                "from_screen": current.screen_id,
+                "to_screen": restart_destination,
+                "control": "Restarted the uploaded app after its service error",
+            }, *resumed]
 
         # A fresh provider session can open on a volatile copy of the same
         # launch/login surface (for example a changed carousel number).  It is
@@ -2797,8 +2916,6 @@ class AutopilotSuiteService:
                         "No guessed control was tapped and no screen case was attempted."
                     )
 
-        input_values = input_values or {}
-        authentication_approved = str(input_values.get("__auth_approved") or "") == "1"
         path = self._safe_discovery_path(
             discovery,
             current.screen_id,
@@ -2818,6 +2935,29 @@ class AutopilotSuiteService:
                     "Reaching this observed screen requires the recorded sign-in flow, but approved saved credentials "
                     "are unavailable for this run. Complete the authentication checkpoint before continuing."
                 )
+            if (
+                package and target_kind == "android" and discovery.provider == "local_runner"
+                and allow_recovery and AutopilotDiscoveryService._active_tab_labels(target.controls)
+                and not AutopilotDiscoveryService._active_tab_labels(current.controls)
+                and not self._screen_has_credential_fields(current)
+                and not any(
+                    control.clickable and AutopilotDiscoveryService._is_auth_entry_control(control.semantic_label)
+                    for control in current.controls
+                )
+            ):
+                reached, mechanism = self._back_from_unlinked_screen(driver, discovery, current, package)
+                if reached is not None and reached.screen_id != current.screen_id:
+                    resumed = self._prepare_test_screen(
+                        driver, test, discovery, package, target_kind,
+                        transient_launch_settle_attempted, transient_launch_recovery_attempted,
+                        input_values, allow_transaction_entries=allow_transaction_entries,
+                        allow_recovery=False,
+                    )
+                    return [{
+                        "from_screen": current.screen_id,
+                        "to_screen": reached.screen_id,
+                        "control": mechanism,
+                    }, *resumed]
             # The saved graph is evidence, not an execution dependency. If a
             # provider dropped one safe edge, recover it from the live app
             # using only controls already observed as reversible and safe.
@@ -2890,6 +3030,24 @@ class AutopilotSuiteService:
                         page_source=safe_page_source(driver),
                     )
                     if not target_ready:
+                        if target_kind == "android" and allow_recovery:
+                            # A root-level Back can take Android to the preceding
+                            # app. Return to the verified APK before trying the
+                            # saved route once more.
+                            self._activate_application(driver, package, discovery.target_activity)
+                            reopened = self._identify_discovered_screen(driver, discovery, package)
+                            if reopened is not None:
+                                resumed = self._prepare_test_screen(
+                                    driver, test, discovery, package, target_kind,
+                                    transient_launch_settle_attempted, transient_launch_recovery_attempted,
+                                    input_values, allow_transaction_entries=allow_transaction_entries,
+                                    allow_recovery=False,
+                                )
+                                return [{
+                                    "from_screen": current.screen_id,
+                                    "to_screen": reopened.screen_id,
+                                    "control": "Reopened the uploaded app after Back",
+                                }, *resumed]
                         raise ProviderLifecycleUnavailable(
                             f"Stopped while returning to the observed public screen: {target_reason}"
                         )
@@ -2982,7 +3140,9 @@ class AutopilotSuiteService:
                     )
                 route_control = refreshed_submit
 
-            if route_control is None:
+            if transition.action == "back":
+                route_label = f"Back ({safe_navigate_back(driver, target_kind=target_kind)})"
+            elif route_control is None:
                 route_label = transition.control_label
                 direction = "right" if route_label.casefold() == "scroll right" else "down"
                 if AutopilotDiscoveryService._scroll_forward(driver, direction=direction, controls=source_screen.controls) is None:
@@ -3005,6 +3165,10 @@ class AutopilotSuiteService:
             step_deadline = time.monotonic() + (60.0 if authentication_replayed else 8.0)
             while time.monotonic() < step_deadline:
                 page_source = safe_page_source(driver)
+                if not authentication_replayed and not allow_transaction_entries:
+                    recovered = recover_session_timeout(page_source)
+                    if recovered is not None:
+                        return [*navigation, *recovered]
                 if allow_transaction_entries and transition.prompt_path and applied_confirmation is None:
                     applied_confirmation = self._replay_transition_confirmation(
                         driver, discovery, transition, page_source, target_kind, locator_map,
@@ -3063,6 +3227,64 @@ class AutopilotSuiteService:
                 "entry control is not visible. No test action was taken."
             )
         return navigation
+
+    def _back_from_unlinked_screen(self, driver, discovery, current, package: str):
+        """Recover from a verified Android subpage that has no recorded parent edge."""
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        source = safe_page_source(driver)
+        ready, _, _ = validate_target_surface(driver, expected_package=package, page_source=source)
+        if not ready or AutopilotDiscoveryService._runtime_prompt_kind(driver, source, "android"):
+            return None, ""
+        try:
+            back_method = safe_navigate_back(driver, target_kind="android")
+        except ProviderLifecycleUnavailable:
+            return None, ""
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            source = safe_page_source(driver)
+            ready, _, _ = validate_target_surface(driver, expected_package=package, page_source=source)
+            if not ready:
+                self._activate_application(driver, package, discovery.target_activity)
+                reached = self._identify_discovered_screen(driver, discovery, package)
+                if reached is not None:
+                    return reached, "Reopened the uploaded app after Back"
+                break
+            reached = self._identify_discovered_screen(driver, discovery, package)
+            if reached is not None and reached.screen_id != current.screen_id:
+                return reached, f"Back to observed screen ({back_method})"
+        reached = self._identify_discovered_screen(driver, discovery, package)
+        if reached is not None and reached.screen_id == current.screen_id:
+            return None, ""
+        raise ProviderLifecycleUnavailable("Android Back could not restore a screen from the saved app map.")
+
+    def _open_login_after_timeout(
+        self, driver, discovery, package: str, authentication_approved: bool, appium_by,
+        *, page_source: str | None = None,
+    ) -> str | None:
+        """Open the verified app's observed login entry after an explicit session expiry."""
+        from app.services.autopilot_discovery import AutopilotDiscoveryService
+
+        source = safe_page_source(driver) if page_source is None else page_source
+        controls = AutopilotDiscoveryService.parse_controls(source)
+        if not AutopilotDiscoveryService._is_session_timeout_controls(controls):
+            return None
+        ready, reason, _ = validate_target_surface(driver, expected_package=package, page_source=source)
+        if not ready:
+            raise ProviderLifecycleUnavailable(reason)
+        if not authentication_approved:
+            raise ProviderLifecycleUnavailable("The app session expired. Approved saved sign-in inputs are required to resume.")
+        entries = [
+            control for control in controls
+            if control.enabled and control.clickable and control.locators and self._auth_submit_label(control.semantic_label)
+        ]
+        if len(entries) != 1:
+            raise ProviderLifecycleUnavailable("The app session expired, and its Login control could not be identified.")
+        expired = self._identify_discovered_screen(driver, discovery, package)
+        AutopilotDiscoveryService._find_discovered_element(driver, entries[0], appium_by).click()
+        time.sleep(0.8)
+        return expired.screen_id if expired is not None else ""
 
     @staticmethod
     def _is_target_foreground_failure(reason: str) -> bool:
@@ -3221,6 +3443,11 @@ class AutopilotSuiteService:
         observed_runtime_prompts: list[RuntimePromptObservation] = []
         input_values = input_values or {}
         sensitive_input_keys = sensitive_input_keys or set()
+        credential_fields = {
+            AutopilotDiscoveryService.runtime_input_key(screen.screen_id, control.control_id, "credential"): control
+            for screen in (discovery.screens if discovery and target_kind == "android" else [])
+            for control in AutopilotDiscoveryService._credential_controls(screen)
+        }
         sensitive_input_touched = sensitive_context
         previous_surface_fingerprint: str | None = None
         signed_in_screen_id: str | None = None
@@ -3480,8 +3707,29 @@ class AutopilotSuiteService:
                         "The selected confirmation option did not change the observed application state."
                     )
                 mechanism = "observed_screen_changed"
+            elif step.action == "assert_business_text":
+                expected = " ".join(str(step.assertion or "").split())
+                source = safe_page_source(driver)
+                root = ET.fromstring(source)
+                displayed = any(
+                    " ".join(str(node.get(attribute) or "").split()) == expected
+                    for node in root.iter()
+                    if node.get("displayed") != "false" and node.get("visible") != "false"
+                    for attribute in ("text", "content-desc", "label", "name", "value")
+                )
+                if not expected or not displayed:
+                    raise AssertionError("The business-confirmed text was not visible.")
+                mechanism = "business_confirmed_visible_text"
             elif step.action == "assert_visible" and step.assertion == "selected":
-                if not AutopilotDiscoveryService._wait_for_tab_selection(driver, step.target or ""):
+                selected = AutopilotDiscoveryService._wait_for_tab_selection(driver, step.target or "")
+                live_source = safe_page_source(driver)
+                live_controls = AutopilotDiscoveryService.parse_controls(live_source)
+                if AutopilotDiscoveryService._is_session_timeout_controls(live_controls):
+                    session_timed_out = True
+                    break
+                if AutopilotDiscoveryService._auth_feedback_code(live_source) == "service_unavailable":
+                    raise AssertionError(f"The app reported a network or service error while opening {step.target}.")
+                if not selected:
                     raise AssertionError(f"The tapped tab did not become selected: {step.target}")
                 mechanism = "native_selected_state"
             elif step.action in {"tap", "click", "assert_visible", "assert_text", "clear", "select"}:
@@ -3636,20 +3884,30 @@ class AutopilotSuiteService:
                     raise AssertionError(
                         f"Encrypted runtime input is unavailable for {step.target or 'the requested field'}"
                     )
-                element = self._find_semantic_element(driver, step, locator_map)
+                credential = credential_fields.get(input_key) if step.value is None else None
+                if credential is not None:
+                    # Match the observed editable class and disambiguate
+                    # duplicate Flutter labels the same way discovery does.
+                    element = AutopilotDiscoveryService._find_discovered_element(driver, credential, AppiumBy)
+                else:
+                    element = self._find_semantic_element(driver, step, locator_map)
                 if not element.is_enabled():
                     raise AssertionError(f"Resolved input control is disabled: {step.target}")
+                sensitive = input_key in sensitive_input_keys
+                sensitive_input_touched = sensitive_input_touched or sensitive
+                field_name = str(step.target or "").casefold()
+                hint = AutopilotDiscoveryService._credential_hint(credential) if credential is not None else None
                 try:
-                    field_name = str(step.target or "").casefold()
-                    sensitive = input_key in sensitive_input_keys
                     verified = enter_observed_text(
                         driver, element, str(value), target_kind=target_kind,
-                        verify_text=sensitive and any(term in field_name for term in ("email", "username", "user id")),
-                        prefer_element_entry=sensitive and "password" in field_name,
+                        verify_text=sensitive and (
+                            hint == "username" or any(term in field_name for term in ("email", "username", "user id"))
+                        ),
+                        prefer_element_entry=sensitive and (hint == "password" or "password" in field_name),
                     )
                     if verified is False:
                         raise AssertionError("The device did not confirm the entered value")
-                    if sensitive:
+                    if sensitive and credential is None:
                         try:
                             driver.hide_keyboard()
                         except Exception:
@@ -3658,8 +3916,8 @@ class AutopilotSuiteService:
                     # Provider errors occasionally echo command arguments;
                     # never propagate a password, OTP or test value into the
                     # suite result, logs or report.
-                    raise AssertionError("Encrypted runtime input could not be entered") from None
-                sensitive_input_touched = sensitive_input_touched or input_key in sensitive_input_keys
+                    detail = f" for {hint}" if hint else ""
+                    raise AssertionError(f"Encrypted runtime input could not be entered{detail}") from None
             elif step.action == "assert_validation_feedback":
                 # Validation is deliberately evidence-led.  The runner does
                 # not infer a pass from the fact that a field accepted a

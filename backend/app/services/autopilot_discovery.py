@@ -13,6 +13,7 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
@@ -44,6 +45,10 @@ from app.services.appium_compat import (
     safe_navigate_back,
     safe_quit,
     validate_target_surface,
+)
+from app.services.local_autopilot import LocalAndroidTarget, LocalAutopilotTransport, LocalDeviceUnavailable
+from app.services.autopilot_instructions import (
+    auth_binding_key, field_identity, is_transit, matches_module, scope_allows_navigation,
 )
 from app.services.autopilot_labels import input_probe_guidance, observed_journey_label, observed_page_label
 
@@ -1474,7 +1479,7 @@ class AutopilotDiscoveryService:
     def _credential_hint(cls, control: DiscoveredControl) -> str:
         """Classify a credential control without reading its current value."""
         haystack = " ".join(
-            [control.semantic_label, control.content_description, control.resource_id, control.class_name]
+            [control.semantic_label, control.content_description, control.resource_id, control.class_name, control.input_type or ""]
         ).lower().replace("_", " ").replace("-", " ")
         if any(term in haystack for term in ("otp", "one time", "mfa", "verification code", "passcode")):
             return "otp"
@@ -1527,17 +1532,22 @@ class AutopilotDiscoveryService:
             if cls._credential_hint(control) != "otp"
             and cls._credential_value(screen.screen_id, control, input_values) is None
         ]
-        otp_controls = [control for control in credential_controls if cls._credential_hint(control) == "otp"]
-        if approved and not missing_controls and not otp_controls:
+        missing_otp = any(
+            cls._credential_hint(control) == "otp"
+            and cls._credential_value(screen.screen_id, control, input_values) is None
+            for control in credential_controls
+        )
+        if approved and not missing_controls and not missing_otp:
             return None
-        if approved and not missing_controls and otp_controls:
+        if missing_otp and not missing_controls:
             return (
                 "OTP checkpoint detected. This sign-in branch needs a user-provided verification code; "
                 "Autopilot will leave this branch incomplete and continue other reachable journeys."
             )
+        missing = ", ".join(dict.fromkeys(control.semantic_label for control in missing_controls))
         return (
-            "Authentication checkpoint detected. Enter the non-production User ID and Password "
-            "(and provide an approved OTP only when the flow permits it) before Autopilot continues."
+            f"Authentication checkpoint detected. Provide the observed sign-in input needed to continue: {missing}."
+            if missing else "Authentication checkpoint detected. Approve use of the saved sign-in inputs to continue."
         )
 
     @classmethod
@@ -1553,6 +1563,15 @@ class AutopilotDiscoveryService:
         if value is not None and str(value).strip():
             return str(value)
         hint = cls._credential_hint(control)
+        if hint == "otp":
+            # A challenge code belongs to the observed field on this job.
+            return None
+        identity = field_identity(control.semantic_label)
+        value = input_values.get(auth_binding_key(control.semantic_label))
+        if value is not None and str(value).strip():
+            return str(value)
+        if identity not in {hint, "", "secure text field", "secure textfield"}:
+            return None
         value = input_values.get(f"__{hint}")
         return str(value) if value is not None and str(value).strip() else None
 
@@ -1846,7 +1865,11 @@ class AutopilotDiscoveryService:
             return "credential_rejected"
         if re.search(r"\b(?:otp|one.time password|verification code|captcha|two.factor|mfa)\b", text):
             return "additional_verification"
-        if re.search(r"\b(?:network error|connection error|server error|service unavailable|timed out|timeout)\b", text):
+        if re.search(
+            r"\b(?:network error|connection error|server error|service unavailable|timed out|timeout"
+            r"|unexpected technical error|no internet connection)\b",
+            text,
+        ):
             return "service_unavailable"
         return None
 
@@ -1859,11 +1882,48 @@ class AutopilotDiscoveryService:
             "service_unavailable": "The app reported a network or service error after sign-in; no further sign-in was attempted.",
         }[code]
 
+    @classmethod
+    def _saved_navigation_routes(
+        cls,
+        screens: Mapping[str, DiscoveredScreen],
+        transitions: Iterable[DiscoveredTransition],
+    ) -> dict[str, list[DiscoveredTransition]]:
+        """Find recorded navigation that can be used to reach unfinished screens."""
+        routes: dict[str, list[DiscoveredTransition]] = defaultdict(list)
+        destinations: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+        for edge in transitions:
+            destinations[(edge.from_screen_id, edge.action, edge.control_id)].add(edge.to_screen_id)
+        for edge in transitions:
+            source = screens.get(edge.from_screen_id)
+            destination = screens.get(edge.to_screen_id)
+            if (
+                source is None or destination is None or source.screen_id == destination.screen_id
+                or edge.prompt_path or cls._credential_controls(source) or cls._credential_controls(destination)
+                or cls._is_session_timeout(source) or cls._is_session_timeout(destination)
+            ):
+                continue
+            if len(destinations[(edge.from_screen_id, edge.action, edge.control_id)]) != 1:
+                continue
+            if edge.action == "tap":
+                control = next((item for item in source.controls if item.control_id == edge.control_id), None)
+                if (
+                    control is None or control.risk != "safe" or not control.clickable
+                    or not cls._eligible_navigation_controls([control], set(), transaction_context=True)
+                    or cls._is_auth_entry_control(control.semantic_label)
+                    or _SUBMISSION_LABEL.match(cls._normalize(control.semantic_label))
+                ):
+                    continue
+            routes[source.screen_id].append(edge)
+        return routes
+
     async def run(
         self,
         job_id: str,
         request: AutopilotDiscoveryRequest,
         input_values: Optional[Mapping[str, str]] = None,
+        *,
+        previous_discovery: Optional[AutopilotDiscoveryResult] = None,
+        local_target: Optional[LocalAndroidTarget] = None,
     ) -> AutopilotDiscoveryResult:
         job = await self.prototype.load_job(job_id)
         analysis = await self.prototype.load_analysis(job_id)
@@ -1884,8 +1944,15 @@ class AutopilotDiscoveryService:
         device_farm_service = None
         device_farm_session = None
         checkpoint_message: Optional[str] = None
+        transport = None
         try:
-            if request.provider == "browserstack":
+            if request.provider == "local_runner":
+                if local_target is None:
+                    raise LocalDeviceUnavailable("Select a paired Android runner and repository APK.")
+                transport = await LocalAutopilotTransport.open(self.settings, local_target)
+                appium_url = transport
+                app_reference = ""
+            elif request.provider == "browserstack":
                 # Keep the upload/provider handshake inside the guarded
                 # discovery path. A provider quota or credential failure is
                 # an actionable blocked run, not an unhandled 500/network
@@ -1929,6 +1996,7 @@ class AutopilotDiscoveryService:
                     self.settings.AUTOPILOT_APPIUM_SERVER_LAUNCH_TIMEOUT_SECONDS * 1000,
                     self.settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
                     input_values or {},
+                    **({"previous_discovery": previous_discovery} if previous_discovery is not None else {}),
                 ),
                 timeout=self.settings.AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS,
             )
@@ -1968,29 +2036,59 @@ class AutopilotDiscoveryService:
                 "interactive_surface_ready": False,
                 "target_identity_reason": f"{type(exc).__name__}: {exc}"[:1200],
             }
-            status = "blocked" if self.prototype._looks_like_connector_problem(exc) else "failed"
+            status = "blocked" if isinstance(exc, LocalDeviceUnavailable) or self.prototype._looks_like_connector_problem(exc) else "failed"
             error = payload["target_identity_reason"]
         finally:
+            if transport is not None:
+                await transport.close()
             await self.prototype._stop_device_farm_session(device_farm_service, device_farm_session)
 
         finished = datetime.now(timezone.utc)
         screens: list[DiscoveredScreen] = payload["screens"]
         controls = [control for screen in screens for control in screen.controls]
         bounded = str(payload.get("stop_reason") or "").lower()
-        can_continue = any(token in bounded for token in ("max_screens", "max_actions", "bounds reached"))
+        reached_budget = any(token in bounded for token in ("max_screens", "max_actions", "bounds reached", "discovery time budget"))
+        can_continue = reached_budget
+        if target_kind == "android":
+            remaining = int(payload.get("unvisited_edge_count") or 0)
+            routes_ran_out = bool(payload.get("frontier_unreachable"))
+            retryable_frontier = routes_ran_out and remaining > 0 and (
+                previous_discovery is None
+                or len(screens) > previous_discovery.screen_count
+                or remaining < previous_discovery.unvisited_edge_count
+            )
+            can_continue = bool(
+                not request.observe_only and screens and payload.get("target_ready") is True
+                and (reached_budget or payload.get("provider_interruption") or retryable_frontier)
+            )
+            if (can_continue or routes_ran_out) and status == "completed":
+                status = "partial"
         cursor = (
             hashlib.sha256(
-                f"{job_id}|{request.continuation_token or ''}|{len(screens)}|{int(payload['actions_attempted'])}".encode()
+                f"{job_id}|{finished.isoformat()}|{request.continuation_token or ''}".encode()
             ).hexdigest()[:32]
             if can_continue
             else None
         )
+        transitions = payload["transitions"]
+        verified_otp_fields = payload.get("verified_otp_fields") or []
+        if previous_discovery is not None:
+            unique_transitions = {}
+            for edge in transitions:
+                key = (
+                    edge.from_screen_id, edge.to_screen_id, edge.action, edge.control_id,
+                    tuple((branch.prompt_id, branch.choice_key) for branch in edge.prompt_path),
+                )
+                unique_transitions.setdefault(key, edge)
+            transitions = list(unique_transitions.values())
         return AutopilotDiscoveryResult(
             job_id=job_id,
             status=status,
             target_kind=target_kind,
             target_url=job.get("target_url"),
             provider=request.provider,
+            local_runner_id=request.local_runner_id,
+            verified_otp_fields=verified_otp_fields,
             started_at=started.isoformat(),
             finished_at=finished.isoformat(),
             duration_seconds=round(time.perf_counter() - perf, 2),
@@ -2011,10 +2109,13 @@ class AutopilotDiscoveryService:
             target_activity=payload.get("target_activity"),
             target_identity_reason=payload.get("target_identity_reason"),
             screens=screens,
-            transitions=payload["transitions"],
+            transitions=transitions,
             runtime_prompts=payload.get("runtime_prompts") or [],
             entry_prompt_path=payload.get("entry_prompt_path") or [],
-            input_requests=self.runtime_input_requests(screens),
+            input_requests=[
+                item for item in self.runtime_input_requests(screens)
+                if item.key not in verified_otp_fields
+            ],
             warnings=payload["warnings"],
             error=error,
             exploration_cursor=cursor,
@@ -2026,7 +2127,7 @@ class AutopilotDiscoveryService:
     def _run_sync(
         self,
         job_id: str,
-        appium_url: str,
+        appium_url: str | LocalAutopilotTransport,
         app_reference: str,
         request: AutopilotDiscoveryRequest,
         package_hint: Optional[str],
@@ -2036,6 +2137,8 @@ class AutopilotDiscoveryService:
         server_launch_timeout_ms: int,
         adb_exec_timeout_ms: int,
         input_values: Optional[Mapping[str, str]] = None,
+        *,
+        previous_discovery: Optional[AutopilotDiscoveryResult] = None,
     ) -> Dict[str, Any]:
         from appium import webdriver
         from appium.webdriver.client_config import AppiumClientConfig
@@ -2043,13 +2146,27 @@ class AutopilotDiscoveryService:
 
         is_ios = request.target_kind == "ios"
         is_device_farm = request.provider == "devicefarm"
+        timeout_seconds = getattr(self.settings, "AUTOPILOT_DISCOVERY_TIMEOUT_SECONDS", None)
+        # Leave time to close the driver and return the saved map before the
+        # outer request timeout. The walker stops at an action boundary.
+        crawl_deadline = (
+            time.monotonic() + max(1, timeout_seconds - 30)
+            if request.target_kind == "android" and timeout_seconds else float("inf")
+        )
         capabilities: Dict[str, Any] = {
             "platformName": "iOS" if is_ios else "Android",
             "appium:automationName": "XCUITest" if is_ios else "UiAutomator2",
             "appium:deviceName": request.device_name,
-            "appium:noReset": request.no_reset,
+            "appium:noReset": request.no_reset or bool(
+                request.provider == "local_runner" and previous_discovery
+                and previous_discovery.target_ready is True
+            ),
             "appium:newCommandTimeout": 180,
         }
+        if request.provider == "local_runner" and not request.observe_only:
+            # Retain the live app between crawl passes while the paired runner
+            # releases its Appium connection for other project work.
+            capabilities["appium:dontStopAppOnReset"] = True
         # AWS installs the APK when opening its remote-access session. Its
         # upload ARN is not a valid appium:app URL; retain the installed app.
         if not is_device_farm:
@@ -2097,15 +2214,17 @@ class AutopilotDiscoveryService:
             from appium.options.android import UiAutomator2Options
 
             options = UiAutomator2Options().load_capabilities(capabilities)
-        client_config = AppiumClientConfig(remote_server_addr=appium_url)
+        local_connection = appium_url.connection() if isinstance(appium_url, LocalAutopilotTransport) else None
+        client_config = AppiumClientConfig(remote_server_addr=appium_url) if local_connection is None else None
         # Bound each HTTP request so a stale Device Farm session cannot hold
         # the discovery worker indefinitely. This complements server-side
         # appium:newCommandTimeout.
-        client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
+        if client_config is not None:
+            client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
         appium_started = time.monotonic()
         try:
             driver = webdriver.Remote(
-                appium_url,
+                local_connection or appium_url,
                 options=options,
                 client_config=client_config,
             )
@@ -2120,31 +2239,117 @@ class AutopilotDiscoveryService:
             "autopilot_stage=appium_session_create outcome=success flow=discovery elapsed_ms=%s",
             max(0, round((time.monotonic() - appium_started) * 1000)),
         )
-        screens: list[DiscoveredScreen] = []
-        transitions: list[DiscoveredTransition] = []
-        seen_fingerprints: dict[str, str] = {}
-        runtime_prompts: list[RuntimePromptObservation] = []
-        entry_prompt_path: list[RuntimePromptBranchRef] = []
+        screens = [screen.model_copy(deep=True) for screen in previous_discovery.screens] if previous_discovery else []
+        saved_screens = {screen.screen_id: screen for screen in screens}
+        saved_transitions = previous_discovery.transitions if previous_discovery else []
+        transitions = list(saved_transitions)
+        seen_fingerprints = {screen.fingerprint: screen.screen_id for screen in screens}
+        runtime_prompts = [prompt.model_copy(deep=True) for prompt in previous_discovery.runtime_prompts] if previous_discovery else []
+        entry_prompt_path = list(previous_discovery.entry_prompt_path) if previous_discovery else []
         last_capture_prompt_path: list[RuntimePromptBranchRef] = []
         pending_prompt_outcomes: list[tuple[RuntimePromptObservation, str]] = []
         pending_prompt_links: list[tuple[RuntimePromptObservation, str]] = []
-        visited_edges: set[tuple[str, str]] = set()
+        visited_edges = set()
         renewed_backtracks: set[tuple[str, str]] = set()
         transaction_screen_ids: set[str] = set()
         scroll_rounds: dict[tuple[str, str], int] = {}
+        unavailable_routes: set[tuple[str, str, str]] = set()
+        for edge in saved_transitions:
+            source = saved_screens.get(edge.from_screen_id)
+            destination = saved_screens.get(edge.to_screen_id)
+            if source is None or destination is None:
+                continue
+            if edge.action == "tap" and not (
+                self._is_auth_entry_control(edge.control_label) and self._credential_controls(destination)
+            ):
+                visited_edges.add((source.screen_id, edge.control_id))
+            if edge.action == "scroll":
+                direction = "right" if edge.control_label.casefold() == "scroll right" else "down"
+                scroll_rounds[(source.screen_id, direction)] = 3
+            if edge.action in {"tap", "scroll"} and (
+                source.screen_id in transaction_screen_ids
+                or edge.action == "tap" and request.include_transaction_journeys
+                and self._is_transaction_navigation_entry(edge.control_label)
+            ):
+                transaction_screen_ids.add(destination.screen_id)
         warnings: list[str] = []
         actions_attempted = 0
-        next_screen_number = 1
+        verified_otp_fields = set(previous_discovery.verified_otp_fields) if previous_discovery else set()
+        next_screen_number = 1 + max(
+            (int(screen_id.removeprefix("screen-")) for screen_id in saved_screens
+             if screen_id.removeprefix("screen-").isdigit()),
+            default=0,
+        )
+        screen_limit = len(saved_screens) + request.max_screens
         stop_reason = "Discovery bounds reached"
+        frontier_unreachable = False
         launch_surface_incomplete = False
         authenticated_surface_observed = False
+        explore_named_uat_controls = False
         target_ready: Optional[bool] = None
         target_identity: Optional[str] = None
         target_activity: Optional[str] = None
         target_identity_reason: Optional[str] = None
+        recovered_auth_surfaces: set[tuple[str, str]] = set()
 
         def read_discovery_source() -> str:
-            return safe_page_source(driver, detect_android_disconnect=request.provider == "appium" and not is_ios)
+            return safe_page_source(driver, detect_android_disconnect=request.provider in {"appium", "local_runner"} and not is_ios)
+
+        def discard_startup_observations(keep: Optional[DiscoveredScreen] = None) -> None:
+            screens[:] = list(saved_screens.values())
+            if keep is not None and keep.screen_id not in saved_screens:
+                screens.append(keep)
+            seen_fingerprints.clear()
+            seen_fingerprints.update({screen.fingerprint: screen.screen_id for screen in screens})
+
+        def scoped_controls(screen: DiscoveredScreen) -> list[DiscoveredControl]:
+            if not request.scope_modules:
+                return screen.controls
+            return [control for control in screen.controls if scope_allows_navigation(
+                request.scope_modules, control.semantic_label, inside=screen.in_requested_scope,
+            )]
+
+        def pending_controls(screen: DiscoveredScreen, visited: set[str]) -> list[DiscoveredControl]:
+            return self._eligible_navigation_controls(
+                scoped_controls(screen), visited,
+                include_transaction_journeys=request.include_transaction_journeys,
+                transaction_context=screen.screen_id in transaction_screen_ids,
+                explore_named_uat_controls=explore_named_uat_controls,
+            )
+
+        def next_saved_hop(origin: DiscoveredScreen) -> Optional[DiscoveredTransition]:
+            route_screens = {screen.screen_id: screen for screen in screens}
+            routes = self._saved_navigation_routes(route_screens, transitions)
+            visited_by_screen: dict[str, set[str]] = defaultdict(set)
+            for screen_id, control_id in visited_edges:
+                visited_by_screen[screen_id].add(control_id)
+            queue: deque[tuple[str, Optional[DiscoveredTransition]]] = deque([(origin.screen_id, None)])
+            seen = {origin.screen_id}
+            while queue:
+                screen_id, first_hop = queue.popleft()
+                for edge in routes.get(screen_id, []):
+                    key = (edge.from_screen_id, edge.control_id, edge.to_screen_id)
+                    if key in unavailable_routes or edge.to_screen_id in seen:
+                        continue
+                    destination = route_screens[edge.to_screen_id]
+                    hop = first_hop or edge
+                    if pending_controls(destination, visited_by_screen[edge.to_screen_id]) or any(
+                        scroll_rounds.get((edge.to_screen_id, direction), 0) < 3
+                        for direction in self._scroll_directions(destination)
+                    ):
+                        return hop
+                    seen.add(edge.to_screen_id)
+                    queue.append((edge.to_screen_id, hop))
+            return None
+
+        def remaining_control_count() -> int:
+            visited_by_screen: dict[str, set[str]] = defaultdict(set)
+            for screen_id, control_id in visited_edges:
+                visited_by_screen[screen_id].add(control_id)
+            for transition in transitions:
+                if transition.action == "tap":
+                    visited_by_screen[transition.from_screen_id].add(transition.control_id)
+            return sum(len(pending_controls(screen, visited_by_screen[screen.screen_id])) for screen in screens)
 
         def capture(
             *,
@@ -2358,6 +2563,26 @@ class AutopilotDiscoveryService:
                     page_source=page_source,
                     control_labels=[control.semantic_label for control in controls],
                 )
+                if (
+                    not target_ok and not is_ios and package_hint
+                    and "Google Play Services UI is active." in reason
+                    and source_screen and trigger_control and self._credential_controls(source_screen)
+                ):
+                    recovery_key = (source_screen.screen_id, trigger_control.control_id)
+                    if recovery_key not in recovered_auth_surfaces:
+                        recovered_auth_surfaces.add(recovery_key)
+                        restored, _, _ = activate_verified_target_surface(
+                            driver, package_hint, timeout_seconds=5.0, page_source=page_source,
+                        )
+                        if restored:
+                            page_source = read_discovery_source()
+                            controls = self._ensure_auth_input_semantics(self.parse_controls(page_source))
+                            target_ok, reason, _ = validate_target_surface(
+                                driver, expected_package=package_hint, expected_activity=activity_hint,
+                                page_source=page_source, control_labels=[control.semantic_label for control in controls],
+                            )
+                            if target_ok:
+                                warnings.append("Autopilot restored the uploaded app after a Google Play Services interruption.")
                 if not target_ok:
                     raise _UnexpectedTargetSurface(reason)
             identity = safe_app_identity(
@@ -2368,7 +2593,31 @@ class AutopilotDiscoveryService:
             )
             package_name = identity["package"]
             activity_name = identity["activity"]
+            active_tabs = self._active_tab_labels(controls)
+            heading = next((
+                control.semantic_label for control in controls
+                if not control.clickable and not control.input_capable and control.semantic_label
+                and control.class_name in {"android.widget.TextView", "XCUIElementTypeStaticText"}
+            ), "") if request.scope_modules and not active_tabs else ""
+            heading_module = next((module for module in request.scope_modules if matches_module([module], heading)), None)
+            issue = "The app displayed a technical or service error." if any(
+                re.search(r"\b(?:unexpected technical error|system error|service unavailable|network error|no internet connection)\b",
+                          control.semantic_label, re.I)
+                for control in controls
+            ) else None
+            scoped_from_parent = bool(
+                source_screen and source_screen.in_requested_scope and not active_tabs
+                and (trigger_control is None or not is_transit(trigger_control.semantic_label))
+            )
             fp = self.fingerprint(package_name, activity_name, controls)
+            scoped_from_entry = bool(
+                source_screen and trigger_control and fp != source_screen.fingerprint
+                and matches_module(request.scope_modules, trigger_control.semantic_label)
+            )
+            in_scope = bool(request.scope_modules and (
+                matches_module(request.scope_modules, *active_tabs) if active_tabs
+                else bool(heading_module) or scoped_from_parent or scoped_from_entry
+            ))
             duplicate_screen_id = seen_fingerprints.get(fp)
             if duplicate_screen_id is None:
                 near_duplicate = next(
@@ -2393,6 +2642,11 @@ class AutopilotDiscoveryService:
             screen_id = duplicate_screen_id or f"screen-{screen_number:03d}"
             if duplicate:
                 existing = next(screen for screen in screens if screen.screen_id == screen_id)
+                existing.in_requested_scope = existing.in_requested_scope or in_scope
+                if heading_module:
+                    existing.page_label, existing.journey = heading, heading_module
+                if issue and issue not in existing.observed_issues:
+                    existing.observed_issues.append(issue)
                 # Keep one canonical replay root for a volatile-but-equivalent
                 # state while retaining the union of safe controls observed on
                 # both provider frames.
@@ -2411,7 +2665,10 @@ class AutopilotDiscoveryService:
                             for choice in prompt.choices
                         ]
                     pending_prompt_outcomes.clear()
-                if persist_evidence and not existing.screenshot_path and not existing.page_source_path:
+                if persist_evidence and not (
+                    existing.screenshot_path or existing.page_source_path
+                    or existing.screenshot_asset_id or existing.page_source_asset_id
+                ):
                     screenshot_path = evidence_dir / f"{screen_id}.png"
                     source_path = evidence_dir / f"{screen_id}.xml"
                     try:
@@ -2433,10 +2690,12 @@ class AutopilotDiscoveryService:
                 source_path.write_text(self._redact_page_source(page_source), encoding="utf-8")
             screen = DiscoveredScreen(
                 screen_id=screen_id,
+                in_requested_scope=in_scope,
+                observed_issues=[issue] if issue else [],
                 fingerprint=fp,
                 package_name=package_name,
                 activity_name=activity_name,
-                journey=observed_journey_label(
+                journey=heading_module or observed_journey_label(
                     DiscoveredScreen(
                         screen_id=screen_id,
                         fingerprint=fp,
@@ -2446,7 +2705,7 @@ class AutopilotDiscoveryService:
                     ),
                     screen_number,
                 ),
-                page_label=observed_page_label(
+                page_label=(heading if heading_module else None) or observed_page_label(
                     DiscoveredScreen(
                         screen_id=screen_id,
                         fingerprint=fp,
@@ -2460,6 +2719,10 @@ class AutopilotDiscoveryService:
                 page_source_path=str(source_path) if persist_evidence else None,
                 controls=controls,
             )
+            if request.scope_modules and not active_tabs:
+                screen.in_requested_scope = in_scope or matches_module(
+                    request.scope_modules, screen.page_label, screen.title, screen.journey,
+                )
             screens.append(screen)
             seen_fingerprints[fp] = screen_id
             if pending_prompt_outcomes:
@@ -2516,7 +2779,7 @@ class AutopilotDiscoveryService:
                     "App remained on a non-interactive launch screen or sparse surface after bounded settling; "
                     "no safe entry point was available, so login and workflows were not inferred."
                 )
-            elif current is not screens[0]:
+            elif not saved_screens and current is not screens[0]:
                 # The replay root must be the settled app, not its splash.
                 screens.remove(current)
                 screens.insert(0, current)
@@ -2541,8 +2804,7 @@ class AutopilotDiscoveryService:
                 # Try the observed activity and package activation in order,
                 # verifying the actual UI package after each attempt.
                 try:
-                    screens.clear()
-                    seen_fingerprints.clear()
+                    discard_startup_observations()
                     retry_ready, retry_reason, retry_identity = activate_verified_target_surface(
                         driver,
                         package_hint,
@@ -2581,19 +2843,16 @@ class AutopilotDiscoveryService:
                                 )
                         else:
                             target_identity_reason = candidate_reason
-                            screens.clear()
-                            seen_fingerprints.clear()
+                            discard_startup_observations()
                     else:
                         target_identity_reason = retry_reason
                         target_identity = retry_identity.get("package")
                         target_activity = retry_identity.get("activity")
-                        screens.clear()
-                        seen_fingerprints.clear()
+                        discard_startup_observations()
                 except AndroidDeviceDisconnected:
                     raise
                 except Exception as exc:
-                    screens.clear()
-                    seen_fingerprints.clear()
+                    discard_startup_observations()
                     warnings.append(
                         f"Explicit target activation retry was unavailable: {type(exc).__name__}"
                     )
@@ -2613,6 +2872,11 @@ class AutopilotDiscoveryService:
                     "target_activity": target_activity,
                     "target_identity_reason": target_identity_reason,
                 }
+            explore_named_uat_controls = (
+                request.full_uat_exploration
+                and request.confirm_isolated_uat
+                and self.settings.full_uat_target_is_allowed(request.target_kind, target_identity, package_hint)
+            )
             # Persist only the now-verified target root. This also upgrades an
             # identical in-memory candidate if the session needed activation.
             current, _ = capture(persist_evidence=True, require_target=True)
@@ -2631,9 +2895,7 @@ class AutopilotDiscoveryService:
                 warnings.append(
                     "The verified app became interactive in the final startup capture; discovery resumed."
                 )
-                screens[:] = [current]
-                seen_fingerprints.clear()
-                seen_fingerprints[current.fingerprint] = current.screen_id
+                discard_startup_observations(current)
             connectivity_blocked = self._has_blocking_connectivity_dialog(current)
             if launch_surface_incomplete or connectivity_blocked:
                 if connectivity_blocked:
@@ -2700,6 +2962,8 @@ class AutopilotDiscoveryService:
             successful_authentications = 0
             timeout_recovery_epochs: dict[str, int] = {}
             stack: list[DiscoveredScreen] = []
+            unresolved_authentication: dict[str, str] = {}
+            used_otp_fields: set[str] = set()
 
             def process_authentication(
                 screen: DiscoveredScreen,
@@ -2709,7 +2973,23 @@ class AutopilotDiscoveryService:
                 while screen is not None:
                     credential_controls = self._credential_controls(screen)
                     if not credential_controls:
+                        has_dismissal = any(
+                            control.enabled and control.clickable
+                            and self._normalize(control.semantic_label) in {"ok", "okay", "dismiss", "close"}
+                            for control in screen.controls
+                        )
+                        if has_dismissal and self._auth_feedback_code(read_discovery_source()) == "credential_rejected":
+                            reason = self._auth_feedback_reason("credential_rejected")
+                            if reason not in screen.observed_issues:
+                                screen.observed_issues.append(reason)
+                            return screen, True, reason
                         return screen, False, None
+                    otp_keys = {
+                        self.runtime_input_key(screen.screen_id, item.control_id, item.input_kind or "credential")
+                        for item in credential_controls if self._credential_hint(item) == "otp"
+                    }
+                    if otp_keys & used_otp_fields:
+                        return screen, True, "OTP checkpoint detected. Request a new code for this challenge."
                     auth_rounds += 1
                     if auth_rounds > 3:
                         return (
@@ -2806,6 +3086,7 @@ class AutopilotDiscoveryService:
                                 f"Authentication values are ready, but max_actions={request.max_actions} was reached",
                             )
                         submit_element = self._find_discovered_element(driver, submit, AppiumBy)
+                        used_otp_fields.update(otp_keys)
                         pre_submit_source = safe_page_source(driver)
                         pre_submit_feedback = self._auth_feedback_code(pre_submit_source)
                         submit_element.click()
@@ -2877,7 +3158,7 @@ class AutopilotDiscoveryService:
                         gesture_attempted = False
                         current_submit = self._auth_submit_control(next_screen.controls) if same_form else None
                         if (
-                            same_form and (username_stage or password_stage)
+                            same_form and not otp_keys and (username_stage or password_stage)
                             and not feedback_code
                             and not self._runtime_prompt_kind(driver, post_native_source, request.target_kind)
                             and submit.enabled and not is_ios
@@ -2950,6 +3231,8 @@ class AutopilotDiscoveryService:
                             # observed failure in the discovery warnings.
                             transient_loading_screen_ids.add(next_screen.screen_id)
                             for transient_id in transient_loading_screen_ids:
+                                if transient_id in saved_screens:
+                                    continue
                                 transient_screen = next(
                                     (item for item in screens if item.screen_id == transient_id),
                                     None,
@@ -2969,17 +3252,24 @@ class AutopilotDiscoveryService:
                                 "the authenticated journey remains incomplete.",
                             )
                         next_has_sensitive_inputs = bool(self._credential_controls(next_screen))
+                        evidence_interruption = None
                         if not duplicate and not next_has_sensitive_inputs:
-                            next_screen, _ = capture(
-                                persist_evidence=True,
-                                require_target=True,
-                                source_screen=screen,
-                                trigger_control=submit,
-                            )
-                            if last_capture_prompt_path:
-                                transition_prompt_path = list(last_capture_prompt_path)
+                            try:
+                                next_screen, _ = capture(
+                                    persist_evidence=True,
+                                    require_target=True,
+                                    source_screen=screen,
+                                    trigger_control=submit,
+                                )
+                                if last_capture_prompt_path:
+                                    transition_prompt_path = list(last_capture_prompt_path)
+                            except _UnexpectedTargetSurface as exc:
+                                # The first verified target observation still
+                                # proves the landing. Retain it and report the
+                                # foreground interruption separately.
+                                evidence_interruption = str(exc)
                         for transient_id in transient_loading_screen_ids:
-                            if transient_id == next_screen.screen_id:
+                            if transient_id == next_screen.screen_id or transient_id in saved_screens:
                                 continue
                             transient_screen = next(
                                 (item for item in screens if item.screen_id == transient_id),
@@ -3003,8 +3293,11 @@ class AutopilotDiscoveryService:
                             return next_screen, True, "The app expired the session immediately after sign-in."
                         same_form = next_screen.screen_id == screen.screen_id
                         if not same_form and not next_has_sensitive_inputs and not self._looks_like_loading_screen(next_screen):
+                            verified_otp_fields.update(otp_keys)
                             authenticated_surface_observed = True
                             successful_authentications += 1
+                        if evidence_interruption:
+                            return next_screen, True, f"Sign-in reached the app, then its foreground was interrupted: {evidence_interruption}"
                         if same_form:
                             final_source = safe_page_source(driver)
                             feedback_code = self._auth_feedback_code(final_source)
@@ -3031,6 +3324,8 @@ class AutopilotDiscoveryService:
                                 "Whether the cause is the input, app service, or device interaction remains unverified.",
                             )
                         screen = next_screen
+                    except AndroidDeviceDisconnected:
+                        raise
                     except _UnexpectedTargetSurface as exc:
                         return (
                             screen,
@@ -3056,18 +3351,22 @@ class AutopilotDiscoveryService:
                 """Return from an unresolved authentication branch to a known parent."""
                 reason_text = str(reason or "").casefold()
                 otp_checkpoint = reason_text.startswith("otp checkpoint")
-                submitted_sign_in_failed = any(
-                    phrase in reason_text
-                    for phrase in (
-                        "sign-in did not reach a usable post-login screen",
-                        "the app rejected the saved uat sign-in details",
-                        "the app reports that the uat account is locked",
-                        "the app reported a network or service error after sign-in",
-                        "the observed sign-in form stayed unchanged",
-                        "the app changed its sign-in display but still requests the same credentials",
+                if not blocked or not reason:
+                    return screen, blocked, reason, False
+                unresolved_authentication[screen.screen_id] = reason
+                for control in self._credential_controls(screen):
+                    if self._credential_hint(control) == "otp":
+                        verified_otp_fields.discard(self.runtime_input_key(
+                            screen.screen_id, control.control_id, control.input_kind or "credential",
+                        ))
+                if not stack or "max_actions=" in reason_text:
+                    return screen, blocked, reason, False
+                if reason_text.startswith("authentication checkpoint") and not any(
+                    pending_controls(
+                        ancestor, {control_id for screen_id, control_id in visited_edges if screen_id == ancestor.screen_id},
                     )
-                )
-                if not blocked or not reason or not stack or not (otp_checkpoint or submitted_sign_in_failed):
+                    for ancestor in stack
+                ):
                     return screen, blocked, reason, False
                 ancestor_ids = [item.screen_id for item in stack]
                 for _ in range(min(6, max(1, len(screens) + 1))):
@@ -3075,6 +3374,8 @@ class AutopilotDiscoveryService:
                         safe_navigate_back(driver, target_kind=request.target_kind)
                         time.sleep(0.6)
                         recovered, _ = capture(persist_evidence=False, require_target=True)
+                    except AndroidDeviceDisconnected:
+                        raise
                     except Exception as exc:
                         warnings.append(
                             f"Authentication branch recovery could not return to an observed app screen: {type(exc).__name__}."
@@ -3090,8 +3391,8 @@ class AutopilotDiscoveryService:
                             )
                         else:
                             warnings.append(
-                                "The sign-in path did not reach a usable authenticated screen. "
-                                "Discovery returned to an observed parent and continued other safe journeys."
+                                "A sign-in branch needs input or review. Discovery returned to an observed parent "
+                                "and continued other safe journeys."
                             )
                         return recovered, False, reason, True
                 warnings.append(
@@ -3106,17 +3407,16 @@ class AutopilotDiscoveryService:
             if authentication_reason:
                 stop_reason = authentication_reason
 
+            frontier_restart_attempted = False
             # A bounded depth-first traversal explores sibling navigation controls
             # instead of following one path and stopping at the first leaf. Every
             # edge is attempted at most once per observed screen; all backtracking
             # is reversible and destructive controls remain excluded by risk.
-            explore_named_uat_controls = (
-                request.full_uat_exploration
-                and request.confirm_isolated_uat
-                and self.settings.full_uat_target_is_allowed(request.target_kind, target_identity, package_hint)
-            )
             if not authentication_blocked and current is not None and not launch_surface_incomplete:
-                while len(screens) < request.max_screens and actions_attempted < request.max_actions:
+                while (
+                    len(screens) < screen_limit and actions_attempted < request.max_actions
+                    and time.monotonic() < crawl_deadline
+                ):
                     visited_for_screen = {
                         control_id for screen_id, control_id in visited_edges if screen_id == current.screen_id
                     }
@@ -3129,7 +3429,7 @@ class AutopilotDiscoveryService:
                             if self._is_auth_entry_control(control.semantic_label)
                         )
                     control = self._select_safe_control(
-                        current.controls,
+                        scoped_controls(current),
                         visited_for_screen,
                         include_transaction_journeys=request.include_transaction_journeys,
                         transaction_context=current.screen_id in transaction_screen_ids,
@@ -3190,8 +3490,112 @@ class AutopilotDiscoveryService:
                             current = next_screen
                             continue
                         if not stack:
-                            stop_reason = "No additional safe navigation controls were available"
-                            break
+                            saved_hop = next_saved_hop(current) if not is_ios else None
+                            if saved_hop is None:
+                                unvisited = remaining_control_count()
+                                terminator = getattr(driver, "terminate_app", None)
+                                if (
+                                    unvisited and package_hint and not is_ios
+                                    and request.provider in {"appium", "local_runner"}
+                                    and not frontier_restart_attempted and callable(terminator)
+                                    and not self._active_tab_labels(current.controls)
+                                    and not self._credential_controls(current) and not expired_session
+                                    and self._auth_feedback_code(read_discovery_source()) == "service_unavailable"
+                                ):
+                                    # A service-error leaf can swallow Back. Restart the same
+                                    # app once, keeping the map, visited edges and app data.
+                                    frontier_restart_attempted = True
+                                    actions_attempted += 1
+                                    try:
+                                        terminator(package_hint)
+                                        time.sleep(0.5)
+                                        reopened, reason, _ = activate_verified_target_surface(
+                                            driver, package_hint, expected_activity=activity_hint,
+                                            force_launch=True, preserve_known_system_prompt=True,
+                                        )
+                                        if not reopened:
+                                            raise _UnexpectedTargetSurface(reason)
+                                        recovered, _ = capture(persist_evidence=False, require_target=True)
+                                        settle_deadline = min(crawl_deadline, time.monotonic() + 12)
+                                        while self._looks_like_loading_screen(recovered) and time.monotonic() < settle_deadline:
+                                            time.sleep(0.8)
+                                            recovered, _ = capture(persist_evidence=False, require_target=True)
+                                        if self._looks_like_loading_screen(recovered) or recovered.screen_id == current.screen_id:
+                                            raise _UnexpectedTargetSurface("No interactive recovery screen was observed.")
+                                        recovered, _ = capture(require_target=True)
+                                    except AndroidDeviceDisconnected:
+                                        raise
+                                    except Exception as exc:
+                                        warnings.append(f"Could not reopen the uploaded app after its service error ({type(exc).__name__}).")
+                                    else:
+                                        warnings.append("Reopened the uploaded app after its service error and resumed discovery.")
+                                        current, authentication_blocked, authentication_reason = process_authentication(recovered)
+                                        if authentication_blocked:
+                                            stop_reason = authentication_reason or "Stopped at the authentication checkpoint after reopening the app."
+                                            break
+                                        continue
+                                if not is_ios and unvisited:
+                                    frontier_unreachable = True
+                                    stop_reason = f"Discovery stopped with {unvisited} controls beyond the routes it could reopen."
+                                else:
+                                    stop_reason = "No additional safe navigation controls were available"
+                                break
+                            route_key = (saved_hop.from_screen_id, saved_hop.control_id, saved_hop.to_screen_id)
+                            actions_before_replay = actions_attempted
+                            try:
+                                route_control = None
+                                if saved_hop.action == "tap":
+                                    route_control = next(item for item in current.controls if item.control_id == saved_hop.control_id)
+                                    if route_control.risk != "safe" or not self._eligible_navigation_controls(
+                                        [route_control], set(), transaction_context=True,
+                                    ):
+                                        raise LookupError("The observed route control is unavailable.")
+                                    route_element = self._find_discovered_element(driver, route_control, AppiumBy)
+                                    actions_attempted += 1
+                                    route_element.click()
+                                    if _TAB_POSITION.search(self._normalize(route_control.semantic_label)):
+                                        self._wait_for_tab_selection(driver, route_control.semantic_label)
+                                    else:
+                                        time.sleep(1.2)
+                                elif saved_hop.action == "scroll":
+                                    direction = "right" if saved_hop.control_label.casefold() == "scroll right" else "down"
+                                    actions_attempted += 1
+                                    if self._scroll_forward(driver, direction=direction, controls=current.controls) is None:
+                                        raise LookupError("The recorded scroll gesture is unavailable.")
+                                else:
+                                    actions_attempted += 1
+                                    safe_navigate_back(driver, target_kind=request.target_kind)
+                                    time.sleep(0.8)
+                                reached, duplicate = capture(
+                                    require_target=True,
+                                    source_screen=current,
+                                    trigger_control=route_control,
+                                    trigger_control_id=saved_hop.control_id,
+                                )
+                            except AndroidDeviceDisconnected:
+                                raise
+                            except _UnexpectedTargetSurface:
+                                stop_reason = "Discovery stopped because replaying a recorded route left the uploaded app."
+                                break
+                            except Exception as exc:
+                                unavailable_routes.add(route_key)
+                                warnings.append(f"Could not reopen a recorded route ({type(exc).__name__}).")
+                                if actions_attempted > actions_before_replay:
+                                    stop_reason = "Discovery stopped because the next app screen could not be verified after navigation."
+                                    break
+                                continue
+                            if reached.screen_id != saved_hop.to_screen_id or last_capture_prompt_path:
+                                unavailable_routes.add(route_key)
+                                transitions.append(saved_hop.model_copy(update={
+                                    "to_screen_id": reached.screen_id,
+                                    "duplicate_state": duplicate,
+                                    "prompt_path": list(last_capture_prompt_path),
+                                }))
+                            current, authentication_blocked, authentication_reason = process_authentication(reached)
+                            if authentication_blocked:
+                                stop_reason = authentication_reason or "Stopped at an authentication checkpoint on a recorded route."
+                                break
+                            continue
                         parent = stack.pop()
                         try:
                             safe_navigate_back(driver, target_kind=request.target_kind)
@@ -3364,43 +3768,35 @@ class AutopilotDiscoveryService:
                             stop_reason = "Stopped after repeated safe-navigation interaction failures"
                             break
                 else:
-                    if len(screens) >= request.max_screens:
+                    if len(screens) >= screen_limit:
                         stop_reason = f"Reached max_screens={request.max_screens}"
                     elif actions_attempted >= request.max_actions:
                         stop_reason = f"Reached max_actions={request.max_actions}"
+                    elif time.monotonic() >= crawl_deadline:
+                        stop_reason = "Reached the discovery time budget"
 
-            if authentication_reason and not authenticated_surface_observed:
+            if unresolved_authentication:
                 crawl_stop_reason = stop_reason
+                checkpoint_note = " ".join(dict.fromkeys(unresolved_authentication.values()))
                 stop_reason = (
-                    f"{authentication_reason} Safe sibling journeys were explored where available. "
+                    f"{checkpoint_note} Sibling journeys were explored where reachable. "
                     f"Crawl ended: {crawl_stop_reason}"
                 )
+            if request.scope_modules and not any(screen.in_requested_scope for screen in screens):
+                warnings.append("The requested module was not observed on a reachable screen.")
 
-            visited_by_screen: dict[str, set[str]] = {}
-            for screen_id, control_id in visited_edges:
-                visited_by_screen.setdefault(screen_id, set()).add(control_id)
-            for transition in transitions:
-                if transition.action == "tap":
-                    visited_by_screen.setdefault(transition.from_screen_id, set()).add(transition.control_id)
-            unvisited_edge_count = sum(
-                len(self._eligible_navigation_controls(
-                    screen.controls, visited_by_screen.get(screen.screen_id, set()),
-                    include_transaction_journeys=request.include_transaction_journeys,
-                    transaction_context=screen.screen_id in transaction_screen_ids,
-                    explore_named_uat_controls=explore_named_uat_controls,
-                ))
-                for screen in screens
-            )
             return {
                 "screens": screens,
                 "transitions": transitions,
                 "runtime_prompts": runtime_prompts,
                 "entry_prompt_path": entry_prompt_path,
                 "actions_attempted": actions_attempted,
-                "unvisited_edge_count": unvisited_edge_count,
+                "unvisited_edge_count": remaining_control_count(),
+                "frontier_unreachable": frontier_unreachable,
                 "stop_reason": stop_reason,
                 "warnings": warnings,
                 "authentication_blocked": authentication_blocked,
+                "verified_otp_fields": sorted(verified_otp_fields),
                 "authenticated_surface_observed": authenticated_surface_observed,
                 "full_uat_exploration": explore_named_uat_controls,
                 "target_ready": target_ready,
@@ -3420,10 +3816,15 @@ class AutopilotDiscoveryService:
                 "stop_reason": reason,
                 "warnings": warnings,
                 "provider_interruption": reason,
+                "verified_otp_fields": sorted(verified_otp_fields),
                 "checkpoint_message": reason,
+                "unvisited_edge_count": remaining_control_count() if target_ready else 0,
                 "target_ready": target_ready is True,
                 "interactive_surface_ready": bool(target_ready and screens and not launch_surface_incomplete),
                 "authenticated_surface_observed": authenticated_surface_observed,
+                "full_uat_exploration": explore_named_uat_controls or bool(
+                    previous_discovery and previous_discovery.full_uat_exploration
+                ),
                 "target_identity": target_identity,
                 "target_activity": target_activity,
                 "target_identity_reason": target_identity_reason,

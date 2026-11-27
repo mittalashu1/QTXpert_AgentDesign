@@ -521,6 +521,10 @@ def safe_page_source(driver: Any, *, detect_android_disconnect: bool = False) ->
     """Read the hierarchy, optionally distinguishing transport loss from an empty surface."""
     try:
         return str(driver.page_source or "")
+    except AndroidDeviceDisconnected:
+        if detect_android_disconnect:
+            raise
+        return ""
     except Exception as exc:
         if detect_android_disconnect:
             if _ADB_DISCONNECT.search(str(exc)):

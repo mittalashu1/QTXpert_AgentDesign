@@ -72,6 +72,7 @@ class ExecutionResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     evidence: Mapped[Optional[dict]] = mapped_column(JSON)
+    execution_spec: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     run: Mapped["ExecutionRun"] = relationship(back_populates="results")
     test_case = relationship("TestCase", lazy="joined")
     execution_plan_case: Mapped[Optional["ExecutionPlanCase"]] = relationship(
@@ -86,6 +87,10 @@ class ExecutionResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     @property
     def scenario(self) -> str:
         return self.execution_plan_case.scenario if self.execution_plan_case else self.test_case.scenario
+
+    @property
+    def traceability(self) -> dict:
+        return (self.execution_spec or {}).get("traceability", {})
 
 class Defect(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "defects"

@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.authored_execution import AuthoredAutomation, FixtureBinding
+
 
 ExecutionSuiteType = Literal["smoke", "feature", "regression", "deep_regression"]
 ExecutionMode = Literal["automated", "manual"]
@@ -28,6 +30,7 @@ class ExecutionCreate(BaseModel):
     provider: ExecutionProvider = "playwright"
     app_asset_id: UUID | None = None
     device_name: str | None = Field(default=None, max_length=120)
+    local_runner_id: UUID | None = None
     platform_version: str | None = Field(default=None, max_length=40)
     appium_url: str | None = Field(default=None, max_length=2048)
     appium_app: str | None = Field(default=None, max_length=2048)
@@ -56,6 +59,7 @@ class ExecutionPlanCaseSelection(BaseModel):
     steps: list[str] | None = Field(default=None, min_length=1, max_length=100)
     expected_result: str | None = Field(default=None, min_length=1, max_length=10000)
     test_data: dict[str, Any] | None = Field(default=None)
+    automation: AuthoredAutomation | None = None
 
 
 class ExecutionPlanCasesUpdate(BaseModel):
@@ -94,6 +98,7 @@ class ExecutionPlanPreflight(BaseModel):
     base_url: str | None = Field(default=None, max_length=2048)
     app_asset_id: UUID | None = None
     device_name: str | None = Field(default=None, max_length=120)
+    local_runner_id: UUID | None = None
     platform_version: str | None = Field(default=None, max_length=40)
     appium_url: str | None = Field(default=None, max_length=2048)
     appium_app: str | None = Field(default=None, max_length=2048)
@@ -107,6 +112,7 @@ class ExecutionPlanExecute(BaseModel):
     base_url: str | None = Field(default=None, max_length=2048)
     app_asset_id: UUID | None = None
     device_name: str | None = Field(default=None, max_length=120)
+    local_runner_id: UUID | None = None
     platform_version: str | None = Field(default=None, max_length=40)
     appium_url: str | None = Field(default=None, max_length=2048)
     appium_app: str | None = Field(default=None, max_length=2048)
@@ -189,6 +195,7 @@ class ExecutionResultOut(BaseModel):
     duration_ms: int | None
     error_message: str | None
     evidence: dict | None
+    traceability: dict = Field(default_factory=dict)
     defects: list[DefectOut] = Field(default_factory=list)
 
 class ExecutionRunOut(BaseModel):
@@ -235,6 +242,7 @@ class ExecutionPlanCaseOut(BaseModel):
     preconditions: str | None
     test_data: dict | None
     steps: list
+    automation: AuthoredAutomation | None = None
     expected_result: str
     post_conditions: str | None
     is_automation_candidate: bool
@@ -261,6 +269,7 @@ class ExecutionPlanOut(BaseModel):
     ready_cases: int
     blocked_cases: int
     input_references: dict[str, str] = Field(default_factory=dict)
+    fixture_bindings: dict[str, FixtureBinding] = Field(default_factory=dict)
     input_requirements: list[ExecutionInputRequirementOut] = Field(default_factory=list)
     cases: list[ExecutionPlanCaseOut] = Field(default_factory=list)
 

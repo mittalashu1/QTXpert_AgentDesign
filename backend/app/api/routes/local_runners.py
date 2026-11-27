@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 import tempfile
@@ -28,11 +29,14 @@ from sqlalchemy.orm import selectinload
 from app.api.deps.auth_deps import get_current_user
 from app.config import get_settings
 from app.database.models.execution import ExecutionResult, ExecutionRun, ExecutionStatus, ResultStatus
-from app.database.models.local_runner import LocalDeviceRunner, LocalRunnerJob
+from app.database.models.local_runner import LocalAutopilotSession, LocalDeviceRunner, LocalRunnerJob
 from app.database.models.project import Project
 from app.database.models.user import User
+from app.database.models.uploaded_asset import UploadedAsset
 from app.database.session import get_db_session
 from app.services.defect_logging import secret_safe_text
+from app.services.authored_execution import prepare_authored_cases, record_ui_outcome
+from app.services.local_autopilot import APK_SERIAL, pack, unpack
 from app.services.upload_repository import UploadRepositoryService
 
 router = APIRouter(prefix="/local-runners", tags=["local-device-runners"])
@@ -61,6 +65,7 @@ class RunnerCaseResult(BaseModel):
     status: str = Field(pattern="^(passed|failed|blocked|skipped)$")
     duration_ms: int | None = Field(default=None, ge=0, le=86_400_000)
     error_message: str | None = Field(default=None, max_length=4000)
+    business_reference: str | None = Field(default=None, max_length=128, pattern=r"^[A-Za-z0-9_.:-]{4,128}$")
 
 
 class RunnerCompleteRequest(BaseModel):
@@ -101,13 +106,15 @@ async def _authenticate_runner(
     db: AsyncSession,
     runner_id: UUID,
     authorization: str | None,
+    *,
+    lock: bool = False,
 ) -> tuple[LocalDeviceRunner, str]:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Runner authentication required")
     token = authorization[7:].strip()
     if len(token) < 32:
         raise HTTPException(status_code=401, detail="Runner authentication failed")
-    runner = await db.scalar(
+    query = (
         select(LocalDeviceRunner)
         .join(User, User.id == LocalDeviceRunner.owner_id)
         .join(Project, Project.id == LocalDeviceRunner.project_id)
@@ -118,6 +125,7 @@ async def _authenticate_runner(
             Project.owner_id == LocalDeviceRunner.owner_id,
         )
     )
+    runner = await db.scalar(query.with_for_update(of=LocalDeviceRunner) if lock else query)
     if runner is None or not runner.runner_token_hash or not hmac.compare_digest(
         runner.runner_token_hash, _digest(token)
     ):
@@ -243,6 +251,7 @@ async def list_runners(
             "status": "online" if row.status == "active" and row.last_seen_at and row.last_seen_at > now - timedelta(seconds=75) else row.status,
             "platforms": row.capabilities.get("platforms", []),
             "devices": row.capabilities.get("devices", []),
+            "autopilot_android": bool(row.capabilities.get("autopilot_android")),
             "last_seen_at": row.last_seen_at,
             "created_at": row.created_at,
         }
@@ -257,13 +266,16 @@ async def revoke_runner(
     user: Annotated[User, Depends(get_current_user)],
 ):
     runner = await db.scalar(
-        select(LocalDeviceRunner).where(LocalDeviceRunner.id == runner_id, LocalDeviceRunner.owner_id == user.id)
+        select(LocalDeviceRunner).where(LocalDeviceRunner.id == runner_id, LocalDeviceRunner.owner_id == user.id).with_for_update()
     )
     if runner is None:
         raise HTTPException(status_code=404, detail="Runner not found")
     runner.status = "revoked"
     runner.runner_token_hash = None
     runner.enrollment_token_hash = None
+    reservation = await db.get(LocalAutopilotSession, runner.id, with_for_update=True)
+    if reservation is not None:
+        await db.delete(reservation)
     jobs = await db.scalars(
         select(LocalRunnerJob).where(LocalRunnerJob.runner_id == runner.id, LocalRunnerJob.status == "leased")
     )
@@ -298,9 +310,13 @@ async def claim_job(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     authorization: Annotated[str | None, Header()] = None,
 ):
-    runner, runner_secret = await _authenticate_runner(db, runner_id, authorization)
+    runner, runner_secret = await _authenticate_runner(db, runner_id, authorization, lock=True)
     now = datetime.now(timezone.utc)
     runner.last_seen_at = now
+    reservation = await db.get(LocalAutopilotSession, runner.id)
+    if reservation is not None and reservation.expires_at > now:
+        await db.commit()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
     platforms = (runner.capabilities or {}).get("platforms", [])
     allowed = [ExecutionRun.target_kind == item for item in platforms if item in {"android", "ios"}]
     if not allowed:
@@ -322,6 +338,10 @@ async def claim_job(
         .where(
             ExecutionRun.project_id == runner.project_id,
             ExecutionRun.provider == "local_runner",
+            or_(
+                ExecutionRun.target_metadata["selected_runner_id"].as_string().is_(None),
+                ExecutionRun.target_metadata["selected_runner_id"].as_string() == str(runner.id),
+            ),
             ExecutionRun.status.in_([ExecutionStatus.QUEUED, ExecutionStatus.RUNNING]),
             or_(*allowed),
             claimable,
@@ -350,6 +370,21 @@ async def claim_job(
         await db.commit()
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     pending_results = [item for item in run.results if item.status == ResultStatus.PENDING]
+    authored_pending = [item for item in pending_results if (item.execution_spec or {}).get("automation")]
+    if authored_pending and not (runner.capabilities or {}).get("autopilot_android"):
+        await db.commit()
+        return Response(status_code=204)
+    dispatched_business = [item for item in authored_pending if (item.evidence or {}).get("business_dispatch")]
+    if dispatched_business and job.status == "leased" and job.lease_expires_at and job.lease_expires_at > now:
+        await db.commit()
+        return Response(status_code=204)
+    for item in dispatched_business:
+        item.status = ResultStatus.BLOCKED
+        item.error_message = "The device stopped after the transaction was dispatched. Check the UAT ledger before retrying."
+        item.evidence = {**item.evidence, "business_verification": "dispatch_uncertain"}
+    pending_results = [item for item in pending_results if item.status == ResultStatus.PENDING]
+    prepared = await prepare_authored_cases(db, get_settings(), run, pending_results) if authored_pending else {}
+    pending_results = [item for item in pending_results if item.status == ResultStatus.PENDING]
     if not pending_results:
         # A plan can contain only cases blocked by preflight. Finalize that
         # run without starting an empty device session or asking the runner to
@@ -394,7 +429,6 @@ async def claim_job(
         run.started_at = now
     if run.execution_plan is not None:
         run.execution_plan.status = "running"
-    await db.commit()
 
     asset = await UploadRepositoryService.get_owned(db, run.app_asset_id, runner.owner_id) if run.app_asset_id else None
     if asset is None or asset.project_id != run.project_id:
@@ -402,12 +436,19 @@ async def claim_job(
     cases = []
     for result in pending_results:
         case = result.execution_plan_case or result.test_case
+        spec = result.execution_spec or {}
+        authored = prepared.get(result.id, {})
+        if authored.get("business_case"):
+            result.evidence = {"business_dispatch": now.isoformat()}
         cases.append({
             "result_id": str(result.id),
             "case_key": getattr(case, "test_case_key", ""),
             "title": getattr(case, "scenario", "Mobile test"),
-            "steps": list(getattr(case, "steps", []) or []),
+            "steps": list(spec["legacy_steps"] if "legacy_steps" in spec else getattr(case, "steps", []) or []),
+            "ledger_identity": spec.get("ledger_identity"),
+            **authored,
         })
+    await db.commit()
     return {
         "run_id": str(run.id),
         "lease_token": lease_token,
@@ -479,6 +520,153 @@ def _remove_download(path: Path) -> None:
         pass
 
 
+class AutopilotClaimRequest(BaseModel):
+    worker_id: UUID
+    devices: list[str] = Field(default_factory=list, max_length=20)
+
+
+class AutopilotCommandAnswer(BaseModel):
+    command_id: UUID
+    response_json: str = Field(max_length=8_000_000)
+
+
+@router.post("/{runner_id}/autopilot/claim")
+async def claim_autopilot_session(
+    runner_id: UUID,
+    payload: AutopilotClaimRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    authorization: Annotated[str | None, Header()] = None,
+):
+    if any(not APK_SERIAL.fullmatch(serial) for serial in payload.devices):
+        raise HTTPException(status_code=400, detail="Invalid ADB device serial")
+    runner, _ = await _authenticate_runner(db, runner_id, authorization, lock=True)
+    now = datetime.now(timezone.utc)
+    runner.last_seen_at = now
+    runner.capabilities = {**runner.capabilities, "autopilot_android": True, "devices": payload.devices}
+    reservation = await db.get(LocalAutopilotSession, runner.id, with_for_update=True)
+    if reservation is not None and reservation.expires_at <= now:
+        await db.delete(reservation)
+        reservation = None
+    if reservation is None or reservation.worker_id not in (None, payload.worker_id):
+        await db.commit()
+        return Response(status_code=204)
+    asset = await db.scalar(select(UploadedAsset).where(
+        UploadedAsset.id == reservation.asset_id,
+        UploadedAsset.owner_id == runner.owner_id,
+        UploadedAsset.project_id == runner.project_id,
+        UploadedAsset.extension == "apk",
+        UploadedAsset.status == "ready",
+    ))
+    if asset is None:
+        await db.delete(reservation)
+        await db.commit()
+        return Response(status_code=204)
+    reservation.worker_id = payload.worker_id
+    manifest = {
+        "session_id": str(reservation.session_id),
+        "device_name": reservation.device_name,
+        "package_name": reservation.package_name,
+        "app_sha256": asset.sha256,
+    }
+    await db.commit()
+    return manifest
+
+
+async def _claimed_autopilot_session(
+    db: AsyncSession, runner_id: UUID, session_id: UUID, authorization: str | None, worker_id: UUID,
+) -> tuple[LocalDeviceRunner, LocalAutopilotSession]:
+    runner, _ = await _authenticate_runner(db, runner_id, authorization)
+    reservation = await db.get(LocalAutopilotSession, runner.id, with_for_update=True)
+    if (
+        reservation is None or reservation.session_id != session_id
+        or reservation.worker_id != worker_id or reservation.expires_at <= datetime.now(timezone.utc)
+    ):
+        raise HTTPException(status_code=409, detail="The Autopilot device session has ended.")
+    return runner, reservation
+
+
+@router.post("/{runner_id}/autopilot/{session_id}/next")
+async def next_autopilot_command(
+    runner_id: UUID,
+    session_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    x_qtxpert_worker: Annotated[UUID, Header()],
+    authorization: Annotated[str | None, Header()] = None,
+):
+    runner, reservation = await _claimed_autopilot_session(db, runner_id, session_id, authorization, x_qtxpert_worker)
+    now = datetime.now(timezone.utc)
+    heartbeat_due = runner.last_seen_at is None or runner.last_seen_at <= now - timedelta(seconds=20)
+    if heartbeat_due:
+        runner.last_seen_at = now
+    if reservation.command_id is None or reservation.command_delivered or not reservation.command_payload:
+        if heartbeat_due:
+            await db.commit()
+        return Response(status_code=204)
+    body = {
+        "command_id": str(reservation.command_id),
+        **unpack(get_settings(), reservation.command_payload),
+    }
+    # Never replay an ambiguous device command after losing the response.
+    reservation.command_delivered = True
+    reservation.command_payload = None
+    await db.commit()
+    return body
+
+
+@router.post("/{runner_id}/autopilot/{session_id}/answer", status_code=204)
+async def answer_autopilot_command(
+    runner_id: UUID,
+    session_id: UUID,
+    payload: AutopilotCommandAnswer,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    x_qtxpert_worker: Annotated[UUID, Header()],
+    authorization: Annotated[str | None, Header()] = None,
+):
+    runner, reservation = await _claimed_autopilot_session(db, runner_id, session_id, authorization, x_qtxpert_worker)
+    if reservation.command_id != payload.command_id or not reservation.command_delivered:
+        raise HTTPException(status_code=409, detail="The Android command expired.")
+    if reservation.command_answer is None:
+        try:
+            response = json.loads(payload.response_json)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid Android command response.") from exc
+        if not isinstance(response, dict):
+            raise HTTPException(status_code=400, detail="Expected an Android command response object.")
+        reservation.command_answer = pack(get_settings(), response)
+        runner.last_seen_at = datetime.now(timezone.utc)
+        await db.commit()
+    return Response(status_code=204)
+
+
+@router.get("/{runner_id}/autopilot/{session_id}/artifact")
+async def download_autopilot_artifact(
+    runner_id: UUID,
+    session_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    x_qtxpert_worker: Annotated[UUID, Header()],
+    authorization: Annotated[str | None, Header()] = None,
+):
+    runner, reservation = await _claimed_autopilot_session(db, runner_id, session_id, authorization, x_qtxpert_worker)
+    owner_id, project_id = runner.owner_id, runner.project_id
+    asset = await db.scalar(select(UploadedAsset.id).where(
+        UploadedAsset.id == reservation.asset_id, UploadedAsset.project_id == project_id,
+        UploadedAsset.owner_id == owner_id, UploadedAsset.extension == "apk", UploadedAsset.status == "ready",
+    ))
+    if asset is None:
+        raise HTTPException(status_code=404, detail="The project APK is no longer available.")
+    await db.rollback()
+    path = Path(tempfile.mkdtemp(prefix="qtxpert-autopilot-download-")) / "application.apk"
+    try:
+        await UploadRepositoryService.materialize(db, asset, owner_id, path, settings=get_settings())
+    except FileNotFoundError as exc:
+        _remove_download(path)
+        raise HTTPException(status_code=404, detail="The project APK is no longer available.") from exc
+    except BaseException:
+        _remove_download(path)
+        raise
+    return FileResponse(path, media_type="application/vnd.android.package-archive", background=BackgroundTask(_remove_download, path))
+
+
 def _decode_evidence(value: str | None, limit: int, label: str) -> bytes | None:
     if not value:
         return None
@@ -548,6 +736,7 @@ async def complete_job(
         result.duration_ms = update.duration_ms
         result.error_message = secret_safe_text(update.error_message or "")[:4000] or None
         result.evidence = {
+            **(result.evidence or {}),
             "provider": "local_runner",
             "device_name": run.device_name,
             "platform_version": run.platform_version,
@@ -555,6 +744,7 @@ async def complete_job(
             "current_activity": payload.current_activity,
             **evidence_ids,
         }
+        record_ui_outcome(result, update.business_reference)
     run.passed_tests = sum(item.status == ResultStatus.PASSED for item in run.results)
     run.failed_tests = sum(item.status == ResultStatus.FAILED for item in run.results)
     run.blocked_tests = sum(item.status == ResultStatus.BLOCKED for item in run.results)

@@ -36,7 +36,7 @@ from app.database.models.integration import (  # noqa: F401
     IntegrationConnection,
     IntegrationUserPreference,
 )
-from app.database.models.local_runner import LocalDeviceRunner, LocalRunnerJob  # noqa: F401
+from app.database.models.local_runner import LocalAutopilotSession, LocalDeviceRunner, LocalRunnerJob  # noqa: F401
 
 __all__ = [
     "User", "UserRole", "Project", "Requirement", "RequirementSource", "RequirementStatus",
