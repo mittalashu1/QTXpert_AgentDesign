@@ -126,9 +126,28 @@ Respond as JSON: {{"test_cases": [
     "post_conditions": string,
     "is_automation_candidate": boolean,
     "automation_type": string or null,
+    "automation": null or {{"target_kind": "web|android|ios", "steps": [object], "outcome": null or object}},
     "risk_level": "high|medium|low"
   }}
 ]}}
+
+Keep human steps readable. Include automation only when the provided evidence
+specifies the target platform, exact controls, and observable assertions. Do
+not infer selectors from screen names or fabricate locators. Supported actions
+are navigate, tap, fill, back, assert_text, assert_visible, capture_reference.
+Use `value` for a same-origin relative navigation path or exact UI text.
+Use `locator` with `strategy` (css for web, accessibility_id/id/xpath for
+mobile) for tap, fill, assert_visible and capture_reference. Use `input_key`
+in snake_case for fill, with no literal data or credentials. Every executable
+case needs a UI assertion and each step should contain only the applicable
+fields. Where a case posts or attempts Add Money or Send Money, generate an
+outcome only from a documented UAT ledger contract. Its fields are operation
+(add_money or send_money), outcome (posted or rejected), account_alias,
+seed_reference, cleanup_reference, amount_minor (integer), and currency.
+For those cases end the automation steps with capture_reference on the
+specific receipt or attempt ID control after checking the UI response. If
+any of this evidence is unavailable, retain the human steps and use null
+automation for the transaction case.
 
 SCENARIO:
 {scenario}

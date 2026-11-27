@@ -299,6 +299,7 @@ export interface TestCase {
   preconditions: string | null;
   test_data: Record<string, unknown> | null;
   steps: string[];
+  automation?: AuthoredAutomation | null;
   expected_result: string;
   post_conditions: string | null;
   is_automation_candidate: boolean;
@@ -352,6 +353,7 @@ export interface LocalDeviceRunner {
   status: "pending" | "active" | "online" | "revoked" | string;
   platforms: ExecutionTargetKind[];
   devices: string[];
+  autopilot_android: boolean;
   last_seen_at: string | null;
   created_at: string;
 }
@@ -398,7 +400,53 @@ export interface ExecutionResult {
   duration_ms: number | null;
   error_message: string | null;
   evidence: Record<string, unknown> | null;
+  traceability?: ExecutionTraceability;
   defects: Defect[];
+}
+
+export interface ExecutionTraceability {
+  requirement_ref?: string | null;
+  requirement_id?: string | null;
+  document_analysis_id?: string | null;
+  design_run_id?: string | null;
+  design_case_id?: string | null;
+  app_asset_id?: string | null;
+  app_sha256?: string | null;
+  device_name?: string | null;
+  fixture_bindings?: Record<string, ExecutionFixtureBinding>;
+}
+
+export interface ExecutionFixtureBinding {
+  record_id: string;
+  part: "value" | "username" | "password";
+}
+
+export interface ExecutionFixture {
+  id: string;
+  label: string;
+  category: string;
+  parts: ExecutionFixtureBinding["part"][];
+  updated_at: string;
+}
+
+export interface AuthoredAutomation {
+  target_kind: ExecutionTargetKind;
+  steps: Array<{
+    action: "navigate" | "tap" | "fill" | "back" | "assert_text" | "assert_visible" | "capture_reference";
+    strategy?: "css" | "accessibility_id" | "id" | "xpath" | null;
+    locator?: string | null;
+    value?: string | null;
+    input_key?: string | null;
+  }>;
+  outcome?: {
+    operation: "add_money" | "send_money";
+    outcome: "posted" | "rejected";
+    account_alias: string;
+    seed_reference: string;
+    cleanup_reference: string;
+    amount_minor: number;
+    currency: string;
+  } | null;
 }
 
 export interface ExecutionRun {
@@ -457,6 +505,7 @@ export interface ExecutionPlanCase {
   preconditions: string | null;
   test_data: Record<string, unknown> | null;
   steps: string[];
+  automation?: AuthoredAutomation | null;
   expected_result: string;
   post_conditions: string | null;
   is_automation_candidate: boolean;
@@ -481,6 +530,7 @@ export interface ExecutionPlan {
   ready_cases: number;
   blocked_cases: number;
   input_references: Record<string, string>;
+  fixture_bindings?: Record<string, ExecutionFixtureBinding>;
   input_requirements: ExecutionInputRequirement[];
   cases: ExecutionPlanCase[];
 }

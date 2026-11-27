@@ -2409,13 +2409,14 @@ async def test_background_analysis_records_failure_instead_of_hanging(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_completed_background_analysis_returns_saved_result(tmp_path, monkeypatch):
+@pytest.mark.parametrize("modules", [[], ["Cards"]])
+async def test_completed_background_analysis_returns_saved_result(tmp_path, monkeypatch, modules):
     service = _service(tmp_path)
     job_id, _ = await service.save_upload("app.apk", b"x" * 2048, "owner")
 
     async def complete(_job_id):
         from app.schemas.autopilot import AutopilotAnalysis
-        result = AutopilotAnalysis(job_id=job_id, filename="app.apk", sha256="a" * 64)
+        result = AutopilotAnalysis(job_id=job_id, filename="app.apk", sha256="a" * 64, scope_modules=modules)
         service._metadata_path(job_id).write_text(result.model_dump_json(), encoding="utf-8")
         return result
 
@@ -2425,6 +2426,8 @@ async def test_completed_background_analysis_returns_saved_result(tmp_path, monk
 
     assert result.status == "analyzed"
     assert result.analysis is not None
+    if modules:
+        assert result.checkpoint_stage == "ready_for_discovery"
 
 
 @pytest.mark.asyncio
@@ -3065,6 +3068,45 @@ async def test_safe_suite_endpoint_rejects_stale_map_after_latest_attempt_failed
 
     assert error.value.status_code == 409
     assert "Google Play services" in error.value.detail
+
+
+@pytest.mark.asyncio
+async def test_safe_suite_can_retry_a_blocked_local_run_with_verified_discovery(monkeypatch):
+    from app.api.routes import autopilot as autopilot_routes
+    from app.schemas.autopilot import AutopilotSuiteRequest
+
+    job_id = "77777777-7777-4777-8777-777777777777"
+    discovery = AutopilotDiscoveryResult(
+        job_id=job_id, status="partial", provider="local_runner", device_name="usb-phone",
+        started_at="2026-10-01T00:00:00+00:00", finished_at="2026-10-01T00:00:01+00:00",
+        duration_seconds=1, screen_count=1, target_ready=True, interactive_surface_ready=True,
+        screens=[DiscoveredScreen(screen_id="cards", fingerprint="cards")],
+    )
+    job = {
+        "job_id": job_id, "phase": "blocked", "target_kind": "android",
+        "discovery": discovery.model_dump(mode="json"),
+        "suite_execution": {"provider": "local_runner", "status": "blocked", "executed_count": 0},
+    }
+
+    class ReachedDeviceStartup(Exception):
+        pass
+
+    async def require_owned_job(*args, **kwargs):
+        return job
+
+    async def advance(_service, selected_job, phase, **kwargs):
+        assert selected_job == job_id and phase == "blocked"
+        raise ReachedDeviceStartup
+
+    monkeypatch.setattr(autopilot_routes, "_service", lambda _settings: object())
+    monkeypatch.setattr(autopilot_routes, "_require_owned_job", require_owned_job)
+    monkeypatch.setattr(autopilot_routes, "_advance_suite_job_to_running", advance)
+    with pytest.raises(ReachedDeviceStartup):
+        await autopilot_routes.execute_autopilot_suite(
+            job_id, AutopilotSuiteRequest(provider="local_runner", device_name="usb-phone"),
+            SimpleNamespace(id="owner"), Settings(), None,
+        )
+
 
 @pytest.mark.asyncio
 async def test_suite_phase_transition_initializes_phase_from_approved_plan():

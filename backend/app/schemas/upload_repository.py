@@ -1,6 +1,6 @@
 """API schemas for the shared QTXpert Upload Repository."""
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +29,7 @@ class UploadedAssetOut(BaseModel):
 class ReuseUploadedAssetRequest(BaseModel):
     upload_id: UUID
     context: str = Field(default="", max_length=8000)
+    run_instructions: Any = Field(default=None, repr=False, exclude=True)
     profile_id: str = Field(default="uae_fintech", max_length=80)
     surface_action: Literal["ask", "new", "override"] = "ask"
     initial_inputs: list[AutopilotInitialInput] = Field(default_factory=list, max_length=50)

@@ -11,6 +11,9 @@ from sqlalchemy.orm import selectinload
 from app.api.deps.auth_deps import get_current_user
 from app.api.routes.executions import _compile_mobile_steps, _compile_steps, _run_execution, _validate_execution_target
 from app.config import Settings, get_settings
+from app.database.models.autopilot_input import AutopilotInputRecord
+from app.database.models.autopilot_job import AutopilotJob
+from app.database.models.document_intelligence import DocumentAnalysisRun
 from app.database.models.execution import ExecutionResult, ExecutionRun, ResultStatus
 from app.database.models.local_runner import LocalRunnerJob
 from app.database.models.execution_plan import ExecutionPlan, ExecutionPlanCase
@@ -19,6 +22,7 @@ from app.database.models.project import Project
 from app.database.models.test_case import TestCase
 from app.database.models.user import User
 from app.database.session import get_db_session
+from app.schemas.authored_execution import AuthoredAutomation, FixtureBinding, FixtureBindingsUpdate
 from app.schemas.execution import (
     ExecutionPlanCasesUpdate,
     ExecutionPlanExecute,
@@ -29,6 +33,7 @@ from app.schemas.execution import (
     ExecutionPlanRerun,
     ExecutionRunOut,
 )
+from app.services.authored_execution import allowed_fixture_parts, authored_url, fixture_keys, scoped_fixtures
 
 router = APIRouter(tags=["execution-plans"])
 
@@ -37,6 +42,8 @@ _HIGH_IMPACT_STEP = re.compile(
     r"\b(delete|remove|withdraw|transfer|payment|pay|purchase|close account|send money|otp)\b",
     re.IGNORECASE,
 )
+_MONEY_JOURNEY = re.compile(r"\b(?:add|send)\s+(?:money|funds)\b", re.IGNORECASE)
+_SUBMIT_MONEY = re.compile(r"\b(?:submit|confirm|post|pay now|send now|deposit now)\b", re.IGNORECASE)
 _AUTHENTICATION_TEXT = re.compile(
     r"\b(log[ -]?in|sign[ -]?in|authenticate|authentication|credential|username|password|passcode|mfa|otp|one[- ]time)\b",
     re.IGNORECASE,
@@ -183,6 +190,18 @@ def _unsupported_step(case: ExecutionPlanCase) -> str | None:
     return None
 
 
+def _needs_ledger_contract(case: ExecutionPlanCase) -> bool:
+    steps = [*case.steps]
+    steps.extend(
+        step.get("locator", "") for step in (case.automation or {}).get("steps", [])
+        if step.get("action") == "tap"
+    )
+    return bool(_MONEY_JOURNEY.search(_case_text(case))) and any(
+        _SUBMIT_MONEY.search(str(step).replace("_", " ").replace("-", " "))
+        for step in steps
+    )
+
+
 def _input_requirements(plan: ExecutionPlan) -> list[dict]:
     """Build deterministic, actionable setup questions for the selected cases."""
     references = plan.runtime_inputs or {}
@@ -224,7 +243,9 @@ def _input_requirements(plan: ExecutionPlan) -> list[dict]:
     ]
     for case in selected:
         text = _case_text(case)
-        if _case_requires_authentication(case):
+        authored = bool(case.automation)
+        ledger = bool((case.automation or {}).get("outcome"))
+        if not authored and _case_requires_authentication(case):
             add(
                 "authentication_reference",
                 "Authentication reference",
@@ -232,7 +253,7 @@ def _input_requirements(plan: ExecutionPlan) -> list[dict]:
                 "Use a non-production vault or credential reference (for example vault://qa/investor). Never enter a password, token, or OTP.",
                 case,
             )
-        if _case_requires_test_data(case, text):
+        if not authored and _case_requires_test_data(case, text):
             add(
                 "test_data_reference",
                 "Synthetic test-data reference",
@@ -240,7 +261,7 @@ def _input_requirements(plan: ExecutionPlan) -> list[dict]:
                 "Point to a seeded or synthetic account/data set for this case. Do not paste personal or production data.",
                 case,
             )
-        if _ENVIRONMENT_TEXT.search(text):
+        if not authored and _ENVIRONMENT_TEXT.search(text):
             add(
                 "environment_reference",
                 "Environment and reset reference",
@@ -248,8 +269,8 @@ def _input_requirements(plan: ExecutionPlan) -> list[dict]:
                 "Name the non-production environment and its reset/cleanup reference so the journey can be repeated safely.",
                 case,
             )
-        unsupported = _unsupported_step(case)
-        if not unsupported and case.blocker_reason and "unsupported" in case.blocker_reason.lower():
+        unsupported = None if authored else _unsupported_step(case)
+        if not authored and not unsupported and case.blocker_reason and "unsupported" in case.blocker_reason.lower():
             # Target-specific compilers (web vs mobile) may reject a command
             # that is valid for the other surface. Keep that blocker visible
             # in the guided setup panel even though the generic union parser
@@ -265,7 +286,7 @@ def _input_requirements(plan: ExecutionPlan) -> list[dict]:
                 provided=False,
             )
         impact = next((str(step).strip() for step in case.steps if _HIGH_IMPACT_STEP.search(str(step))), None)
-        if impact:
+        if impact and not ledger:
             add(
                 "approval_reference",
                 "Business-impact approval reference",
@@ -291,6 +312,8 @@ def _setup_blockers(plan: ExecutionPlan, case: ExecutionPlanCase, target_kind: s
         blockers.append("Environment/reset details are required; add a non-production environment reference in Guided setup")
     if next((str(step).strip() for step in case.steps if _HIGH_IMPACT_STEP.search(str(step))), None) and not str(refs.get("approval_reference", "")).strip():
         blockers.append("Approval is required for business-impacting actions; add an approval reference in Guided setup")
+    if _needs_ledger_contract(case):
+        blockers.append("Define an authored UAT ledger outcome for this money movement")
     unsupported = _unsupported_step(case)
     if unsupported:
         label = "Unsupported mobile automation step" if target_kind in {"android", "ios"} else "Unsupported automation step"
@@ -320,13 +343,14 @@ def _contains_sensitive_data(value: object) -> bool:
     return False
 
 
-async def _load_plan(db: AsyncSession, plan_id: UUID, user_id: UUID) -> ExecutionPlan:
-    plan = await db.scalar(
+async def _load_plan(db: AsyncSession, plan_id: UUID, user_id: UUID, *, lock: bool = False) -> ExecutionPlan:
+    query = (
         select(ExecutionPlan)
         .join(Project, ExecutionPlan.project_id == Project.id)
         .options(selectinload(ExecutionPlan.cases))
         .where(ExecutionPlan.id == plan_id, Project.owner_id == user_id)
     )
+    plan = await db.scalar(query.with_for_update(of=ExecutionPlan) if lock else query)
     if plan is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Execution plan not found")
     return plan
@@ -350,6 +374,7 @@ def _plan_payload(plan: ExecutionPlan) -> dict:
         "ready_cases": plan.ready_cases,
         "blocked_cases": plan.blocked_cases,
         "input_references": dict(plan.runtime_inputs or {}),
+        "fixture_bindings": dict(plan.fixture_bindings or {}),
         "input_requirements": _input_requirements(plan),
         "cases": sorted(plan.cases, key=lambda item: item.selection_order),
     }
@@ -374,6 +399,7 @@ def _case_snapshot(test_case: TestCase, plan_id: UUID, index: int) -> ExecutionP
         preconditions=test_case.preconditions,
         test_data=test_case.test_data,
         steps=list(test_case.steps or []),
+        automation=test_case.automation,
         expected_result=test_case.expected_result,
         post_conditions=test_case.post_conditions,
         is_automation_candidate=candidate,
@@ -382,12 +408,83 @@ def _case_snapshot(test_case: TestCase, plan_id: UUID, index: int) -> ExecutionP
     )
 
 
+async def _authored_setup(
+    db: AsyncSession, plan: ExecutionPlan, owner_id: UUID, target_kind: str,
+    app_asset_id: UUID | None, base_url: str | None, settings: Settings,
+) -> tuple[set[str], set[str], str | None]:
+    bindings = {key: FixtureBinding.model_validate(value) for key, value in (plan.fixture_bindings or {}).items()}
+    rows = await scoped_fixtures(
+        db, owner_id=owner_id, project_id=plan.project_id, target_kind=target_kind,
+        app_asset_id=app_asset_id, base_url=base_url,
+        record_ids={item.record_id for item in bindings.values()},
+    )
+    by_id = {row.id: row for row in rows}
+    valid = {
+        key for key, binding in bindings.items()
+        if binding.record_id in by_id and binding.part in allowed_fixture_parts(by_id[binding.record_id])
+    }
+    credential_keys = {key for key in valid if by_id[bindings[key].record_id].category == "credential"}
+    identity = None
+    if app_asset_id and any((case.automation or {}).get("outcome") for case in plan.cases):
+        analyzed = await db.scalar(select(AutopilotJob.analysis).where(
+            AutopilotJob.owner_id == owner_id, AutopilotJob.project_id == plan.project_id,
+            AutopilotJob.target_kind == target_kind,
+            AutopilotJob.repository_asset_id == app_asset_id,
+            AutopilotJob.analysis.is_not(None),
+        ).order_by(AutopilotJob.created_at.desc()).limit(1))
+        if isinstance(analyzed, dict):
+            candidate = analyzed.get("package_name")
+            if settings.full_uat_target_is_allowed(target_kind, candidate, candidate):
+                identity = candidate
+    return valid, credential_keys, identity
+
+
+def _authored_blockers(
+    plan: ExecutionPlan, case: ExecutionPlanCase, target_kind: str, base_url: str | None,
+    bound_keys: set[str], credential_keys: set[str], ledger_identity: str | None, ledger_configured: bool,
+) -> list[str]:
+    automation = AuthoredAutomation.model_validate(case.automation)
+    if automation.target_kind != target_kind:
+        return [f"This case targets {automation.target_kind}. Select that platform to run it."]
+    keys = fixture_keys(automation)
+    blockers = [f"Bind saved Test Data for {key} on the selected target" for key in sorted(keys - bound_keys)]
+    if _case_requires_authentication(case) and not (keys & credential_keys):
+        blockers.append("Bind a saved credential for the authored sign-in steps")
+    for step in automation.steps:
+        if step.action == "navigate":
+            try:
+                authored_url(base_url or "", step.value or "")
+            except ValueError as exc:
+                blockers.append(str(exc))
+                break
+    references = plan.runtime_inputs or {}
+    if automation.outcome:
+        if not ledger_identity:
+            blockers.append("Use an analyzed mobile build from the isolated UAT application allowlist")
+        if not ledger_configured:
+            blockers.append("Configure the signed UAT ledger export before running transaction cases")
+        if not keys:
+            blockers.append("Bind the transaction to saved Test Data for the isolated UAT account")
+    elif _needs_ledger_contract(case):
+        blockers.append("Define the UAT ledger outcome and exact receipt or attempt reference for this money movement")
+    if (
+        not automation.outcome and not references.get("approval_reference")
+        and any(_HIGH_IMPACT_STEP.search(str(step)) for step in case.steps or [])
+    ):
+        blockers.append("Add the UAT approval reference in Guided setup")
+    return blockers
+
+
 async def _preflight_plan(
     plan: ExecutionPlan,
     base_url: str | None,
     *,
     case_ids: set[UUID] | None = None,
     target_kind: str = "web",
+    bound_keys: set[str] | None = None,
+    credential_keys: set[str] | None = None,
+    ledger_identity: str | None = None,
+    ledger_configured: bool = False,
 ) -> None:
     """Compile selected cases and surface every setup action explicitly."""
     for case in plan.cases:
@@ -404,6 +501,14 @@ async def _preflight_plan(
         if case.source_test_case_id is None:
             case.readiness = "blocked"
             case.blocker_reason = "The source Test Design case is no longer available. Re-import the Design run."
+            continue
+        if case.automation:
+            blockers = _authored_blockers(
+                plan, case, target_kind, base_url, bound_keys or set(), credential_keys or set(),
+                ledger_identity, ledger_configured,
+            )
+            case.readiness = "blocked" if blockers else "ready"
+            case.blocker_reason = "; ".join(blockers) if blockers else None
             continue
         setup_blockers = _setup_blockers(plan, case, target_kind)
         impact = next((str(step).strip() for step in case.steps if _HIGH_IMPACT_STEP.search(str(step))), None)
@@ -465,8 +570,17 @@ async def _queue_plan_execution(
     appium_url: str | None = None,
     appium_app: str | None = None,
     target_metadata: dict | None = None,
+    settings: Settings | None = None,
 ) -> ExecutionRun:
-    await _preflight_plan(plan, base_url, case_ids=case_ids, target_kind=target_kind)
+    settings = settings or get_settings()
+    bound_keys, credential_keys, ledger_identity = await _authored_setup(
+        db, plan, user.id, target_kind, app_asset_id, base_url, settings,
+    )
+    await _preflight_plan(
+        plan, base_url, case_ids=case_ids, target_kind=target_kind, bound_keys=bound_keys,
+        credential_keys=credential_keys, ledger_identity=ledger_identity,
+        ledger_configured=len((settings.UAT_LEDGER_VERIFICATION_KEY or "").strip()) >= 32,
+    )
     automated = [
         case for case in plan.cases
         if (case_ids is None and case.selected or case_ids is not None and case.id in case_ids)
@@ -499,6 +613,13 @@ async def _queue_plan_execution(
         )
 
     plan.status = "queued"
+    source = None
+    if plan.source_generation_run_id:
+        source = (await db.execute(
+            select(GenerationRun.source_document_analysis_id, DocumentAnalysisRun.published_requirement_id)
+            .outerjoin(DocumentAnalysisRun, DocumentAnalysisRun.id == GenerationRun.source_document_analysis_id)
+            .where(GenerationRun.id == plan.source_generation_run_id, GenerationRun.project_id == plan.project_id)
+        )).one_or_none()
     run = ExecutionRun(
         project_id=plan.project_id,
         requested_by_id=user.id,
@@ -520,6 +641,29 @@ async def _queue_plan_execution(
     await db.flush()
     for case in automated:
         blocked = case.readiness != "ready"
+        automation = AuthoredAutomation.model_validate(case.automation) if case.automation else None
+        bindings = {
+            key: plan.fixture_bindings[key] for key in fixture_keys(automation)
+            if key in (plan.fixture_bindings or {})
+        } if automation else {}
+        metadata = target_metadata or {}
+        traceability = {
+            "requirement_ref": case.requirement_traceability,
+            "requirement_id": str(source.published_requirement_id) if source and source.published_requirement_id else None,
+            "document_analysis_id": str(source.source_document_analysis_id) if source and source.source_document_analysis_id else None,
+            "design_run_id": str(plan.source_generation_run_id) if plan.source_generation_run_id else None,
+            "design_case_id": str(case.source_test_case_id),
+            "plan_case_id": str(case.id),
+            "case_key": case.test_case_key,
+            "app_asset_id": str(app_asset_id) if app_asset_id else None,
+            "app_sha256": metadata.get("asset_sha256"),
+            "target_kind": target_kind,
+            "target_url": base_url,
+            "provider": provider,
+            "device_name": device_name,
+            "platform_version": platform_version,
+            "fixture_bindings": bindings,
+        }
         db.add(
             ExecutionResult(
                 execution_run_id=run.id,
@@ -528,6 +672,13 @@ async def _queue_plan_execution(
                 status=ResultStatus.BLOCKED if blocked else ResultStatus.PENDING,
                 error_message=case.blocker_reason if blocked else None,
                 evidence={"preflight": case.readiness} if blocked else None,
+                execution_spec={
+                    "automation": case.automation,
+                    "bindings": bindings,
+                    "ledger_identity": ledger_identity if automation and automation.outcome else None,
+                    "legacy_steps": list(case.steps or []) if automation is None else [],
+                    "traceability": traceability,
+                },
             )
         )
     if provider == "local_runner":
@@ -637,7 +788,7 @@ async def update_execution_plan_cases(
     db: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
 ):
-    plan = await _load_plan(db, plan_id, user.id)
+    plan = await _load_plan(db, plan_id, user.id, lock=True)
     if plan.status not in {"draft", "ready", "blocked"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -657,6 +808,10 @@ async def update_execution_plan_cases(
             if any(not step for step in normalized_steps):
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"{case.test_case_key} contains an empty automation step")
             case.steps = normalized_steps
+            if "automation" not in update.model_fields_set:
+                case.automation = None
+        if "automation" in update.model_fields_set:
+            case.automation = update.automation.model_dump(mode="json") if update.automation else None
         if update.expected_result is not None:
             normalized_expected = update.expected_result.strip()
             if not normalized_expected:
@@ -695,7 +850,7 @@ async def update_execution_plan_inputs(
     user: Annotated[User, Depends(get_current_user)],
 ):
     """Save non-secret setup references and let preflight re-evaluate cases."""
-    plan = await _load_plan(db, plan_id, user.id)
+    plan = await _load_plan(db, plan_id, user.id, lock=True)
     if plan.status not in {"draft", "ready", "blocked"}:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -733,6 +888,56 @@ async def update_execution_plan_inputs(
     return _plan_payload(await _load_plan(db, plan.id, user.id))
 
 
+@router.get("/execution-plans/{plan_id}/fixtures")
+async def list_execution_fixtures(
+    plan_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+    target_kind: str = "web",
+    app_asset_id: UUID | None = None,
+    base_url: str | None = None,
+):
+    plan = await _load_plan(db, plan_id, user.id)
+    rows = await scoped_fixtures(
+        db, owner_id=user.id, project_id=plan.project_id, target_kind=target_kind,
+        app_asset_id=app_asset_id, base_url=base_url,
+    )
+    return [
+        {"id": row.id, "label": row.label, "category": row.category, "parts": allowed_fixture_parts(row), "updated_at": row.updated_at}
+        for row in rows
+    ]
+
+
+@router.patch("/execution-plans/{plan_id}/fixtures", response_model=ExecutionPlanOut)
+async def bind_execution_fixtures(
+    plan_id: UUID,
+    payload: FixtureBindingsUpdate,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+):
+    plan = await _load_plan(db, plan_id, user.id, lock=True)
+    if plan.status not in {"draft", "ready", "blocked"}:
+        raise HTTPException(status_code=409, detail="This plan's Test Data bindings are frozen after it is queued.")
+    ids = {binding.record_id for binding in payload.bindings.values()}
+    rows = await db.scalars(select(AutopilotInputRecord).where(
+        AutopilotInputRecord.id.in_(ids), AutopilotInputRecord.owner_id == user.id,
+        AutopilotInputRecord.project_id == plan.project_id, AutopilotInputRecord.save_for_reuse.is_(True),
+        AutopilotInputRecord.encrypted_value.is_not(None),
+        AutopilotInputRecord.category.in_(("credential", "test_data")),
+    )) if ids else []
+    by_id = {row.id: row for row in rows}
+    if any(binding.record_id not in by_id or binding.part not in allowed_fixture_parts(by_id[binding.record_id]) for binding in payload.bindings.values()):
+        raise HTTPException(status_code=400, detail="Select reusable Test Data from this project.")
+    plan.fixture_bindings = {key: binding.model_dump(mode="json") for key, binding in payload.bindings.items()}
+    plan.status = "draft"
+    for case in plan.cases:
+        if case.selected and case.execution_mode == "automated":
+            case.readiness = "pending"
+            case.blocker_reason = None
+    await db.commit()
+    return _plan_payload(plan)
+
+
 @router.post("/execution-plans/{plan_id}/preflight", response_model=ExecutionPlanOut)
 async def preflight_execution_plan(
     plan_id: UUID,
@@ -741,7 +946,10 @@ async def preflight_execution_plan(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
 ):
-    plan = await _load_plan(db, plan_id, user.id)
+    plan = await _load_plan(db, plan_id, user.id, lock=True)
+    prior_status = plan.status
+    if prior_status in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Wait for the active execution before running preflight again.")
     target = await _validate_execution_target(
         db,
         user,
@@ -757,8 +965,18 @@ async def preflight_execution_plan(
         no_reset=payload.no_reset,
         auto_grant_permissions=payload.auto_grant_permissions,
         settings=settings,
+        local_runner_id=payload.local_runner_id,
     )
-    await _preflight_plan(plan, target["base_url"], target_kind=target["target_kind"])
+    bound_keys, credential_keys, ledger_identity = await _authored_setup(
+        db, plan, user.id, target["target_kind"], target["app_asset_id"], target["base_url"], settings,
+    )
+    await _preflight_plan(
+        plan, target["base_url"], target_kind=target["target_kind"], bound_keys=bound_keys,
+        credential_keys=credential_keys, ledger_identity=ledger_identity,
+        ledger_configured=len((settings.UAT_LEDGER_VERIFICATION_KEY or "").strip()) >= 32,
+    )
+    if prior_status in {"completed", "failed"}:
+        plan.status = prior_status
     await db.commit()
     return _plan_payload(await _load_plan(db, plan.id, user.id))
 
@@ -772,7 +990,7 @@ async def execute_execution_plan(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
 ):
-    plan = await _load_plan(db, plan_id, user.id)
+    plan = await _load_plan(db, plan_id, user.id, lock=True)
     if plan.status in {"queued", "running"}:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This execution plan is already running")
     target = await _validate_execution_target(
@@ -790,6 +1008,7 @@ async def execute_execution_plan(
         no_reset=payload.no_reset,
         auto_grant_permissions=payload.auto_grant_permissions,
         settings=settings,
+        local_runner_id=payload.local_runner_id,
     )
     return await _queue_plan_execution(
         plan,
@@ -810,6 +1029,7 @@ async def execute_execution_plan(
             **target["target_metadata"],
             "input_references": dict(plan.runtime_inputs or {}),
         },
+        settings=settings,
     )
 
 
@@ -822,7 +1042,7 @@ async def rerun_execution_plan(
     user: Annotated[User, Depends(get_current_user)],
     settings: Annotated[Settings, Depends(get_settings)],
 ):
-    plan = await _load_plan(db, plan_id, user.id)
+    plan = await _load_plan(db, plan_id, user.id, lock=True)
     source = await db.scalar(
         select(ExecutionRun)
         .join(Project, ExecutionRun.project_id == Project.id)
@@ -853,6 +1073,7 @@ async def rerun_execution_plan(
         no_reset=bool((source.target_metadata or {}).get("no_reset", False)),
         auto_grant_permissions=bool((source.target_metadata or {}).get("auto_grant_permissions", True)),
         settings=settings,
+        local_runner_id=UUID((source.target_metadata or {})["selected_runner_id"]) if (source.target_metadata or {}).get("selected_runner_id") else None,
     )
     return await _queue_plan_execution(
         plan,
@@ -875,5 +1096,6 @@ async def rerun_execution_plan(
             **target["target_metadata"],
             "input_references": dict(plan.runtime_inputs or {}),
         },
+        settings=settings,
     )
 

@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 
 from agent import compile_mobile_steps, normalize_api_url, inspect_local_stack, _download_artifact, execute_android_job, _case_error, _validate_startup_ui
+from autopilot_android import AndroidSession
 
 
 class LocalRunnerProtocolTests(unittest.TestCase):
@@ -64,6 +65,33 @@ class LocalRunnerProtocolTests(unittest.TestCase):
             job["app_sha256"] = "0" * 64
             with self.assertRaisesRegex(RuntimeError, "checksum"):
                 _download_artifact(client, credentials, job, "lease", path)
+
+    def test_android_resume_reuses_only_the_repository_apk(self):
+        digest = "a" * 64
+        manifest = {"device_name": "usb-device", "package_name": "com.example.app", "app_sha256": digest}
+        path = "/data/app/~~instance/com.example.app-instance/base.apk"
+        for installed_digest, should_install in ((digest, False), ("b" * 64, True)):
+            with self.subTest(should_install=should_install), patch(
+                "autopilot_android.subprocess.run",
+                side_effect=[MagicMock(stdout=f"package:{path}\n"), MagicMock(stdout=f"{installed_digest}  {path}\n")],
+            ) as adb:
+                session = AndroidSession(MagicMock(), manifest, Path("app.apk"), "adb")
+                with patch.object(session, "_call", return_value={"value": {"sessionId": "binary-session"}}) as call:
+                    session.execute("newSession", {"capabilities": {"alwaysMatch": {"appium:noReset": True}}})
+                capabilities = call.call_args.args[2]["capabilities"]["alwaysMatch"]
+                self.assertEqual("appium:app" in capabilities, should_install)
+                self.assertEqual(capabilities["appium:enforceAppInstall"], should_install)
+                self.assertEqual(capabilities["appium:forceAppLaunch"], should_install)
+                self.assertEqual(adb.call_args.args[0], ["adb", "-s", "usb-device", "shell", "sha256sum", path])
+
+    def test_android_runner_accepts_appium_clear_as_well_as_selenium_clear(self):
+        manifest = {"device_name": "usb-device", "package_name": "com.example.app", "app_sha256": "a" * 64}
+        session = AndroidSession(MagicMock(), manifest, Path("app.apk"), "adb")
+        session.session_id = "test-session"
+        with patch.object(session, "_call", return_value={"value": None}) as call:
+            for command in ("clear", "clearElement"):
+                session.execute(command, {"sessionId": "test-session", "id": "field-1"})
+                call.assert_called_with("POST", "/session/test-session/element/field-1/clear", {})
 
     def test_api_url_requires_https_for_cloud(self):
         self.assertEqual(normalize_api_url("https://design.example"), "https://design.example/api/v1")

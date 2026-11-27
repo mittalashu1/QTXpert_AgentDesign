@@ -44,6 +44,7 @@ from app.llm.base import LLMMessage
 from app.llm.factory import get_llm_provider
 from app.schemas.autopilot import (
     AutopilotAnalysis,
+    AutopilotBusinessAnswer,
     AutopilotContextRequest,
     AutopilotContextResponse,
     AutopilotExecutionRequest,
@@ -57,6 +58,8 @@ from app.schemas.autopilot import (
     DiscoveredControl,
     DiscoveredScreen,
 )
+from app.services.autopilot_instructions import is_primary_tab, matches_module, scope_allows_design_case
+from app.services.autopilot_progress import business_context
 from app.services.appium_compat import (
     ProviderLifecycleUnavailable,
     activate_verified_target_surface,
@@ -88,6 +91,7 @@ from app.services.autopilot_workflow import (
     transition_phase,
 )
 from app.services.device_farm import DeviceFarmService, DeviceFarmSession
+from app.services.local_autopilot import LocalAndroidTarget, LocalAutopilotTransport, LocalDeviceUnavailable
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -572,8 +576,9 @@ class AutopilotPrototypeService:
         """
         if getattr(self.settings, "AUTOPILOT_DEGRADED_MODE_ENABLED", False):
             return False
-        if not getattr(self.settings, "AUTOPILOT_DB_PERSISTENCE_ENABLED", True):
-            return False
+        configured = getattr(self.settings, "AUTOPILOT_DB_PERSISTENCE_ENABLED", None)
+        if configured is not None:
+            return configured
         if self.settings.APP_ENV != "local":
             return True
         database_url = str(getattr(self.settings, "POSTGRES_URL", "")).lower()
@@ -1497,7 +1502,7 @@ class AutopilotPrototypeService:
             # form, and ask for the exact User ID/password before it requests
             # secondary UAT/SIT data.  The discovery runner remains bounded and
             # never submits destructive business actions.
-            if analysis.tests and target_kind in {"android", "ios", "web"}:
+            if (analysis.tests or analysis.scope_modules) and target_kind in {"android", "ios", "web"}:
                 ready = analysis.model_copy(update={"checkpoint_stage": "ready_for_discovery", "input_requests": []})
                 await asyncio.to_thread(self._metadata_path(job_id).write_text, ready.model_dump_json(indent=2), "utf-8")
                 await self.update_job(
@@ -1778,6 +1783,8 @@ class AutopilotPrototypeService:
 
     async def analyze(self, job_id: str) -> AutopilotAnalysis:
         job = await self.load_job(job_id)
+        setup = job.get("setup_profile") or {}
+        scope_modules = list(setup.get("scope_modules") or [])
         context_text = str(job.get("context") or "").strip()
         target_kind = str(job.get("target_kind") or ("ios" if str(job.get("filename", "")).lower().endswith(".ipa") else "android"))
         if target_kind == "web":
@@ -1789,7 +1796,9 @@ class AutopilotPrototypeService:
         await self.update_job(job_id, status="analyzing", stage="designing_tests", progress=65)
         deterministic_tests = self._build_deterministic_tests(metadata)
         deterministic_tests = self._filter_tests_for_requested_scope(deterministic_tests, context_text)
-        enrichment = await self._enrich_with_ai(metadata, context_text)
+        confirmed = business_context(AutopilotBusinessAnswer.model_validate(item) for item in setup.get("business_answers") or [])
+        planning_context = f"{context_text[:5200]}\n\nConfirmed business outcomes\n{confirmed}" if confirmed else context_text
+        enrichment = await self._enrich_with_ai(metadata, planning_context)
         ai_enrichment_used = bool(enrichment.pop("_ai_used", False))
         await self.update_job(job_id, status="analyzing", stage="finalizing", progress=90)
 
@@ -1949,6 +1958,7 @@ class AutopilotPrototypeService:
                 *requested_journey_names(context_text),
                 *(enrichment.get("critical_journeys") or self._fallback_journeys(metadata)),
             ]))[:20],
+            scope_modules=scope_modules,
             clarification_questions=(
                 self._filter_initial_clarification_questions(
                     enrichment.get("clarification_questions"), metadata
@@ -1958,7 +1968,7 @@ class AutopilotPrototypeService:
             # Keep every distinct, evidence-scoped case. Runtime expansion is
             # finite because it is derived from the discovered screen/control
             # graph; execution remains separately batchable.
-            tests=deduped,
+            tests=[test for test in deduped if scope_allows_design_case(scope_modules, test, set())],
             release_risks=enrichment.get("release_risks") or self._fallback_risks(metadata),
             warnings=metadata.get("warnings", []),
             capabilities=self._capabilities(metadata),
@@ -3163,8 +3173,18 @@ class AutopilotPrototypeService:
         for screen_index, screen in enumerate(screens, start=1):
             screen_label = cls._runtime_screen_label(screen, screen_index)
             journey_label = screen.journey or observed_journey_label(screen, screen_index)
-            controls = [control for control in screen.controls if control.enabled and control.locators and not control.resource_id.startswith("android:id/")]
-            anchor = next((control for control in controls if control.semantic_label), None)
+            controls = [
+                control for control in screen.controls
+                if control.enabled and control.locators and not control.resource_id.startswith("android:id/")
+                and (
+                    not analysis.scope_modules or not is_primary_tab(control.semantic_label)
+                    or matches_module(analysis.scope_modules, control.semantic_label)
+                )
+            ]
+            named_controls = [control for control in controls if control.semantic_label]
+            anchor = next((control for control in named_controls if control.class_name != "h1"), None)
+            if anchor is None and named_controls:
+                anchor = named_controls[0]
             anchor_label = anchor.semantic_label if anchor else None
             navigation = ["Launch application", *paths.get(screen.screen_id, [])]
 
@@ -3513,7 +3533,9 @@ class AutopilotPrototypeService:
                 target_anchor = next(
                     (
                         item for item in (target_screen.controls if target_screen else [])
-                        if item.enabled and item.locators and item.semantic_label
+                    if item.enabled and item.locators and item.semantic_label
+                    and (not analysis.scope_modules or not is_primary_tab(item.semantic_label)
+                         or matches_module(analysis.scope_modules, item.semantic_label))
                     ),
                     None,
                 )
@@ -3583,7 +3605,7 @@ class AutopilotPrototypeService:
                 # login attempts and account lockout.
                 if input_is_sensitive:
                     continue
-                input_is_reachable = screen.screen_id in paths
+                input_is_reachable = screen.screen_id in paths or (discovery.target_kind == "web" and bool(screen.url))
                 input_candidate = input_is_reachable and not input_is_sensitive
                 input_navigation = [*navigation]
                 input_dependency = (
@@ -3747,7 +3769,7 @@ class AutopilotPrototypeService:
         ]
         if scope.login_observed:
             input_summary.append(
-                "Runtime Discovery observed a sign-in form; provide an approved non-production User ID/email and Password to continue authenticated journeys."
+                "Runtime Discovery observed a sign-in form. Autopilot uses matching test inputs and requests any remaining required field."
             )
         else:
             input_summary.append(
@@ -3765,7 +3787,11 @@ class AutopilotPrototypeService:
         ]
         return analysis.model_copy(
             update={
-                "tests": merged,
+                "tests": [
+                    test for test in merged if scope_allows_design_case(
+                        analysis.scope_modules, test, {screen.screen_id for screen in discovery.screens if screen.in_requested_scope},
+                    )
+                ] if analysis.scope_modules else merged,
                 "analysis_basis": basis,
                 "critical_journeys": observed_journeys[:20] or analysis.critical_journeys,
                 "scope": scope,
@@ -4466,7 +4492,9 @@ class AutopilotPrototypeService:
         if service is not None and session is not None:
             await asyncio.to_thread(service.stop_session, session.arn)
 
-    async def execute_smoke(self, job_id: str, request: AutopilotExecutionRequest) -> AutopilotExecutionResult:
+    async def execute_smoke(
+        self, job_id: str, request: AutopilotExecutionRequest, *, local_target: LocalAndroidTarget | None = None,
+    ) -> AutopilotExecutionResult:
         job = await self.load_job(job_id)
         analysis = await self.load_analysis(job_id)
         job_target_kind = str(job.get("target_kind") or analysis.target_kind or "android")
@@ -4491,6 +4519,7 @@ class AutopilotPrototypeService:
         source_path = evidence_dir / ("page-source.html" if target_kind == "web" else "page-source.xml")
         device_farm_service: DeviceFarmService | None = None
         device_farm_session: DeviceFarmSession | None = None
+        transport = None
 
         try:
             if target_kind == "web":
@@ -4519,7 +4548,13 @@ class AutopilotPrototypeService:
                 app_reference = request.appium_app or str(apk_path)
                 browserstack_options: Dict[str, Any] | None = None
 
-                if request.provider == "browserstack":
+                if request.provider == "local_runner":
+                    if local_target is None:
+                        raise LocalDeviceUnavailable("Select a paired Android runner and repository APK.")
+                    transport = await LocalAutopilotTransport.open(self.settings, local_target)
+                    appium_url = transport
+                    app_reference = ""
+                elif request.provider == "browserstack":
                     app_reference = await self._browserstack_app_url(job_id, apk_path, analysis.sha256)
                     appium_url = self.settings.BROWSERSTACK_HUB_URL
                     browserstack_options = {
@@ -4572,9 +4607,11 @@ class AutopilotPrototypeService:
                 error = None
         except Exception as exc:
             result = {"provider": request.provider}
-            execution_status = "blocked" if self._looks_like_connector_problem(exc) else "failed"
+            execution_status = "blocked" if isinstance(exc, LocalDeviceUnavailable) or self._looks_like_connector_problem(exc) else "failed"
             error = f"{type(exc).__name__}: {exc}"
         finally:
+            if transport is not None:
+                await transport.close()
             await self._stop_device_farm_session(device_farm_service, device_farm_session)
 
         finished = datetime.now(timezone.utc)
@@ -4634,7 +4671,7 @@ class AutopilotPrototypeService:
 
     @staticmethod
     def _execute_appium_sync(
-        appium_url: str,
+        appium_url: str | LocalAutopilotTransport,
         app_reference: str,
         request: AutopilotExecutionRequest,
         screenshot_path: Path,
@@ -4703,14 +4740,16 @@ class AutopilotPrototypeService:
             from appium.options.android import UiAutomator2Options
 
             options = UiAutomator2Options().load_capabilities(capabilities)
-        client_config = AppiumClientConfig(remote_server_addr=appium_url)
+        local_connection = appium_url.connection() if isinstance(appium_url, LocalAutopilotTransport) else None
+        client_config = AppiumClientConfig(remote_server_addr=appium_url) if local_connection is None else None
         # Bound each HTTP request so a stale provider session cannot hold the
         # smoke worker indefinitely.
-        client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
+        if client_config is not None:
+            client_config.timeout = max(30, min(180, int(adb_exec_timeout_ms / 1000)))
         appium_started = time.monotonic()
         try:
             driver = webdriver.Remote(
-                appium_url,
+                local_connection or appium_url,
                 options=options,
                 client_config=client_config,
             )

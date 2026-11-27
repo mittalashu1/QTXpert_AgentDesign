@@ -1,10 +1,12 @@
 from pathlib import Path
+from types import SimpleNamespace
 import base64
 
 import pytest
 
 from app.config import Settings
 from app.services.appium_compat import ProviderLifecycleUnavailable, validate_target_surface
+from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.schemas.autopilot import (
     AutopilotAnalysis,
     AutopilotDiscoveryResult,
@@ -975,6 +977,36 @@ def test_suite_interpreter_fills_input_and_suppresses_sensitive_evidence(tmp_pat
     assert "do-not-log" not in str(evidence)
 
 
+def test_suite_resolves_an_encrypted_sign_in_field_with_its_observed_editable_control(tmp_path, monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    form = next(screen for screen in discovery.screens if screen.screen_id == "screen-auth")
+    credential = next(control for control in form.controls if control.semantic_label == "Password")
+    key = AutopilotDiscoveryService.runtime_input_key(form.screen_id, credential.control_id, "credential")
+    driver = _Driver()
+    resolved = []
+
+    def resolve(discovered_driver, control, _by):
+        assert discovered_driver is driver
+        resolved.append(control)
+        return driver.element
+
+    monkeypatch.setattr(AutopilotDiscoveryService, "_find_discovered_element", staticmethod(resolve))
+    test = _test_ir([QTXIRStep(
+        action="fill", description="Enter saved password", target="Password",
+        input_key=key, screen_id=form.screen_id, locator_strategy="accessibility_id",
+        locator_value="Password",
+    )])
+    evidence = service._execute_test(
+        driver, test, tmp_path, "com.qtx.demo", discovery=discovery,
+        input_values={key: "fixture-only-value"}, sensitive_input_keys={key},
+    )
+
+    assert resolved == [credential]
+    assert driver.element.values == ["fixture-only-value"]
+    assert evidence["sensitive_input_evidence_suppressed"] is True
+
+
 def test_suite_interpreter_redacts_native_hierarchy_values(tmp_path):
     service = AutopilotSuiteService(Settings(), prototype=object())
     driver = _Driver()
@@ -1465,6 +1497,251 @@ def test_suite_will_not_backtrack_from_a_populated_credential_form():
 
     assert driver.back_calls == 0
     assert driver.auth_submit_clicks == 0
+
+
+def test_suite_reopens_the_uploaded_app_when_back_leaves_a_public_route(monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    driver = _RouteDriver()
+    driver.page_source = driver.auth_source
+    activations = []
+
+    def leave_app():
+        driver.back_calls += 1
+        driver.page_source = '<hierarchy><node package="com.other.app" /></hierarchy>'
+
+    def activate(package):
+        activations.append(package)
+        driver.page_source = driver.root_source
+
+    monkeypatch.setattr(driver, "back", leave_app)
+    monkeypatch.setattr(driver, "activate_app", activate, raising=False)
+    test = _test_ir([QTXIRStep(
+        action="assert_visible", description="Verify Get started", target="Get started",
+        screen_id="screen-root", locator_strategy="id",
+        locator_value="com.qtx.demo:id/get_started", locator_confidence=0.98,
+    )])
+
+    navigation = service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert activations == ["com.qtx.demo"]
+    assert driver.back_calls == 1
+    assert driver.auth_submit_clicks == 0
+    assert navigation == [{
+        "from_screen": "screen-auth",
+        "to_screen": "screen-root",
+        "control": "Reopened the uploaded app after Back",
+    }]
+
+
+@pytest.mark.parametrize("recorded_back", [True, False])
+def test_suite_restores_verified_android_home_from_a_nested_screen(monkeypatch, recorded_back):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    home = discovery.screens[0]
+    home.controls.append(DiscoveredControl(
+        control_id="home-tab", semantic_label="Home Tab 1 of 4", selected=True, clickable=True, risk="safe",
+    ))
+    preview = _observed_screen("screen-send", [DiscoveredControl(
+        control_id="recipient-search", semantic_label="Search recipients", input_capable=True, input_kind="test_data",
+    )])
+    back_edge = DiscoveredTransition(
+        from_screen_id=preview.screen_id, to_screen_id=home.screen_id,
+        action="back", control_id="__back__", control_label="Back", duplicate_state=True,
+    )
+    discovery = discovery.model_copy(update={
+        "provider": "local_runner", "screens": [home, preview],
+        "transitions": [back_edge] if recorded_back else [],
+    })
+    driver = _RouteDriver()
+    driver.page_source = '<hierarchy><node package="com.qtx.demo" text="Send money" /></hierarchy>'
+
+    def back_to_home():
+        driver.back_calls += 1
+        driver.page_source = driver.root_source
+
+    monkeypatch.setattr(driver, "back", back_to_home)
+    monkeypatch.setattr(service, "_identify_discovered_screen",
+                        lambda *_args: home if driver.page_source == driver.root_source else preview)
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    test = _test_ir([QTXIRStep(
+        action="assert_visible", description="Verify Get started", target="Get started",
+        screen_id=home.screen_id, locator_strategy="id", locator_value="com.qtx.demo:id/get_started",
+        locator_confidence=0.98,
+    )])
+
+    navigation = service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert driver.back_calls == 1
+    assert driver.auth_submit_clicks == 0
+    assert navigation[0]["from_screen"] == preview.screen_id
+    assert navigation[0]["to_screen"] == home.screen_id
+    assert navigation[0]["control"].startswith("Back")
+
+
+@pytest.mark.parametrize("approved", [True, False])
+@pytest.mark.parametrize("during_navigation", [True, False])
+def test_suite_recovers_an_observed_session_timeout_before_a_saved_tab_case(monkeypatch, approved, during_navigation):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery().model_copy(update={"provider": "local_runner"})
+    home = discovery.screens[0]
+    home.controls.append(DiscoveredControl(
+        control_id="home-tab", semantic_label="Home Tab 1 of 4", selected=True, clickable=True, risk="safe",
+    ))
+    driver = _RouteDriver()
+    timeout_source = (
+        '<hierarchy><node package="com.qtx.demo" class="android.widget.TextView" text="Session Timeout" />'
+        '<node package="com.qtx.demo" class="android.widget.Button" text="Login" clickable="true" /></hierarchy>'
+    )
+    driver.page_source = timeout_source
+    entries = []
+    if during_navigation:
+        home_tab = DiscoveredControl(
+            control_id="home-link", semantic_label="Home Tab 1 of 4", clickable=True, risk="safe",
+            locators=[DiscoveryLocator(strategy="id", value="com.qtx.demo:id/home", confidence=0.98)],
+        )
+        cards = _observed_screen("screen-cards", [home_tab, DiscoveredControl(
+            control_id="cards-tab", semantic_label="Cards Tab 3 of 4", selected=True, clickable=True, risk="safe",
+        )])
+        discovery.screens.append(cards)
+        discovery.transitions.append(DiscoveredTransition(
+            from_screen_id=cards.screen_id, to_screen_id=home.screen_id, control_id=home_tab.control_id,
+            control_label=home_tab.semantic_label,
+        ))
+        cards_source = '<hierarchy><node package="com.qtx.demo" text="Cards" /></hierarchy>'
+        driver.page_source = cards_source
+        monkeypatch.setattr(service, "_identify_discovered_screen", lambda *_args: {
+            cards_source: cards, driver.root_source: home,
+        }.get(driver.page_source))
+        monkeypatch.setattr(service, "_route_control_element", lambda *_args: SimpleNamespace(
+            click=lambda: setattr(driver, "page_source", timeout_source),
+        ))
+
+    def find_login(_driver, control, _by):
+        assert control.semantic_label == "Login"
+
+        def open_login():
+            entries.append(control.semantic_label)
+            driver.page_source = driver.root_source
+
+        return SimpleNamespace(click=open_login)
+
+    monkeypatch.setattr(AutopilotDiscoveryService, "_find_discovered_element", staticmethod(find_login))
+    monkeypatch.setattr("app.services.autopilot_suite.time.sleep", lambda _seconds: None)
+    test = _test_ir([QTXIRStep(
+        action="assert_visible", description="Verify the saved Home control", target="Get started",
+        screen_id=home.screen_id, locator_strategy="id", locator_value="com.qtx.demo:id/get_started",
+        locator_confidence=0.98,
+    )])
+    if not approved:
+        with pytest.raises(ProviderLifecycleUnavailable, match="Approved saved sign-in inputs"):
+            service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+        assert not entries
+        return
+
+    navigation = service._prepare_test_screen(
+        driver, test, discovery, "com.qtx.demo", input_values={"__auth_approved": "1"},
+    )
+
+    assert entries == ["Login"]
+    assert navigation[0]["control"] == "Opened Login after session timeout"
+    assert navigation[0]["to_screen"] == home.screen_id
+
+
+@pytest.mark.parametrize("selected", [True, False])
+def test_tab_selection_reports_session_expiry_instead_of_a_false_assertion_failure(tmp_path, monkeypatch, selected):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _RouteDriver()
+    driver.page_source = (
+        '<hierarchy><node package="com.qtx.demo" class="android.widget.TextView" text="Session Timeout" />'
+        '<node package="com.qtx.demo" class="android.widget.Button" text="Login" clickable="true" /></hierarchy>'
+    )
+    monkeypatch.setattr(AutopilotDiscoveryService, "_wait_for_tab_selection", lambda *_args: selected)
+    test = _test_ir([QTXIRStep(
+        action="assert_visible", description="Verify selected Home tab", assertion="selected", target="Home Tab 1 of 4",
+    )])
+
+    result = service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+    assert result["session_timed_out"] is True
+
+
+def test_tab_selection_reports_an_observed_service_error(tmp_path, monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    driver = _RouteDriver()
+    driver.page_source = (
+        '<hierarchy><node package="com.qtx.demo" text="An unexpected technical error has occurred" /></hierarchy>'
+    )
+    monkeypatch.setattr(AutopilotDiscoveryService, "_wait_for_tab_selection", lambda *_args: False)
+    test = _test_ir([QTXIRStep(
+        action="assert_visible", description="Verify selected Cards tab", assertion="selected", target="Cards Tab 3 of 4",
+    )])
+
+    with pytest.raises(AssertionError, match="The app reported a network or service error while opening Cards"):
+        service._execute_test(driver, test, tmp_path, "com.qtx.demo")
+
+
+def test_suite_restarts_app_once_when_observed_service_error_blocks_a_case(monkeypatch):
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    driver = _RouteDriver()
+    driver.page_source = (
+        '<hierarchy><node package="com.qtx.demo" text="An unexpected technical error has occurred" /></hierarchy>'
+    )
+    error = DiscoveredScreen(screen_id="screen-error", fingerprint="error", page_label="Service error")
+    identified = service._identify_discovered_screen
+    restarted = []
+
+    def identify(active_driver, saved_discovery, package):
+        if "technical error" in active_driver.page_source:
+            return error
+        return identified(active_driver, saved_discovery, package)
+
+    def restart(active_driver, package, _activity, *, use_provider_reset):
+        restarted.append((package, use_provider_reset))
+        active_driver.page_source = active_driver.root_source
+
+    monkeypatch.setattr(service, "_identify_discovered_screen", identify)
+    monkeypatch.setattr(service, "_reset_to_application", restart)
+    test = _test_ir([QTXIRStep(
+        action="assert_visible", description="Verify Get started", target="Get started",
+        screen_id="screen-root", locator_strategy="id", locator_value="com.qtx.demo:id/get_started",
+        locator_confidence=0.98,
+    )])
+
+    navigation = service._prepare_test_screen(driver, test, discovery, "com.qtx.demo")
+
+    assert restarted == [("com.qtx.demo", False)]
+    assert navigation == [{
+        "from_screen": "screen-error",
+        "to_screen": "screen-root",
+        "control": "Restarted the uploaded app after its service error",
+    }]
+
+
+def test_suite_starts_on_the_verified_credential_form_when_login_entry_is_setup():
+    service = AutopilotSuiteService(Settings(), prototype=object())
+    discovery = _navigation_discovery()
+    driver = _RouteDriver()
+    driver.page_source = driver.auth_source
+    entry = [
+        QTXIRStep(action="launch_app", description="Open app", screen_id="screen-root"),
+        QTXIRStep(action="tap", description="Open login", target="Login", screen_id="screen-root",
+                  expected_resulting_screen_id="screen-auth"),
+    ]
+    fill = QTXIRStep(action="fill", description="Enter approved credentials", target="User ID",
+                     screen_id="screen-auth", input_key="credential_reference")
+    assertion = QTXIRStep(action="assert_visible", description="Check the home page", target="Home", screen_id="screen-home")
+    authenticated = _test_ir([*entry, fill, assertion])
+    verify_entry = _test_ir([*entry, assertion, assertion])
+
+    resumed = service._resume_at_visible_sign_in_form(driver, authenticated, discovery, "com.qtx.demo", "android")
+    untouched = service._resume_at_visible_sign_in_form(driver, verify_entry, discovery, "com.qtx.demo", "android")
+
+    assert resumed.steps == [fill, assertion]
+    assert authenticated.steps == [*entry, fill, assertion]
+    assert untouched is verify_entry
+    assert driver.back_calls == 0
 
 
 def test_missing_route_with_same_label_is_repaired_from_observed_safe_control():

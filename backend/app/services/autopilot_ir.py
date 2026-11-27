@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 import hashlib
 from datetime import datetime, timezone
+from app.services.autopilot_instructions import scope_allows_case
+from app.services.autopilot_progress import apply_business_answer
 from textwrap import dedent
 from typing import Mapping, Optional
 
@@ -361,6 +363,9 @@ class AutopilotIRCompiler:
             self.compile_test(test, analysis, discovery, setup, input_values=input_values, full_uat=full_uat)
             for test in analysis.tests
         ]
+        if analysis.scope_modules:
+            scoped_screens = {screen.screen_id for screen in discovery.screens if screen.in_requested_scope} if discovery else set()
+            compiled = [test for test in compiled if scope_allows_case(analysis.scope_modules, test, scoped_screens)]
         bucket_counts: dict[str, int] = {}
         for test in compiled:
             bucket_counts[test.bucket] = bucket_counts.get(test.bucket, 0) + 1
@@ -810,6 +815,17 @@ class AutopilotIRCompiler:
             ir_steps = []
         else:
             ir_steps = resolved_steps if resolved_steps is not None else self._ir_steps(test, analysis)
+        money_journey = re.search(r"\b(?:add|send)\s+(?:money|funds)\b", f"{test.title} {test.journey or ''}", re.I)
+        explicitly_submits = test.destructive or any(
+            step.action in {"tap", "click", "prompt_choice"}
+            and re.search(r"\b(?:confirm|submit|post|pay now|send now|deposit now)\b", step.target or "", re.I)
+            for step in ir_steps
+        )
+        needs_ledger = full_uat and readiness == "executable" and bool(money_journey) and explicitly_submits
+        if needs_ledger:
+            readiness = "discovery_required"
+            readiness_reason = "Use an authored UAT transaction case with a captured reference and independent ledger evidence."
+            promoted = False
         generated = QTXTestIR(
             test_id=test.id,
             title=test.title,
@@ -822,7 +838,7 @@ class AutopilotIRCompiler:
             requires_test_data=test.requires_test_data,
             autonomous_candidate=test.autonomous_candidate,
             synthetic_data_strategy=test.synthetic_data_strategy,
-            dependency=test.dependency,
+            dependency=readiness_reason if needs_ledger else test.dependency,
             promoted_by_discovery=promoted,
             readiness_reason=readiness_reason,
             steps=ir_steps,
@@ -838,6 +854,8 @@ class AutopilotIRCompiler:
             runtime_prompt_choice=test.runtime_prompt_choice,
             data_probes=list(test.data_probes),
         )
+        if setup is not None and setup.business_answers:
+            generated = apply_business_answer(generated, reversed(setup.business_answers))
         generated.appium_python = self._appium_script(test, analysis, generated)
         return generated
 
@@ -1142,7 +1160,8 @@ class AutopilotIRCompiler:
                     return None, f"No deterministic input locator is strong enough for: {control.semantic_label}"
                 field_type = control.input_kind or "text"
                 input_key = self._runtime_input_key(current.screen_id, control.control_id, field_type)
-                value = (input_values or {}).get(input_key)
+                use_invalid_probe = field_type != "credential" and test.synthetic_data_strategy == "invalid_field_probe"
+                value = None if use_invalid_probe else (input_values or {}).get(input_key)
                 synthetic = False
                 if value is None or not str(value).strip():
                     # A first-pass candidate never fabricates credentials or

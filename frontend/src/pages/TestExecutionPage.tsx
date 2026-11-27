@@ -1,5 +1,5 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
@@ -39,18 +39,22 @@ import OpenInNewOutlinedIcon from "@mui/icons-material/OpenInNewOutlined";
 import SearchOutlinedIcon from "@mui/icons-material/SearchOutlined";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import { AxiosError } from "axios";
-import { executionPlansApi, executionsApi, testCasesApi, uploadsApi } from "@/services/api";
+import { executionPlansApi, executionsApi, localRunnersApi, testCasesApi, uploadsApi } from "@/services/api";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
 import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
 import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
-import type { ExecutionPlan, ExecutionPlanCase, ExecutionProvider, ExecutionRun, ExecutionTargetKind, UploadedAsset } from "@/types/domain";
+import type {
+  AuthoredAutomation, ExecutionFixtureBinding, ExecutionPlan, ExecutionPlanCase, ExecutionProvider, ExecutionRun,
+  ExecutionTargetKind, UploadedAsset,
+} from "@/types/domain";
 
 type CaseExecutionUpdate = {
   id: string;
   steps?: string[];
   expected_result?: string;
   test_data?: Record<string, unknown> | null;
+  automation?: AuthoredAutomation | null;
 };
 
 const STEPS = ["Import from Test Design", "Select cases", "Preflight and run", "Review evidence"];
@@ -143,12 +147,14 @@ export default function TestExecutionPage() {
   const { selectedProjectId } = useSelectedProject();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [sourceRunId, setSourceRunId] = useState("");
+  const [searchParams] = useSearchParams();
+  const [sourceRunId, setSourceRunId] = useState(searchParams.get("design") || "");
   const [planId, setPlanId] = useState("");
   const [planName, setPlanName] = useState("");
   const [suiteType, setSuiteType] = useState<"smoke" | "feature" | "regression" | "deep_regression">("regression");
   const [targetKind, setTargetKind] = useState<ExecutionTargetKind>("web");
   const [provider, setProvider] = useState<ExecutionProvider>("playwright");
+  const [localRunnerId, setLocalRunnerId] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [appAssetId, setAppAssetId] = useState("");
   const [deviceName, setDeviceName] = useState("Google Pixel 8");
@@ -171,6 +177,7 @@ export default function TestExecutionPage() {
     steps: string;
     expectedResult: string;
     testData: string;
+    automation: string;
   } | null>(null);
   const [caseEditorError, setCaseEditorError] = useState("");
   const [uploadError, setUploadError] = useState("");
@@ -225,6 +232,29 @@ export default function TestExecutionPage() {
   );
   const currentPlan = plan.data;
   const currentCases = useMemo(() => currentPlan?.cases ?? [], [currentPlan]);
+  const selectedFixtureKeys = useMemo(() => [...new Set(currentCases.flatMap((item) => (
+    selection[item.id] && (modes[item.id] ?? item.execution_mode) === "automated"
+      && item.automation?.target_kind === targetKind
+      ? item.automation.steps.flatMap((step) => step.input_key ? [step.input_key] : [])
+      : []
+  )))].sort(), [currentCases, modes, selection, targetKind]);
+  const fixtures = useQuery({
+    queryKey: ["execution-fixtures", planId, targetKind, appAssetId, baseUrl.trim()],
+    queryFn: () => executionPlansApi.fixtures(planId, {
+      target_kind: targetKind, app_asset_id: appAssetId || undefined, base_url: baseUrl.trim() || undefined,
+    }).then((response) => response.data),
+    enabled: Boolean(planId && selectedFixtureKeys.length && (targetKind === "web" ? baseUrl.trim() : appAssetId)),
+  });
+  const runners = useQuery({
+    queryKey: ["paired-runners", selectedProjectId],
+    queryFn: () => localRunnersApi.list(selectedProjectId!).then((response) => response.data),
+    enabled: Boolean(selectedProjectId && targetKind === "android"),
+  });
+  const pairedDevices = (runners.data ?? [])
+    .filter((runner) => runner.status === "online" && runner.autopilot_android && runner.platforms.includes("android"))
+    .flatMap((runner) => runner.devices.map((serial) => ({
+      id: runner.id, serial, value: `${runner.id}/${serial}`, label: `${runner.name} · ${serial}`,
+    })));
   const sourceRun = useMemo(
     () => currentPlan?.source_generation_run_id
       ? (history.data ?? []).find((item) => item.id === currentPlan.source_generation_run_id)
@@ -243,15 +273,17 @@ export default function TestExecutionPage() {
       : {
         app_asset_id: appAssetId || undefined,
         device_name: deviceName.trim() || undefined,
-        platform_version: platformVersion.trim() || undefined,
+        platform_version: provider === "local_runner" ? undefined : platformVersion.trim() || undefined,
+        local_runner_id: provider === "local_runner" ? localRunnerId : undefined,
         no_reset: noReset,
         auto_grant_permissions: autoGrantPermissions,
       }),
-  }), [appAssetId, autoGrantPermissions, baseUrl, deviceName, noReset, platformVersion, provider, targetKind]);
+  }), [appAssetId, autoGrantPermissions, baseUrl, deviceName, localRunnerId, noReset, platformVersion, provider, targetKind]);
   const targetSignature = useMemo(() => JSON.stringify(targetPayload), [targetPayload]);
   const targetConfigured = targetKind === "web"
     ? Boolean(baseUrl.trim())
-    : Boolean(appAssetId && deviceName.trim() && provider !== "playwright");
+    : Boolean(appAssetId && deviceName.trim() && provider !== "playwright"
+      && (provider !== "local_runner" || pairedDevices.some((device) => device.value === `${localRunnerId}/${deviceName}`)));
 
   useEffect(() => {
     if (!currentPlan) return;
@@ -271,18 +303,23 @@ export default function TestExecutionPage() {
 
   useEffect(() => {
     if (targetKind === "web") {
-      setProvider("playwright");
       setAppAssetId("");
-      setPreflightSignature("");
       return;
     }
-    setProvider("browserstack");
     const selected = mobileAssets.assets.find((asset) => asset.id === appAssetId);
     if (selected && repositoryAssetExtension(selected) !== (targetKind === "android" ? "apk" : "ipa")) {
       setAppAssetId("");
     }
-    setPreflightSignature("");
   }, [appAssetId, mobileAssets.assets, targetKind]);
+
+  const chooseTargetKind = (next: ExecutionTargetKind) => {
+    setTargetKind(next);
+    setProvider(next === "web" ? "playwright" : "browserstack");
+    setLocalRunnerId("");
+    setDeviceName(next === "ios" ? "iPhone 15" : "Google Pixel 8");
+    setPlatformVersion(next === "ios" ? "17" : "14.0");
+    setPreflightSignature("");
+  };
 
   const importPlan = useMutation({
     mutationFn: () => executionPlansApi.import({
@@ -294,6 +331,8 @@ export default function TestExecutionPage() {
     onSuccess: (created) => {
       setPlanId(created.id);
       setPlanName("");
+      const targets = new Set(created.cases.flatMap((item) => item.automation ? [item.automation.target_kind] : []));
+      if (targets.size === 1) chooseTargetKind([...targets][0]);
       queryClient.invalidateQueries({ queryKey: ["execution-plans", selectedProjectId] });
       queryClient.invalidateQueries({ queryKey: ["execution-plan", created.id] });
     },
@@ -310,6 +349,7 @@ export default function TestExecutionPage() {
           steps: override.steps,
           expected_result: override.expected_result,
           test_data: override.test_data,
+          automation: override.automation,
         } : {}),
       })),
     ).then((response) => response.data),
@@ -328,6 +368,16 @@ export default function TestExecutionPage() {
       queryClient.invalidateQueries({ queryKey: ["execution-plans", selectedProjectId] });
       setPreflightSignature("");
       setInputDirty(false);
+    },
+  });
+
+  const saveFixtures = useMutation({
+    mutationFn: (bindings: Record<string, ExecutionFixtureBinding>) =>
+      executionPlansApi.bindFixtures(planId, bindings).then((response) => response.data),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(["execution-plan", updated.id], updated);
+      queryClient.invalidateQueries({ queryKey: ["execution-plans", selectedProjectId] });
+      setPreflightSignature("");
     },
   });
 
@@ -369,6 +419,7 @@ export default function TestExecutionPage() {
       steps: (item.steps ?? []).join("\n"),
       expectedResult: item.expected_result ?? "",
       testData: item.test_data ? JSON.stringify(item.test_data, null, 2) : "",
+      automation: item.automation ? JSON.stringify(item.automation, null, 2) : "",
     });
   };
 
@@ -397,9 +448,20 @@ export default function TestExecutionPage() {
         return;
       }
     }
+    let automation: AuthoredAutomation | null = null;
+    if (caseEditor.automation.trim()) {
+      try {
+        const parsed: unknown = JSON.parse(caseEditor.automation);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("object expected");
+        automation = parsed as AuthoredAutomation;
+      } catch {
+        setCaseEditorError("Authored automation must be a JSON object. Use the same format as generated automation.");
+        return;
+      }
+    }
     setCaseEditorError("");
     saveSelection.mutate(
-      { id: caseEditor.id, steps, expected_result: caseEditor.expectedResult.trim(), test_data: testData },
+      { id: caseEditor.id, steps, expected_result: caseEditor.expectedResult.trim(), test_data: testData, automation },
       {
         onSuccess: () => setCaseEditor(null),
         onError: (reason) => setCaseEditorError(apiErrorMessage(reason, "The execution case could not be saved.")),
@@ -452,6 +514,7 @@ export default function TestExecutionPage() {
   ));
   const canExecute = Boolean(
     currentPlan
+    && targetConfigured
     && selectedAutomated.length > 0
     && readyCount > 0
     && selectedAttention.length === 0
@@ -459,6 +522,7 @@ export default function TestExecutionPage() {
     && preflightSignature === targetSignature
     && !selectionDirty
     && !inputDirty
+    && !saveFixtures.isPending
     && !execute.isPending,
   );
   const planRuns = (runs.data ?? []).filter((run) => !planId || run.execution_plan_id === planId);
@@ -473,7 +537,7 @@ export default function TestExecutionPage() {
       <PageHeader
         eyebrow="M4 · EXECUTION FABRIC"
         title="Test execution"
-        description="Import a Test Design set, select cases, run mobile tests on BrowserStack or web checks with Playwright, and retain evidence."
+        description="Run selected Test Design cases on a paired Android device, BrowserStack, or Playwright and review their evidence."
       />
 
       <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 2 }}>
@@ -646,7 +710,7 @@ export default function TestExecutionPage() {
                 <Grid size={{ xs: 12, md: 3 }}>
                   <FormControl fullWidth size="small">
                     <InputLabel id="target-kind-label">Application target</InputLabel>
-                    <Select labelId="target-kind-label" label="Application target" value={targetKind} onChange={(event) => setTargetKind(event.target.value as ExecutionTargetKind)}>
+                    <Select labelId="target-kind-label" label="Application target" value={targetKind} onChange={(event) => chooseTargetKind(event.target.value as ExecutionTargetKind)}>
                       <MenuItem value="web">Web application</MenuItem>
                       <MenuItem value="android">Android APK</MenuItem>
                       <MenuItem value="ios">iOS IPA</MenuItem>
@@ -685,10 +749,38 @@ export default function TestExecutionPage() {
                 <Grid size={{ xs: 12, md: targetKind === "web" ? 4 : 3 }}><TextField fullWidth size="small" label="Run name (optional)" value={runName} onChange={(event) => setRunName(event.target.value)} /></Grid>
                 {targetKind !== "web" && <>
                   <Grid size={{ xs: 12, md: 3 }}>
-                    <TextField fullWidth size="small" label="Execution provider" value="BrowserStack real device" InputProps={{ readOnly: true }} />
+                    <TextField fullWidth select size="small" label="Execution provider" value={provider} onChange={(event) => {
+                      setProvider(event.target.value as ExecutionProvider);
+                      setLocalRunnerId("");
+                      setDeviceName(event.target.value === "local_runner" ? "" : "Google Pixel 8");
+                      setPreflightSignature("");
+                    }}>
+                      <MenuItem value="browserstack">BrowserStack real device</MenuItem>
+                      {targetKind === "android" && <MenuItem value="local_runner">Paired Android device</MenuItem>}
+                    </TextField>
                   </Grid>
-                  <Grid size={{ xs: 12, md: 3 }}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => { setDeviceName(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "iPhone 15" : "Google Pixel 8"} /></Grid>
-                  <Grid size={{ xs: 12, md: 2 }}><TextField fullWidth size="small" label="OS version" value={platformVersion} onChange={(event) => { setPlatformVersion(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "17" : "14.0"} /></Grid>
+                  {provider === "local_runner" ? (
+                    <Grid size={{ xs: 12, md: 5 }}>
+                      <Stack direction="row" spacing={1} alignItems="flex-start">
+                        <TextField fullWidth select size="small" label="Paired Android device"
+                          value={pairedDevices.some((device) => device.value === `${localRunnerId}/${deviceName}`) ? `${localRunnerId}/${deviceName}` : ""}
+                          helperText={runners.isError ? "Could not load paired devices." : undefined}
+                          onChange={(event) => {
+                            const selected = pairedDevices.find((device) => device.value === event.target.value);
+                            setLocalRunnerId(selected?.id || "");
+                            setDeviceName(selected?.serial || "");
+                            setPreflightSignature("");
+                          }}>
+                          <MenuItem value="" disabled>{pairedDevices.length ? "Select a device" : "No paired devices online"}</MenuItem>
+                          {pairedDevices.map((device) => <MenuItem value={device.value} key={device.value}>{device.label}</MenuItem>)}
+                        </TextField>
+                        <Button size="small" onClick={() => void runners.refetch()}>Refresh</Button>
+                      </Stack>
+                    </Grid>
+                  ) : <>
+                    <Grid size={{ xs: 12, md: 3 }}><TextField fullWidth size="small" label="Device name" value={deviceName} onChange={(event) => { setDeviceName(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "iPhone 15" : "Google Pixel 8"} /></Grid>
+                    <Grid size={{ xs: 12, md: 2 }}><TextField fullWidth size="small" label="OS version" value={platformVersion} onChange={(event) => { setPlatformVersion(event.target.value); setPreflightSignature(""); }} placeholder={targetKind === "ios" ? "17" : "14.0"} /></Grid>
+                  </>}
                   <Grid size={{ xs: 12 }}>
                     <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
                       <FormControlLabel control={<Switch size="small" checked={noReset} onChange={(event) => { setNoReset(event.target.checked); setPreflightSignature(""); }} />} label="Keep app state (no reset)" />
@@ -709,6 +801,34 @@ export default function TestExecutionPage() {
                 <Chip label={`${currentPlan.blocked_cases} blocked/approval`} color={currentPlan.blocked_cases ? "warning" : "default"} variant="outlined" />
                 {preflightSignature && <Chip label="Preflight matches target" color="success" variant="outlined" />}
               </Stack>
+              {selectedFixtureKeys.length > 0 && <Stack spacing={1.25} sx={{ mt: 2 }}>
+                <Typography variant="subtitle1" fontWeight={800}>Saved Test Data</Typography>
+                {fixtures.isError && <Alert severity="error">Saved Test Data could not be loaded for this target.</Alert>}
+                {fixtures.isSuccess && !fixtures.data.length && <Alert severity="info">Save reusable inputs for this build or URL in Autopilot to bind them here.</Alert>}
+                {selectedFixtureKeys.map((key) => {
+                  const existing = currentPlan.fixture_bindings?.[key];
+                  const choices = (fixtures.data ?? []).flatMap((fixture) => fixture.parts.map((part) => ({
+                    value: `${fixture.id}/${part}`, binding: { record_id: fixture.id, part },
+                    label: `${fixture.label}${part === "value" ? "" : ` · ${part}`} · ${new Date(fixture.updated_at).toLocaleString()}`,
+                  })));
+                  const selectedValue = existing ? `${existing.record_id}/${existing.part}` : "";
+                  return <TextField key={key} select fullWidth size="small" label={key.replaceAll("_", " ")}
+                    value={choices.some((choice) => choice.value === selectedValue) ? selectedValue : ""}
+                    helperText={existing && !choices.some((choice) => choice.value === selectedValue) ? "The saved binding is unavailable for this target." : undefined}
+                    disabled={saveFixtures.isPending || fixtures.isFetching || inputDirty || selectionDirty || !["draft", "ready", "blocked"].includes(currentPlan.status)}
+                    onChange={(event) => {
+                      const next = { ...currentPlan.fixture_bindings };
+                      const choice = choices.find((item) => item.value === event.target.value);
+                      if (choice) next[key] = choice.binding;
+                      else delete next[key];
+                      saveFixtures.mutate(next);
+                    }}>
+                    <MenuItem value="">Choose Test Data</MenuItem>
+                    {choices.map((choice) => <MenuItem key={choice.value} value={choice.value}>{choice.label}</MenuItem>)}
+                  </TextField>;
+                })}
+                {saveFixtures.isError && <Alert severity="error">{apiErrorMessage(saveFixtures.error, "The Test Data binding could not be saved.")}</Alert>}
+              </Stack>}
               {inputRequirements.length > 0 && <Box sx={{ mt: 2, p: 1.75, border: "1px solid", borderColor: "warning.light", borderRadius: 2, bgcolor: "warning.light" }}>
                 <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={1} sx={{ mb: 1 }}>
                   <Box>
@@ -832,10 +952,10 @@ export default function TestExecutionPage() {
               fullWidth
               multiline
               minRows={5}
-              label="Automation steps"
+              label={caseEditor?.automation.trim() ? "Human-readable steps" : "Automation steps"}
               value={caseEditor?.steps ?? ""}
               onChange={(event) => setCaseEditor((previous) => previous ? { ...previous, steps: event.target.value } : previous)}
-              helperText="Web: navigate / click / fill locator :: value / assert-text / assert-url. Mobile also supports launch, tap, back, and assert-visible."
+              helperText={caseEditor?.automation.trim() ? "Execution uses the authored automation below." : "Web supports navigate, click, fill, and assert-text. Mobile also supports launch, tap, back, and assert-visible."}
             />
             <TextField
               fullWidth
@@ -854,6 +974,13 @@ export default function TestExecutionPage() {
               onChange={(event) => setCaseEditor((previous) => previous ? { ...previous, testData: event.target.value } : previous)}
               placeholder={'{\n  "account_reference": "qa-customer-01"\n}'}
               helperText="Use references or synthetic values only. Passwords, tokens, and OTPs are rejected and never stored."
+            />
+            <TextField
+              fullWidth multiline minRows={3}
+              label="Authored automation JSON"
+              value={caseEditor?.automation ?? ""}
+              onChange={(event) => setCaseEditor((previous) => previous ? { ...previous, automation: event.target.value } : previous)}
+              helperText="Use target_kind and structured steps. Fill steps reference saved Test Data by input_key."
             />
             {caseEditorError && <Alert severity="error">{caseEditorError}</Alert>}
           </Stack>

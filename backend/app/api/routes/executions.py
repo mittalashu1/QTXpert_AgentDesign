@@ -30,15 +30,21 @@ from app.database.models.test_case import TestCase
 from app.database.models.user import User
 from app.database.session import AsyncSessionLocal, get_db_session
 from app.schemas.autopilot import AutopilotExecutionRequest
+from app.schemas.authored_execution import SignedLedgerEvidence
 from app.schemas.execution import (
     AutopilotDashboardSummary,
     DashboardSummary,
     DefectCreate,
     DefectOut,
     ExecutionCreate,
+    ExecutionResultOut,
     ExecutionRunOut,
 )
 from app.services.autopilot import AutopilotPrototypeService
+from app.services.appium_compat import validate_target_surface
+from app.services.authored_execution import (
+    authored_url, native_text_visible, origin_of, prepare_authored_cases, record_ui_outcome, verified_ledger_outcome,
+)
 from app.services.browserstack_errors import upload_error_message
 from app.services.defect_logging import safe_target_reference, secret_safe_text
 from app.services.upload_repository import UploadRepositoryService
@@ -276,6 +282,7 @@ async def _validate_execution_target(
     no_reset: bool,
     auto_grant_permissions: bool,
     settings: Settings,
+    local_runner_id: UUID | None = None,
 ) -> dict:
     """Validate and normalize a web or mobile execution target.
 
@@ -343,6 +350,11 @@ async def _validate_execution_target(
             if target_kind in (runner.capabilities or {}).get("platforms", [])
             and runner.last_seen_at is not None
             and runner.last_seen_at >= runner_online_after
+            and (
+                local_runner_id is None or (
+                    runner.id == local_runner_id and normalized_device in (runner.capabilities or {}).get("devices", [])
+                )
+            )
         ]
         if not capable:
             raise HTTPException(
@@ -367,6 +379,7 @@ async def _validate_execution_target(
                 "platform_version": (platform_version or "").strip() or None,
                 "no_reset": bool(no_reset),
                 "auto_grant_permissions": bool(auto_grant_permissions),
+                "selected_runner_id": str(local_runner_id) if local_runner_id else None,
             },
         }
 
@@ -607,6 +620,8 @@ def _execute_mobile_sync(
     """Run explicit Appium DSL cases and return serializable evidence."""
     from appium import webdriver
     from appium.webdriver.common.appiumby import AppiumBy
+    from selenium.common.exceptions import NoSuchElementException
+    from selenium.webdriver.support.ui import WebDriverWait
 
     options, _ = _mobile_capabilities(
         target_kind=target_kind,
@@ -624,9 +639,10 @@ def _execute_mobile_sync(
     try:
         time.sleep(3)
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-        driver.get_screenshot_as_file(str(screenshot_path))
         page_source = driver.page_source or ""
-        source_path.write_text(page_source, encoding="utf-8")
+        if not any(case.get("uses_fixture") for case in cases):
+            driver.get_screenshot_as_file(str(screenshot_path))
+            source_path.write_text(page_source, encoding="utf-8")
         session_metadata = _mobile_session_metadata(driver)
         results: list[dict] = []
         locator_map = {
@@ -638,6 +654,8 @@ def _execute_mobile_sync(
             started = time.perf_counter()
             status_value = "passed"
             error: str | None = None
+            business_reference = None
+            index, action = 0, "start case"
             evidence: dict = {
                 "target_kind": target_kind,
                 "provider": provider,
@@ -646,7 +664,40 @@ def _execute_mobile_sync(
                 "dsl_version": "mobile-1.0",
             }
             try:
-                compiled = _compile_mobile_steps(case.get("steps") or [])
+                if case.get("ledger_identity"):
+                    ready, _, _ = validate_target_surface(
+                        driver, expected_package=case["ledger_identity"], page_source=driver.page_source or "",
+                    )
+                    if not ready:
+                        raise ValueError("The allowlisted UAT app is outside the active device surface.")
+                authored = case.get("authored_steps")
+                compiled = [] if authored else _compile_mobile_steps(case.get("steps") or [])
+                for index, step in enumerate(authored or [], 1):
+                    action = step["action"]
+                    if action == "back":
+                        driver.back()
+                        continue
+                    if action == "assert_text":
+                        WebDriverWait(driver, 10).until(
+                            lambda session: native_text_visible(session.page_source, step["value"]),
+                            "The expected mobile UI text was absent.",
+                        )
+                        continue
+                    try:
+                        element = driver.find_element(locator_map[step["strategy"]], step["locator"])
+                    except NoSuchElementException:
+                        if action == "capture_reference":
+                            continue
+                        raise
+                    if action == "tap":
+                        element.click()
+                    elif action == "fill":
+                        element.clear()
+                        element.send_keys(step["value"])
+                    elif action == "assert_visible" and not element.is_displayed():
+                        raise AssertionError("The expected mobile control was hidden.")
+                    elif action == "capture_reference":
+                        business_reference = element.text if element.is_displayed() else None
                 for action, strategy, value in compiled:
                     if action == "back":
                         driver.back()
@@ -663,10 +714,16 @@ def _execute_mobile_sync(
                 evidence.update(session_metadata)
             except ValueError as exc:
                 status_value = "blocked"
-                error = str(exc)
+                error = (
+                    f"Authored mobile step {index} ({action}) could not run."
+                    if case.get("uses_fixture") and index else str(exc)
+                )
             except Exception as exc:  # Appium element/driver errors are product evidence.
                 status_value = "failed"
-                error = str(exc)[:4000]
+                error = (
+                    f"Authored mobile step {index} ({action}) failed with {type(exc).__name__}."
+                    if case.get("uses_fixture") else str(exc)[:4000]
+                )
             results.append(
                 {
                     "id": str(case["id"]),
@@ -674,6 +731,7 @@ def _execute_mobile_sync(
                     "duration_ms": int((time.perf_counter() - started) * 1000),
                     "error_message": error,
                     "evidence": evidence,
+                    "business_reference": business_reference,
                 }
             )
         return {
@@ -739,8 +797,9 @@ async def _run_mobile_execution(run_id: UUID) -> None:
                 selectinload(ExecutionRun.execution_plan),
             )
             .where(ExecutionRun.id == run_id)
+            .with_for_update(of=ExecutionRun)
         )
-        if run is None:
+        if run is None or run.status != ExecutionStatus.QUEUED:
             return
         if run.provider == "local_runner":
             # Local execution is leased by the outbound runner API. Never let
@@ -786,14 +845,22 @@ async def _run_mobile_execution(run_id: UUID) -> None:
                 }
             if not appium_url:
                 raise RuntimeError("No Appium endpoint is available for this execution.")
+            prepared = await prepare_authored_cases(
+                db, settings, run, [result for result in run.results if result.status == ResultStatus.PENDING],
+            )
+            if any(case["uses_fixture"] for case in prepared.values()) and browserstack_options:
+                # BrowserStack command/network recordings can include fixture values.
+                browserstack_options.update({"debug": False, "networkLogs": False, "appiumLogs": False, "video": False})
             cases = [
                 {
                     "id": str(result.id),
                     "steps": (
-                        result.execution_plan_case.steps
-                        if result.execution_plan_case is not None
-                        else result.test_case.steps
+                        (result.execution_spec or {}).get("legacy_steps")
+                        if result.execution_spec is not None
+                        else (result.execution_plan_case or result.test_case).steps
                     ),
+                    "ledger_identity": (result.execution_spec or {}).get("ledger_identity"),
+                    **prepared.get(result.id, {}),
                 }
                 for result in run.results
                 if result.status == ResultStatus.PENDING
@@ -818,7 +885,7 @@ async def _run_mobile_execution(run_id: UUID) -> None:
                     adb_exec_timeout_ms=settings.AUTOPILOT_APPIUM_ADB_EXEC_TIMEOUT_SECONDS * 1000,
                 ),
                 timeout=settings.AUTOPILOT_SMOKE_TIMEOUT_SECONDS,
-            )
+            ) if cases else {}
             evidence_ids = await _persist_execution_evidence(
                 db,
                 run,
@@ -843,6 +910,7 @@ async def _run_mobile_execution(run_id: UUID) -> None:
                     # the plan stores only non-secret setup references.
                     "input_references": dict((run.target_metadata or {}).get("input_references") or {}),
                 }
+                record_ui_outcome(result, update.get("business_reference"))
             run.target_metadata = {
                 **(run.target_metadata or {}),
                 "asset_filename": asset.filename,
@@ -932,8 +1000,9 @@ async def _run_execution(run_id: UUID) -> None:
                 selectinload(ExecutionRun.execution_plan),
             )
             .where(ExecutionRun.id == run_id)
+            .with_for_update(of=ExecutionRun)
         )
-        if run is None:
+        if run is None or run.status != ExecutionStatus.QUEUED:
             return
         run.status = ExecutionStatus.RUNNING
         run.started_at = datetime.now(timezone.utc)
@@ -942,6 +1011,9 @@ async def _run_execution(run_id: UUID) -> None:
         await db.commit()
         try:
             from playwright.async_api import async_playwright
+            prepared = await prepare_authored_cases(
+                db, get_settings(), run, [result for result in run.results if result.status == ResultStatus.PENDING],
+            )
             async with async_playwright() as manager:
                 browser_type = getattr(manager, run.browser)
                 browser = await browser_type.launch(headless=True)
@@ -950,20 +1022,54 @@ async def _run_execution(run_id: UUID) -> None:
                     if result.status != ResultStatus.PENDING:
                         continue
                     started = time.perf_counter()
+                    authored = prepared.get(result.id, {}).get("authored_steps")
+                    base_url = run.base_url or ""
                     try:
-                        source_steps = (
-                            result.execution_plan_case.steps
-                            if result.execution_plan_case is not None
-                            else result.test_case.steps
-                        )
-                        steps = _compile_steps(source_steps or [], run.base_url or "")
+                        source_steps = (result.execution_spec or {}).get("legacy_steps")
+                        if source_steps is None:
+                            source_steps = (result.execution_plan_case or result.test_case).steps
+                        steps = [] if authored else _compile_steps(source_steps or [], base_url)
                     except ValueError as exc:
                         result.status = ResultStatus.BLOCKED
                         result.error_message = str(exc)
                         result.duration_ms = 0
                         continue
-                    page = await context.new_page()
+                    case_context = await browser.new_context(ignore_https_errors=False) if authored else context
+                    page = await case_context.new_page()
+                    current_action = "open target"
+                    reference = None
                     try:
+                        if authored:
+                            async def scoped_navigation(route):
+                                request = route.request
+                                if request.is_navigation_request() and origin_of(request.url) != origin_of(base_url):
+                                    await route.abort()
+                                else:
+                                    await route.continue_()
+
+                            await page.route("**/*", scoped_navigation)
+                            if authored[0]["action"] != "navigate":
+                                await page.goto(base_url, wait_until="domcontentloaded", timeout=30_000)
+                            for step in authored:
+                                current_action = step["action"]
+                                if current_action == "navigate":
+                                    await page.goto(authored_url(base_url, step["value"]), wait_until="domcontentloaded", timeout=30_000)
+                                elif current_action == "back":
+                                    await page.go_back(wait_until="domcontentloaded", timeout=30_000)
+                                elif current_action == "assert_text":
+                                    await page.get_by_text(step["value"], exact=True).wait_for(state="visible", timeout=10_000)
+                                else:
+                                    locator = page.locator(step["locator"])
+                                    if current_action == "tap":
+                                        await locator.click(timeout=10_000)
+                                    elif current_action == "fill":
+                                        if origin_of(page.url) != origin_of(base_url):
+                                            raise ValueError("The target moved outside the Test Data origin.")
+                                        await locator.fill(step["value"], timeout=10_000)
+                                    elif current_action == "assert_visible":
+                                        await locator.wait_for(state="visible", timeout=10_000)
+                                    elif current_action == "capture_reference":
+                                        reference = await locator.inner_text(timeout=10_000)
                         for action, target, value in steps:
                             if action == "navigate":
                                 await page.goto(target, wait_until="domcontentloaded", timeout=30_000)
@@ -977,22 +1083,29 @@ async def _run_execution(run_id: UUID) -> None:
                                 raise AssertionError(f"Expected URL to contain {target!r}, got {page.url!r}")
                         result.status = ResultStatus.PASSED
                         result.evidence = {
-                            "final_url": page.url,
-                            "title": await page.title(),
-                            "dsl_version": "1.0",
+                            "final_url": safe_target_reference(page.url) if authored else page.url,
+                            "dsl_version": "authored-1.0" if authored else "1.0",
                             "input_references": dict((run.target_metadata or {}).get("input_references") or {}),
                         }
+                        if not authored:
+                            result.evidence = {**result.evidence, "title": await page.title()}
+                        record_ui_outcome(result, reference)
                     except Exception as exc:
                         result.status = ResultStatus.FAILED
-                        result.error_message = str(exc)[:4000]
+                        result.error_message = (
+                            f"Authored web action {current_action} failed with {type(exc).__name__}."
+                            if authored else str(exc)[:4000]
+                        )
                         result.evidence = {
-                            "final_url": page.url,
-                            "dsl_version": "1.0",
+                            "final_url": safe_target_reference(page.url) if authored else page.url,
+                            "dsl_version": "authored-1.0" if authored else "1.0",
                             "input_references": dict((run.target_metadata or {}).get("input_references") or {}),
                         }
                     finally:
                         result.duration_ms = int((time.perf_counter() - started) * 1000)
                         await page.close()
+                        if authored:
+                            await case_context.close()
                 await browser.close()
             run.passed_tests = sum(x.status == ResultStatus.PASSED for x in run.results)
             run.failed_tests = sum(x.status == ResultStatus.FAILED for x in run.results)
@@ -1010,6 +1123,49 @@ async def _run_execution(run_id: UUID) -> None:
             if run.execution_plan is not None:
                 run.execution_plan.status = "completed" if run.status == ExecutionStatus.COMPLETED else "failed"
             await db.commit()
+
+
+@router.post("/execution-results/{result_id}/ledger-evidence", response_model=ExecutionResultOut)
+async def import_ledger_evidence(
+    result_id: UUID,
+    payload: SignedLedgerEvidence,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+    settings: Annotated[Settings, Depends(get_settings)],
+):
+    run = await db.scalar(
+        select(ExecutionRun).join(Project, Project.id == ExecutionRun.project_id)
+        .join(ExecutionResult, ExecutionResult.execution_run_id == ExecutionRun.id)
+        .where(ExecutionResult.id == result_id, Project.owner_id == user.id)
+        .with_for_update(of=ExecutionRun)
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail="Execution result not found")
+    result = next(item for item in run.results if item.id == result_id)
+    evidence = dict(result.evidence or {})
+    if run.status != ExecutionStatus.COMPLETED or evidence.get("business_verification") not in {
+        "awaiting_ledger", "verified", "mismatch",
+    }:
+        raise HTTPException(status_code=409, detail="This result is waiting for a successful UI assertion and captured reference.")
+    try:
+        matches, ledger = verified_ledger_outcome(settings=settings, run=run, result=result, evidence=payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if evidence.get("business_verification") != "awaiting_ledger":
+        if (evidence.get("ledger") or {}).get("digest") == ledger["digest"]:
+            return result
+        raise HTTPException(status_code=409, detail="Ledger evidence is already recorded for this result.")
+    result.status = ResultStatus.PASSED if matches else ResultStatus.FAILED
+    result.error_message = None if matches else "The signed ledger state differs from the expected business outcome."
+    result.evidence = {
+        **evidence, "ledger": ledger, "business_verification": "verified" if matches else "mismatch",
+        "ledger_received_at": datetime.now(timezone.utc).isoformat(),
+    }
+    run.passed_tests = sum(item.status == ResultStatus.PASSED for item in run.results)
+    run.failed_tests = sum(item.status == ResultStatus.FAILED for item in run.results)
+    run.blocked_tests = sum(item.status == ResultStatus.BLOCKED for item in run.results)
+    await db.commit()
+    return result
 
 
 @router.post("/executions", response_model=ExecutionRunOut, status_code=status.HTTP_201_CREATED)
@@ -1036,6 +1192,7 @@ async def create_execution(
         no_reset=payload.no_reset,
         auto_grant_permissions=payload.auto_grant_permissions,
         settings=settings,
+        local_runner_id=payload.local_runner_id,
     )
     cases = (await db.scalars(
         select(TestCase).join(GenerationRun).where(

@@ -26,6 +26,7 @@ import DownloadOutlinedIcon from "@mui/icons-material/DownloadOutlined";
 import DeleteOutlineOutlinedIcon from "@mui/icons-material/DeleteOutlineOutlined";
 import FolderOutlinedIcon from "@mui/icons-material/FolderOutlined";
 import { uploadsApi } from "@/services/api";
+import { apiClient } from "@/services/apiClient";
 import { isReusableProjectDocument, UploadedAsset } from "@/types/domain";
 import { repositoryAssetExtension } from "@/components/repositoryAssets";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
@@ -36,6 +37,14 @@ export type RepositoryMode = "test_data" | "documents";
 interface UploadsPageProps {
   mode?: RepositoryMode;
 }
+
+type SavedAutopilotInput = {
+  id: string;
+  label: string;
+  category: "credential" | "test_data";
+  application: string;
+  updated_at: string;
+};
 
 const DOCUMENT_EXTENSIONS = new Set([
   "pdf", "docx", "pptx", "txt", "md", "json", "csv", "xlsx", "xls", "xml", "yaml", "yml", "html", "htm",
@@ -106,6 +115,11 @@ export default function UploadsPage({ mode = "test_data" }: UploadsPageProps) {
       // after the repository split.
     }).then((response) => response.data),
     enabled: Boolean(selectedProjectId),
+  });
+  const savedInputs = useQuery({
+    queryKey: ["autopilot-test-data", selectedProjectId],
+    queryFn: () => apiClient.get<SavedAutopilotInput[]>("/autopilot/test-data").then((response) => response.data),
+    enabled: !isDocumentRepository && Boolean(selectedProjectId),
   });
 
   const uploadMutation = useMutation({
@@ -222,6 +236,38 @@ export default function UploadsPage({ mode = "test_data" }: UploadsPageProps) {
           : "Test data is stored separately from documents and mobile builds. Execution evidence and reports are kept in Test reports."}
       </Alert>
       {(uploadMutation.isPending || uploadsQuery.isLoading) && <LinearProgress />}
+
+      {!isDocumentRepository && (
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="h6" fontWeight={800}>Saved Autopilot inputs</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Values are encrypted. Select Use saved Test Data when starting or rerunning the matching app.
+            </Typography>
+            {savedInputs.isLoading && <LinearProgress aria-label="Loading saved inputs" />}
+            {savedInputs.isError && <Alert severity="error">Saved Autopilot inputs could not be loaded.</Alert>}
+            {savedInputs.data?.length === 0 && <Typography variant="body2">No saved Autopilot inputs in this project.</Typography>}
+            {!!savedInputs.data?.length && (
+              <TableContainer>
+                <Table size="small" aria-label="Saved Autopilot inputs">
+                  <TableHead><TableRow><TableCell>Input</TableCell><TableCell>Application</TableCell><TableCell>Saved</TableCell></TableRow></TableHead>
+                  <TableBody>
+                    {savedInputs.data.map((item) => (
+                      <TableRow key={item.id}>
+                        <TableCell><Typography variant="body2">{item.label}</Typography>
+                          <Typography variant="caption" color="text.secondary">{item.category === "credential" ? "Sign-in input" : "Test data"}</Typography>
+                        </TableCell>
+                        <TableCell>{item.application}</TableCell>
+                        <TableCell>{formatDate(item.updated_at)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
         {[

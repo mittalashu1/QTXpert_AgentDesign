@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.routes import autopilot
+from app.schemas.autopilot import AutopilotInputRequest, AutopilotSavedInput, AutopilotSetupProfile
 
 
 @pytest.mark.parametrize("field_time,bundle_time,expected", [
@@ -50,15 +51,40 @@ def test_disabled_sign_in_can_resume_after_corrected_input():
     assert autopilot._resume_should_run_discovery(False, discovery, setup)
 
 
+def test_mobile_replay_reuses_approved_login_without_consuming_a_one_time_code(monkeypatch):
+    async def resolve(*args, **kwargs):
+        assert not kwargs.get("consume")
+        assert args[-1] != "runtime_otp"
+        return json.dumps({
+            "username": "qa@example.test", "password": "fixture-password", "otp": "fixture-otp",
+        }) if args[-1] == "credential_reference" else None
+
+    monkeypatch.setattr(autopilot, "resolve_value", resolve)
+    setup = SimpleNamespace(
+        input_requests=[], saved_inputs=[], safe_authentication_approved=True,
+        runtime_input_requests=[SimpleNamespace(
+            key="runtime_otp", category="credential", input_hint="otp", label="Verification code", sensitive=True,
+        )],
+    )
+    record = SimpleNamespace(surface_key="fixture", job_id="job", owner_id="owner", project_id="project")
+
+    values, _ = asyncio.run(autopilot._resolve_discovery_input_values(None, None, record, setup, consume_otp=False))
+
+    assert values == {
+        "__auth_approved": "1", "__username": "qa@example.test", "__password": "fixture-password",
+    }
+
+
 @pytest.mark.parametrize(
-    ("bundle_time", "expected_auth_approval"),
+    ("bundle_job_id", "bundle_time", "expected_auth_approval"),
     [
-        ("2026-10-04T11:00:00Z", False),
-        ("2026-10-04T13:00:00Z", True),
+        ("job", "2026-10-04T11:00:00Z", False),
+        ("job", "2026-10-04T13:00:00Z", True),
+        ("other-job", "2026-10-04T13:00:00Z", False),
     ],
 )
 def test_discovery_does_not_replay_rejected_credentials_without_a_new_value(
-    monkeypatch, bundle_time, expected_auth_approval,
+    monkeypatch, bundle_job_id, bundle_time, expected_auth_approval,
 ):
     async def resolve(*args, **kwargs):
         assert kwargs.get("job_id") == "job"
@@ -70,24 +96,22 @@ def test_discovery_does_not_replay_rejected_credentials_without_a_new_value(
         }.get(args[-1])
 
     monkeypatch.setattr(autopilot, "resolve_value", resolve)
-    request = SimpleNamespace(
+    request = AutopilotInputRequest(
         key="runtime_user", category="credential", input_hint="username",
-        label="User ID", sensitive=True,
+        label="User ID", sensitive=True, reason="Observed sign-in field.",
     )
-    setup = SimpleNamespace(
-        input_requests=[], runtime_input_requests=[request], safe_authentication_approved=True,
+    setup = AutopilotSetupProfile(
+        job_id="job", runtime_input_requests=[request], safe_authentication_approved=True,
         saved_inputs=[
-            SimpleNamespace(key="runtime_user", updated_at="2026-10-04T11:00:00Z"),
-            SimpleNamespace(key="credential_reference", updated_at=bundle_time),
+            AutopilotSavedInput(
+                key="runtime_user", job_id="job", label="User ID", category="credential",
+                decision="provide", has_value=True, updated_at="2026-10-04T11:00:00Z",
+            ),
+            AutopilotSavedInput(
+                key="credential_reference", job_id=bundle_job_id, label="UAT sign-in credentials",
+                category="credential", decision="provide", has_value=True, updated_at=bundle_time,
+            ),
         ],
-        model_copy=lambda *, update: SimpleNamespace(
-            input_requests=[], runtime_input_requests=[request],
-            safe_authentication_approved=update["safe_authentication_approved"],
-            saved_inputs=[
-                SimpleNamespace(key="runtime_user", updated_at="2026-10-04T11:00:00Z"),
-                SimpleNamespace(key="credential_reference", updated_at=bundle_time),
-            ],
-        ),
     )
     record = SimpleNamespace(surface_key="fh-money", job_id="job", owner_id="owner", project_id="project")
     discovery = SimpleNamespace(

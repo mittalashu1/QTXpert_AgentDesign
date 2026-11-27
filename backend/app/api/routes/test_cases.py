@@ -240,6 +240,11 @@ async def update_run(
         test_case.scenario = scenario
         test_case.objective = objective
         test_case.preconditions = (item.preconditions.strip() or None) if item.preconditions else None
+        if test_case.automation and (
+            test_case.steps != cleaned_steps or test_case.expected_result != expected_result
+        ):
+            test_case.automation = None
+            test_case.is_automation_candidate = False
         test_case.steps = cleaned_steps
         test_case.expected_result = expected_result
 

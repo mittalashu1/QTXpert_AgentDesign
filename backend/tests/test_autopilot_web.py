@@ -145,6 +145,32 @@ def test_ambiguous_generic_submit_does_not_guess_authentication():
     assert AutopilotWebService._auth_submit_control(normalized) is None
 
 
+def test_sign_in_preserves_named_fields_outside_username_and_password():
+    locator = [DiscoveryLocator(strategy="css", value="#member", confidence=0.95)]
+    controls = [
+        DiscoveredControl(
+            control_id="member",
+            semantic_label="Member number",
+            class_name="input",
+            input_capable=True,
+            input_kind="test_data",
+            locators=locator,
+        ),
+        DiscoveredControl(
+            control_id="sign-in",
+            semantic_label="Sign in",
+            class_name="button",
+            clickable=True,
+            locators=locator,
+        ),
+    ]
+
+    field = AutopilotWebService._ensure_auth_input_semantics(controls)[0]
+
+    assert field.semantic_label == "Member number"
+    assert field.input_kind == "credential"
+
+
 def test_generic_continue_does_not_promote_a_single_search_field():
     controls = [
         DiscoveredControl(

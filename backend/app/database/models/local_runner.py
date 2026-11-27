@@ -43,3 +43,24 @@ class LocalRunnerJob(Base, TimestampMixin):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class LocalAutopilotSession(Base, TimestampMixin):
+    """One outbound Appium session reservation per paired runner."""
+    __tablename__ = "local_autopilot_sessions"
+
+    runner_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("local_device_runners.id", ondelete="CASCADE"), primary_key=True
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False)
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("uploaded_assets.id", ondelete="CASCADE"), nullable=False
+    )
+    device_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    package_name: Mapped[str] = mapped_column(String(300), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    worker_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
+    command_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
+    command_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    command_delivered: Mapped[bool] = mapped_column(nullable=False, default=False)
+    command_answer: Mapped[str | None] = mapped_column(Text, nullable=True)

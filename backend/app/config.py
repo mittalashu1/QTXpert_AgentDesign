@@ -231,7 +231,8 @@ class Settings(BaseSettings):
         allowed = {item.strip().casefold() for item in self.AUTOPILOT_FULL_UAT_TARGET_ALLOWLIST.split(",") if item.strip()}
         return target_key in allowed
     AUTOPILOT_STORAGE_PATH: str = "./storage/autopilot"
-    AUTOPILOT_DB_PERSISTENCE_ENABLED: bool = True
+    # Explicitly opt in for a local stack that runs with PostgreSQL.
+    AUTOPILOT_DB_PERSISTENCE_ENABLED: Optional[bool] = None
     # A short retry absorbs a transient Neon failover without holding the
     # analysis worker or HTTP request indefinitely. The filesystem manifest
     # remains the immediate fallback when all attempts are exhausted.
@@ -295,6 +296,7 @@ class Settings(BaseSettings):
     # production; the JWT secret is a backwards-compatible derivation fallback
     # so existing deployments remain safe during rollout.
     AUTOPILOT_INPUT_ENCRYPTION_KEY: Optional[str] = None
+    UAT_LEDGER_VERIFICATION_KEY: Optional[str] = None
     AUTOPILOT_INPUT_SESSION_TTL_SECONDS: int = Field(default=3600, ge=300, le=86400)
     AUTOPILOT_INPUT_SAVED_TTL_DAYS: int = Field(default=90, ge=1, le=3650)
 
@@ -365,6 +367,7 @@ class Settings(BaseSettings):
     # Rate limiting
     # ------------------------------------------------------------------ #
     RATE_LIMIT_PER_MINUTE: int = 60
+    LOCAL_RUNNER_RATE_LIMIT_PER_MINUTE: int = Field(default=600, ge=60, le=3000)
 
     @field_validator("JWT_SECRET")
     @classmethod

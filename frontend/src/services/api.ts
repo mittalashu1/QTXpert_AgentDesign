@@ -7,7 +7,11 @@ import {
   User,
   UserRole,
   TestCase,
+  AuthoredAutomation,
   ExecutionRun,
+  ExecutionResult,
+  ExecutionFixture,
+  ExecutionFixtureBinding,
   ExecutionPlan,
   ExecutionSuiteType,
   DashboardSummary,
@@ -74,6 +78,8 @@ export const executionsApi = {
     auto_grant_permissions?: boolean;
   }) => apiClient.post<ExecutionRun>("/executions", payload),
   get: (runId: string) => apiClient.get<ExecutionRun>(`/executions/${runId}`),
+  importLedgerEvidence: (resultId: string, payload: Record<string, unknown>) =>
+    apiClient.post<ExecutionResult>(`/execution-results/${resultId}/ledger-evidence`, payload),
   createDefect: (resultId: string, payload: { title: string; severity: string; description: string; integration_provider?: "local" | "jira" }) =>
     apiClient.post<Defect>(`/execution-results/${resultId}/defects`, payload),
 };
@@ -105,16 +111,22 @@ export const executionPlansApi = {
       steps?: string[];
       expected_result?: string;
       test_data?: Record<string, unknown> | null;
+      automation?: AuthoredAutomation | null;
     }>,
   ) => apiClient.patch<ExecutionPlan>(`/execution-plans/${planId}/cases`, { cases }),
   updateInputs: (planId: string, inputs: Record<string, string>) =>
     apiClient.patch<ExecutionPlan>(`/execution-plans/${planId}/inputs`, { inputs }),
+  fixtures: (planId: string, target: { target_kind: ExecutionTargetKind; app_asset_id?: string; base_url?: string }) =>
+    apiClient.get<ExecutionFixture[]>(`/execution-plans/${planId}/fixtures`, { params: target }),
+  bindFixtures: (planId: string, bindings: Record<string, ExecutionFixtureBinding>) =>
+    apiClient.patch<ExecutionPlan>(`/execution-plans/${planId}/fixtures`, { bindings }),
   preflight: (planId: string, payload: {
     target_kind: ExecutionTargetKind;
     provider: ExecutionProvider;
     base_url?: string;
     app_asset_id?: string;
     device_name?: string;
+    local_runner_id?: string;
     platform_version?: string;
     appium_url?: string;
     appium_app?: string;
@@ -128,6 +140,7 @@ export const executionPlansApi = {
     base_url?: string;
     app_asset_id?: string;
     device_name?: string;
+    local_runner_id?: string;
     platform_version?: string;
     appium_url?: string;
     appium_app?: string;

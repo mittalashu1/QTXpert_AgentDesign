@@ -1,9 +1,12 @@
 """Focused tests for the secure Autopilot checkpoint input contract."""
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 from app.config import Settings
 from app.database.models.autopilot_input import AutopilotInputRecord
+from app.database.models.autopilot_job import AutopilotJob
 from app.schemas.autopilot import (
     AutopilotInputRequest,
     AutopilotInputSubmission,
@@ -17,7 +20,9 @@ from app.services.autopilot_input_store import (
     _reconcile_runtime_reuse_submissions,
     _fernet,
     _metadata,
+    apply_submissions,
     generate_synthetic_value,
+    list_metadata,
 )
 from app.services.autopilot_ir import credential_value_available
 
@@ -125,6 +130,47 @@ def test_saved_credentials_satisfy_the_run_after_explicit_reuse():
     )
 
     assert credential_value_available(setup) is True
+
+
+async def test_reusing_saved_test_data_preserves_earlier_run_bindings():
+    settings = Settings(JWT_SECRET="unit-test-secret")
+    owner_id = UUID("11111111-1111-1111-1111-111111111111")
+    project_id = UUID("22222222-2222-2222-2222-222222222222")
+    scope = "test-android-build"
+    first = AutopilotJob(id=UUID(int=1), owner_id=owner_id, project_id=project_id, job_id="first", surface_key=scope)
+    second = AutopilotJob(id=UUID(int=2), owner_id=owner_id, project_id=project_id, job_id="second", surface_key=scope)
+    key = "credential_reference"
+    request = AutopilotInputRequest(
+        key=key, label="UAT sign-in credentials", category="credential",
+        reason="Observed sign-in form.", source="plan", credential_bundle=True,
+    )
+    rows: list[AutopilotInputRecord] = []
+    db = AsyncMock()
+    db.add = rows.append
+    db.scalars.side_effect = lambda _query: SimpleNamespace(all=lambda: list(reversed(rows)))
+    original = AutopilotInputSubmission(
+        key=key, decision="provide", value='{"username":"uat-user","password":"test-only-password"}',
+        save_for_reuse=True,
+    )
+
+    await apply_submissions(db, settings, first, [original], {key: request})
+    _, metadata = await apply_submissions(
+        db, settings, second, [AutopilotInputSubmission(key=key, decision="reuse")],
+        {key: request.model_copy(update={"source": "runtime"})},
+    )
+    assert [row.job_id for row in rows] == [first.job_id, second.job_id]
+    assert rows[0].encrypted_value == rows[1].encrypted_value
+    assert rows[0].decision == "provide"
+    assert [(item.job_id, item.decision) for item in metadata] == [(second.job_id, "reuse")]
+    first_metadata = await list_metadata(db, owner_id, project_id, scope, job_id=first.job_id)
+    assert [(item.job_id, item.decision) for item in first_metadata] == [(first.job_id, "provide")]
+
+    await apply_submissions(
+        db, settings, second, [AutopilotInputSubmission(key=key, decision="skip")], {key: request},
+    )
+    assert rows[0].encrypted_value and rows[1].encrypted_value is None
+    saved = await list_metadata(db, owner_id, project_id, scope)
+    assert [(item.job_id, item.decision) for item in saved] == [(first.job_id, "provide")]
 
 
 def _saved_runtime_username(*, input_key="runtime_old_username", label="Sign-in · Username · User ID / email", source="runtime"):

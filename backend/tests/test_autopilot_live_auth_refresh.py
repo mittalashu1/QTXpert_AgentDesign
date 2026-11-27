@@ -54,6 +54,12 @@ class StagedLoginDriver:
                 self.pending_state = None
         if self.state == "home":
             body = '<node text="Dashboard" class="android.widget.TextView" />'
+        elif self.state == "rejection_dialog":
+            body = (
+                '<node class="android.view.View" content-desc="Wrong Credentials." />'
+                '<node class="android.view.View" content-desc="You have entered invalid User ID or Password." />'
+                '<node class="android.view.View" content-desc="Okay" clickable="true" enabled="true" />'
+            )
         else:
             label = "Username / Email Address *" if self.state == "username" else "Password"
             value = self.values.get(self.state, "")
@@ -185,6 +191,8 @@ def mobile_discovery(monkeypatch, tmp_path):
     webdriver = types.ModuleType("appium.webdriver")
     webdriver.Remote = lambda *_args, **_kwargs: driver
     appium.webdriver = webdriver
+    client_config = types.ModuleType("appium.webdriver.client_config")
+    client_config.AppiumClientConfig = SimpleNamespace
     by_module = types.ModuleType("appium.webdriver.common.appiumby")
     by_module.AppiumBy = AppiumBy
     android_options = types.ModuleType("appium.options.android")
@@ -194,6 +202,7 @@ def mobile_discovery(monkeypatch, tmp_path):
     for name, module in {
         "appium": appium,
         "appium.webdriver": webdriver,
+        "appium.webdriver.client_config": client_config,
         "appium.webdriver.common": types.ModuleType("appium.webdriver.common"),
         "appium.webdriver.common.appiumby": by_module,
         "appium.options": types.ModuleType("appium.options"),
@@ -432,6 +441,18 @@ def test_visible_password_rejection_stops_before_second_tap(mobile_discovery):
     assert result["actions_attempted"] == 2
     assert "Sign-in feedback category: credential_rejected" in result["warnings"][-1]
     assert "synthetic-secret" not in str(result)
+
+
+def test_existing_credential_rejection_dialog_reports_a_blocked_login(mobile_discovery):
+    driver, run, _ = mobile_discovery
+    driver.state = "rejection_dialog"
+
+    result = run()
+
+    assert result["authentication_blocked"] is True
+    assert "rejected the saved UAT sign-in details" in result["stop_reason"]
+    assert any(screen.observed_issues for screen in result["screens"])
+    assert driver.submitted == []
 
 
 @pytest.mark.parametrize("message, category", [

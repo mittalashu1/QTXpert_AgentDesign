@@ -27,7 +27,7 @@ AutopilotTestBucket = Literal[
     "regression",
 ]
 AutopilotTargetKind = Literal["android", "ios", "web"]
-AutopilotProvider = Literal["browserstack", "devicefarm", "appium", "playwright"]
+AutopilotProvider = Literal["browserstack", "devicefarm", "appium", "playwright", "local_runner"]
 AutopilotExecutionMode = Literal["safe_navigation", "full_uat"]
 
 # The phase is intentionally separate from the legacy ``status`` field.  The
@@ -177,7 +177,8 @@ class AutopilotInitialInput(BaseModel):
 
     label: str = Field(min_length=1, max_length=120)
     category: Literal["credential", "test_data"] = "test_data"
-    value: str = Field(min_length=1, max_length=4000)
+    value: str = Field(min_length=1, max_length=4000, repr=False)
+    credential_field: bool = False
 
 
 class AutopilotSavedInput(BaseModel):
@@ -195,6 +196,14 @@ class AutopilotSavedInput(BaseModel):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     expires_at: Optional[str] = None
+
+
+class AutopilotRepositoryInput(BaseModel):
+    id: UUID
+    label: str
+    category: Literal["credential", "test_data"]
+    application: str
+    updated_at: datetime
 
 
 class AutopilotInputRequest(BaseModel):
@@ -447,6 +456,7 @@ class AutopilotAnalysis(BaseModel):
     inferred_domain: str = "General mobile application"
     app_summary: str = ""
     critical_journeys: List[str] = Field(default_factory=list)
+    scope_modules: List[str] = Field(default_factory=list)
     clarification_questions: List[str] = Field(default_factory=list)
     tests: List[AutopilotTest] = Field(default_factory=list)
     release_risks: List[str] = Field(default_factory=list)
@@ -583,6 +593,30 @@ class AutopilotReportEvidenceAsset(BaseModel):
     scope: Literal["test", "suite", "smoke"] = "test"
 
 
+class AutopilotBusinessAnswerRequest(BaseModel):
+    expected_behavior: str = Field(min_length=1, max_length=1500)
+    visible_text: str = Field(default="", max_length=240)
+
+
+class AutopilotBusinessAnswer(AutopilotBusinessAnswerRequest):
+    finding_id: str
+    title: str
+    case_id: Optional[str] = None
+    case_title: Optional[str] = None
+    saved_at: str
+
+
+class AutopilotBusinessFinding(BaseModel):
+    id: str
+    title: str
+    detail: str
+    question: str
+    case_id: Optional[str] = None
+    case_title: Optional[str] = None
+    evidence_asset_ids: List[UUID] = Field(default_factory=list)
+    answer: Optional[AutopilotBusinessAnswer] = None
+
+
 class AutopilotTestAuditReport(BaseModel):
     """Executive release-readiness report derived from evidence and context."""
 
@@ -596,6 +630,7 @@ class AutopilotTestAuditReport(BaseModel):
     last_run_at: Optional[str] = None
     executive_findings: List[str] = Field(default_factory=list)
     reported_issues: List[str] = Field(default_factory=list)
+    business_findings: List[AutopilotBusinessFinding] = Field(default_factory=list)
     application_overview: AutopilotApplicationOverview
     metrics: AutopilotReportMetrics
     functional_testing: List[AutopilotReportCheck] = Field(default_factory=list)
@@ -743,6 +778,9 @@ class AutopilotSetupProfile(AutopilotSetupUpdateRequest):
     """Durable setup metadata; passwords and tokens are intentionally excluded."""
 
     job_id: str
+    scope_modules: List[str] = Field(default_factory=list)
+    progressive_intake: bool = False
+    business_answers: List[AutopilotBusinessAnswer] = Field(default_factory=list)
     updated_at: Optional[str] = None
     provided_fields: List[str] = Field(default_factory=list)
     missing_fields: List[str] = Field(default_factory=list)
@@ -774,6 +812,7 @@ class AutopilotResumeRequest(BaseModel):
     # Optional safe-discovery preferences used when the server chains resume
     # directly into discovery. They contain no credentials or field values.
     discovery_provider: Optional[AutopilotProvider] = None
+    discovery_local_runner_id: Optional[UUID] = None
     discovery_device_name: Optional[str] = Field(default=None, max_length=160)
     discovery_platform_version: Optional[str] = Field(default=None, max_length=80)
     discovery_appium_url: Optional[str] = Field(default=None, max_length=2048)
@@ -795,6 +834,7 @@ class QTXIRStep(BaseModel):
         "scroll",
         "swipe",
         "capture_evidence",
+        "assert_business_text",
         "inspect_ui",
         "static_assertion",
         "permission_flow",
@@ -901,6 +941,7 @@ class AutopilotExecutionRequest(BaseModel):
     target_kind: AutopilotTargetKind = "android"
     target_url: Optional[str] = None
     provider: AutopilotProvider = "browserstack"
+    local_runner_id: Optional[UUID] = None
     appium_url: Optional[str] = None
     device_name: str = "Google Pixel 8"
     platform_version: Optional[str] = "14.0"
@@ -948,6 +989,7 @@ class AutopilotAnalysisRerunRequest(BaseModel):
     upload_id: Optional[UUID] = None
     target_url: Optional[str] = Field(default=None, max_length=2048)
     context: Optional[str] = Field(default=None, max_length=8000)
+    run_instructions: Any = Field(default=None, repr=False, exclude=True)
     profile_id: str = Field(default="uae_fintech", max_length=80)
     surface_action: Literal["ask", "new", "override"] = "new"
     # A rerun must not silently reuse credentials or seeded data.  The UI asks
@@ -974,6 +1016,7 @@ class AutopilotDiscoveryRequest(AutopilotExecutionRequest):
     max_screens: int = Field(default=120, ge=1, le=120)
     max_actions: int = Field(default=300, ge=0, le=300)
     observe_only: bool = False
+    scope_modules: List[str] = Field(default_factory=list, exclude=True)
     # Open exact transaction-module entry points to map screens/forms; the
     # discovery walker does not submit business actions from this flag.
     include_transaction_journeys: bool = True
@@ -1008,6 +1051,8 @@ class DiscoveredControl(BaseModel):
 
 class DiscoveredScreen(BaseModel):
     screen_id: str
+    in_requested_scope: bool = False
+    observed_issues: List[str] = Field(default_factory=list)
     fingerprint: str
     package_name: Optional[str] = None
     activity_name: Optional[str] = None
@@ -1088,6 +1133,8 @@ class AutopilotDiscoveryResult(BaseModel):
     target_kind: AutopilotTargetKind = "android"
     target_url: Optional[str] = None
     provider: AutopilotProvider
+    local_runner_id: Optional[UUID] = None
+    verified_otp_fields: List[str] = Field(default_factory=list)
     started_at: str
     finished_at: str
     duration_seconds: float

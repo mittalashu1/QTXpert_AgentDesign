@@ -635,6 +635,7 @@ export default function GenerateTestCasesPage() {
         </Box>
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           <Button startIcon={<RefreshOutlinedIcon />} onClick={() => setResult(null)}>Edit inputs</Button>
+          {run.status === "completed" && !localPreview && <Button variant="outlined" onClick={() => navigate(`/execution?design=${encodeURIComponent(run.id)}`)}>Open in Test Execution</Button>}
           <Button startIcon={<SaveOutlinedIcon />} variant={saved ? "outlined" : "contained"} onClick={saveSuite} disabled={saveMutation.isPending || (run.status !== "completed" && !localPreview)}>{saveMutation.isPending ? "Saving…" : saved ? "Saved" : "Save suite"}</Button>
         </Stack>
       </Stack>

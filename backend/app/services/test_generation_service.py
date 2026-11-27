@@ -8,6 +8,7 @@ import time
 from typing import List, Optional
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,7 @@ from app.database.repositories.requirement_repository import RequirementReposito
 from app.database.repositories.requirement_repository import ProjectRepository
 from app.llm.base import LLMProviderError
 from app.llm.factory import get_llm_provider
+from app.schemas.authored_execution import AuthoredAutomation
 
 logger = logging.getLogger(__name__)
 
@@ -454,6 +456,12 @@ class TestGenerationService:
                             normalized_steps.append(action_text)
                 if not normalized_steps:
                     raise ValueError("test steps contained no usable actions")
+                automation = None
+                if case.get("automation") is not None:
+                    try:
+                        automation = AuthoredAutomation.model_validate(case["automation"]).model_dump(mode="json")
+                    except ValidationError:
+                        warnings.append(f"Test case #{index} needs automation review because its structured steps are invalid.")
                 self._db.add(TestCase(
                     generation_run_id=run.id,
                     test_case_key=f"TC-{run.id.hex[:8].upper()}-{index:04d}",
@@ -469,9 +477,12 @@ class TestGenerationService:
                     preconditions=_stringify_optional(case.get("preconditions")),
                     test_data=case.get("test_data") if isinstance(case.get("test_data"), dict) else None,
                     steps=normalized_steps,
+                    automation=automation,
                     expected_result=expected_result,
                     post_conditions=_stringify_optional(case.get("post_conditions")),
-                    is_automation_candidate=_coerce_bool(case.get("is_automation_candidate")),
+                    is_automation_candidate=automation is not None or (
+                        "automation" not in case and _coerce_bool(case.get("is_automation_candidate"))
+                    ),
                     automation_type=_stringify_optional(case.get("automation_type"), 100),
                     risk_level=_coerce_enum(RiskLevel, case.get("risk_level"), RiskLevel.MEDIUM),
                 ))

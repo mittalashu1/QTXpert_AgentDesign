@@ -5,6 +5,7 @@ local/dev without Redis. In production (multiple Render instances), swap
 `_InMemoryLimiter` for a Redis-backed limiter using the same `RateLimiter`
 interface - no route code changes needed.
 """
+import re
 import time
 from collections import defaultdict, deque
 from typing import Deque, Dict
@@ -13,6 +14,9 @@ from fastapi import Request, Response, status
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import Settings
+
+_UUID = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+_RUNNER_BEARER = re.compile(r"Bearer qtxrunner_[A-Za-z0-9_-]{64}")
 
 
 class _InMemoryLimiter:
@@ -36,12 +40,25 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, settings: Settings):
         super().__init__(app)
         self._limiter = _InMemoryLimiter(settings.RATE_LIMIT_PER_MINUTE)
+        self._runner_limiter = _InMemoryLimiter(settings.LOCAL_RUNNER_RATE_LIMIT_PER_MINUTE)
+        self._runner_rpc = re.compile(
+            rf"{re.escape(settings.API_V1_PREFIX)}/local-runners/{_UUID}/"
+            rf"(?:heartbeat|jobs/claim|jobs/{_UUID}/(?:heartbeat|artifact|complete|fail)"
+            rf"|autopilot/claim|autopilot/{_UUID}/(?:next|answer|artifact))"
+        )
 
     async def dispatch(self, request: Request, call_next) -> Response:
         client_key = request.client.host if request.client else "unknown"
         if request.url.path == "/api/v1/health":
             return await call_next(request)
-        if not self._limiter.allow(client_key):
+        # Paired Android actively polls command endpoints. Keep that traffic
+        # bounded per IP without consuming the end user's browser allowance.
+        # The runner routes still authenticate every bearer and lease.
+        is_runner_rpc = self._runner_rpc.fullmatch(request.url.path) and _RUNNER_BEARER.fullmatch(
+            request.headers.get("authorization", "")
+        )
+        limiter = self._runner_limiter if is_runner_rpc else self._limiter
+        if not limiter.allow(client_key):
             return Response(
                 content='{"detail":"Rate limit exceeded"}',
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,

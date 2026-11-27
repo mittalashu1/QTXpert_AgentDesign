@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.database.models.generation_run import RunStatus
 from app.database.models.test_case import Priority, RiskLevel, Severity, TestCaseType
+from app.schemas.authored_execution import AuthoredAutomation
 
 
 class GenerateTestCasesRequest(BaseModel):
@@ -70,6 +71,7 @@ class TestCaseOut(BaseModel):
     preconditions: Optional[str]
     test_data: Optional[dict[str, Any]]
     steps: list
+    automation: AuthoredAutomation | None = None
     expected_result: str
     post_conditions: Optional[str]
     is_automation_candidate: bool

@@ -12,6 +12,20 @@ from app.services import autopilot as autopilot_service
 from app.services.autopilot import AutopilotPrototypeService, AutopilotStorageUnavailable
 
 
+def test_local_postgres_can_enable_durable_autopilot(tmp_path):
+    settings = Settings(
+        APP_ENV="local",
+        POSTGRES_URL="postgresql+asyncpg://qa@127.0.0.1:55434/postgres",
+        JWT_SECRET="fixture-key-for-local-storage-test",
+        AUTOPILOT_STORAGE_PATH=str(tmp_path),
+        AUTOPILOT_DB_PERSISTENCE_ENABLED=True,
+    )
+    assert AutopilotPrototypeService(settings)._durable_results_enabled is True
+    assert AutopilotPrototypeService(
+        settings.model_copy(update={"AUTOPILOT_DEGRADED_MODE_ENABLED": True})
+    )._durable_results_enabled is False
+
+
 JOB_ID = "11111111-1111-1111-1111-111111111111"
 
 
