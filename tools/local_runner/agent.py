@@ -364,7 +364,9 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
     if job.get("target_kind") != "android":
         raise RuntimeError("This Windows runner only accepts Android jobs. Pair a Mac runner for iOS.")
     configured_device = str(job.get("device_name") or "").strip()
-    authored_cases = any(case.get("authored_steps") for case in job.get("cases", []))
+    cases = job.get("cases", [])
+    authored_cases = any(case.get("authored_steps") for case in cases)
+    keep_app_state = bool(job.get("no_reset", False))
     pinned_serial = os.environ.get(ANDROID_SERIAL_ENV)
     if pinned_serial and configured_device and configured_device != pinned_serial:
         raise RuntimeError("This job requested a different Android device from the one selected on the runner.")
@@ -392,7 +394,7 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
         "appium:deviceName": configured_device,
         "appium:udid": configured_device,
         "appium:app": str(app_path),
-        "appium:noReset": bool(job.get("no_reset", False)),
+        "appium:noReset": keep_app_state,
         "appium:autoGrantPermissions": bool(job.get("auto_grant_permissions", True)),
         "appium:newCommandTimeout": 180,
         "appium:androidInstallTimeout": 300_000,
@@ -411,14 +413,15 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
         time.sleep(2)
         source = driver.page_source or ""
         _validate_startup_ui(source)
-        capture_startup = not any(case.get("uses_fixture") for case in job.get("cases", []))
+        capture_startup = not any(case.get("uses_fixture") for case in cases)
         screenshot = driver.get_screenshot_as_png() if capture_startup else b""
         if len(screenshot) > MAX_SCREENSHOT_BYTES:
             raise RuntimeError("Startup screenshot exceeds the 5MB evidence cap")
         page_source = source.encode("utf-8")[:MAX_SOURCE_BYTES] if capture_startup else b""
         app_package = driver.current_package
         app_activity = driver.current_activity
-        for case in job.get("cases", []):
+        target_package = driver.capabilities.get("appPackage") or driver.capabilities.get("appium:appPackage")
+        for index, case in enumerate(cases):
             started = time.monotonic()
             outcome, error = "passed", None
             reference = None
@@ -427,6 +430,16 @@ def execute_android_job(app_path: Path, job: dict[str, Any], appium_url: str, st
                 if stop is not None and stop.is_set():
                     raise RuntimeError("Execution lease was revoked or lost; no further device actions are allowed")
                 authored = case.get("authored_steps")
+                if authored and index and not keep_app_state:
+                    current_action = "relaunch app"
+                    if not target_package:
+                        raise ValueError("Appium did not identify the APK package needed to start this case independently.")
+                    driver.terminate_app(target_package)
+                    if stop is not None and stop.is_set():
+                        raise RuntimeError("Execution lease was revoked or lost; no further device actions are allowed")
+                    driver.activate_app(target_package)
+                    _validate_startup_ui(driver.page_source or "")
+                    current_action = "start case"
                 if case.get("ledger_identity") and driver.current_package != case["ledger_identity"]:
                     raise ValueError("The allowlisted UAT app is outside the active device surface.")
                 if not authored and not case.get("steps"):

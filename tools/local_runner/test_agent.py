@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 import tempfile
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import httpx
 
@@ -153,6 +153,48 @@ class LocalRunnerProtocolTests(unittest.TestCase):
         self.assertEqual(report["results"][0]["status"], "failed")
         driver.find_element.assert_not_called()
         driver.quit.assert_called_once()
+
+    def test_authored_batch_relaunches_only_when_app_state_is_not_retained(self):
+        from selenium.common.exceptions import NoSuchElementException
+
+        for keep_app_state in (False, True):
+            with self.subTest(keep_app_state=keep_app_state):
+                driver = MagicMock()
+                driver.get_screenshot_as_png.return_value = b"png"
+                driver.page_source = "<screen/>"
+                driver.capabilities = {"appium:appPackage": "com.example.app"}
+                driver.current_package = "com.example.app"
+                driver.current_activity = ".MainActivity"
+                state = {"screen": "welcome"}
+
+                def find_element(strategy, locator):
+                    if locator != state["screen"]:
+                        raise NoSuchElementException()
+                    element = MagicMock()
+                    element.click.side_effect = lambda: state.update(screen="home")
+                    return element
+
+                driver.find_element.side_effect = find_element
+                driver.activate_app.side_effect = lambda package: state.update(screen="welcome")
+                job = {"target_kind": "android", "no_reset": keep_app_state, "cases": [
+                    {"result_id": "first", "authored_steps": [
+                        {"action": "tap", "strategy": "id", "locator": "welcome"},
+                    ]},
+                    {"result_id": "second", "authored_steps": [
+                        {"action": "assert_visible", "strategy": "id", "locator": "home" if keep_app_state else "welcome"},
+                    ]},
+                ]}
+                with (
+                    patch("appium.webdriver.Remote", return_value=driver),
+                    patch("agent.inspect_local_stack", return_value={"devices": ["emulator-5554"]}),
+                    patch("agent.time.sleep"),
+                ):
+                    report = execute_android_job(Path("app.apk"), job, "http://127.0.0.1:4723")
+                self.assertEqual([item["status"] for item in report["results"]], ["passed", "passed"])
+                lifecycle_calls = [entry for entry in driver.method_calls if entry[0] in ("terminate_app", "activate_app")]
+                self.assertEqual(lifecycle_calls, [] if keep_app_state else [
+                    call.terminate_app("com.example.app"), call.activate_app("com.example.app"),
+                ])
 
     def test_fill_values_do_not_leak_into_error_report(self):
         self.assertEqual(_case_error(RuntimeError("request contained private-value"), ["fill id :: password :: private-value"]), "request contained [redacted input]")
