@@ -917,6 +917,7 @@ export default function AutopilotPage() {
     queryKey: ["paired-runners", selectedProjectId],
     queryFn: () => localRunnersApi.list(selectedProjectId!).then((response) => response.data),
     enabled: Boolean(selectedProjectId),
+    refetchInterval: androidProvider === "local_runner" ? 15000 : false,
   });
   const [busy, setBusy] = useState(false);
   const [analysisProgress, setAnalysisProgress] = useState(0);
@@ -1112,6 +1113,7 @@ export default function AutopilotPage() {
   }, [refreshReportTabs, selectedProjectId]);
   useEffect(() => {
     clearRunState({ clearSurface: true });
+    setPairedDeviceValue("");
     setSelectedUploadId("");
     setSelectedDocumentAssetIds([]);
     setDocumentAnalysisRunId("");
@@ -1529,7 +1531,7 @@ export default function AutopilotPage() {
       return;
     }
     const selectedTarget = executionPayload(targetKind, isWebsite ? targetUrl.trim() : null);
-    const targetIssue = executionTargetIssue(selectedTarget);
+    const targetIssue = analysisTargetIssue(selectedTarget);
     if (!selectedTarget || targetIssue) {
       setError(targetIssue || "Choose an execution provider.");
       return;
@@ -1624,10 +1626,16 @@ export default function AutopilotPage() {
 
   const executionTargetIssue = (target: ExecutionTarget | null) => {
     if (!target) return "Choose Local Runner or BrowserStack to start.";
-    if (target.provider === "local_runner" && !target.local_runner_id) {
+    if (target.provider === "local_runner") {
       if (localRunners.isPending) return "Checking paired Android devices…";
       if (localRunners.isError) return "Could not load paired devices. Refresh the device list.";
-      return pairedDevices.length ? "Choose a paired Android device." : "Connect a device to an online runner. Pair a runner in Test Execution.";
+      if (!pairedRunners.length) return "No local runner is paired to this project.";
+      if (!onlineRunners.length) return "The local runner for this project is offline.";
+      if (!onlineAndroidRunners.length) return "Update the online runner to a version with Android Autopilot support.";
+      if (!pairedDevices.length) return "Connect an Android device to the online runner.";
+      if (!target.local_runner_id) return pairedDeviceValue
+        ? "The selected Android device is unavailable. Choose an online device."
+        : "Choose a paired Android device.";
     }
     if (target.provider === "browserstack") {
       if (executionProviders.isPending) return "Checking BrowserStack availability…";
@@ -1637,6 +1645,8 @@ export default function AutopilotPage() {
     }
     return null;
   };
+  const analysisTargetIssue = (target: ExecutionTarget | null) =>
+    target?.provider === "local_runner" ? null : executionTargetIssue(target);
   const openSetup = (requestKey?: string) => {
     if (!analysis) return;
     const sourceSetup = setup?.job_id === analysis.job_id
@@ -2070,6 +2080,10 @@ export default function AutopilotPage() {
   };
   const continueFirstPass = async (jobId: string, completed: Analysis, selectedTarget: ExecutionTarget) => {
     if (completed.checkpoint_stage !== "ready_for_discovery") return;
+    if (selectedTarget.provider === "local_runner" && executionTargetIssue(selectedTarget)) {
+      setContextNotice("Analysis is ready. Continue with discovery once your local Android device is online.");
+      return;
+    }
     if (completed.phase === "plan_pending_review" || completed.generation_plan?.status === "pending_review") {
       const approved = await apiClient.post<GenerationPlan>(`/autopilot/${jobId}/plan/approve`, {}, { timeout: 20000 });
       setGenerationPlan(approved.data);
@@ -2292,7 +2306,7 @@ export default function AutopilotPage() {
   const rerunAnalysis = async (setupAction: "reuse" | "fresh" = "fresh") => {
     if (!analysis || !selectedProjectId) return;
     const selectedTarget = executionPayload(targetKind, targetKind === "web" ? targetUrl.trim() : "");
-    const targetIssue = executionTargetIssue(selectedTarget);
+    const targetIssue = analysisTargetIssue(selectedTarget);
     if (!selectedTarget || targetIssue) {
       setError(targetIssue || "Choose an execution provider.");
       return;
@@ -2362,11 +2376,12 @@ export default function AutopilotPage() {
     } finally { setDeleteReportBusy(false); }
   };
 
-  const pairedDevices = (localRunners.data ?? [])
-    .filter((runner) => runner.status === "online" && runner.autopilot_android && runner.platforms.includes("android"))
-    .flatMap((runner) => runner.devices.map((serial) => ({
-      runnerId: runner.id, serial, value: `${runner.id}/${serial}`, label: `${runner.name} · ${serial}`,
-    })));
+  const pairedRunners = (localRunners.data ?? []).filter((runner) => runner.status !== "revoked");
+  const onlineRunners = pairedRunners.filter((runner) => runner.status === "online");
+  const onlineAndroidRunners = onlineRunners.filter((runner) => runner.autopilot_android && runner.platforms.includes("android"));
+  const pairedDevices = onlineAndroidRunners.flatMap((runner) => runner.devices.map((serial) => ({
+    runnerId: runner.id, serial, value: `${runner.id}/${serial}`, label: `${runner.name} · ${serial}`,
+  })));
   const selectedPairedDevice = pairedDeviceValue
     ? pairedDevices.find((device) => device.value === pairedDeviceValue)
     : pairedDevices.length === 1 ? pairedDevices[0] : undefined;
@@ -2374,8 +2389,10 @@ export default function AutopilotPage() {
   const currentExecutionTarget = executionPayload();
   const startExecutionTarget = executionPayload(targetKind, targetUrl.trim());
   const startTargetIssue = executionTargetIssue(startExecutionTarget);
+  const startAnalysisIssue = analysisTargetIssue(startExecutionTarget);
+  const runtimeTargetIssue = executionTargetIssue(currentExecutionTarget);
   const deviceWorkBusy = busy || resumeBusy || discoveryBusy || suiteBusy || smokeBusy;
-  const executionUnavailable = deviceWorkBusy || Boolean(executionTargetIssue(currentExecutionTarget)) || !artifactAvailable;
+  const executionUnavailable = deviceWorkBusy || Boolean(runtimeTargetIssue) || !artifactAvailable;
   const canContinueDiscovery = Boolean(discovery?.can_continue && discovery.exploration_cursor
     && discovery.provider === currentExecutionTarget?.provider && discovery.device_name === currentExecutionTarget.device_name
     && (discovery.local_runner_id ?? null) === currentExecutionTarget.local_runner_id
@@ -2704,6 +2721,9 @@ export default function AutopilotPage() {
             <Stack direction="row" spacing={.7} alignItems="center"><PlayArrowRoundedIcon color="primary" fontSize="small" /><Typography variant="subtitle2" fontWeight={800}>Next actions</Typography></Stack>
             <Stack spacing={.55} sx={{ mt: .8 }}>
               <Button size="small" variant="outlined" onClick={openScopeSetup} startIcon={<AutoAwesomeIcon />}>{analysis ? "Refine scope" : "Choose target"}</Button>
+              {analysis?.checkpoint_stage === "ready_for_discovery" && currentExecutionTarget?.provider === "local_runner" && runtimeTargetIssue && (
+                <Typography variant="caption" color="text.secondary">Analysis is ready. {runtimeTargetIssue}</Typography>
+              )}
               {analysis && planAwaitingApproval && <Button size="small" variant="contained" onClick={() => { void approvePlanAndDiscover(); }} disabled={workflowBusy || discoveryBusy || executionUnavailable} startIcon={<TravelExploreOutlinedIcon />}>Approve &amp; discover</Button>}
               {analysis && !planAwaitingApproval && <>
                 <Button size="small" variant="contained" onClick={() => runSafeSmokeOnly ? void runSmoke() : void runSuite()} disabled={runSafeSmokeOnly ? executionUnavailable || !discoveryVerifiedForExecution(discovery) : !casesRunnable} startIcon={deviceWorkBusy ? <CircularProgress size={14} color="inherit" /> : <PlayArrowRoundedIcon />}>
@@ -2811,10 +2831,6 @@ export default function AutopilotPage() {
             </Stack>
           </Box>
         </Grid>}
-        {startExecutionTarget && startTargetIssue && <Grid item xs={12}>
-          <Alert severity="info" action={startExecutionTarget.provider === "browserstack" && executionProviders.isError
-            ? <Button size="small" onClick={() => void executionProviders.refetch()}>Retry</Button> : undefined}>{startTargetIssue}</Alert>
-        </Grid>}
       </Grid>
       <Grid container spacing={2}>
         <Grid item xs={12} md={5}><Stack spacing={1.25}>
@@ -2881,9 +2897,19 @@ export default function AutopilotPage() {
             <FormControlLabel control={<Checkbox size="small" checked={runSafeSmokeOnly} disabled={deviceWorkBusy} onChange={(event) => setRunSafeSmokeOnly(event.target.checked)} />} label="Run safe smoke only" />
             <Typography variant="caption" color="text.secondary" sx={{ pl: 4 }}>Leave unchecked to run every eligible case.</Typography>
           </Stack>
+          {startTargetIssue && <Alert severity="info" sx={{ mt: 1 }} action={
+            startExecutionTarget?.provider === "local_runner"
+              ? <Button size="small" color="inherit" onClick={() => navigate("/execution")}>Test Execution</Button>
+              : startExecutionTarget?.provider === "browserstack" && executionProviders.isError
+                ? <Button size="small" color="inherit" onClick={() => void executionProviders.refetch()}>Retry</Button>
+                : undefined
+          }>
+            {startTargetIssue}
+            {startExecutionTarget?.provider === "local_runner" && " You can start analysis now and continue to device discovery when ready."}
+          </Alert>}
           <Stack direction={{ xs: "column", sm: "row" }} spacing={2} alignItems={{ sm: "center" }} sx={{ mt: 2 }}>
-            <Button disabled={(targetKind === "web" ? !targetUrl.trim() : (!file && !selectedUploadId)) || deviceWorkBusy || !selectedProjectId || (!checkpointWaiting && Boolean(startTargetIssue))} onClick={checkpointWaiting ? () => openSetup() : () => void analyze()} variant="contained" size="large" startIcon={busy || resumeBusy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{analysisButtonLabel}</Button>
-            {analysis && <Button disabled={deviceWorkBusy || !selectedProjectId || Boolean(startTargetIssue)} onClick={startRerun} variant="outlined" size="large">Rerun this analysis</Button>}
+            <Button disabled={!targetIsSelected || deviceWorkBusy || !selectedProjectId || (!checkpointWaiting && Boolean(startAnalysisIssue))} onClick={checkpointWaiting ? () => openSetup() : () => void analyze()} variant="contained" size="large" startIcon={busy || resumeBusy ? <CircularProgress size={18} color="inherit" /> : <AutoAwesomeIcon />}>{analysisButtonLabel}</Button>
+            {analysis && <Button disabled={deviceWorkBusy || !selectedProjectId || Boolean(startAnalysisIssue)} onClick={startRerun} variant="outlined" size="large">Rerun this analysis</Button>}
           </Stack>
         </Grid>
       </Grid>
