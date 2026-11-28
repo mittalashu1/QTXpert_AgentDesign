@@ -2886,8 +2886,9 @@ async def _resume_and_discover_background(
                 local_runner_id=resume_payload.discovery_local_runner_id,
                 appium_url=resume_payload.discovery_appium_url,
                 appium_app=resume_payload.discovery_appium_app,
-                device_name=resume_payload.discovery_device_name or "Google Pixel 8",
-                platform_version=resume_payload.discovery_platform_version or "14.0",
+                device_name=resume_payload.discovery_device_name or ("iPhone 15" if target_kind == "ios" else "Google Pixel 8"),
+                platform_version=resume_payload.discovery_platform_version,
+                auto_grant_permissions=resume_payload.discovery_auto_grant_permissions,
                 observe_only=False,
                 scope_modules=setup_for_discovery.scope_modules,
                 # Traverse a broad app surface, not just a representative
@@ -3131,7 +3132,7 @@ async def _resume_and_discover_background(
                     surface_blocked=latest_surface_blocked,
                     pending_auth=pending_auth,
                     pending_inputs=bool(pending_checkpoints),
-                    completed_message="Runtime Discovery completed. Review the discovered map and run safe execution.",
+                    completed_message="Runtime Discovery completed. Review the discovered map and run eligible cases.",
                 ),
                 input_requests=(
                     [item.model_dump(mode="json") for item in pending_checkpoints]
@@ -3170,7 +3171,10 @@ async def _resume_and_discover_background(
                 user = await db.get(User, owner_id)
                 await execute_autopilot_suite(
                     job_id,
-                    AutopilotSuiteRequest(**request.model_dump(exclude={"observe_only", "max_screens", "max_actions"})),
+                    AutopilotSuiteRequest(
+                        **request.model_dump(include=set(AutopilotExecutionRequest.model_fields)),
+                        execution_mode="safe_navigation",
+                    ),
                     user, settings, db,
                 )
     except Exception as exc:  # pragma: no cover - provider-specific background path
@@ -3208,7 +3212,7 @@ async def _start_analysis_from_asset(
     save_initial_inputs_for_reuse: bool = True,
     reuse_existing_test_data: bool = True,
     safe_authentication_approved: bool = False,
-    execution_mode: AutopilotExecutionMode = "full_uat",
+    execution_mode: AutopilotExecutionMode = "functional",
     scope_modules: list[str] | None = None,
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
@@ -3282,7 +3286,7 @@ async def _start_analysis_from_local_path(
     save_initial_inputs_for_reuse: bool = True,
     reuse_existing_test_data: bool = True,
     safe_authentication_approved: bool = False,
-    execution_mode: AutopilotExecutionMode = "full_uat",
+    execution_mode: AutopilotExecutionMode = "functional",
     scope_modules: list[str] | None = None,
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
@@ -4397,7 +4401,7 @@ async def analyze_autopilot_target(
     save_initial_inputs_for_reuse: bool = Form(default=True),
     reuse_existing_test_data: bool = Form(default=True),
     safe_authentication_approved: bool = Form(default=False),
-    execution_mode: AutopilotExecutionMode = Form(default="full_uat"),
+    execution_mode: AutopilotExecutionMode = Form(default="functional"),
     x_qtxpert_project_id: Annotated[Optional[str], Header()] = None,
 ):
     """Analyze a website URL, Android APK or iOS IPA as one Autopilot job."""
@@ -4709,15 +4713,11 @@ def _resolve_rerun_execution_mode(
     saved_setup_profile: Optional[dict[str, Any]],
     target_kind: str,
 ) -> AutopilotExecutionMode:
-    """Honor the current selection, or preserve a saved preference for older clients."""
-    if target_kind == "web":
-        return "safe_navigation"
-    if requested in ("safe_navigation", "full_uat"):
-        return requested
+    """Honor explicit choices and retain an explicitly requested smoke run."""
+    if requested:
+        return "functional" if target_kind == "web" and requested == "full_uat" else requested
     saved = saved_setup_profile.get("preferred_execution_mode") if isinstance(saved_setup_profile, dict) else None
-    if saved in ("safe_navigation", "full_uat"):
-        return saved
-    return "full_uat"
+    return "safe_smoke" if saved == "safe_smoke" else "functional"
 
 
 @router.post("/{job_id}/rerun-analysis", response_model=AutopilotJobStatus, status_code=status.HTTP_202_ACCEPTED)
@@ -6156,16 +6156,16 @@ async def execute_autopilot_suite(
     settings: Annotated[Settings, Depends(get_settings)],
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ):
-    """Execute only QTX IR cases proven safe and deterministic."""
+    """Execute eligible QTX IR cases and record cases awaiting setup or review."""
     service = _service(settings)
     # Capture the immutable owner id before any repository operation can roll
     # back the request session and expire the User ORM instance.
     owner_id = user.id
     job = await _require_owned_job(service, job_id, user, owner_id=owner_id)
-    if payload.run_all_eligible and payload.execution_mode != "full_uat":
+    if payload.run_all_eligible and payload.execution_mode == "safe_navigation":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="run_all_eligible is available only when full_uat execution mode is selected.",
+            detail="run_all_eligible requires functional or full UAT execution.",
         )
     if payload.execution_mode == "full_uat" and not payload.confirm_isolated_uat:
         raise HTTPException(
@@ -6175,12 +6175,12 @@ async def execute_autopilot_suite(
     if payload.execution_mode == "full_uat" and str(job.get("target_kind") or "android") not in {"android", "ios"}:
         raise HTTPException(status_code=409, detail="Full transaction mode is currently restricted to Android/iOS UAT apps.")
     if payload.prompt_only and (
-        payload.execution_mode != "safe_navigation"
+        payload.execution_mode == "full_uat"
         or str(job.get("target_kind") or "android") not in {"android", "ios"}
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Prompt-only execution is limited to safe Android/iOS cases.",
+            detail="Prompt-only execution is available for Android and iOS.",
         )
     record = await _safe_job_record(db, job_id, owner_id)
     phase = _resolved_autopilot_phase(job, record)
@@ -6189,7 +6189,7 @@ async def execute_autopilot_suite(
     retrying_local_suite = (
         phase == "blocked"
         and payload.provider == "local_runner"
-        and payload.execution_mode == "safe_navigation"
+        and payload.execution_mode != "full_uat"
         and isinstance(prior_suite, dict)
         and prior_suite.get("provider") == "local_runner"
         and prior_suite.get("status") == "blocked"
@@ -6199,7 +6199,7 @@ async def execute_autopilot_suite(
     if phase not in SUITE_RUNNABLE_PHASES and not retrying_local_suite:
         raise HTTPException(
             status_code=409,
-            detail=f"Safe execution cannot start while Autopilot is in the {phase} phase.",
+            detail=f"Case execution cannot start while Autopilot is in the {phase} phase.",
         )
     prompt_only_discovery_ready = (
         payload.prompt_only
@@ -6219,7 +6219,7 @@ async def execute_autopilot_suite(
         raise HTTPException(
             status_code=409,
             detail=(
-                "Safe execution is waiting for Runtime Discovery to expose an interactive screen in the selected app. "
+                "Case execution is waiting for Runtime Discovery to expose an interactive screen in the selected app. "
                 f"{reason or 'Retry discovery after the app is attached in the foreground.'}"
             ),
         )
@@ -6274,7 +6274,8 @@ async def execute_autopilot_suite(
             and (not requested_buckets or item.bucket in requested_buckets)
         ]
         selected.sort(key=lambda item: not (item.readiness == "executable" and item.steps))
-        selected = selected[: payload.max_tests]
+        if not payload.run_all_eligible:
+            selected = selected[: payload.max_tests]
         candidates = [item for item in selected if item.readiness == "executable" and item.steps]
         deferred = [item for item in selected if item not in candidates]
         if not candidates:
@@ -6293,7 +6294,7 @@ async def execute_autopilot_suite(
                 deferred_count=len(deferred),
                 skipped_count=len(deferred),
                 bucket_counts={item.bucket: sum(candidate.bucket == item.bucket for candidate in selected) for item in selected},
-                error="No safe deterministic website checks are available; deferred cases list their dependencies.",
+                error="No executable website checks are available. Review the dependencies of the selected cases.",
                 tests=AutopilotSuiteService._deferred_results(deferred) if payload.include_deferred else [],
             )
         else:

@@ -1,7 +1,8 @@
 from app.config import Settings
-from app.schemas.autopilot import DiscoveredControl, DiscoveryLocator
+from app.schemas.autopilot import AutopilotDiscoveryResult, AutopilotResumeRequest, AutopilotSetupProfile, AutopilotSuiteRequest, DiscoveredControl, DiscoveryLocator
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_ir import AutopilotIRCompiler
+from app.services.autopilot_suite import AutopilotSuiteService
 
 
 def _control(label: str, *, risk: str = "review") -> DiscoveredControl:
@@ -48,6 +49,44 @@ def test_full_uat_requires_target_identity_match_and_exact_allowlist():
         "com.fhc.InvestNation.uat",
         "com.fhc.InvestNation.uat",
     )
+
+
+def test_normal_regression_and_smoke_defaults():
+    assert AutopilotSetupProfile(job_id="job").preferred_execution_mode == "functional"
+    assert AutopilotSuiteRequest().execution_mode == "functional"
+    assert AutopilotResumeRequest().auto_run_safe_suite is False
+
+
+def test_functional_execution_enables_uat_only_for_the_verified_app():
+    stamp = "2026-11-28T00:00:00Z"
+    discovery = AutopilotDiscoveryResult(
+        job_id="job",
+        status="completed",
+        target_kind="android",
+        provider="local_runner",
+        device_name="usb-test",
+        started_at=stamp,
+        finished_at=stamp,
+        duration_seconds=0,
+        target_ready=True,
+        target_identity="com.example.sandbox",
+        stop_reason="completed",
+    )
+    for verified in (False, True):
+        settings = Settings(
+            AUTOPILOT_FULL_UAT_SANDBOX_VERIFIED=verified,
+            AUTOPILOT_FULL_UAT_TARGET_ALLOWLIST="android:com.example.sandbox",
+        )
+        service = AutopilotSuiteService(settings, None)
+        for provider in ("local_runner", "browserstack"):
+            batch = AutopilotSuiteRequest(provider=provider, run_all_eligible=True)
+            assert service._verified_uat_enabled(batch, discovery, "com.example.sandbox") is verified
+            assert not service._verified_uat_enabled(batch, discovery, "com.example.other")
+            assert not service._verified_uat_enabled(batch, discovery.model_copy(update={"target_ready": False}), "com.example.sandbox")
+            legacy = AutopilotSuiteRequest(provider=provider)
+            assert not service._verified_uat_enabled(legacy, discovery, "com.example.sandbox")
+            smoke = AutopilotSuiteRequest(provider=provider, execution_mode="safe_navigation")
+            assert not service._verified_uat_enabled(smoke, discovery, "com.example.sandbox")
 
 
 def test_transaction_module_entry_is_map_only_and_needs_explicit_discovery_choice():

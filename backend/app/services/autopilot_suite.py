@@ -119,6 +119,23 @@ class AutopilotSuiteService:
         self.settings = settings
         self.prototype = prototype
 
+    def _verified_uat_enabled(
+        self,
+        request: AutopilotSuiteRequest,
+        discovery: AutopilotDiscoveryResult | None,
+        package: str | None,
+    ) -> bool:
+        return (
+            not request.prompt_only
+            and (
+                (request.execution_mode == "functional" and request.run_all_eligible)
+                or (request.execution_mode == "full_uat" and request.confirm_isolated_uat)
+            )
+            and discovery is not None
+            and discovery.target_ready is not False
+            and self.settings.full_uat_target_is_allowed(request.target_kind, discovery.target_identity, package)
+        )
+
     async def run(
         self,
         job_id: str,
@@ -140,7 +157,7 @@ class AutopilotSuiteService:
             discovery,
             setup,
             input_values=input_values,
-            full_uat=request.execution_mode == "full_uat",
+            full_uat=self._verified_uat_enabled(request, discovery, analysis.package_name),
         )
 
         selected = self._select_tests(bundle.tests, request)
@@ -199,7 +216,7 @@ class AutopilotSuiteService:
                 deferred_count=len(deferred),
                 skipped_count=len(deferred_results),
                 bucket_counts=self._bucket_counts(selected),
-                error="No safe deterministic executable tests are available; deferred cases list their dependencies.",
+                error="No executable cases are available. Review the dependencies of the selected cases.",
                 tests=deferred_results,
                 remaining_count=remaining_count,
             )
@@ -346,7 +363,7 @@ class AutopilotSuiteService:
                             current_discovery,
                             setup,
                             input_values=input_values,
-                            full_uat=request.execution_mode == "full_uat",
+                            full_uat=self._verified_uat_enabled(request, current_discovery, analysis.package_name),
                         )
                         discovered_cases = self._select_tests(expanded_bundle.tests, request)
                         discovered_cases = [
@@ -381,7 +398,7 @@ class AutopilotSuiteService:
                         current_discovery,
                         setup,
                         input_values=input_values,
-                        full_uat=request.execution_mode == "full_uat",
+                        full_uat=self._verified_uat_enabled(request, current_discovery, analysis.package_name),
                     )
                     all_cases = self._select_tests(expanded_bundle.tests, request)
                     all_cases.sort(key=lambda item: self._selection_priority(item, current_discovery))
@@ -1207,8 +1224,7 @@ class AutopilotSuiteService:
         }
         if (
             not is_ios and request.provider == "appium" and request.no_reset and not reset_for_prompts
-            and request.execution_mode == "full_uat" and request.confirm_isolated_uat and discovery is not None
-            and self.settings.full_uat_target_is_allowed(request.target_kind, discovery.target_identity, package_hint)
+            and self._verified_uat_enabled(request, discovery, package_hint)
         ):
             # Reopen the verified app from its startup flow while retaining
             # application data on the paired Android phone.
@@ -1372,12 +1388,7 @@ class AutopilotSuiteService:
                 package_hint=package_hint,
             )
             package = str(package_hint or target_identity.get("package") or identity["package"] or "").strip() or None
-            full_uat_run = (
-                request.execution_mode == "full_uat"
-                and request.confirm_isolated_uat
-                and discovery is not None
-                and self.settings.full_uat_target_is_allowed(request.target_kind, discovery.target_identity, package)
-            )
+            full_uat_run = self._verified_uat_enabled(request, discovery, package)
             share_sign_in = bool(
                 full_uat_run and package and not is_ios
                 and request.provider in {"appium", "local_runner"} and not request.prompt_only

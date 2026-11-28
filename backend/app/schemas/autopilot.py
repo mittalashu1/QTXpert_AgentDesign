@@ -28,7 +28,8 @@ AutopilotTestBucket = Literal[
 ]
 AutopilotTargetKind = Literal["android", "ios", "web"]
 AutopilotProvider = Literal["browserstack", "devicefarm", "appium", "playwright", "local_runner"]
-AutopilotExecutionMode = Literal["safe_navigation", "full_uat"]
+AutopilotSuiteMode = Literal["functional", "safe_navigation", "full_uat"]
+AutopilotExecutionMode = Literal["functional", "safe_smoke", "safe_navigation", "full_uat"]
 
 # The phase is intentionally separate from the legacy ``status`` field.  The
 # latter is a transport/storage status used by older clients, while this
@@ -758,7 +759,7 @@ class AutopilotSetupUpdateRequest(BaseModel):
     acceptance_criteria_reference: str = Field(default="", max_length=500)
     api_oracle_reference: str = Field(default="", max_length=500)
     navigation_notes: str = Field(default="", max_length=4000)
-    preferred_execution_mode: AutopilotExecutionMode = "full_uat"
+    preferred_execution_mode: AutopilotExecutionMode = "functional"
     reuse_existing_test_data: bool = True
     safe_authentication_approved: bool = False
     # Approval applies to any number of observed cases; the plan itself is
@@ -803,7 +804,7 @@ class AutopilotResumeRequest(BaseModel):
     # When enabled, a successful safe discovery is followed by the bounded
     # read-only suite automatically.  Payments, OTP, destructive and other
     # approval-gated cases are never included by this switch.
-    auto_run_safe_suite: bool = True
+    auto_run_safe_suite: bool = False
     # Full UAT is an explicit run preference. The endpoint repeats the exact
     # target allowlist check before any state-changing case is executed.
     auto_run_full_uat: bool = False
@@ -815,6 +816,7 @@ class AutopilotResumeRequest(BaseModel):
     discovery_local_runner_id: Optional[UUID] = None
     discovery_device_name: Optional[str] = Field(default=None, max_length=160)
     discovery_platform_version: Optional[str] = Field(default=None, max_length=80)
+    discovery_auto_grant_permissions: bool = True
     discovery_appium_url: Optional[str] = Field(default=None, max_length=2048)
     discovery_appium_app: Optional[str] = Field(default=None, max_length=2048)
 
@@ -1195,7 +1197,7 @@ class AutopilotDiscoveryResult(BaseModel):
 
 
 class AutopilotSuiteRequest(AutopilotExecutionRequest):
-    """Execute safe IR cases and report deferred cases with their dependencies."""
+    """Execute eligible IR cases and report deferred cases with their dependencies."""
 
     test_ids: List[str] = Field(default_factory=list)
     buckets: List[AutopilotTestBucket] = Field(default_factory=list, max_length=20)
@@ -1206,13 +1208,13 @@ class AutopilotSuiteRequest(AutopilotExecutionRequest):
     # provider and timeout budget.
     max_tests: int = Field(default=20, ge=1)
     include_deferred: bool = True
-    # This is informational for explicitly triggered runs and is also used by
-    # the checkpoint-resume worker when it chains discovery into execution.
-    auto_run_safe_suite: bool = True
-    execution_mode: AutopilotExecutionMode = "safe_navigation"
-    # Full UAT can run the full set of eligible cases without the safe-mode batch cap.
+    # Retained for clients that send the older suite request shape.
+    auto_run_safe_suite: bool = False
+    execution_mode: AutopilotSuiteMode = "functional"
+    # Automated regression can select the entire case set.
     run_all_eligible: bool = False
-    # Required per run in addition to server-side sandbox and exact allowlist checks.
+    # Required for explicit full_uat requests. Functional runs use the server's
+    # exact allowlist to determine which verified UAT cases are eligible.
     confirm_isolated_uat: bool = False
 
 
@@ -1236,7 +1238,7 @@ class AutopilotSuiteTestResult(BaseModel):
 
 class AutopilotSuiteResult(BaseModel):
     job_id: str
-    execution_mode: AutopilotExecutionMode = "safe_navigation"
+    execution_mode: AutopilotSuiteMode = "safe_navigation"
     status: Literal["passed", "failed", "partial", "blocked"]
     target_kind: AutopilotTargetKind = "android"
     target_url: Optional[str] = None
