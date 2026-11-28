@@ -81,13 +81,17 @@ def _service(tmp_path: Path, **overrides) -> AutopilotPrototypeService:
     [
         ("full_uat", {"preferred_execution_mode": "safe_navigation"}, "android", "full_uat"),
         ("safe_navigation", {"preferred_execution_mode": "full_uat"}, "android", "safe_navigation"),
-        (None, {"preferred_execution_mode": "full_uat"}, "android", "full_uat"),
-        (None, {"preferred_execution_mode": "invalid"}, "android", "full_uat"),
-        (None, None, "android", "full_uat"),
-        ("full_uat", {"preferred_execution_mode": "full_uat"}, "web", "safe_navigation"),
+        (None, {"preferred_execution_mode": "full_uat"}, "android", "functional"),
+        (None, {"preferred_execution_mode": "safe_navigation"}, "web", "functional"),
+        (None, {"preferred_execution_mode": "safe_smoke"}, "android", "safe_smoke"),
+        (None, {"preferred_execution_mode": "invalid"}, "android", "functional"),
+        (None, None, "android", "functional"),
+        ("full_uat", {"preferred_execution_mode": "full_uat"}, "web", "functional"),
+        ("functional", {"preferred_execution_mode": "safe_smoke"}, "android", "functional"),
+        ("safe_smoke", None, "web", "safe_smoke"),
     ],
 )
-def test_rerun_execution_mode_honors_selection_and_preserves_legacy_preference(
+def test_rerun_execution_mode_requires_an_explicit_smoke_preference(
     requested, saved_setup, target_kind, expected
 ):
     assert _resolve_rerun_execution_mode(requested, saved_setup, target_kind) == expected
