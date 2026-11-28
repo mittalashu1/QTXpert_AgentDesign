@@ -43,6 +43,7 @@ import { executionPlansApi, executionsApi, localRunnersApi, testCasesApi, upload
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import PageHeader from "@/components/PageHeader";
 import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
+import LocalRunnerPairing, { LOCAL_RUNNER_START_COMMAND } from "@/components/LocalRunnerPairing";
 import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
 import type {
   AuthoredAutomation, ExecutionFixtureBinding, ExecutionPlan, ExecutionPlanCase, ExecutionProvider, ExecutionRun,
@@ -144,7 +145,7 @@ function executionRunDate(run: ExecutionRun) {
 }
 
 export default function TestExecutionPage() {
-  const { selectedProjectId } = useSelectedProject();
+  const { selectedProjectId, selectedProject } = useSelectedProject();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
@@ -248,10 +249,14 @@ export default function TestExecutionPage() {
   const runners = useQuery({
     queryKey: ["paired-runners", selectedProjectId],
     queryFn: () => localRunnersApi.list(selectedProjectId!).then((response) => response.data),
-    enabled: Boolean(selectedProjectId && targetKind === "android"),
+    enabled: Boolean(selectedProjectId),
+    refetchInterval: (query) => query.state.data?.some((runner) => runner.status !== "revoked") ? 15000 : false,
   });
-  const pairedDevices = (runners.data ?? [])
-    .filter((runner) => runner.status === "online" && runner.autopilot_android && runner.platforms.includes("android"))
+  const runnerRecords = runners.data ?? [];
+  const onlineRunners = runnerRecords.filter((runner) => runner.status === "online");
+  const offlineRunner = onlineRunners.length === 0 && runnerRecords.some((runner) => runner.status === "active");
+  const pairedDevices = onlineRunners
+    .filter((runner) => runner.autopilot_android && runner.platforms.includes("android"))
     .flatMap((runner) => runner.devices.map((serial) => ({
       id: runner.id, serial, value: `${runner.id}/${serial}`, label: `${runner.name} · ${serial}`,
     })));
@@ -539,6 +544,29 @@ export default function TestExecutionPage() {
         title="Test execution"
         description="Run selected Test Design cases on a paired Android device, BrowserStack, or Playwright and review their evidence."
       />
+
+      {selectedProjectId && <Card variant="outlined" sx={{ mb: 2 }}>
+        <CardContent>
+          <Stack direction={{ xs: "column", sm: "row" }} justifyContent="space-between" spacing={1.5} alignItems={{ sm: "center" }}>
+            <Box>
+              <Typography variant="subtitle1" fontWeight={800}>Local Android runner</Typography>
+              <Typography variant="body2" color="text.secondary">
+                {runners.isPending ? "Checking runner status…" : runners.isError ? "Could not load runner status."
+                  : onlineRunners.length
+                    ? `${pairedDevices.length} Android device${pairedDevices.length === 1 ? "" : "s"} available`
+                    : offlineRunner
+                      ? "The paired runner is offline. Start the runner on the paired laptop."
+                      : "Pair a Windows laptop to run tests on its USB phone or emulator."}
+              </Typography>
+              {offlineRunner && <Typography variant="caption" component="div" color="text.secondary"><code>{LOCAL_RUNNER_START_COMMAND}</code></Typography>}
+            </Box>
+            <Stack direction="row" spacing={1}>
+              <Button size="small" onClick={() => void runners.refetch()}>Refresh runner status</Button>
+              <LocalRunnerPairing key={selectedProjectId} projectId={selectedProjectId} projectName={selectedProject?.name} />
+            </Stack>
+          </Stack>
+        </CardContent>
+      </Card>}
 
       <Stepper activeStep={activeStep} alternativeLabel sx={{ mb: 2 }}>
         {STEPS.map((label) => <Step key={label}><StepLabel>{label}</StepLabel></Step>)}

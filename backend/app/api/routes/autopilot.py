@@ -106,7 +106,15 @@ from app.services.autopilot_workflow import (
     SUITE_RUNNABLE_PHASES,
     transition_phase,
 )
-from app.services.autopilot_instructions import auth_binding_key, field_identity, parse_run_instructions
+from app.services.autopilot_instructions import (
+    DOCUMENT_BASELINE_HEADER,
+    PROFILE_CONTEXT_SEPARATOR,
+    REPOSITORY_CONTEXT_SEPARATOR,
+    auth_binding_key,
+    field_identity,
+    parse_run_instructions,
+    saved_run_brief,
+)
 from app.services.autopilot_progress import build_business_findings
 from app.services.autopilot_input_store import (
     AutopilotInputStoreError,
@@ -525,6 +533,8 @@ def _context_with_documents(
     profile_id: str,
     document_excerpt: str,
     *,
+    run_instructions: str | None = None,
+    baseline_context: str = "",
     target_kind: str = "android",
     target_url: str | None = None,
     application_name: str | None = None,
@@ -536,10 +546,15 @@ def _context_with_documents(
         target_url=target_url,
         application_name=application_name,
     )
-    if not document_excerpt:
-        return context
-    prefix = f"{context[:6000]}\n\nSelected repository documentation:\n"
-    return (prefix + document_excerpt)[:8000]
+    if baseline_context and not context.startswith(DOCUMENT_BASELINE_HEADER):
+        context = f"{context}\n\n{baseline_context}"
+    if run_instructions:
+        context = f"{run_instructions}{PROFILE_CONTEXT_SEPARATOR}{context}"
+    if document_excerpt:
+        # Keep the user's scope ahead of supporting material in the bounded prompt.
+        context_limit = max(6000, len(run_instructions or ""))
+        context = f"{context[:context_limit]}{REPOSITORY_CONTEXT_SEPARATOR}\n{document_excerpt}"
+    return context[:8000]
 
 
 async def _document_analysis_baseline(
@@ -565,11 +580,6 @@ async def _document_analysis_baseline(
     # baseline itself remains complete and auditable; only the prompt-side
     # attachment list is bounded here.
     return run_id, list(payload.get("asset_ids") or [])[:20], str(payload.get("context") or "")
-
-
-def _context_without_documents(value: Optional[str]) -> str:
-    """Recover the editable user/profile brief from a stored effective context."""
-    return (value or "").split("\n\nSelected repository documentation:", 1)[0].strip()
 
 
 def _canonical_profile_id(profile_id: str | None) -> str:
@@ -1344,16 +1354,13 @@ def _initial_input_key(item: AutopilotInitialInput) -> str:
 
 def _starting_instructions(
     raw: object,
-    context: str | None,
     inputs: list[AutopilotInitialInput],
     reuse: bool,
-    *,
-    inherited_modules: list[str] | None = None,
 ) -> tuple[str | None, list[AutopilotInitialInput], bool, list[str] | None]:
     if raw is None:
-        return context, inputs, reuse, None
+        return None, inputs, reuse, None
     try:
-        brief = parse_run_instructions(raw)
+        brief = parse_run_instructions(raw, initial_inputs=inputs)
     except ValueError as exc:
         # Do not return submitted values even when validation rejects the brief.
         detail = str(exc) if type(exc) is ValueError else "Check the labels and values in Run instructions."
@@ -1361,8 +1368,8 @@ def _starting_instructions(
     combined = {_initial_input_key(item): item for item in [*inputs, *brief.inputs]}
     if len(combined) > 50:
         raise HTTPException(status_code=400, detail="Use at most 50 starting inputs.")
-    modules = brief.modules if brief.module_directive or inherited_modules is None else inherited_modules
-    return brief.context or context, list(combined.values()), reuse if brief.reuse is None else brief.reuse, modules
+    instructions = AutopilotPrototypeService._redact_context(brief.context)[:8000]
+    return instructions, list(combined.values()), reuse if brief.reuse is None else brief.reuse, brief.modules
 
 
 def _starting_field_for_request(saved_inputs, request):
@@ -1391,6 +1398,7 @@ async def _save_initial_autopilot_inputs(
     reuse_existing_test_data: bool,
     safe_authentication_approved: bool,
     execution_mode: AutopilotExecutionMode,
+    saved_run_instructions: str | None,
     scope_modules: list[str] | None = None,
 ) -> None:
     """Encrypt supplied values before queueing analysis; persist safe metadata only."""
@@ -1409,6 +1417,7 @@ async def _save_initial_autopilot_inputs(
             "input_decisions": {},
             "scope_modules": scope_modules or [],
             "progressive_intake": scope_modules is not None,
+            "saved_run_instructions": saved_run_instructions,
         })
         return
 
@@ -1511,6 +1520,7 @@ async def _save_initial_autopilot_inputs(
         prior_decisions = dict(profile.get("input_decisions") or {})
         prior_decisions.update(decisions)
         profile.update({
+            "saved_run_instructions": saved_run_instructions,
             "preferred_execution_mode": execution_mode,
             "reuse_existing_test_data": reuse_existing_test_data,
             "safe_authentication_approved": bool(safe_authentication_approved and credential_available),
@@ -3213,6 +3223,7 @@ async def _start_analysis_from_asset(
     reuse_existing_test_data: bool = True,
     safe_authentication_approved: bool = False,
     execution_mode: AutopilotExecutionMode = "functional",
+    saved_run_instructions: str | None = None,
     scope_modules: list[str] | None = None,
 ) -> AutopilotJobStatus:
     """Create an analysis job from a durable repository APK or IPA.
@@ -3257,6 +3268,7 @@ async def _start_analysis_from_asset(
         reuse_existing_test_data=reuse_existing_test_data,
         safe_authentication_approved=safe_authentication_approved,
         execution_mode=execution_mode,
+        saved_run_instructions=saved_run_instructions,
         scope_modules=scope_modules,
     )
     _queue_repository_materialization(background_tasks, settings, job_id, asset.id, user.id)
@@ -3287,6 +3299,7 @@ async def _start_analysis_from_local_path(
     reuse_existing_test_data: bool = True,
     safe_authentication_approved: bool = False,
     execution_mode: AutopilotExecutionMode = "functional",
+    saved_run_instructions: str | None = None,
     scope_modules: list[str] | None = None,
 ) -> AutopilotJobStatus:
     """Rerun a same-instance job while the durable database is unavailable."""
@@ -3333,6 +3346,7 @@ async def _start_analysis_from_local_path(
         reuse_existing_test_data=reuse_existing_test_data,
         safe_authentication_approved=safe_authentication_approved,
         execution_mode=execution_mode,
+        saved_run_instructions=saved_run_instructions,
         scope_modules=scope_modules,
     )
     background_tasks.add_task(service.analyze_safely, job_id)
@@ -4408,8 +4422,8 @@ async def analyze_autopilot_target(
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
     service = _service(settings)
     parsed_initial_inputs = _parse_initial_inputs(initial_inputs)
-    context, parsed_initial_inputs, reuse_existing_test_data, scope_modules = _starting_instructions(
-        run_instructions, context, parsed_initial_inputs, reuse_existing_test_data,
+    saved_instructions, parsed_initial_inputs, reuse_existing_test_data, scope_modules = _starting_instructions(
+        run_instructions, parsed_initial_inputs, reuse_existing_test_data,
     )
     safe_authentication_approved = bool(
         safe_authentication_approved
@@ -4441,12 +4455,12 @@ async def analyze_autopilot_target(
         context,
         profile_id,
         document_excerpt,
+        run_instructions=saved_instructions,
+        baseline_context=baseline_context,
         target_kind=inferred_kind,
         target_url=normalized_url or None,
         application_name=Path(file.filename).stem if file is not None and file.filename else None,
     )
-    if baseline_context:
-        analysis_context = f"{baseline_context}\n\n{analysis_context}"[:8000]
     if normalized_url:
         try:
             normalized_url = service.validate_web_url(
@@ -4490,6 +4504,7 @@ async def analyze_autopilot_target(
             reuse_existing_test_data=reuse_existing_test_data,
             safe_authentication_approved=safe_authentication_approved,
             execution_mode=execution_mode,
+            saved_run_instructions=saved_instructions,
             scope_modules=scope_modules,
         )
         background_tasks.add_task(service.analyze_safely, job_id)
@@ -4609,6 +4624,7 @@ async def analyze_autopilot_target(
         reuse_existing_test_data=reuse_existing_test_data,
         safe_authentication_approved=safe_authentication_approved,
         execution_mode=execution_mode,
+        saved_run_instructions=saved_instructions,
         scope_modules=scope_modules,
     )
     background_tasks.add_task(service.analyze_safely, job_id)
@@ -4627,8 +4643,8 @@ async def analyze_existing_mobile_app(
 ):
     """Start a new mobile analysis from an APK or IPA in the active project."""
     project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
-    starting_context, initial_inputs, reuse_saved, scope_modules = _starting_instructions(
-        payload.run_instructions, payload.context, payload.initial_inputs, payload.reuse_existing_test_data,
+    saved_instructions, initial_inputs, reuse_saved, scope_modules = _starting_instructions(
+        payload.run_instructions, payload.initial_inputs, payload.reuse_existing_test_data,
     )
     try:
         asset = await UploadRepositoryService.get_owned(db, payload.upload_id, user.id)
@@ -4672,14 +4688,14 @@ async def analyze_existing_mobile_app(
         db, user, project_id, selected_document_ids, settings
     )
     analysis_context = _context_with_documents(
-        starting_context,
+        payload.context,
         canonical_profile,
         document_excerpt,
+        run_instructions=saved_instructions,
+        baseline_context=baseline_context,
         target_kind="ios" if asset.extension == "ipa" else "android",
         application_name=asset.filename.rsplit(".", 1)[0],
     )
-    if baseline_context:
-        analysis_context = f"{baseline_context}\n\n{analysis_context}"[:8000]
     return await _start_analysis_from_asset(
         background_tasks=background_tasks,
         db=db,
@@ -4704,6 +4720,7 @@ async def analyze_existing_mobile_app(
             or any(item.category == "credential" for item in initial_inputs)
         ),
         execution_mode=payload.execution_mode,
+        saved_run_instructions=saved_instructions,
         scope_modules=scope_modules,
     )
 
@@ -4735,19 +4752,24 @@ async def rerun_autopilot_analysis(
     original = await _require_owned_job(service, job_id, user)
     original_record = await _safe_job_record(db, job_id, user.id)
     original_setup = (getattr(original_record, "setup_profile", None) or original.get("setup_profile") or {})
-    starting_context, initial_inputs, reuse_saved, scope_modules = _starting_instructions(
-        payload.run_instructions, payload.context, payload.initial_inputs,
+    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
+    effective_project_id = project_id or (UUID(str(original["project_id"])) if original.get("project_id") and _is_uuid(original.get("project_id")) else None)
+    same_project = str(effective_project_id or "") == str(getattr(original_record, "project_id", None) or original.get("project_id") or "")
+    previous_instructions, previous_context = saved_run_brief(
+        {**original, "setup_profile": original_setup},
+    ) if same_project else (None, "")
+    saved_instructions, initial_inputs, reuse_saved, scope_modules = _starting_instructions(
+        payload.run_instructions, payload.initial_inputs,
         payload.reuse_existing_test_data or payload.setup_action == "reuse",
-        inherited_modules=list(original_setup.get("scope_modules") or []),
     )
+    if scope_modules is None:
+        saved_instructions = previous_instructions
+        scope_modules = list(original_setup.get("scope_modules") or []) if same_project else []
     payload = payload.model_copy(update={
-        "context": starting_context,
         "initial_inputs": initial_inputs,
         "reuse_existing_test_data": reuse_saved,
         "setup_action": payload.setup_action if reuse_saved else "fresh",
     })
-    if scope_modules is None:
-        scope_modules = list(original_setup.get("scope_modules") or [])
     # Reusing setup is opt-in.  The default ``ask`` behaves like a fresh setup
     # for older clients, while the current UI presents the saved references and
     # sends ``reuse`` only after the user confirms them.
@@ -4773,13 +4795,9 @@ async def rerun_autopilot_analysis(
         }
         setup_profile_to_copy["skipped_input_keys"] = []
         setup_profile_to_copy["random_input_keys"] = []
-    project_id = await _active_project(db, user, x_qtxpert_project_id, settings)
-    effective_project_id = project_id or (UUID(str(original["project_id"])) if original.get("project_id") and _is_uuid(original.get("project_id")) else None)
-
     def setup_for_rerun(target_scope: str) -> dict | None:
         profile = dict(setup_profile_to_copy or {})
         same_target = target_scope == (getattr(original_record, "surface_key", None) or original.get("surface_key"))
-        same_project = str(effective_project_id or "") == str(getattr(original_record, "project_id", None) or original.get("project_id") or "")
         profile["business_answers"] = original_setup.get("business_answers", []) if same_target and same_project else []
         return profile
 
@@ -4808,34 +4826,22 @@ async def rerun_autopilot_analysis(
     baseline_id, baseline_asset_ids, baseline_context = await _document_analysis_baseline(
         db, user, settings, baseline_id, effective_project_id
     )
-    if payload.document_asset_ids is None:
-        selected_document_ids = _merge_document_asset_ids(baseline_asset_ids, original_document_ids)
-        selected_document_ids, document_excerpt = await _document_context(
-            db, user, effective_project_id, selected_document_ids, settings
-        )
-        rerun_context = _context_with_documents(
-            payload.context if payload.context is not None else _context_without_documents(str(original.get("context", ""))),
-            canonical_profile_id,
-            document_excerpt,
-            target_kind=original_target_kind,
-            target_url=original.get("target_url"),
-            application_name=Path(str(original.get("filename", ""))).stem or None,
-        )
-    else:
-        selected_document_ids = _merge_document_asset_ids(baseline_asset_ids, payload.document_asset_ids)
-        selected_document_ids, document_excerpt = await _document_context(
-            db, user, effective_project_id, selected_document_ids, settings
-        )
-        rerun_context = _context_with_documents(
-            payload.context if payload.context is not None else str(original.get("context", "")),
-            canonical_profile_id,
-            document_excerpt,
-            target_kind=original_target_kind,
-            target_url=original.get("target_url"),
-            application_name=Path(str(original.get("filename", ""))).stem or None,
-        )
-    if baseline_context:
-        rerun_context = f"{baseline_context}\n\n{rerun_context}"[:8000]
+    selected_document_ids = _merge_document_asset_ids(
+        baseline_asset_ids, original_document_ids if payload.document_asset_ids is None else payload.document_asset_ids,
+    )
+    selected_document_ids, document_excerpt = await _document_context(
+        db, user, effective_project_id, selected_document_ids, settings
+    )
+    rerun_context = _context_with_documents(
+        payload.context if payload.context is not None else previous_context,
+        canonical_profile_id,
+        document_excerpt,
+        run_instructions=saved_instructions,
+        baseline_context=baseline_context,
+        target_kind=original_target_kind,
+        target_url=payload.target_url or original.get("target_url"),
+        application_name=Path(str(original.get("filename", ""))).stem or None,
+    )
     if original_target_kind == "web" and payload.upload_id is None:
         target_url = payload.target_url or str(original.get("target_url") or "")
         try:
@@ -4883,6 +4889,7 @@ async def rerun_autopilot_analysis(
                 or any(item.category == "credential" for item in payload.initial_inputs)
             ),
             execution_mode=effective_execution_mode,
+            saved_run_instructions=saved_instructions,
             scope_modules=scope_modules,
         )
         background_tasks.add_task(service.analyze_safely, new_job_id)
@@ -4930,6 +4937,7 @@ async def rerun_autopilot_analysis(
                 or any(item.category == "credential" for item in payload.initial_inputs)
             ),
             execution_mode=effective_execution_mode,
+            saved_run_instructions=saved_instructions,
             scope_modules=scope_modules,
         )
     asset_id = payload.upload_id
@@ -4991,6 +4999,7 @@ async def rerun_autopilot_analysis(
             or any(item.category == "credential" for item in payload.initial_inputs)
         ),
         execution_mode=effective_execution_mode,
+        saved_run_instructions=saved_instructions,
         scope_modules=scope_modules,
     )
 
@@ -5307,6 +5316,7 @@ async def update_autopilot_setup(
 
     stored = payload.model_dump(exclude={"input_submissions"})
     stored["scope_modules"] = current_profile.scope_modules
+    stored["saved_run_instructions"] = current_profile.saved_run_instructions
     stored["progressive_intake"] = current_profile.progressive_intake
     stored["business_answers"] = [answer.model_dump(mode="json") for answer in current_profile.business_answers]
     stored.update(normalized_references)

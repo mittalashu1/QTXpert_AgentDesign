@@ -3,8 +3,10 @@ import json
 
 import pytest
 
+from app.api.routes.autopilot import _context_with_documents, _starting_instructions
 from app.schemas.autopilot import (
     AutopilotBusinessAnswer,
+    AutopilotInitialInput,
     DiscoveredControl,
     DiscoveredScreen,
     DiscoveryLocator,
@@ -14,7 +16,9 @@ from app.schemas.autopilot import (
 from app.services.autopilot_discovery import AutopilotDiscoveryService
 from app.services.autopilot_instructions import (
     auth_binding_key,
+    matches_module,
     parse_run_instructions,
+    saved_run_brief,
     scope_allows_case,
     scope_allows_navigation,
 )
@@ -42,6 +46,48 @@ def test_prompt_binds_inputs_before_context_is_used():
     for value in ("fixture@example.test", "QA-test!67", "QA456", "Frosted", "Test branch"):
         assert value not in brief.context
         assert value not in repr(brief.inputs)
+    assert brief.context == "Modules: Cards\nExercise viewing and freezing."
+    assert parse_run_instructions(brief.context.replace("Cards", "Login")).modules == ["Login"]
+
+
+def test_saved_brief_round_trip_excludes_values_and_supporting_material():
+    supplied = AutopilotInitialInput(label="Reference", value="Fixture-429", category="test_data")
+    instructions, inputs, reuse, modules = _starting_instructions(
+        "Modules: Login\nVerify the reference Fixture-429.\nPassword: qa-password!\nUse fresh Test Data.",
+        [supplied],
+        True,
+    )
+    assert instructions == "Modules: Login\nVerify the reference [saved input]."
+    assert modules == ["Login"]
+    assert reuse is False and len(inputs) == 2
+    assert matches_module(modules, "Member sign-in")
+    assert not matches_module(modules, "Verify investments")
+    profile_context = "Check the selected profile's locale."
+    context = _context_with_documents(
+        profile_context, "general_mobile", "Reference excerpt",
+        run_instructions=instructions,
+        baseline_context="Document Intelligence baseline (static evidence).\nReference baseline",
+    )
+    job = {"context": context, "setup_profile": {"saved_run_instructions": instructions}}
+    assert saved_run_brief(job) == (instructions, profile_context)
+    assert context.count(instructions) == 1
+    replacement, _, _, modules = _starting_instructions("Modules: All\nVerify all journeys.", [], True)
+    assert modules == []
+    assert replacement == "Modules: All\nVerify all journeys."
+    assert _starting_instructions("", [], False) == ("", [], False, [])
+
+
+def test_saved_brief_recovers_legacy_notes_and_scope_when_available():
+    legacy = {
+        "context": "Modules: Cards\nOnly test Cards. Verify freezing.\n\nSelected repository documentation:\nExcerpt",
+        "setup_profile": {"progressive_intake": True, "scope_modules": ["Cards"]},
+    }
+    assert saved_run_brief(legacy) == ("Modules: Cards\nVerify freezing.", "")
+    legacy["document_analysis_run_id"] = "fixture"
+    assert saved_run_brief(legacy) == ("Modules: Cards", "")
+    legacy["setup_profile"]["saved_run_instructions"] = ""
+    legacy["context"] = "Profile category: General Mobile Application"
+    assert saved_run_brief(legacy) == ("", legacy["context"])
 
 
 def test_user_gets_only_the_observed_missing_sign_in_field():

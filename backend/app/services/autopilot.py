@@ -58,7 +58,7 @@ from app.schemas.autopilot import (
     DiscoveredControl,
     DiscoveredScreen,
 )
-from app.services.autopilot_instructions import is_primary_tab, matches_module, scope_allows_design_case
+from app.services.autopilot_instructions import is_primary_tab, matches_module, saved_run_brief, scope_allows_design_case
 from app.services.autopilot_progress import business_context
 from app.services.appium_compat import (
     ProviderLifecycleUnavailable,
@@ -1353,6 +1353,7 @@ class AutopilotPrototypeService:
                 if key and key not in known_keys:
                     input_requests.append(item)
                     known_keys.add(key)
+        saved_instructions, profile_context = saved_run_brief(job)
         return AutopilotJobStatus(
             job_id=job_id,
             filename=job["filename"],
@@ -1374,6 +1375,8 @@ class AutopilotPrototypeService:
             created_at=job["created_at"],
             updated_at=job.get("updated_at", job["created_at"]),
             context=str(job.get("context", "")),
+            saved_run_instructions=saved_instructions,
+            profile_context=profile_context,
             document_asset_ids=document_asset_ids,
             document_analysis_run_id=document_analysis_run_id,
             artifact_available=(
