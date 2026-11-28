@@ -715,6 +715,8 @@ class AutopilotJobStatus(BaseModel):
     created_at: str
     updated_at: str
     context: str = ""
+    saved_run_instructions: Optional[str] = None
+    profile_context: str = ""
     document_asset_ids: List[UUID] = Field(default_factory=list)
     document_analysis_run_id: Optional[UUID] = None
     artifact_available: bool = True
@@ -780,6 +782,7 @@ class AutopilotSetupProfile(AutopilotSetupUpdateRequest):
 
     job_id: str
     scope_modules: List[str] = Field(default_factory=list)
+    saved_run_instructions: Optional[str] = None
     progressive_intake: bool = False
     business_answers: List[AutopilotBusinessAnswer] = Field(default_factory=list)
     updated_at: Optional[str] = None

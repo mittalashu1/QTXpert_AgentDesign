@@ -1,4 +1,4 @@
-import { ChangeEvent, Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -28,6 +28,7 @@ import { DocumentContext } from "@/types/domain";
 import { useSelectedProject } from "@/hooks/useSelectedProject";
 import RepositoryDocumentsPicker from "@/components/RepositoryDocumentsPicker";
 import RepositoryAssetPicker from "@/components/RepositoryAssetPicker";
+import LocalRunnerPairing from "@/components/LocalRunnerPairing";
 import { repositoryAssetExtension, useRepositoryAssets } from "@/components/repositoryAssets";
 import DefectLogDialog, { type DefectSubmission } from "@/components/DefectLogDialog";
 import type { Defect } from "@/types/domain";
@@ -132,6 +133,7 @@ type AnalysisJob = {
   checkpoint_stage?: string; checkpoint_message?: string | null; input_requests?: AutopilotInputRequest[];
   phase?: WorkflowPhase; phase_updated_at?: string | null; generation_plan?: GenerationPlan | null;
   application_map?: ApplicationMap | null; case_reviews?: Record<string, string>;
+  saved_run_instructions?: string | null; profile_context?: string;
 };
 type ReportCheckStatus = "pass" | "fail" | "warning" | "pending" | "not_assessed";
 type ReportCheck = {
@@ -430,6 +432,14 @@ function profileIdFromContext(value: string, profiles: ProfileOption[]) {
 }
 
 const DEFAULT_AUTOPILOT_CONTEXT = contextForProfile(DEFAULT_PROFILE_OPTIONS[0]);
+const DEFAULT_RUN_INSTRUCTIONS = [
+  "Modules: All",
+  "Execution scope: Full functional regression",
+  "Cover positive, negative and boundary cases within the selected modules. Follow both choices on prompts.",
+  "Sign-in: Test the available methods, valid and invalid inputs, and session handling where applicable.",
+  "Applications and transactions: Complete available UAT journeys end to end and verify their outcomes.",
+  "Use supplied or saved Test Data first. Generate other test values when appropriate. Record blockers and continue the remaining journeys.",
+].join("\n");
 
 const priorityColor: Record<TestCase["priority"], "error" | "warning" | "info" | "default"> = {
   critical: "error", high: "warning", medium: "info", low: "default",
@@ -886,7 +896,9 @@ export default function AutopilotPage() {
   const [defectBusy, setDefectBusy] = useState(false);
   const [setup, setSetup] = useState<SetupProfile | null>(null);
   const [setupDraft, setSetupDraft] = useState<SetupProfile>(emptySetup());
-  const [runInstructions, setRunInstructions] = useState("");
+  const [runInstructions, setRunInstructions] = useState(DEFAULT_RUN_INSTRUCTIONS);
+  const instructionsJobId = useRef<string | null>(null);
+  const activeProjectId = useRef(selectedProjectId);
   const [saveInitialInputsForReuse, setSaveInitialInputsForReuse] = useState(true);
   const [reuseExistingTestData, setReuseExistingTestData] = useState(true);
   const [inputDrafts, setInputDrafts] = useState<Record<string, InputDraft>>({});
@@ -1113,6 +1125,15 @@ export default function AutopilotPage() {
   }, [refreshReportTabs, selectedProjectId]);
   useEffect(() => {
     clearRunState({ clearSurface: true });
+    activeProjectId.current = selectedProjectId;
+    instructionsJobId.current = null;
+    setRunInstructions(DEFAULT_RUN_INSTRUCTIONS);
+    setFile(null);
+    setTargetUrl("");
+    setTargetKind("android");
+    setProfileId(DEFAULT_PROFILE_ID);
+    setContext(DEFAULT_AUTOPILOT_CONTEXT);
+    setContextSource("default");
     setPairedDeviceValue("");
     setSelectedUploadId("");
     setSelectedDocumentAssetIds([]);
@@ -1156,21 +1177,28 @@ export default function AutopilotPage() {
   }, [profiles, searchParams, selectedProjectId]);
 
   const applyJob = useCallback((job: AnalysisJob) => {
+    if (activeProjectId.current !== selectedProjectId) return;
     setAnalysisProgress(job.progress); setAnalysisStage(job.stage);
+    if (instructionsJobId.current !== job.job_id) {
+      instructionsJobId.current = job.job_id;
+      // The job exposes only planning text; the submitted values stay in Test Data.
+      setRunInstructions(job.saved_run_instructions ?? DEFAULT_RUN_INSTRUCTIONS);
+    }
     if (job.target_kind) setTargetKind(job.target_kind);
     if (job.target_url !== undefined) setTargetUrl(job.target_url || "");
     if (job.profile_id) setProfileId(job.profile_id);
     if (job.report_tab_key) setActiveReportTabKey(job.report_tab_key);
     else if (job.surface_key) setActiveReportTabKey(`${job.surface_key}:${job.surface_version || 1}:${job.job_id}`);
     if (job.repository_asset_id) setSelectedUploadId(job.repository_asset_id);
-    if (job.context !== undefined && job.context.trim()) {
-      const editableContext = contextForEditor(job.context);
+    if (job.context !== undefined) {
+      const editableContext = job.profile_context ?? contextForEditor(job.context);
       const contextPreview = editableContext.length > 8000
         ? `${editableContext.slice(0, 7999).trimEnd()}…`
         : editableContext;
-      setContext(contextPreview);
+      const profile = profiles.find((item) => item.id === job.profile_id) ?? DEFAULT_PROFILE_OPTIONS[0];
+      setContext(contextPreview || contextForTarget(profile, job.target_kind ?? "android", job.filename, job.target_url));
       if (!job.profile_id) setProfileId(profileIdFromContext(contextPreview, profiles));
-      setContextSource("custom");
+      setContextSource(contextPreview ? "custom" : "default");
     }
     if (job.document_asset_ids) setSelectedDocumentAssetIds(job.document_asset_ids);
     else if (job.analysis?.document_asset_ids) setSelectedDocumentAssetIds(job.analysis.document_asset_ids);
@@ -1224,7 +1252,7 @@ export default function AutopilotPage() {
        void refreshExecutionHistory(job.analysis.job_id);
        void refreshReport(job.analysis.job_id);
     }
-  }, [profiles, refreshExecutionHistory, refreshReport]);
+  }, [profiles, refreshExecutionHistory, refreshReport, selectedProjectId]);
   const pollAnalysis = useCallback(async (jobId: string) => {
     const deadline = Date.now() + 20 * 60 * 1000;
     let transientFailures = 0;
@@ -1442,10 +1470,15 @@ export default function AutopilotPage() {
   const discoveredRows = useMemo(() => discovery?.screens.flatMap((screen) => screen.controls.map((control) => ({ screen, control }))) ?? [], [discovery]);
 
   const resetResult = () => { clearRunState(); setSetupOpen(false); };
+  const resetRunInstructions = () => {
+    instructionsJobId.current = null;
+    setRunInstructions(DEFAULT_RUN_INSTRUCTIONS);
+  };
   const onFile = (event: ChangeEvent<HTMLInputElement>) => {
     const selected = event.target.files?.[0] ?? null;
     setFile(selected);
     if (selected) {
+      if (instructionsJobId.current) resetRunInstructions();
       setSelectedUploadId("");
       const nextTarget = /\.ipa$/i.test(selected.name) ? "ios" : "android";
       setTargetKind(nextTarget);
@@ -1470,15 +1503,14 @@ export default function AutopilotPage() {
     setContextNotice(`${nextProfile.name} brief applied. You can edit it before starting the run.`);
     setError("");
   };
-  const generateContext = async (mode: "default" | "generate" | "improve") => {
-    if (mode === "default") {
-      resetResult();
-      setContext(contextForTarget(selectedProfile, targetKind, selectedApplicationName, targetUrl));
-      setContextSource("default");
-      setContextNotice(`${selectedProfile.name} brief applied. Review it before running.`);
-      setContextScope(null);
-      return;
-    }
+  const resetToDefaultBrief = () => {
+    setRunInstructions(DEFAULT_RUN_INSTRUCTIONS);
+    setContext(contextForTarget(selectedProfile, targetKind, selectedApplicationName, targetUrl));
+    setContextSource("default");
+    setContextNotice("");
+    setContextScope(null);
+  };
+  const generateContext = async (mode: "generate" | "improve") => {
     setContextBusy(true); setContextNotice(""); setError("");
     try {
       const response = await apiClient.post<ContextResponse>("/autopilot/context/generate", {
@@ -1573,9 +1605,6 @@ export default function AutopilotPage() {
         }
       }
       applyJob(response.data);
-      // Drop write-only values from component memory once the API has accepted
-      // and encrypted them. They never enter the report context or model prompt.
-      setRunInstructions("");
       const completed = await pollAnalysis(response.data.job_id);
       await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshWorkflow(response.data.job_id); await refreshReportTabs(selectedProjectId);
       await continueFirstPass(response.data.job_id, completed, selectedTarget);
@@ -1592,6 +1621,8 @@ export default function AutopilotPage() {
 
   const selectReportTab = async (reportTab: ReportTab) => {
     if (busy || !selectedProjectId || reportTab.latest_job_id === analysis?.job_id) return;
+    resetRunInstructions();
+    setFile(null);
     setBusy(true); setError(""); resetResult(); setActiveReportTabKey(reportTabKey(reportTab));
     try {
       const job = (await apiClient.get<AnalysisJob>(`/autopilot/jobs/${reportTab.latest_job_id}`, { timeout: 20000 })).data;
@@ -2321,7 +2352,7 @@ export default function AutopilotPage() {
           upload_id: selectedUploadId || undefined, profile_id: profileId, surface_action: "new",
           setup_action: setupAction, reuse_existing_test_data: setupAction === "reuse",
           save_initial_inputs_for_reuse: saveInitialInputsForReuse,
-          run_instructions: runInstructions.trim() || undefined,
+          run_instructions: runInstructions.trim(), context,
           execution_mode: runMode, target_url: targetKind === "web" ? targetUrl.trim() || undefined : undefined,
           document_asset_ids: selectedDocumentAssetIds, document_analysis_run_id: documentAnalysisRunId || undefined,
         },
@@ -2331,7 +2362,6 @@ export default function AutopilotPage() {
       // is being persisted/polled. The new result replaces it atomically.
       setDiscovery(null); setAutomation(null); setSuite(null);
       applyJob(response.data);
-      setRunInstructions("");
       const completed = await pollAnalysis(response.data.job_id);
       await refreshAutomation(response.data.job_id); await refreshReport(response.data.job_id); await refreshWorkflow(response.data.job_id);
       await refreshReportTabs(selectedProjectId);
@@ -2369,6 +2399,7 @@ export default function AutopilotPage() {
       await apiClient.delete(`/autopilot/${jobId}/report`, { timeout: 30000 });
       setDeleteReportOpen(false);
       clearRunState({ clearSurface: true });
+      resetRunInstructions();
       setContextNotice("Report deleted. The original APK/IPA, documents and evidence uploads remain in the repository.");
       await refreshReportTabs(selectedProjectId);
     } catch (err) {
@@ -2376,7 +2407,7 @@ export default function AutopilotPage() {
     } finally { setDeleteReportBusy(false); }
   };
 
-  const pairedRunners = (localRunners.data ?? []).filter((runner) => runner.status !== "revoked");
+  const pairedRunners = (localRunners.data ?? []).filter((runner) => ["active", "online"].includes(runner.status));
   const onlineRunners = pairedRunners.filter((runner) => runner.status === "online");
   const onlineAndroidRunners = onlineRunners.filter((runner) => runner.autopilot_android && runner.platforms.includes("android"));
   const pairedDevices = onlineAndroidRunners.flatMap((runner) => runner.devices.map((serial) => ({
@@ -2766,7 +2797,6 @@ export default function AutopilotPage() {
           </Grid>
           <Grid item xs={12} md={7}>
             <Typography variant="body2" color="text.secondary">{selectedProfile.description}</Typography>
-            <Typography variant="caption" color="text.secondary">The brief updates automatically and remains editable.</Typography>
           </Grid>
         </Grid>
       </Box>
@@ -2778,6 +2808,7 @@ export default function AutopilotPage() {
                const next = event.target.value as TargetKind;
                setTargetKind(next);
                setFile(null); setSelectedUploadId(""); resetResult();
+               if (instructionsJobId.current) resetRunInstructions();
                // Switching target starts a new surface. Always replace the
                // old target identity in the brief instead of carrying a
                // previously loaded APK/URL context into this run.
@@ -2790,7 +2821,16 @@ export default function AutopilotPage() {
             </Select>
           </FormControl>
         </Grid>
-        {targetKind === "web" && <Grid item xs={12} md={8}><TextField fullWidth size="small" label="Website URL" placeholder="https://qa.example.com" value={targetUrl} disabled={busy} onChange={(event) => { setTargetUrl(event.target.value); if (contextSource === "default") setContext(contextForTarget(selectedProfile, "web", null, event.target.value)); resetResult(); }} helperText="Use a reachable non-production URL; credentials stay in approved setup references." /></Grid>}
+        {targetKind === "web" && <Grid item xs={12} md={8}><TextField fullWidth size="small" label="Website URL" placeholder="https://qa.example.com" value={targetUrl} disabled={busy} onChange={(event) => {
+          const nextUrl = event.target.value;
+          setTargetUrl(nextUrl);
+          if (contextSource === "default" || instructionsJobId.current) {
+            setContext(contextForTarget(selectedProfile, "web", null, nextUrl));
+            setContextSource("default");
+          }
+          if (instructionsJobId.current) resetRunInstructions();
+          resetResult();
+        }} helperText="Use a reachable non-production URL; credentials stay in approved setup references." /></Grid>}
         {targetKind === "android" && <Grid item xs={12} md={8}>
           <TextField select fullWidth size="small" id="autopilot-execution-provider" label="Execution provider"
             value={androidProvider} disabled={deviceWorkBusy} SelectProps={{ displayEmpty: true }} InputLabelProps={{ shrink: true }}
@@ -2863,18 +2903,18 @@ export default function AutopilotPage() {
            : <Box sx={{ border: "1px dashed", borderColor: file ? "primary.main" : "divider", borderRadius: 2, p: 1.75, textAlign: "center", bgcolor: "action.hover" }}><CloudUploadOutlinedIcon sx={{ fontSize: 32, color: "primary.main" }} /><Typography variant="body2" fontWeight={700} display="block">{file?.name || `Choose a ${targetKind === "ios" ? "iOS IPA" : "Android APK"}`}</Typography>{file && <Typography variant="caption" color="text.secondary">{formatBytes(file.size)}</Typography>}<Box sx={{ mt: 1 }}><Button component="label" variant="outlined" disabled={busy}>Choose build<input hidden type="file" accept=".apk,.ipa,application/vnd.android.package-archive,application/octet-stream" onChange={onFile} /></Button></Box></Box>)}
         </Stack></Grid>
         <Grid item xs={12} md={7}>
-          <TextField fullWidth multiline minRows={5} maxRows={10} inputProps={{ maxLength: 8000, spellCheck: false }}
+          <TextField fullWidth multiline minRows={6} maxRows={12} inputProps={{ maxLength: 8000, spellCheck: false }}
             label="Run instructions" autoComplete="off" disabled={busy}
-            placeholder={"Only test Cards. Check viewing and freezing a card.\nUser ID: qa-user@example.test\nPassword: your UAT password\nTest data: Card nickname = QA Card"}
+            placeholder="Edit the brief to describe what Autopilot should test."
             value={runInstructions} onChange={(event) => setRunInstructions(event.target.value)}
-            helperText="Optional. Paste modules, instructions and UAT inputs once. For a custom sign-in field, use Login data: Member number = QA123." />
+            helperText="Change Modules: All to a name such as Modules: Login. Add optional UAT inputs on separate lines, for example User ID: …, Password: …, Login data: Member number = …, or Test data: Search term = …." />
           {!!analysis?.scope_modules?.length && <Typography variant="body2" sx={{ mt: .75 }}>
-            Scope of this run · {analysis.scope_modules.join(", ")} only
+            Last run scope · {analysis.scope_modules.join(", ")} only
           </Typography>}
           {setup?.job_id === analysis?.job_id && !!setup?.saved_inputs?.some((item) => item.job_id === setup.job_id && item.has_value) &&
             <Button size="small" onClick={() => navigate("/test-data/uploads")}>Open Test Data</Button>}
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1} alignItems={{ sm: "center" }} sx={{ mt: 1 }}>
-            <Button size="small" variant="outlined" onClick={() => void generateContext("default")} disabled={contextBusy}>Reset to profile brief</Button>
+            <Button size="small" variant="outlined" onClick={resetToDefaultBrief} disabled={busy || contextBusy}>Reset to default brief</Button>
             <Button size="small" variant="outlined" onClick={() => void generateContext(context.trim() ? "improve" : "generate")} disabled={contextBusy} startIcon={contextBusy ? <CircularProgress size={14} /> : <AutoAwesomeIcon />}>{contextBusy ? "Writing context…" : context.trim() ? "Improve with AI" : "Generate with AI"}</Button>
             <Chip size="small" label={`Context: ${contextSource}`} color={contextSource === "ai" ? "primary" : "default"} variant="outlined" />
           </Stack>
@@ -2899,7 +2939,9 @@ export default function AutopilotPage() {
           </Stack>
           {startTargetIssue && <Alert severity="info" sx={{ mt: 1 }} action={
             startExecutionTarget?.provider === "local_runner"
-              ? <Button size="small" color="inherit" onClick={() => navigate("/execution")}>Test Execution</Button>
+              ? localRunners.isSuccess && !pairedRunners.length && selectedProjectId
+                ? <LocalRunnerPairing key={selectedProjectId} projectId={selectedProjectId} projectName={selectedProject?.name} />
+                : <Button size="small" color="inherit" onClick={() => navigate("/execution")}>Test Execution</Button>
               : startExecutionTarget?.provider === "browserstack" && executionProviders.isError
                 ? <Button size="small" color="inherit" onClick={() => void executionProviders.refetch()}>Retry</Button>
                 : undefined

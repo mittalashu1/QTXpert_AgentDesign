@@ -36,6 +36,9 @@ _SECRET_ASSIGNMENT = re.compile(
     r"\b(?:user\s*(?:id|name)|username|email|password|passcode|pwd|passwd|otp|"
     r"verification\s+code|pin|token|api\s+key|secret)\s*(?:[:=]|\bis\b)", re.I,
 )
+PROFILE_CONTEXT_SEPARATOR = "\n\nSupporting profile context:\n"
+REPOSITORY_CONTEXT_SEPARATOR = "\n\nSelected repository documentation:"
+DOCUMENT_BASELINE_HEADER = "Document Intelligence baseline ("
 
 
 @dataclass(repr=False)
@@ -44,7 +47,6 @@ class RunInstructions:
     modules: list[str] = field(default_factory=list)
     inputs: list[AutopilotInitialInput] = field(default_factory=list)
     reuse: bool | None = None
-    module_directive: bool = False
 
 
 def field_identity(label: str) -> str:
@@ -84,7 +86,9 @@ def _module_names(value: str) -> list[str]:
     return names
 
 
-def parse_run_instructions(value: object) -> RunInstructions:
+def parse_run_instructions(
+    value: object, *, initial_inputs: Iterable[AutopilotInitialInput] = (),
+) -> RunInstructions:
     if not isinstance(value, str) or len(value) > 8000:
         raise ValueError("Enter up to 8,000 characters of run instructions.")
     context: list[str] = []
@@ -143,12 +147,29 @@ def parse_run_instructions(value: object) -> RunInstructions:
                 module_directive = True
                 for name in _module_names(scoped[1]):
                     modules.setdefault(name.casefold(), name)
+                line = text[scoped.end():].lstrip(".!? ")
+                if not line:
+                    continue
+                text = line
             if _SECRET_ASSIGNMENT.search(text):
                 # Keep unrecognized assignments away from the analysis prompt.
                 raise ValueError("Put each sign-in input on a separate labeled line in Run instructions.")
             context.append(line)
 
-    supplied_values = [item.value for item in inputs.values()]
+    supplied_values = {item.value for item in inputs.values()}
+    for item in initial_inputs:
+        supplied_values.add(item.value)
+        if item.category == "credential" and not item.credential_field and item.value.lstrip().startswith("{"):
+            try:
+                bundle = json.loads(item.value)
+            except ValueError:
+                continue  # The input store validates bundled credentials separately.
+            if isinstance(bundle, dict):
+                supplied_values.update(value for value in bundle.values() if isinstance(value, str) and value)
+    # Redact repeats in free-form notes, including values entered separately by API clients.
+    patterns = [re.compile(rf"(?<!\w){re.escape(value)}(?!\w)") for value in sorted(supplied_values, key=len, reverse=True)]
+    if any(pattern.search(name) for pattern in patterns for name in modules.values()):
+        raise ValueError("Choose module names that differ from starting input values.")
     username = inputs.get(("credential", "username"))
     password = inputs.get(("credential", "password"))
     if username and password:
@@ -162,16 +183,47 @@ def parse_run_instructions(value: object) -> RunInstructions:
     if len(inputs) > 50 or len(modules) > 20:
         raise ValueError("Use at most 50 starting values and 20 modules for one run.")
     text = "\n".join(context).strip()
-    if modules and not any(_MODULE_PREFIX.match(line.strip()) for line in context):
-        text = f"Modules: {', '.join(modules.values())}\n{text}".strip()
-    for value in sorted(set(supplied_values), key=len, reverse=True):
-        text = re.sub(rf"(?<!\w){re.escape(value)}(?!\w)", "[saved input]", text)
-    return RunInstructions(text, list(modules.values()), list(inputs.values()), reuse, module_directive)
+    for pattern in patterns:
+        text = pattern.sub("[saved input]", text)
+    if module_directive:
+        # Keep one editable scope line so changing it replaces the previous scope.
+        text = f"Modules: {', '.join(modules.values()) or 'All'}\n{text}".strip()
+    return RunInstructions(text[:8000].rstrip(), list(modules.values()), list(inputs.values()), reuse)
+
+
+def saved_run_brief(job: dict) -> tuple[str | None, str]:
+    """Read the editable instructions and profile context from a saved job."""
+    setup = job.get("setup_profile") or {}
+    saved = setup.get("saved_run_instructions")
+    context = str(job.get("context") or "")
+    if saved:
+        prefix = f"{saved}{PROFILE_CONTEXT_SEPARATOR}"
+        context = context[len(prefix):] if context.startswith(prefix) else ""
+    context = context.split(REPOSITORY_CONTEXT_SEPARATOR, 1)[0].strip()
+    if not context.startswith(DOCUMENT_BASELINE_HEADER):
+        context = context.split(f"\n\n{DOCUMENT_BASELINE_HEADER}", 1)[0].strip()
+    if isinstance(saved, str):
+        return saved, context
+
+    # Older runs combined the parsed brief with supporting material in context.
+    # Recover it only where we can identify the original notes or saved scope.
+    if setup.get("progressive_intake"):
+        if context and not job.get("document_analysis_run_id") and not context.startswith(
+            ("Profile category:", DOCUMENT_BASELINE_HEADER),
+        ):
+            try:
+                return parse_run_instructions(context).context, ""
+            except ValueError:
+                pass
+        if modules := setup.get("scope_modules"):
+            return f"Modules: {', '.join(modules)}", context if context.startswith("Profile category:") else ""
+    return None, context
 
 
 def _module_words(value: str) -> tuple[str, ...]:
+    label = re.sub(r"\b(?:(?:log|sign)[\s_-]*in|authentication)\b", "login", str(value or "").casefold())
     return tuple(word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
-                 for word in re.findall(r"[^\W_]+", str(value or "").casefold()))
+                 for word in re.findall(r"[^\W_]+", label))
 
 
 def matches_module(modules: Iterable[str], *labels: str | None) -> bool:
