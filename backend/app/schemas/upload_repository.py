@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.autopilot import AutopilotInitialInput
+from app.schemas.autopilot import AutopilotExecutionMode, AutopilotInitialInput
 
 
 class UploadedAssetOut(BaseModel):
@@ -36,7 +36,7 @@ class ReuseUploadedAssetRequest(BaseModel):
     save_initial_inputs_for_reuse: bool = False
     reuse_existing_test_data: bool = False
     safe_authentication_approved: bool = False
-    execution_mode: Literal["safe_navigation", "full_uat"] = "safe_navigation"
+    execution_mode: AutopilotExecutionMode = "functional"
     # Optional project documentation to reuse as analysis context. ``None``
     # means preserve the attachments from the previous run when rerunning;
     # an empty list deliberately clears them.
